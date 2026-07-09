@@ -1,7 +1,10 @@
 import asyncio
+import json
 import os
+import pathlib
 import logging
 from dotenv import load_dotenv
+
 load_dotenv()  # Load .env variables into os.environ
 
 import discord
@@ -24,7 +27,6 @@ INTENTS.message_content = True
 DISCORD_TOKEN  = os.getenv("DISCORD_BOT_TOKEN", "")
 
 # API Key — local endpoints typically ignore it, but we pass something non-empty
-# Prefer OPENWEBUI_API_KEY for OpenWebUI; fall back to OPENAI_API_KEY.
 OPENAI_API_KEY = (os.getenv("OPENWEBUI_API_KEY") or
                   os.getenv("OPENAI_API_KEY", "local-model-key"))
 
@@ -33,15 +35,59 @@ OPENAI_API_KEY = (os.getenv("OPENWEBUI_API_KEY") or
 #   SillyTavern proxy:    http://localhost:5100/v1/openai
 API_BASE_URL = os.getenv("OPENAI_API_URL", "http://localhost:8080/v1")
 
-# The model slug that your local server exposes (e.g. from /api/tags)
-MODEL_NAME   = os.getenv("MODEL_NAME", "default-model-name")
-
-SYSTEM_PROMPT  = os.getenv(
+# Fallback values used when no characters are configured.
+DEFAULT_MODEL      = os.getenv("MODEL_NAME", "default-model-name")
+DEFAULT_SYSTEM_PROMPT = os.getenv(
     "SYSTEM_PROMPT",
     "You are a helpful AI assistant embedded in a Discord bot.",
 )
+
 CONTEXT_WINDOW: int = 10
 prefix         = os.getenv("BOT_PREFIX", "!ai")
+
+# ─────────────────────────── Characters ──────────────────────────────
+CHARACTERS_FILE = pathlib.Path(__file__).parent / "characters.json"
+
+try:
+    with open(CHARACTERS_FILE, encoding="utf-8") as fh:
+        _char_cfg = json.load(fh)
+except FileNotFoundError:
+    log.warning("characters.json not found — using single default character.")
+    _char_cfg = {
+        "default": "Default",
+        "characters": {
+            "Default": {
+                "model": DEFAULT_MODEL,
+                "system_prompt": DEFAULT_SYSTEM_PROMPT,
+            },
+        },
+    }
+
+CHARACTERS: dict       = _char_cfg.get("characters", {})
+DEFAULT_CHARACTER     = _char_cfg.get("default", list(CHARACTERS)[0]) if CHARACTERS else "Default"
+
+# Per-guild channel active character  (key = (guild_id, channel_id))
+_active_characters: dict[tuple[int, int], str] = {}
+
+
+def _get_char(gid: int | None, cid: int) -> dict:
+    """Return the {model, system_prompt} dict for the current active character."""
+    if gid is not None and (gid, cid) in _active_characters:
+        name = _active_characters[(gid, cid)]
+    else:
+        name = DEFAULT_CHARACTER
+    return CHARACTERS.get(name, {"model": DEFAULT_MODEL, "system_prompt": DEFAULT_SYSTEM_PROMPT})
+
+
+def _switch_character(gid: int | None, cid: int, name: str) -> tuple[bool, str]:
+    """Set active character. Returns (ok, message)."""
+    if name not in CHARACTERS:
+        avail = ", ".join(f"`{k}`" for k in CHARACTORS)
+        return False, f"Unknown character '{name}'. Available: {avail}"
+    if gid is not None:
+        _active_characters[(gid, cid)] = name
+    return True, f"Switched to **{name}** ({CHARACTERS[name]['model']})"
+
 
 # ─────────────────────────── Bot Setup ───────────────────────────────
 bot = commands.Bot(command_prefix=prefix, intents=INTENTS)
@@ -63,41 +109,50 @@ def _clear_history(guild_id: int, channel_id: int) -> None:
 
 # ─────────────────────────── Helpers ─────────────────────────────────
 
-async def ask_ai(user_message: str, guild_id: int, channel_id: int) -> str:
-    """Send *user_message* to the local AI model and return the reply."""
-    # Timeout must exceed local model inference time (~9s for qwen3.6:latest).
-    # Also set per-request timeout so fast-fail works on transient errors.
+
+async def ask_ai(user_message: str, guild_id: int, channel_id: int) -> tuple[str, str]:
+    """Send *user_message* to the active AI model and return (reply, character_name)."""
     timeout_sec = int(os.getenv("AI_REQUEST_TIMEOUT", "120"))
-    client = AsyncOpenAI(
-        api_key=OPENAI_API_KEY,
-        base_url=API_BASE_URL,
-        http_client=None,  # use default; we set timeout below
-    )
+    char = _get_char(guild_id, channel_id)
+    model     = char.get("model") or DEFAULT_MODEL
+    system_p  = char.get("system_prompt") or DEFAULT_SYSTEM_PROMPT
+
+    client = AsyncOpenAI(api_key=OPENAI_API_KEY, base_url=API_BASE_URL)
 
     _ensure_history(guild_id, channel_id)
     history = chat_histories[guild_id][channel_id]
 
-    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages: list[dict] = [{"role": "system", "content": system_p}]
     messages += history
     messages.append({"role": "user", "content": user_message})
 
     resp = await client.chat.completions.create(
-        model=MODEL_NAME,
+        model=model,
         messages=messages,
         temperature=0.7,
         max_tokens=1024,
-        stream=False,  # non-streaming — avoids timeout issues with OpenWebUI
-        timeout=timeout_sec,   # seconds before giving up
+        stream=False,
+        timeout=timeout_sec,
     )
 
     reply = resp.choices[0].message.content or "(empty response)"
+
+    # Determine character name for display / history tracking
+    char_name = DEFAULT_CHARACTER
+    if guild_id is not None and (guild_id, channel_id) in _active_characters:
+        char_name = _active_characters[(guild_id, channel_id)]
+    else:
+        for n, c in CHARACTERS.items():
+            if c.get("model") == model:
+                char_name = n
+                break
 
     history.append({"role": "user", "content": user_message})
     history.append({"role": "assistant", "content": reply})
     if len(history) > 2 * CONTEXT_WINDOW:
         chat_histories[guild_id][channel_id] = history[-(2 * CONTEXT_WINDOW):]
 
-    return reply
+    return reply, char_name
 
 
 async def _typing_loop(channel, duration_sec: int = 30):
@@ -107,14 +162,13 @@ async def _typing_loop(channel, duration_sec: int = 30):
         try:
             await channel.typing()
         except discord.Forbidden:
-            # Bot lacks permission to send typing indicators in this channel
             break
         except Exception:
             pass
         await asyncio.sleep(10)
 
 
-async def _send_long_response(source, reply: str) -> None:
+async def _send_long_response(source, reply: str, char_name: str = "") -> None:
     """Send `reply`, chunking it into multiple messages if > 1900 chars.
 
     Paragraph-aware splitting keeps code blocks and lists intact.
@@ -122,24 +176,25 @@ async def _send_long_response(source, reply: str) -> None:
     """
     MAX_LEN = 1900  # Leave room for "[X/Y] " metadata
 
+    header = f"--- {char_name} ---\n" if char_name else ""
+
     if len(reply) <= MAX_LEN:
+        full_text = (header + reply).strip()
         if hasattr(source, 'followup'):
-            await source.followup.send(reply)
+            await source.followup.send(full_text)
         else:
-            await source.reply(reply)
+            await source.reply(full_text)
         return
 
-    # Split by double newlines (paragraphs) first for readability
     paragraphs = reply.split('\n\n')
-    chunks = []
-    current_chunk = ""
+    chunks, current_chunk = [], ""
 
     for para in paragraphs:
         if len(current_chunk) + len(para) + 2 > MAX_LEN:
             if current_chunk:
                 chunks.append(current_chunk.strip())
 
-            # If a single paragraph is longer than MAX_LEN, force-split by words
+            # Single paragraph too long → force-split by words
             if len(para) > MAX_LEN:
                 words = para.split()
                 sub = ""
@@ -158,11 +213,9 @@ async def _send_long_response(source, reply: str) -> None:
     if current_chunk:
         chunks.append(current_chunk.strip())
 
-    # Send sequentially with page indicators
     for i, chunk in enumerate(chunks, 1):
         meta = f"[{i}/{len(chunks)}] "
-        display_text = meta + chunk
-
+        display_text = (header + meta + chunk).strip()
         if hasattr(source, 'followup'):
             await source.followup.send(display_text)
         else:
@@ -178,8 +231,68 @@ async def ai_command(interaction: discord.Interaction, message: str):
     guild_id = interaction.guild_id or 0
     asyncio.create_task(_typing_loop(interaction.channel))
 
-    reply = await ask_ai(message, guild_id, interaction.channel_id)
-    await _send_long_response(interaction, reply)
+    reply, char_name = await ask_ai(message, guild_id, interaction.channel_id)
+    await _send_long_response(interaction, reply, char_name)
+
+
+@bot.tree.command(
+    name="character",
+    description="Manage AI character/persona settings.",
+)
+async def character_command(
+    interaction: discord.Interaction,
+    action: str = "list",
+    name: str | None = None,
+):
+    """Switch or list characters.
+
+    Usage:
+        /character              — lists available characters (default)
+        /character set <name>   — switch to a character
+        /character show         — shows current active character
+        /character reset        — revert to default character
+    """
+    await interaction.response.defer(ephemeral=True)
+    if not CHARACTERS:
+        await interaction.followup.send("No characters configured.", ephemeral=True)
+        return
+
+    guild_id = interaction.guild_id or 0
+    current = _active_characters.get((guild_id, interaction.channel_id), DEFAULT_CHARACTER)
+    is_current = lambda n: n == current
+
+    if action == "list":
+        lines = ["**Available characters:**\n"]
+        for cname, cdata in CHARACTERS.items():
+            marker = " ← current" if is_current(cname) else ""
+            lines.append(f"  • `{cname}` — model: `{cdata['model']}`{marker}")
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+    elif action == "set":
+        if name is None:
+            await interaction.followup.send("Please provide a character name: `/character set <name>`", ephemeral=True)
+            return
+        ok, msg = _switch_character(guild_id, interaction.channel_id, name)
+        await interaction.followup.send(msg, ephemeral=True)
+
+    elif action == "show":
+        char_data = CHARACTERS.get(current, {})
+        await interaction.followup.send(
+            f"**Current character:** `{current}`\n"
+            f"**Model:** `{char_data.get('model', 'N/A')}`",
+            ephemeral=True,
+        )
+
+    elif action == "reset":
+        if guild_id is not None:
+            _active_characters.pop((guild_id, interaction.channel_id), None)
+        await interaction.followup.send(f"Reverted to default character: **{DEFAULT_CHARACTER}**", ephemeral=True)
+
+    else:
+        await interaction.followup.send(
+            f"Unknown action '{action}'. Use: list, set, show, reset.",
+            ephemeral=True,
+        )
 
 
 @bot.tree.command(name="clear_history", description="Clear conversation history for this channel.")
@@ -197,6 +310,7 @@ async def on_ready():
     if bot.guilds:
         bot.tree.copy_global_to(guild=discord.Object(id=bot.guilds[0].id))
     await bot.tree.sync()
+    log.info("Characters loaded: %s", ", ".join(CHARACTERS) or "(none)")
 
 
 @bot.event
@@ -218,8 +332,8 @@ async def on_message(message: discord.Message):
              message.author, message.author.id, message.channel.name, prompt[:80])
 
     await message.channel.typing()
-    reply = await ask_ai(prompt, guild_id, message.channel.id)
-    await _send_long_response(message, reply)
+    reply, char_name = await ask_ai(prompt, guild_id, message.channel.id)
+    await _send_long_response(message, reply, char_name)
 
 
 # ─────────────────────────── Startup ─────────────────────────────────
@@ -229,6 +343,6 @@ if __name__ == "__main__":
         log.error("Please set the DISCORD_BOT_TOKEN environment variable.")
         raise SystemExit(1)
 
-    log.info(f"Connecting to local AI backend at: {API_BASE_URL}")
-    log.info(f"Using model:             {MODEL_NAME}")
+    log.info("Connecting to local AI backend at: %s", API_BASE_URL)
+    log.info("Using default model:  %s", DEFAULT_MODEL)
     bot.run(DISCORD_TOKEN)
