@@ -1,6 +1,8 @@
 import asyncio
 import os
 import logging
+from dotenv import load_dotenv
+load_dotenv()  # Load .env variables into os.environ
 
 import discord
 from discord.ext import commands
