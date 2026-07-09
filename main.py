@@ -142,6 +142,7 @@ async def ask_ai_with_model(
         max_tokens=1024,
         stream=False,
         timeout=timeout_sec,
+        metadata={"r": True},  # ← activate Knowledge Base / RAG
     )
 
     reply = resp.choices[0].message.content or "(empty response)"
