@@ -19,15 +19,25 @@ INTENTS.guilds = True
 INTENTS.guild_messages = True
 INTENTS.message_content = True
 
-DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
-OPENAI_API_KEY  = os.getenv("OPENAI_API_KEY", "")
-MODEL_NAME      = os.getenv("MODEL_NAME", "gpt-3.5-turbo")
-SYSTEM_PROMPT   = os.getenv(
+DISCORD_TOKEN  = os.getenv("DISCORD_BOT_TOKEN", "")
+
+# API Key — local endpoints typically ignore it, but we pass something non-empty
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "local-model-key")
+
+# Base URL for the local inference backend:
+#   OpenWebUI (default):  http://localhost:8080/v1
+#   SillyTavern proxy:    http://localhost:5100/v1/openai
+API_BASE_URL = os.getenv("OPENAI_API_URL", "http://localhost:8080/v1")
+
+# The model slug that your local server exposes (e.g. from /api/tags)
+MODEL_NAME   = os.getenv("MODEL_NAME", "default-model-name")
+
+SYSTEM_PROMPT  = os.getenv(
     "SYSTEM_PROMPT",
     "You are a helpful AI assistant embedded in a Discord bot.",
 )
 CONTEXT_WINDOW: int = 10
-prefix          = os.getenv("BOT_PREFIX", "!ai")
+prefix         = os.getenv("BOT_PREFIX", "!ai")
 
 # ─────────────────────────── Bot Setup ───────────────────────────────
 bot = commands.Bot(command_prefix=prefix, intents=INTENTS)
@@ -50,8 +60,15 @@ def _clear_history(guild_id: int, channel_id: int) -> None:
 # ─────────────────────────── Helpers ─────────────────────────────────
 
 async def ask_ai(user_message: str, guild_id: int, channel_id: int) -> str:
-    """Send *user_message* to the AI model and return the reply."""
-    client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    """Send *user_message* to the local AI model and return the reply."""
+    # Timeout must exceed local model inference time (~9s for qwen3.6:latest).
+    # Also set per-request timeout so fast-fail works on transient errors.
+    timeout_sec = int(os.getenv("AI_REQUEST_TIMEOUT", "120"))
+    client = AsyncOpenAI(
+        api_key=OPENAI_API_KEY,
+        base_url=API_BASE_URL,
+        http_client=None,  # use default; we set timeout below
+    )
 
     _ensure_history(guild_id, channel_id)
     history = chat_histories[guild_id][channel_id]
@@ -65,6 +82,7 @@ async def ask_ai(user_message: str, guild_id: int, channel_id: int) -> str:
         messages=messages,
         temperature=0.7,
         max_tokens=1024,
+        timeout=timeout_sec,   # seconds before giving up
     )
 
     reply = resp.choices[0].message.content or "(empty response)"
@@ -78,7 +96,7 @@ async def ask_ai(user_message: str, guild_id: int, channel_id: int) -> str:
 
 
 async def _typing_loop(channel, duration_sec: int = 30):
-    """Send typing indicators every 10 seconds for *duration_sec* seconds."""
+    """Send typing indicators every 10s for up to duration_sec seconds."""
     end_time = asyncio.get_event_loop().time() + duration_sec
     while asyncio.get_event_loop().time() < end_time:
         await channel.typing()
@@ -140,7 +158,8 @@ async def on_message(message: discord.Message):
         return
 
     guild_id = message.guild_id or 0
-    log.info("%s (%s) in #%s: %s", message.author, message.author.id, message.channel.name, prompt[:80])
+    log.info("%s (%s) in #%s: %s",
+             message.author, message.author.id, message.channel.name, prompt[:80])
 
     await message.channel.typing()
     reply = await ask_ai(prompt, guild_id, message.channel.id)
@@ -153,8 +172,7 @@ if __name__ == "__main__":
     if not DISCORD_TOKEN:
         log.error("Please set the DISCORD_BOT_TOKEN environment variable.")
         raise SystemExit(1)
-    if not OPENAI_API_KEY:
-        log.error("Please set the OPENAI_API_KEY environment variable.")
-        raise SystemExit(1)
 
+    log.info(f"Connecting to local AI backend at: {API_BASE_URL}")
+    log.info(f"Using model:             {MODEL_NAME}")
     bot.run(DISCORD_TOKEN)
