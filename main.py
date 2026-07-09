@@ -22,7 +22,9 @@ INTENTS.message_content = True
 DISCORD_TOKEN  = os.getenv("DISCORD_BOT_TOKEN", "")
 
 # API Key — local endpoints typically ignore it, but we pass something non-empty
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "local-model-key")
+# Prefer OPENWEBUI_API_KEY for OpenWebUI; fall back to OPENAI_API_KEY.
+OPENAI_API_KEY = (os.getenv("OPENWEBUI_API_KEY") or
+                  os.getenv("OPENAI_API_KEY", "local-model-key"))
 
 # Base URL for the local inference backend:
 #   OpenWebUI (default):  http://localhost:8080/v1
@@ -82,6 +84,7 @@ async def ask_ai(user_message: str, guild_id: int, channel_id: int) -> str:
         messages=messages,
         temperature=0.7,
         max_tokens=1024,
+        stream=False,  # non-streaming — avoids timeout issues with OpenWebUI
         timeout=timeout_sec,   # seconds before giving up
     )
 
