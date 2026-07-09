@@ -87,7 +87,11 @@ def check_backend():
 
     # ── Quick chat test (optional — only if we have a model) ────
     if models and API_KEY:
-        sample = models[0] if isinstance(models[0], str) else models[0].get("id")
+        # Prefer the configured MODEL_NAME so we test the right model.
+        sample = MODEL_NAME or None
+        if not sample:
+            m0 = models[0] if isinstance(models[0], str) else models[0].get("id")
+            sample = m0
         if sample:
             print(f"\n💡 Try this chat completion with model '{sample}':")
             url = f"{API_BASE}/chat/completions"
@@ -95,6 +99,7 @@ def check_backend():
                 "model": sample,
                 "messages": [{"role": "user", "content": "Say 'hello' in one word."}],
                 "max_tokens": 20,
+                "stream": False,
             }).encode()
             req = urllib.request.Request(url, data=payload, method="POST")
             req.add_header("Content-Type", "application/json")
