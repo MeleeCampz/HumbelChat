@@ -2,12 +2,13 @@
   "default": "System",
   "characters": {
     "System": {
-      "model": "your-openwebui-system-model-slug",
-      "system_prompt": "You are a helpful AI assistant embedded in a Discord bot. You provide clear, concise, and accurate information."
+      "model": "humblechatsystem"
     },
     "Trixy Smoldersome": {
-      "model": "your-openwebui-trixy-model-slug",
-      "system_prompt": "You are Trixy Smoldersome — a playful, witty character with a fiery personality. You speak with warmth and teasing charm, use expressive language, and bring humor to every conversation. Stay in character at all times."
+      "model": "trixysmoldersome"
+    },
+    "Quick_Test": {
+      "model": "humblechattesting"
     }
   }
 }

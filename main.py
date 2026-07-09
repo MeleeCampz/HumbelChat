@@ -9,6 +9,7 @@ load_dotenv()  # Load .env variables into os.environ
 
 import discord
 from discord.ext import commands
+import discord.app_commands as app_commands
 from openai import AsyncOpenAI
 
 # ─────────────────────────── Configuration ───────────────────────────
@@ -56,37 +57,42 @@ except FileNotFoundError:
     _char_cfg = {
         "default": "Default",
         "characters": {
-            "Default": {
-                "model": DEFAULT_MODEL,
-                "system_prompt": DEFAULT_SYSTEM_PROMPT,
-            },
+            "Default": {"model": DEFAULT_MODEL},
         },
     }
 
 CHARACTERS: dict       = _char_cfg.get("characters", {})
 DEFAULT_CHARACTER     = _char_cfg.get("default", list(CHARACTERS)[0]) if CHARACTERS else "Default"
 
+# Pre-built Discord slash-command choices (dropdown) — populated at startup from characters.json
+_CHAR_CHOICES = [
+    discord.app_commands.Choice(name=name, value=name)
+    for name in CHARACTERS.keys()
+]
+
 # Per-guild channel active character  (key = (guild_id, channel_id))
 _active_characters: dict[tuple[int, int], str] = {}
 
 
-def _get_char(gid: int | None, cid: int) -> dict:
-    """Return the {model, system_prompt} dict for the current active character."""
+def _get_char_model(gid: int | None, cid: int) -> str:
+    """Return the model slug for the current active character."""
     if gid is not None and (gid, cid) in _active_characters:
         name = _active_characters[(gid, cid)]
     else:
         name = DEFAULT_CHARACTER
-    return CHARACTERS.get(name, {"model": DEFAULT_MODEL, "system_prompt": DEFAULT_SYSTEM_PROMPT})
+    char_data = CHARACTERS.get(name, {})
+    return char_data.get("model", DEFAULT_MODEL)
 
 
 def _switch_character(gid: int | None, cid: int, name: str) -> tuple[bool, str]:
     """Set active character. Returns (ok, message)."""
     if name not in CHARACTERS:
-        avail = ", ".join(f"`{k}`" for k in CHARACTORS)
+        avail = ", ".join(f"`{k}`" for k in CHARACTERS)
         return False, f"Unknown character '{name}'. Available: {avail}"
     if gid is not None:
         _active_characters[(gid, cid)] = name
-    return True, f"Switched to **{name}** ({CHARACTERS[name]['model']})"
+    entry = CHARACTERS[name].get("model", "")
+    return True, f"Switched to **{name}** ({entry})"
 
 
 # ─────────────────────────── Bot Setup ───────────────────────────────
@@ -110,12 +116,15 @@ def _clear_history(guild_id: int, channel_id: int) -> None:
 # ─────────────────────────── Helpers ─────────────────────────────────
 
 
-async def ask_ai(user_message: str, guild_id: int, channel_id: int) -> tuple[str, str]:
-    """Send *user_message* to the active AI model and return (reply, character_name)."""
+async def ask_ai_with_model(
+    user_message: str,
+    model: str,
+    guild_id: int,
+    channel_id: int,
+) -> str:
+    """Send *user_message* to the AI using a specific model slug and return the reply text."""
     timeout_sec = int(os.getenv("AI_REQUEST_TIMEOUT", "120"))
-    char = _get_char(guild_id, channel_id)
-    model     = char.get("model") or DEFAULT_MODEL
-    system_p  = char.get("system_prompt") or DEFAULT_SYSTEM_PROMPT
+    system_p = DEFAULT_SYSTEM_PROMPT
 
     client = AsyncOpenAI(api_key=OPENAI_API_KEY, base_url=API_BASE_URL)
 
@@ -137,22 +146,12 @@ async def ask_ai(user_message: str, guild_id: int, channel_id: int) -> tuple[str
 
     reply = resp.choices[0].message.content or "(empty response)"
 
-    # Determine character name for display / history tracking
-    char_name = DEFAULT_CHARACTER
-    if guild_id is not None and (guild_id, channel_id) in _active_characters:
-        char_name = _active_characters[(guild_id, channel_id)]
-    else:
-        for n, c in CHARACTERS.items():
-            if c.get("model") == model:
-                char_name = n
-                break
-
     history.append({"role": "user", "content": user_message})
     history.append({"role": "assistant", "content": reply})
     if len(history) > 2 * CONTEXT_WINDOW:
         chat_histories[guild_id][channel_id] = history[-(2 * CONTEXT_WINDOW):]
 
-    return reply, char_name
+    return reply
 
 
 async def _typing_loop(channel, duration_sec: int = 30):
@@ -225,13 +224,42 @@ async def _send_long_response(source, reply: str, char_name: str = "") -> None:
 # ─────────────────────────── Slash Commands ──────────────────────────
 
 @bot.tree.command(name="ai", description="Send a prompt to the AI and get a reply.")
-async def ai_command(interaction: discord.Interaction, message: str):
+@app_commands.choices(character=_CHAR_CHOICES)
+async def ai_command(
+    interaction: discord.Interaction,
+    message: str,
+    character: str | None = None,
+):
+    """AI chat command with optional character override. Falls back to System if none specified."""
     await interaction.response.defer()
 
     guild_id = interaction.guild_id or 0
+
+    # Determine which character/model to use
+    if character is not None:
+        if character not in CHARACTERS:
+            avail = ", ".join(f"`{k}`" for k in CHARACTERS)
+            await interaction.followup.send(
+                f"Unknown character `{character}`. Available: {avail}", ephemeral=True
+            )
+            return
+        model_to_use = CHARACTERS[character]["model"]
+        char_name = character
+    else:
+        # No character specified — use active per-channel character or fall back to DEFAULT_CHARACTER (System)
+        if guild_id is not None and (guild_id, interaction.channel_id) in _active_characters:
+            name = _active_characters[(guild_id, interaction.channel_id)]
+        else:
+            name = DEFAULT_CHARACTER  # "System"
+        char_data = CHARACTERS.get(name, {"model": DEFAULT_MODEL})
+        model_to_use = char_data["model"]
+        char_name = name
+
     asyncio.create_task(_typing_loop(interaction.channel))
 
-    reply, char_name = await ask_ai(message, guild_id, interaction.channel_id)
+    reply = await ask_ai_with_model(
+        message, model_to_use, guild_id, interaction.channel_id
+    )
     await _send_long_response(interaction, reply, char_name)
 
 
@@ -332,8 +360,10 @@ async def on_message(message: discord.Message):
              message.author, message.author.id, message.channel.name, prompt[:80])
 
     await message.channel.typing()
-    reply, char_name = await ask_ai(prompt, guild_id, message.channel.id)
-    await _send_long_response(message, reply, char_name)
+    # Prefix command always uses default character (System)
+    sys_model = CHARACTERS.get(DEFAULT_CHARACTER, {}).get("model", DEFAULT_MODEL)
+    reply = await ask_ai_with_model(prompt, sys_model, guild_id, message.channel.id)
+    await _send_long_response(message, reply, DEFAULT_CHARACTER)
 
 
 # ─────────────────────────── Startup ─────────────────────────────────
