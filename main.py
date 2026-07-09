@@ -104,18 +104,69 @@ async def _typing_loop(channel, duration_sec: int = 30):
     """Send typing indicators every 10s for up to duration_sec seconds."""
     end_time = asyncio.get_event_loop().time() + duration_sec
     while asyncio.get_event_loop().time() < end_time:
-        await channel.typing()
+        try:
+            await channel.typing()
+        except discord.Forbidden:
+            # Bot lacks permission to send typing indicators in this channel
+            break
+        except Exception:
+            pass
         await asyncio.sleep(10)
 
 
-async def _send_long_response(interaction, reply: str):
-    if len(reply) > 2000:
-        with open("_tmp.txt", "w") as f:
-            f.write(reply)
-        await interaction.followup.send(file=discord.File("_tmp.txt"))
-        os.remove("_tmp.txt")
-    else:
-        await interaction.followup.send(reply)
+async def _send_long_response(source, reply: str) -> None:
+    """Send `reply`, chunking it into multiple messages if > 1900 chars.
+
+    Paragraph-aware splitting keeps code blocks and lists intact.
+    Works for both Slash Commands (followup.send) and prefix commands (reply).
+    """
+    MAX_LEN = 1900  # Leave room for "[X/Y] " metadata
+
+    if len(reply) <= MAX_LEN:
+        if hasattr(source, 'followup'):
+            await source.followup.send(reply)
+        else:
+            await source.reply(reply)
+        return
+
+    # Split by double newlines (paragraphs) first for readability
+    paragraphs = reply.split('\n\n')
+    chunks = []
+    current_chunk = ""
+
+    for para in paragraphs:
+        if len(current_chunk) + len(para) + 2 > MAX_LEN:
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+
+            # If a single paragraph is longer than MAX_LEN, force-split by words
+            if len(para) > MAX_LEN:
+                words = para.split()
+                sub = ""
+                for w in words:
+                    if len(sub) + len(w) + 1 > MAX_LEN:
+                        chunks.append(sub.strip())
+                        sub = w
+                    else:
+                        sub += " " + w if sub else w
+                current_chunk = sub
+            else:
+                current_chunk = para
+        else:
+            current_chunk += "\n\n" + para if current_chunk else para
+
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+
+    # Send sequentially with page indicators
+    for i, chunk in enumerate(chunks, 1):
+        meta = f"[{i}/{len(chunks)}] "
+        display_text = meta + chunk
+
+        if hasattr(source, 'followup'):
+            await source.followup.send(display_text)
+        else:
+            await source.reply(display_text)
 
 
 # ─────────────────────────── Slash Commands ──────────────────────────
