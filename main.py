@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import pathlib
+import uuid
 import logging
 from dotenv import load_dotenv
 
@@ -411,6 +412,183 @@ async def remind_command(
         f"✅ Reminder set for **{human_delay}** from now!\n📝 I'll ping you with: \"{message}\"",
         ephemeral=True,
     )
+
+
+# ─────────────────────────── Knowledge Base Uploads ──────────────────
+
+KB_KB_NAME = os.getenv("KB_KNOWLEDGE_BASE", "Default")  # target knowledge base name
+KB_DIR     = pathlib.Path(__file__).parent / ".kb_tmp"   # temp storage for fetched files
+KB_DIR.mkdir(exist_ok=True)
+
+# Known MIME-type → file extension mapping
+_MIME_EXT: dict[str, str] = {
+    "application/pdf": ".pdf",
+    "text/plain":      ".txt",
+    "text/csv":        ".csv",
+    "text/html":       ".html",
+    "text/xml":        ".xml",
+    "text/markdown":   ".md",
+    "application/rtf": ".rtf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/json": ".json",
+}
+
+
+async def _fetch_file_from_discord(url: str) -> pathlib.Path:
+    """Download a Discord attachment to .kb_tmp and return the local path."""
+    import httpx
+
+    ext = ".bin"
+    async with httpx.AsyncClient() as client:
+        head_resp = await client.head(url, follow_redirects=True)
+        content_type = (head_resp.headers.get("content-type") or "").split(";")[0].lower()
+        ext = _MIME_EXT.get(content_type, ".bin")
+
+    # Extract potential filename from URL
+    fname = pathlib.Path(url.split("/")[-1])
+    if fname.suffix:
+        ext = fname.suffix
+
+    local_path = KB_DIR / f"{uuid.uuid4().hex}{ext}"
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(url, follow_redirects=True)
+        resp.raise_for_status()
+        local_path.write_bytes(resp.content)
+    return local_path
+
+
+async def _post_to_openwebui_docs(local_path: pathlib.Path) -> dict | None:
+    """Upload a file to OpenWebUI's knowledge-base API.
+
+    Returns the JSON response dict on success, or None on failure.
+    """
+    api_key = os.getenv("OPENWEBUI_API_KEY")
+    if not api_key:
+        return {"error": "OPENWEBUI_API_KEY not set in .env"}
+
+    url = f"{API_BASE_URL.rsplit('/v1', 1)[0]}/api/v1/knowledge/documents/upload"
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+    }
+    params = {"knowledge_base_name": KB_KB_NAME}
+
+    with open(local_path, "rb") as fh:
+        files = {"file": (local_path.name, fh)}
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(url, headers=headers, params=params, files=files)
+
+    if resp.status_code in (200, 201):
+        return resp.json()
+    return {"error": f"HTTP {resp.status_code}: {resp.text[:300]}"}
+
+
+async def _list_kb_documents() -> list[dict]:
+    """List current documents in the target knowledge base."""
+    api_key = os.getenv("OPENWEBUI_API_KEY")
+    if not api_key:
+        return []
+    url = f"{API_BASE_URL.rsplit('/v1', 1)[0]}/api/v1/knowledge/documents"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    params = {"knowledge_base_name": KB_KB_NAME}
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(url, headers=headers, params=params)
+    if resp.status_code == 200:
+        return resp.json()
+    return []
+
+
+@bot.tree.command(
+    name="upload_kb",
+    description="Upload a file (text/pdf/etc.) to the knowledge base for RAG.",
+)
+@app_commands.describe(file_type="File type: document, text, pdf")
+async def upload_kb_command(
+    interaction: discord.Interaction,
+    kb_name: str | None = None,
+):
+    """Upload an attached file to OpenWebUI's Knowledge Base."""
+    global KB_KB_NAME
+    if kb_name:
+        KB_KB_NAME = kb_name
+
+    await interaction.response.defer(ephemeral=True)
+
+    attachment: discord.Attachment | None = None
+    for att in interaction.attachments:
+        if att.size and att.size < 20 * 1024 * 1024:  # 20 MB limit
+            attachment = att
+            break
+
+    if not attachment:
+        await interaction.followup.send(
+            "⚠️ Please attach a file to this command (max 20 MB).",
+            ephemeral=True,
+        )
+        return
+
+    log.info("Processing KB upload: %s (%d bytes, %s)",
+             attachment.filename, attachment.size, attachment.content_type or "unknown")
+
+    local_path = await _fetch_file_from_discord(attachment.url)
+
+    try:
+        result = await _post_to_openwebui_docs(local_path)
+    except Exception as exc:
+        await interaction.followup.send(
+            f"❌ Upload failed: {exc}", ephemeral=True
+        )
+        return
+
+    if "error" in result and "OPENWEBUI_API_KEY" not in str(result.get("error", "")):
+        status = "⚠️"
+        detail = str(result["error"])
+    elif "error" in result:
+        status = "❌"
+        detail = f"Key error: {result['error']}"
+    else:
+        status = "✅"
+        detail = json.dumps(result, indent=2, default=str)[:1500]
+
+    await interaction.followup.send(
+        f"{status} Uploaded to KB **'{KB_KB_NAME}'**\n"
+        f"📄 File: `{attachment.filename}`\n"
+        f"📦 Size: `{attachment.size:,}` bytes\n"
+        f"🔖 Details:\n```{detail}```",
+        ephemeral=True,
+    )
+    local_path.unlink(missing_ok=True)
+
+
+@bot.tree.command(
+    name="list_kb_docs",
+    description="List all documents currently in the knowledge base.",
+)
+async def list_kb_docs_command(interaction: discord.Interaction):
+    """List docs in the target knowledge base."""
+    await interaction.response.defer(ephemeral=True)
+
+    docs = await _list_kb_documents()
+    if not docs:
+        await interaction.followup.send(
+            f"📚 Knowledge base **'{KB_KB_NAME}'** is empty. Use `/upload_kb` to add files.",
+            ephemeral=True,
+        )
+        return
+
+    lines = [f"📚 Documents in **'{KB_KB_NAME}'** ({len(docs)}):\n"]
+    for d in docs[:50]:  # cap at 50 entries for display
+        name = d.get("name", d.get("filename", "unknown"))
+        size = d.get("size", "?")
+        doc_id = d.get("id", d.get("document_id", "?"))
+        lines.append(f"  • `{name}` — {size:,} bytes (ID: {doc_id})")
+
+    if len(docs) > 50:
+        lines.append("\n... and {} more.".format(len(docs) - 50))
+
+    await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+
 
 
 @bot.tree.command(name="clear_history", description="Clear conversation history for this channel.")
