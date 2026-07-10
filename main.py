@@ -46,6 +46,29 @@ DEFAULT_SYSTEM_PROMPT = os.getenv(
 CONTEXT_WINDOW: int = 10
 prefix         = os.getenv("BOT_PREFIX", "!ai")
 
+# ─────────────────────────── Reminders ─────────────────────────────
+
+async def _send_reminder(channel_id: int, message: str) -> None:
+    """Send a reminder DM or channel message."""
+    try:
+        chan = bot.get_channel(channel_id)
+        if chan:
+            await chan.send(f"⏰ **Reminder:** {message}")
+    except Exception as e:
+        log.error(f"Failed to send reminder: {e}")
+
+
+async def _reminder_handler(
+    channel_id: int,
+    delay_seconds: int,
+    message: str,
+) -> None:
+    """Wait *delay_seconds*, then deliver the reminder."""
+    await asyncio.sleep(delay_seconds)
+    log.info("Delivering reminder for channel %s: %s", channel_id, message)
+    await _send_reminder(channel_id, message)
+
+
 # ─────────────────────────── Characters ──────────────────────────────
 CHARACTERS_FILE = pathlib.Path(__file__).parent / "characters.json"
 
@@ -336,6 +359,58 @@ async def character_command(
             f"Unknown action '{action}'. Use: list, set, show, reset.",
             ephemeral=True,
         )
+
+
+@bot.tree.command(
+    name="remind",
+    description="Schedule a reminder for yourself. Example: /remind in 15 minutes Say hello to Bob",
+)
+@app_commands.describe(
+    time_value="Amount of time (number)",
+    time_unit="Unit of time (seconds, minutes, hours)",
+    message="What you want to be reminded about",
+)
+async def remind_command(
+    interaction: discord.Interaction,
+    time_value: int,
+    time_unit: str,
+    message: str,
+):
+    """Schedule a one-time reminder."""
+    multipliers = {
+        "second": 1, "seconds": 1, "s": 1,
+        "minute": 60, "minutes": 60, "min": 60, "m": 60,
+        "hour": 3600, "hours": 3600, "hr": 3600, "h": 3600,
+    }
+    unit_lower = time_unit.lower()
+    if unit_lower not in multipliers:
+        await interaction.response.send_message(
+            f"Unknown unit `{time_unit}`. Use: seconds, minutes, hours.",
+            ephemeral=True,
+        )
+        return
+
+    delay = time_value * multipliers[unit_lower]
+    if delay < 10:
+        await interaction.response.send_message(
+            "Reminder must be at least 10 seconds in the future.",
+            ephemeral=True,
+        )
+        return
+
+    # Defer while we confirm, then schedule in background
+    await interaction.response.defer(ephemeral=True)
+
+    channel_id = interaction.channel.id
+    asyncio.create_task(
+        _reminder_handler(channel_id, delay, message)
+    )
+
+    human_delay = f"{time_value} {time_unit}" if time_value != 1 else f"{time_value} {time_unit.rstrip('s')}"
+    await interaction.followup.send(
+        f"✅ Reminder set for **{human_delay}** from now!\n📝 I'll ping you with: \"{message}\"",
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(name="clear_history", description="Clear conversation history for this channel.")
