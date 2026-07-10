@@ -1,5 +1,5 @@
-- Add an option for user to set created timed Tasks. e.G "Remind me in 15 minutes"
-- Add an option to upload files that will be added to the knowledge databse
+- ~~Add an option for user to set created timed Tasks. e.G "Remind me in 15 minutes"~~ ✅ DONE (`/remind` slash command)
+- ~~Add an option to upload files that will be added to the knowledge databse~~ ✅ DONE (`/upload_kb` + `/list_kb_docs`)
 - Add an option to upload images extract textual information from them
-- Upload Text based files and get a summary or translation of the content
-- Check which user sent a message and include it in the prompt so the AI can gecognize different users.
+- Upload Text based files and get a summary or translation of the content (✅ `/upload_kb` already handles text/pdf/csv - needs prompt endpoint)
+- ~~Check which user sent a message and include it in the prompt so the AI can recognize different users.~~ ✅ DONE (prepends `**username:** ` to messages)
