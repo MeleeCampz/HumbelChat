@@ -1,9 +1,64 @@
-.venv/
-env/
-venv/
+# Python
 __pycache__/
-*.pyc
-.env
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
 .env.local
+
+# Environment files with secrets
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs and temp files
+*.log
 *.txt.tmp
 tmp.txt
+_tmp.txt
+*.bak
+
+# Dependencies (if vendored)
+dependencies/
+vendor/
+
+# Secrets / credentials (belt + suspenders)
+*.pem
+*.key
+*.jwk
+credentials/
+secrets/
+
+# Git
+.git/

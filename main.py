@@ -232,8 +232,6 @@ async def ai_command(
     character: str | None = None,
 ):
     """AI chat command with optional character override. Falls back to System if none specified."""
-    await interaction.response.defer()
-
     guild_id = interaction.guild_id or 0
 
     # Determine which character/model to use
@@ -256,12 +254,28 @@ async def ai_command(
         model_to_use = char_data["model"]
         char_name = name
 
+    # Defer — may fail if the slash-command invocation expired.
+    try:
+        await interaction.response.defer()
+    except discord.NotFound:
+        pass  # already stale; skip typing indicator
+    except Exception:
+        pass
+
     asyncio.create_task(_typing_loop(interaction.channel))
 
     reply = await ask_ai_with_model(
         message, model_to_use, guild_id, interaction.channel_id
     )
-    await _send_long_response(interaction, reply, char_name)
+
+    # Respond — defer may have failed; fall back to direct channel send.
+    try:
+        await _send_long_response(interaction, reply, char_name)
+    except discord.NotFound:
+        await interaction.channel.send(reply.strip())
+    except Exception as exc:
+        log.error("Failed to send AI response: %s", exc)
+        await interaction.channel.send(reply.strip())
 
 
 @bot.tree.command(
