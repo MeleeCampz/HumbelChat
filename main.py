@@ -146,8 +146,13 @@ async def ask_ai_with_model(
     model: str,
     guild_id: int,
     channel_id: int,
+    username: str = "",
 ) -> str:
-    """Send *user_message* to the AI using a specific model slug and return the reply text."""
+    """Send *user_message* to the AI using a specific model slug and return the reply text.
+
+    If *username* is provided, it is prepended to every user message so the AI can
+    distinguish between different speakers.
+    """
     timeout_sec = int(os.getenv("AI_REQUEST_TIMEOUT", "120"))
     system_p = DEFAULT_SYSTEM_PROMPT
 
@@ -158,7 +163,11 @@ async def ask_ai_with_model(
 
     messages: list[dict] = [{"role": "system", "content": system_p}]
     messages += history
-    messages.append({"role": "user", "content": user_message})
+    if username:
+        user_content = f"**{username}:** {user_message}"
+    else:
+        user_content = user_message
+    messages.append({"role": "user", "content": user_content})
 
     resp = await client.chat.completions.create(
         model=model,
@@ -167,12 +176,15 @@ async def ask_ai_with_model(
         max_tokens=1024,
         stream=False,
         timeout=timeout_sec,
-        metadata={"r": True},  # ← activate Knowledge Base / RAG
+        metadata={
+            "retrieval":       True,
+            "knowledge_base":  KB_KB_NAME,
+        },
     )
 
     reply = resp.choices[0].message.content or "(empty response)"
 
-    history.append({"role": "user", "content": user_message})
+    history.append({"role": "user", "content": f"**{username}:** {user_message}" if username else user_message})
     history.append({"role": "assistant", "content": reply})
     if len(history) > 2 * CONTEXT_WINDOW:
         chat_histories[guild_id][channel_id] = history[-(2 * CONTEXT_WINDOW):]
@@ -290,7 +302,8 @@ async def ai_command(
     asyncio.create_task(_typing_loop(interaction.channel))
 
     reply = await ask_ai_with_model(
-        message, model_to_use, guild_id, interaction.channel_id
+        message, model_to_use, guild_id, interaction.channel_id,
+        username=interaction.user.display_name
     )
 
     # Respond — defer may have failed; fall back to direct channel send.
@@ -417,6 +430,164 @@ async def remind_command(
     await interaction.followup.send(confirmation_msg, ephemeral=True)
 
 
+
+
+# ─────────────────────────── Knowledge Base Uploads ──────────────────
+
+KB_KB_NAME = os.getenv("KB_KNOWLEDGE_BASE", "Default")
+KB_DIR     = pathlib.Path(__file__).parent / ".kb_tmp"
+KB_DIR.mkdir(exist_ok=True)
+
+_MIME_EXT: dict[str, str] = {
+    "application/pdf": ".pdf",
+    "text/plain":      ".txt",
+    "text/csv":        ".csv",
+    "text/html":       ".html",
+    "text/xml":        ".xml",
+    "text/markdown":   ".md",
+    "application/rtf": ".rtf",
+}
+
+
+async def _fetch_file_from_discord(url: str) -> pathlib.Path:
+    import httpx
+    ext = ".bin"
+    async with httpx.AsyncClient() as client:
+        head_resp = await client.head(url, follow_redirects=True)
+        ct = (head_resp.headers.get("content-type") or "").split(";")[0].lower()
+        ext = _MIME_EXT.get(ct, ".bin")
+    fname = pathlib.Path(url.split("/")[-1])
+    if fname.suffix:
+        ext = fname.suffix
+    local_path = KB_DIR / f"{uuid.uuid4().hex}{ext}"
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(url, follow_redirects=True)
+        resp.raise_for_status()
+        local_path.write_bytes(resp.content)
+    return local_path
+
+
+async def _post_to_openwebui_docs(local_path: pathlib.Path) -> dict | None:
+    api_key = os.getenv("OPENWEBUI_API_KEY")
+    if not api_key:
+        return {"error": "OPENWEBUI_API_KEY not set in .env"}
+    base_url = API_BASE_URL.rsplit("/v1", 1)[0]
+    url = f"{base_url}/api/v1/knowledge/documents/upload"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    params = {"knowledge_base_name": KB_KB_NAME}
+    with open(local_path, "rb") as fh:
+        files = {"file": (local_path.name, fh)}
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(url, headers=headers, params=params, files=files)
+    if resp.status_code in (200, 201):
+        return resp.json()
+    return {"error": f"HTTP {resp.status_code}: {resp.text[:300]}"}
+
+
+async def _list_kb_documents() -> list[dict]:
+    api_key = os.getenv("OPENWEBUI_API_KEY")
+    if not api_key:
+        return []
+    base_url = API_BASE_URL.rsplit("/v1", 1)[0]
+    url = f"{base_url}/api/v1/knowledge/documents"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    params = {"knowledge_base_name": KB_KB_NAME}
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(url, headers=headers, params=params)
+    if resp.status_code == 200:
+        return resp.json()
+    return []
+
+
+@bot.tree.command(
+    name="upload_kb",
+    description="Upload a file (text/pdf/csv/etc.) to the knowledge base for RAG.",
+)
+@app_commands.describe(kb_name="Optional: override the default knowledge base name")
+async def upload_kb_command(
+    interaction: discord.Interaction,
+    kb_name: str | None = None,
+):
+    global KB_KB_NAME
+    if kb_name:
+        KB_KB_NAME = kb_name
+
+    await interaction.response.defer(ephemeral=True)
+
+    attachment: discord.Attachment | None = None
+    for att in interaction.attachments:
+        if att.size and att.size < 20 * 1024 * 1024:
+            attachment = att
+            break
+
+    if not attachment:
+        await interaction.followup.send(
+            "⚠️ Please attach a file to this command (max 20 MB).",
+            ephemeral=True,
+        )
+        return
+
+    log.info("Processing KB upload: %s (%d bytes, %s)",
+             attachment.filename, attachment.size, attachment.content_type or "unknown")
+
+    local_path = await _fetch_file_from_discord(attachment.url)
+
+    try:
+        result = await _post_to_openwebui_docs(local_path)
+    except Exception as exc:
+        await interaction.followup.send(f"❌ Upload failed: {exc}", ephemeral=True)
+        return
+
+    if "error" in result and "OPENWEBUI_API_KEY" not in str(result.get("error", "")):
+        status = "⚠️"
+        detail = str(result["error"])
+    elif "error" in result:
+        status = "❌"
+        detail = f'Key error: {result["error"]}'
+    else:
+        status = "✅"
+        detail = json.dumps(result, indent=2, default=str)[:1500]
+
+    msg_lines = []
+    msg_lines.append(f"{status} Uploaded to KB **{KB_KB_NAME}**")
+    msg_lines.append(f"📄 File: `{attachment.filename}`")
+    msg_lines.append(f"📦 Size: `{attachment.size:,}` bytes")
+    msg_lines.append("🔖 Details:")
+    msg_lines.append("```\n" + detail + "\n```")
+    await interaction.followup.send("\n".join(msg_lines), ephemeral=True)
+    local_path.unlink(missing_ok=True)
+
+
+@bot.tree.command(
+    name="list_kb_docs",
+    description="List all documents currently in the knowledge base.",
+)
+async def list_kb_docs_command(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
+    docs = await _list_kb_documents()
+    if not docs:
+        await interaction.followup.send(
+            f"📚 Knowledge base **'{KB_KB_NAME}'** is empty. Use `/upload_kb` to add files.",
+            ephemeral=True,
+        )
+        return
+
+    lines = [f"📚 Documents in **'{KB_KB_NAME}'** ({len(docs)}):"]
+    for d in docs[:50]:
+        name = d.get("name", d.get("filename", "unknown"))
+        size = d.get("size", "?")
+        doc_id = d.get("id", d.get("document_id", "?"))
+        lines.append(f"  - `{name}` — {size:,} bytes (ID: {doc_id})")
+
+    if len(docs) > 50:
+        extra = len(docs) - 50
+        lines.append(f"... and {extra} more.")
+
+    await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+
+
 @bot.tree.command(name="clear_history", description="Clear conversation history for this channel.")
 async def clear_history_command(interaction: discord.Interaction):
     if interaction.guild_id and interaction.channel_id:
@@ -456,7 +627,7 @@ async def on_message(message: discord.Message):
     await message.channel.typing()
     # Prefix command always uses default character (System)
     sys_model = CHARACTERS.get(DEFAULT_CHARACTER, {}).get("model", DEFAULT_MODEL)
-    reply = await ask_ai_with_model(prompt, sys_model, guild_id, message.channel.id)
+    reply = await ask_ai_with_model(prompt, sys_model, guild_id, message.channel.id, username=message.author.display_name)
     await _send_long_response(message, reply, DEFAULT_CHARACTER)
 
 
