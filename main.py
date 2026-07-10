@@ -588,6 +588,162 @@ async def list_kb_docs_command(interaction: discord.Interaction):
 
 
 
+@bot.tree.command(
+    name="ocr",
+    description="Extract text from an image (OCR) using vision AI.",
+)
+async def ocr_command(interaction: discord.Interaction):
+    """Send an image attachment to a vision model and return the extracted text."""
+    await interaction.response.defer(ephemeral=True)
+
+    image: discord.Attachment | None = None
+    for att in interaction.attachments:
+        if att.width and att.height:
+            image = att
+            break
+
+    if not image or not (image.width and image.height):
+        await interaction.followup.send(
+            "⚠️ Please attach an image to this command.",
+            ephemeral=True,
+        )
+        return
+
+    async def _ask_vision():
+        client = AsyncOpenAI(api_key=OPENAI_API_KEY, base_url=API_BASE_URL)
+        resp = await client.chat.completions.create(
+            model=os.getenv("VISION_MODEL", DEFAULT_MODEL),
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": "Extract all text from this image accurately. Do not interpret or summarize — return the exact text as you see it."},
+                {"type": "image_url", "image_url": {"url": image.url}},
+            ]}],
+            temperature=0,
+            max_tokens=4096,
+        )
+        return resp.choices[0].message.content or "(no text found)"
+
+    reply = await _ask_vision()
+    MAX_LEN = 1900
+    if len(reply) <= MAX_LEN:
+        await interaction.followup.send(f"🔍 Extracted text:\n\n{reply}", ephemeral=True)
+    else:
+        for i in range(0, len(reply), MAX_LEN):
+            chunk = reply[i:i+MAX_LEN]
+            await interaction.followup.send(f"🔍 Extracted text (part {i//MAX_LEN+1}):\n\n{chunk}", ephemeral=True)
+
+
+@bot.tree.command(
+    name="summarize",
+    description="Summarize an uploaded file or the current conversation context.",
+)
+@app_commands.describe(
+    file_url="Optional: URL of a text file to summarize. If omitted, summarizes recent chat history.",
+)
+async def summarize_command(
+    interaction: discord.Interaction,
+    file_url: str | None = None,
+):
+    """Summarize text from a file or recent context."""
+    await interaction.response.defer(ephemeral=True)
+
+    text_to_summarize = ""
+
+    if file_url:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(file_url)
+            resp.raise_for_status()
+            text_to_summarize = resp.text[:32000]
+        source_label = f"file from `{file_url[:80]}...`"
+    else:
+        guild_id = interaction.guild_id or 0
+        cid = interaction.channel_id
+        history = chat_histories.get(guild_id, {}).get(cid, [])
+        parts = []
+        for msg in history[-30:]:
+            role_name = {"user": "User", "assistant": "AI"}.get(msg["role"], msg["role"])
+            parts.append(f"[{role_name}]: {msg['content']}")
+        text_to_summarize = "\n\n".join(parts) if parts else "(no history available)"
+        source_label = "recent conversation"
+
+    if not text_to_summarize or text_to_summarize.strip() in ("(no history available)",):
+        await interaction.followup.send("⚠️ Nothing to summarize. Provide a file URL or send messages first.", ephemeral=True)
+        return
+
+    client = AsyncOpenAI(api_key=OPENAI_API_KEY, base_url=API_BASE_URL)
+    resp = await client.chat.completions.create(
+        model=os.getenv("SUMMARIZE_MODEL", DEFAULT_MODEL),
+        messages=[{"role": "system", "content": f"You are a precise summarizer. Summarize the following text from {source_label} in clear bullet points. Be concise but complete."},
+                  {"role": "user", "content": text_to_summarize}],
+        temperature=0.3,
+        max_tokens=2048,
+    )
+    summary = resp.choices[0].message.content or "(empty)"
+
+    if len(summary) <= 1900:
+        await interaction.followup.send(f"📝 Summary of {source_label}:\n\n{summary}", ephemeral=True)
+    else:
+        for i in range(0, len(summary), 1900):
+            chunk = summary[i:i+1900]
+            await interaction.followup.send(f"📝 Summary (part {i//1900+1}):\n\n{chunk}", ephemeral=True)
+
+
+@bot.tree.command(
+    name="translate",
+    description="Translate text. Usage: /translate target_language:text_or_no_text",
+)
+@app_commands.describe(
+    target_language="Target language and optional source text (e.g. 'Spanish: Hello world' or just 'Spanish')",
+    source_language="Optional source language (default: auto-detect)",
+)
+async def translate_command(
+    interaction: discord.Interaction,
+    target_language: str,
+    source_language: str | None = None,
+):
+    """Translate text to a target language."""
+    parts = target_language.split(":", 1)
+    tgt_lang = parts[0].strip()
+    text_to_translate = parts[1].strip() if len(parts) > 1 else None
+
+    if not text_to_translate:
+        guild_id = interaction.guild_id or 0
+        cid = interaction.channel_id
+        history = chat_histories.get(guild_id, {}).get(cid, [])
+        if not history:
+            await interaction.followup.send("⚠️ No text to translate. Provide text as: `/translate Spanish: Hello world`", ephemeral=True)
+            return
+        last_user = [m["content"] for m in reversed(history) if m["role"] == "user"]
+        if last_user:
+            text_to_translate = last_user[0]
+        else:
+            await interaction.followup.send("⚠️ No user message found to translate.", ephemeral=True)
+            return
+
+    src_clause = f" from {source_language}" if source_language else ""
+
+    client = AsyncOpenAI(api_key=OPENAI_API_KEY, base_url=API_BASE_URL)
+    resp = await client.chat.completions.create(
+        model=os.getenv("TRANSLATE_MODEL", DEFAULT_MODEL),
+        messages=[{
+            "role": "system",
+            "content": f"You are a professional translator. Translate the following text{src_clause} into {tgt_lang}. Return ONLY the translated text — no explanations, no quotes, no metadata.",
+        }, {
+            "role": "user",
+            "content": text_to_translate,
+        }],
+        temperature=0.3,
+        max_tokens=4096,
+    )
+    translated = resp.choices[0].message.content or "(translation failed)"
+
+    if len(translated) <= 1900:
+        await interaction.followup.send(f"🌐 Translated to **{tgt_lang}**:\n\n{translated}", ephemeral=True)
+    else:
+        for i in range(0, len(translated), 1900):
+            chunk = translated[i:i+1900]
+            await interaction.followup.send(f"🌐 Translated to **{tgt_lang}** (part {i//1900+1}):\n\n{chunk}", ephemeral=True)
+
+
 @bot.tree.command(name="clear_history", description="Clear conversation history for this channel.")
 async def clear_history_command(interaction: discord.Interaction):
     if interaction.guild_id and interaction.channel_id:
