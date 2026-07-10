@@ -468,46 +468,150 @@ async def _fetch_file_from_discord(url: str) -> pathlib.Path:
     return local_path
 
 
-async def _post_to_openwebui_docs(local_path: pathlib.Path) -> dict | None:
+async def _fetch_file_from_url(url: str) -> pathlib.Path:
+    ext = ".bin"
+    async with httpx.AsyncClient() as client:
+        head_resp = await client.head(url, follow_redirects=True)
+        ct = (head_resp.headers.get("content-type") or "").split(";")[0].lower()
+        ext = _MIME_EXT.get(ct, ".bin")
+    fname = pathlib.Path(url.split("/")[-1])
+    if fname.suffix:
+        ext = fname.suffix
+    local_path = KB_DIR / f"{uuid.uuid4().hex}{ext}"
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(url, follow_redirects=True)
+        resp.raise_for_status()
+        local_path.write_bytes(resp.content)
+    return local_path
+
+
+def _build_owui_headers() -> dict:
     api_key = os.getenv("OPENWEBUI_API_KEY")
     if not api_key:
-        return {"error": "OPENWEBUI_API_KEY not set in .env"}
-    base_url = API_BASE_URL.rsplit("/v1", 1)[0]
-    url = f"{base_url}/api/v1/knowledge/documents/upload"
-    headers = {"Authorization": f"Bearer {api_key}"}
-    params = {"knowledge_base_name": KB_KB_NAME}
+        raise RuntimeError("OPENWEBUI_API_KEY not set in .env")
+    return {"Authorization": f"Bearer {api_key}"}
+
+
+def _owui_base() -> str:
+    """Return the OpenWebUI server base (strip '/api/v1' suffix)."""
+    return API_BASE_URL.rsplit("/api", 1)[0]
+
+
+async def _upload_file_to_owui(local_path: pathlib.Path) -> dict:
+    """Step 1 – upload file via /api/v1/files/. Returns the JSON response."""
+    server = _owui_base()
+    url = f"{server}/api/v1/files/"
+    headers = _build_owui_headers() | {"Accept": "application/json"}
     with open(local_path, "rb") as fh:
-        files = {"file": (local_path.name, fh)}
         async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(url, headers=headers, params=params, files=files)
+            resp = await client.post(url, headers=headers, files={"file": (local_path.name, fh)})
     if resp.status_code in (200, 201):
         return resp.json()
     return {"error": f"HTTP {resp.status_code}: {resp.text[:300]}"}
 
 
-async def _list_kb_documents() -> list[dict]:
-    api_key = os.getenv("OPENWEBUI_API_KEY")
-    if not api_key:
-        return []
-    base_url = API_BASE_URL.rsplit("/v1", 1)[0]
-    url = f"{base_url}/api/v1/knowledge/documents"
-    headers = {"Authorization": f"Bearer {api_key}"}
-    params = {"knowledge_base_name": KB_KB_NAME}
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(url, headers=headers, params=params)
-    if resp.status_code == 200:
+async def _wait_for_file_processing(file_id: str, timeout: int = 300) -> dict:
+    """Step 2 – poll /api/v1/files/{id}/process/status until 'completed' or failure."""
+    server = _owui_base()
+    url = f"{server}/api/v1/files/{file_id}/process/status"
+    headers = _build_owui_headers()
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        import time
+        start = time.time()
+        while True:
+            elapsed = time.time() - start
+            if elapsed > timeout:
+                return {"error": f"File processing timed out after {timeout}s"}
+            resp = await client.get(url, headers=headers)
+            data = resp.json()
+            status = data.get("status")
+            if status == "completed":
+                return data
+            if status == "failed":
+                return {"error": f"File processing failed: {data.get('error')}"}
+            # pending — poll again
+            await asyncio.sleep(2)
+
+
+async def _resolve_kb_id(kb_name: str) -> tuple[str | None, str]:
+    """Resolve a knowledge-base name (or slug) to its id. Returns (kb_id, error_msg)."""
+    server = _owui_base()
+    headers = _build_owui_headers()
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(f"{server}/api/v1/knowledge", headers=headers)
+    if resp.status_code != 200:
+        return None, f"Failed to list KBs: HTTP {resp.status_code}"
+    kbs = resp.json()
+    kb_id = None
+    for kb in kbs:
+        name = kb.get("name", "")
+        ident = kb.get("id", "")
+        if name == kb_name or ident == kb_name:
+            kb_id = ident
+            break
+    if not kb_id:
+        for kb in kbs:
+            name = kb.get("name", "").lower()
+            if kb_name.lower() in name:
+                kb_id = kb["id"]
+                break
+    if not kb_id:
+        names = [kb.get("name", "?") for kb in kbs]
+        return None, f"KB '{kb_name}' not found (available: {names})"
+    return kb_id, ""
+
+
+async def _add_file_to_kb(kb_name: str, file_id: str) -> dict:
+    """Step 3 – resolve kb_name → kb_id, then POST /api/v1/knowledge/{id}/file/add."""
+    kb_id, err = await _resolve_kb_id(kb_name)
+    if kb_id is None:
+        return {"error": err}
+    server = _owui_base()
+    headers = _build_owui_headers()
+    add_url = f"{server}/api/v1/knowledge/{kb_id}/file/add"
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(add_url, headers=headers | {"Content-Type": "application/json"},
+                                 json={"file_id": file_id})
+    if resp.status_code in (200, 201):
         return resp.json()
-    return []
+    return {"error": f"Add to KB failed: HTTP {resp.status_code}: {resp.text[:300]}"}
+
+
+async def _list_kb_documents() -> list[dict]:
+    """List all documents across knowledge bases."""
+    server = _owui_base()
+    headers = _build_owui_headers()
+    # List all KBs
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(f"{server}/api/v1/knowledge", headers=headers)
+    if resp.status_code != 200:
+        return []
+    kbs = resp.json()
+    all_docs: list[dict] = []
+    for kb in kbs:
+        kb_id = kb.get("id", "")
+        kb_name = kb.get("name", "unknown")
+        # List files inside each KB
+        files_url = f"{server}/api/v1/knowledge/{kb_id}/files"
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp2 = await client.get(files_url, headers=headers)
+        if resp2.status_code == 200:
+            docs = resp2.json()
+            for d in docs:
+                d["kb_name"] = kb_name
+                all_docs.append(d)
+    return all_docs
 
 
 @bot.tree.command(
     name="upload_kb",
-    description="Upload a file (text/pdf/csv/etc.) to the knowledge base for RAG.",
+    description="Upload a file to the knowledge base for RAG. Attach a file or provide a URL.",
 )
-@app_commands.describe(kb_name="Optional: override the default knowledge base name")
 async def upload_kb_command(
     interaction: discord.Interaction,
     kb_name: str | None = None,
+    url: str | None = None,
+    file: discord.Attachment = None,
 ):
     global KB_KB_NAME
     if kb_name:
@@ -515,44 +619,112 @@ async def upload_kb_command(
 
     await interaction.response.defer(ephemeral=True)
 
-    attachment: discord.Attachment | None = None
-    for att in interaction.attachments:
-        if att.size and att.size < 20 * 1024 * 1024:
-            attachment = att
-            break
+    source_type = None  # 'attachment' or 'url'
+    local_path = None
+    filename = "uploaded"
+    size = None
 
-    if not attachment:
+    # Priority: attachment > url > error
+    if file:
+        source_type = "attachment"
+        local_path = await _fetch_file_from_discord(file.url)
+        filename = file.filename
+        size = file.size
+    elif interaction.attachments:
+        # Fallback: take the first attachment if no explicit 'file' param was used
+        att = interaction.attachments[0]
+        if att.size and att.size < 20 * 1024 * 1024:
+            source_type = "attachment"
+            local_path = await _fetch_file_from_discord(att.url)
+            filename = att.filename
+            size = att.size
+
+    if source_type is None and url:
+        source_type = "url"
+        # Extract filename from URL or use a default
+        url_stripped = url.rstrip("/")
+        basename = url_stripped.split("/")[-1].split("?")[0] if "/" in url_stripped else "downloaded_file"
+        filename = basename if basename else "downloaded_file"
+        local_path = await _fetch_file_from_url(url)
+        size = local_path.stat().st_size if hasattr(local_path, 'stat') else None
+
+    if not source_type:
         await interaction.followup.send(
-            "⚠️ Please attach a file to this command (max 20 MB).",
+            "⚠️ Please attach a file (using the 📎 button below) or provide a URL. Max 20 MB.",
             ephemeral=True,
         )
         return
 
-    log.info("Processing KB upload: %s (%d bytes, %s)",
-             attachment.filename, attachment.size, attachment.content_type or "unknown")
+    log.info("Processing KB upload: %s (%s)", filename, source_type)
 
-    local_path = await _fetch_file_from_discord(attachment.url)
-
-    try:
-        result = await _post_to_openwebui_docs(local_path)
-    except Exception as exc:
-        await interaction.followup.send(f"❌ Upload failed: {exc}", ephemeral=True)
+    # Step 1: Upload the file to OpenWebUI
+    await interaction.followup.send(
+        "⏳ Step 1/3: Uploading file...",
+        ephemeral=True,
+    )
+    result = await _upload_file_to_owui(local_path)
+    if "error" in result:
+        log.warning("KB upload failed at step 1: %s", result["error"])
+        await interaction.followup.send(
+            f"❌ Upload failed: {result['error']}",
+            ephemeral=True,
+        )
+        local_path.unlink(missing_ok=True)
         return
 
-    if "error" in result and "OPENWEBUI_API_KEY" not in str(result.get("error", "")):
-        status = "⚠️"
-        detail = str(result["error"])
-    elif "error" in result:
-        status = "❌"
-        detail = f'Key error: {result["error"]}'
+    file_id = result.get("id", "")
+    if not file_id:
+        await interaction.followup.send(
+            "❌ Upload succeeded but no file ID returned. Response: " + json.dumps(result, indent=2, default=str)[:1000],
+            ephemeral=True,
+        )
+        local_path.unlink(missing_ok=True)
+        return
+
+    log.info("File uploaded with id: %s", file_id)
+
+    # Step 2: Wait for processing to complete
+    await interaction.followup.send(
+        "⏳ Step 2/3: Processing file (extracting text, computing embeddings)...",
+        ephemeral=True,
+    )
+    proc_result = await _wait_for_file_processing(file_id)
+    if "error" in proc_result:
+        log.warning("KB upload failed at step 2: %s", proc_result["error"])
+        await interaction.followup.send(
+            f"⚠️ File uploaded but processing failed: {proc_result['error']}",
+            ephemeral=True,
+        )
+        local_path.unlink(missing_ok=True)
+        return
+
+    log.info("File processing completed.")
+
+    # Step 3: Add file to knowledge base
+    await interaction.followup.send(
+        "⏳ Step 3/3: Adding file to knowledge base...",
+        ephemeral=True,
+    )
+    add_result = await _add_file_to_kb(KB_KB_NAME, file_id)
+    local_path.unlink(missing_ok=True)
+
+    if "error" in add_result:
+        log.warning("KB upload failed at step 3: %s", add_result["error"])
+        status_emoji = "⚠️"
+        detail = json.dumps(add_result, indent=2, default=str)[:1500]
     else:
-        status = "✅"
-        detail = json.dumps(result, indent=2, default=str)[:1500]
+        status_emoji = "✅"
+        detail = json.dumps(add_result, indent=2, default=str)[:1500]
 
     msg_lines = []
-    msg_lines.append(f"{status} Uploaded to KB **{KB_KB_NAME}**")
-    msg_lines.append(f"📄 File: `{attachment.filename}`")
-    msg_lines.append(f"📦 Size: `{attachment.size:,}` bytes")
+    kb_display = f"**{KB_KB_NAME}**" if status_emoji == "✅" else f"**{KB_KB_NAME}** (partial)"
+    msg_lines.append(f"{status_emoji} Uploaded to KB {kb_display}")
+    msg_lines.append(f"📄 File: `{filename}`")
+    msg_lines.append(f"📥 Source: `{source_type}`")
+    local_size = local_path.stat().st_size if hasattr(local_path, 'stat') else None
+    if local_size:
+        msg_lines.append(f"📦 Size: `{local_size:,}` bytes")
+    msg_lines.append(f"🆔 File ID: `{file_id}`")
     msg_lines.append("🔖 Details:")
     msg_lines.append("```\n" + detail + "\n```")
     await interaction.followup.send("\n".join(msg_lines), ephemeral=True)
