@@ -12,6 +12,7 @@ import discord
 from discord.ext import commands
 import discord.app_commands as app_commands
 from openai import AsyncOpenAI
+import httpx
 
 # ─────────────────────────── Configuration ───────────────────────────
 logging.basicConfig(
@@ -592,17 +593,11 @@ async def list_kb_docs_command(interaction: discord.Interaction):
     name="ocr",
     description="Extract text from an image (OCR) using vision AI.",
 )
-async def ocr_command(interaction: discord.Interaction):
+async def ocr_command(interaction: discord.Interaction, image: discord.Attachment = None):
     """Send an image attachment to a vision model and return the extracted text."""
     await interaction.response.defer(ephemeral=True)
 
-    image: discord.Attachment | None = None
-    for att in interaction.attachments:
-        if att.width and att.height:
-            image = att
-            break
-
-    if not image or not (image.width and image.height):
+    if not image:
         await interaction.followup.send(
             "⚠️ Please attach an image to this command.",
             ephemeral=True,
@@ -610,12 +605,29 @@ async def ocr_command(interaction: discord.Interaction):
         return
 
     async def _ask_vision():
+        # Download the image and encode it as a base64 data URI
+        async with httpx.AsyncClient() as client:
+            img_resp = await client.get(image.url)
+        img_data = img_resp.content
+
+        # Determine MIME type from content or filename
+        mime = "image/png"
+        if image.filename and image.filename.lower().endswith((".jpg", ".jpeg")):
+            mime = "image/jpeg"
+        elif image.filename and image.filename.lower().endswith(".gif"):
+            mime = "image/gif"
+        elif image.filename and image.filename.lower().endswith(".webp"):
+            mime = "image/webp"
+        import base64
+        b64 = base64.b64encode(img_data).decode("utf-8")
+        data_uri = f"data:{mime};base64,{b64}"
+
         client = AsyncOpenAI(api_key=OPENAI_API_KEY, base_url=API_BASE_URL)
         resp = await client.chat.completions.create(
             model=os.getenv("VISION_MODEL", DEFAULT_MODEL),
             messages=[{"role": "user", "content": [
                 {"type": "text", "text": "Extract all text from this image accurately. Do not interpret or summarize — return the exact text as you see it."},
-                {"type": "image_url", "image_url": {"url": image.url}},
+                {"type": "image_url", "image_url": {"url": data_uri}},
             ]}],
             temperature=0,
             max_tokens=4096,
