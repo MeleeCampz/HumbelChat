@@ -1,0 +1,5 @@
+- ~~Add an option for user to set created timed Tasks. e.G "Remind me in 15 minutes"~~ ✅ DONE (`/remind` slash command)
+- ~~Add an option to upload files that will be added to the knowledge database~~ ✅ DONE (`/upload_kb` + `/list_kb_docs`)
+- ~~Add an option to upload images extract textual information from them~~ ✅ DONE (`/ocr` command - sends image to vision model)
+- ~~Upload Text based files and get a summary or translation of the content~~ ✅ DONE (`/summarize` + `/translate` commands)
+- ~~Check which user sent a message and include it in the prompt so the AI can recognize different users.~~ ✅ DONE (prepends `**username:** ` to all messages)
