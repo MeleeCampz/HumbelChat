@@ -1,8 +1,9 @@
 # HumbleChat — Local-Only Discord AI Bot
 
-A self-hosted Discord bot that forwards messages from channels to a local AI backend (OpenWebUI, Ollama via API proxy, etc.) and returns AI responses as Discord messages.
+A self-hosted Discord bot that forwards messages from channels to **OpenWebUI** (your local AI gateway) and returns AI responses as Discord messages. All inference runs through OpenWebUI's OpenAI-compatible API layer — nothing touches a model backend directly.
 
 > **Local-only:** All inference runs on your own hardware. No cloud APIs. Private by design.
+> **Gateway-first:** Every request routes through OpenWebUI, giving you centralized access to knowledge bases, user management, and model creation for the future.
 
 ---
 
@@ -207,7 +208,7 @@ Copy `.env.example` to `.env` and configure all values.
 | `DISCORD_BOT_TOKEN` | Discord bot authentication token **(required)** | — |
 | `OPENAI_API_KEY` | API key for local AI backend | `local-model-key` |
 | `OPENWEBUI_API_KEY` | OpenWebUI-specific auth key for KB features | *(falls back to `OPENAI_API_KEY`)* |
-| `OPENAI_API_URL` | Base URL of inference backend | `http://localhost:8080/v1` |
+| `OPENAI_API_URL` | Base URL of the OpenWebUI gateway | `http://localhost:8080/v1` |
 | `MODEL_NAME` | Default model slug for all chat commands | `default-model-name` |
 | `VISION_MODEL` | Model for OCR/image tasks | *(falls back to `MODEL_NAME`)* |
 | `SUMMARIZE_MODEL` | Model for summarization | *(falls back to `MODEL_NAME`)* |
@@ -236,17 +237,23 @@ https://discord.com/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot%20applic
 
 ```
 ┌──────────┐    ┌─────────────┐    ┌─────────────────┐    ┌──────────────┐
-│  Discord  │◄──►│   Bot (Py-  │◄──►│  Local AI       │◄──►│  OpenWebUI   │
-│  Gateway  │    │  discord)   │    │  Backend        │    │  Knowledge   │
+│  Discord  │◄──►│   Bot (Py-  │◄──►│  OpenWebUI      │◄──►│  LLM Backend │
+│  Gateway  │    │  discord)   │    │  Gateway        │    │  (any)       │
 └──────────┘    └─────────────┘    └─────────────────┘    └──────────────┘
    Messages       Slash commands    OpenAI-compatible   Document upload/
-   + Attachments  + Typing loops    API calls            KB management
+   + Attachments  + Typing loops    API calls           KB management, user mgmt
 ```
 
 - **Bot framework:** `discord.py` with `app_commands` (slash commands) + `commands.Bot` (prefix fallback)
 - **HTTP client:** `httpx.AsyncClient` for image downloading, file uploads, and knowledge base queries
-- **AI client:** `openai.AsyncOpenAI` — any OpenAI-compatible endpoint works (OpenWebUI, Ollama API proxy, etc.)
+- **AI client:** `openai.AsyncOpenAI` — routes all inference through OpenWebUI's gateway; the underlying LLM backend is fully abstracted and can be swapped in the future without changing the bot code.
 - **State management:** In-memory dicts keyed by `(guild_id, channel_id)` for characters and history; no external database
+
+**Why OpenWebUI?** OpenWebUI acts as a single intermediary layer that provides:
+- Knowledge base management and RAG (your data stays local)
+- User management across your team
+- Easy model creation and selection from a UI
+- A standardized OpenAI-compatible API endpoint — meaning future gateways can replace OpenWebUI without rewriting the bot
 
 ---
 
