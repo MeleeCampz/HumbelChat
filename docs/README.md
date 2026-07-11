@@ -7,7 +7,7 @@ Copy `.env.example` to `.env` and configure all values.
 | `DISCORD_BOT_TOKEN` | Discord bot authentication token (required) | — |
 | `OPENAI_API_KEY` | API key for local AI backend | `local-model-key` |
 | `OPENWEBUI_API_KEY` | OpenWebUI-specific API key for knowledge base features | *(falls back to `OPENAI_API_KEY`)* |
-| `OPENAI_API_URL` | Base URL of the inference backend | `http://localhost:8080/v1` |
+| `OPENAI_API_URL` | Base URL of the inference backend gateway (OpenWebUI) | `http://localhost:8080/v1` |
 | `MODEL_NAME` | Default model slug for all chat commands | `default-model-name` |
 | `VISION_MODEL` | Model used for OCR/image tasks | *(falls back to `MODEL_NAME`)* |
 | `SUMMARIZE_MODEL` | Model used for summarization | *(falls back to `MODEL_NAME`)* |
@@ -124,8 +124,7 @@ Downloads an attached image, downloads it from Discord's CDN, encodes it as a ba
 |---|---|
 | `image` | Attach an image file when invoking the command |
 
-**Supported formats:** PNG, JPEG, GIF, WebP (auto-detected from filename; defaults to PNG).  
-Uses `VISION_MODEL` (falls back to `MODEL_NAME`) for inference.
+**Supported formats:** PNG, JPEG, GIF, WebP (auto-detected from filename; defaults to PNG).  \nUses `VISION_MODEL` (falls back to `MODEL_NAME`) for inference.
 
 ---
 
@@ -221,16 +220,16 @@ Default prefix is `!ai`. Example: `!ai What time is it?`
 
 ```
 ┌──────────┐    ┌─────────────┐    ┌─────────────────┐    ┌──────────────┐
-│  Discord  │◄──►│   Bot (Py-  │◄──►│  Local AI       │◄──►│  OpenWebUI   │
-│  Gateway  │    │  discord)   │    │  Backend        │    │  Knowledge   │
+│  Discord  │◄──►│   Bot (Py-  │◄──►│  OpenWebUI      │◄──►│  LLM Backend │
+│  Gateway  │    │  discord)   │    │  Gateway        │    │  (any)       │
 └──────────┘    └─────────────┘    └─────────────────┘    └──────────────┘
    Messages       Slash commands    OpenAI-compatible   Document upload/
-   + Attachments  + Typing loops    API calls            KB management
+   + Attachments  + Typing loops    API calls           KB management, user mgmt
 ```
 
 - **Bot framework:** `discord.py` with `app_commands` (slash commands) and `commands.Bot` (prefix fallback)
 - **HTTP client:** `httpx.AsyncClient` for image downloading, file uploads, and knowledge base queries
-- **AI client:** `openai.AsyncOpenAI` — any OpenAI-compatible endpoint works (OpenWebUI, Ollama via API proxy, etc.)
+- **AI client:** `openai.AsyncOpenAI` — routes all inference through OpenWebUI's gateway; the underlying LLM backend is fully abstracted and can be swapped in the future without changing the bot code.
 - **State management:** In-memory dicts keyed by `(guild_id, channel_id)` for characters and history; no external database
 
 ---

@@ -2,6 +2,8 @@ import asyncio
 import json
 import os
 import pathlib
+import re
+import sys
 import uuid
 import logging
 from dotenv import load_dotenv
@@ -33,9 +35,8 @@ DISCORD_TOKEN  = os.getenv("DISCORD_BOT_TOKEN", "")
 OPENAI_API_KEY = (os.getenv("OPENWEBUI_API_KEY") or
                   os.getenv("OPENAI_API_KEY", "local-model-key"))
 
-# Base URL for the local inference backend:
-#   OpenWebUI (default):  http://localhost:8080/v1
-#   SillyTavern proxy:    http://localhost:5100/v1/openai
+# Base URL for the local AI backend (OpenWebUI by default):
+#   http://localhost:8080/v1
 API_BASE_URL = os.getenv("OPENAI_API_URL", "http://localhost:8080/v1")
 
 # Fallback values used when no characters are configured.
@@ -154,6 +155,8 @@ async def ask_ai_with_model(
     If *username* is provided, it is prepended to every user message so the AI can
     distinguish between different speakers.
     """
+    global KB_KB_ID
+
     timeout_sec = int(os.getenv("AI_REQUEST_TIMEOUT", "120"))
     system_p = DEFAULT_SYSTEM_PROMPT
 
@@ -170,6 +173,23 @@ async def ask_ai_with_model(
         user_content = user_message
     messages.append({"role": "user", "content": user_content})
 
+    # Resolve KB ID lazily (only when needed by /ai command)
+    kb_id_to_use = KB_KB_ID
+    if kb_id_to_use is None:
+        log.warning("KB ID not resolved at startup — attempting lazy resolution")
+        kb_id_to_use, err = await _resolve_kb_id(KB_KB_NAME)
+        if kb_id_to_use:
+            KB_KB_ID = kb_id_to_use  # cache
+        else:
+            log.error("Knowledge base ID resolution failed: %s", err)
+    
+    extra_body: dict = {}
+    if kb_id_to_use:
+        extra_body["retrieval"]       = True
+        extra_body["knowledge_bases"] = [kb_id_to_use]
+    else:
+        log.warning("No knowledge base ID available — RAG disabled for this request")
+    
     resp = await client.chat.completions.create(
         model=model,
         messages=messages,
@@ -177,10 +197,7 @@ async def ask_ai_with_model(
         max_tokens=1024,
         stream=False,
         timeout=timeout_sec,
-        metadata={
-            "retrieval":       True,
-            "knowledge_base":  KB_KB_NAME,
-        },
+        extra_body=extra_body if extra_body else None,
     )
 
     reply = resp.choices[0].message.content or "(empty response)"
@@ -435,8 +452,9 @@ async def remind_command(
 
 # ─────────────────────────── Knowledge Base Uploads ──────────────────
 
-KB_KB_NAME = os.getenv("KB_KNOWLEDGE_BASE", "Default")
-KB_DIR     = pathlib.Path(__file__).parent / ".kb_tmp"
+KB_KB_NAME    = os.getenv("KB_KNOWLEDGE_BASE", "HumbleWood")
+KB_KB_ID      : str | None = None  # resolved at startup
+KB_DIR         = pathlib.Path(__file__).parent / ".kb_tmp"
 KB_DIR.mkdir(exist_ok=True)
 
 _MIME_EXT: dict[str, str] = {
@@ -450,39 +468,73 @@ _MIME_EXT: dict[str, str] = {
 }
 
 
-async def _fetch_file_from_discord(url: str) -> pathlib.Path:
-    import httpx
+async def _fetch_remote_file(url: str, dest_dir: pathlib.Path) -> tuple[pathlib.Path, int | None]:
+    """Download a remote file to *dest_dir*, infer its extension from headers or URL.
+
+    Returns (local_path, size).  Size is ``None`` when it can't be determined upfront.
+    """
+    url_base = url.split("?")[0]
+    fname = pathlib.Path(url_base.split("/")[-1])
     ext = ".bin"
+
     async with httpx.AsyncClient() as client:
         head_resp = await client.head(url, follow_redirects=True)
         ct = (head_resp.headers.get("content-type") or "").split(";")[0].lower()
         ext = _MIME_EXT.get(ct, ".bin")
-    fname = pathlib.Path(url.split("/")[-1])
-    if fname.suffix:
-        ext = fname.suffix
-    local_path = KB_DIR / f"{uuid.uuid4().hex}{ext}"
+        if fname.suffix and len(fname.suffix) > 1:
+            ext = fname.suffix
+
+    local_path = dest_dir / f"{uuid.uuid4().hex}{ext}"
     async with httpx.AsyncClient() as client:
         resp = await client.get(url, follow_redirects=True)
         resp.raise_for_status()
         local_path.write_bytes(resp.content)
-    return local_path
+
+    size = len(resp.content)
+    return local_path, size
 
 
-async def _fetch_file_from_url(url: str) -> pathlib.Path:
-    ext = ".bin"
-    async with httpx.AsyncClient() as client:
-        head_resp = await client.head(url, follow_redirects=True)
-        ct = (head_resp.headers.get("content-type") or "").split(";")[0].lower()
-        ext = _MIME_EXT.get(ct, ".bin")
-    fname = pathlib.Path(url.split("/")[-1])
-    if fname.suffix:
-        ext = fname.suffix
-    local_path = KB_DIR / f"{uuid.uuid4().hex}{ext}"
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(url, follow_redirects=True)
-        resp.raise_for_status()
-        local_path.write_bytes(resp.content)
-    return local_path
+def _read_text_excerpt(local_path: pathlib.Path, max_chars: int = 2000) -> str:
+    """Read the first *max_chars* of a file as text (tries utf-8, falls back to latin-1)."""
+    try:
+        return local_path.read_text(encoding="utf-8")[:max_chars]
+    except UnicodeDecodeError:
+        return local_path.read_bytes()[:max_chars].decode("latin-1")
+
+
+def _generate_filename_from_content(local_path: pathlib.Path) -> str:
+    """Analyse the file content and return a human-readable filename (no extension).
+
+    Strategy:
+      1. Try to read text from the file.
+      2. Look for a title line (# heading, <title>, first non-blank line).
+      3. Fall back to a short excerpt of the opening words.
+    """
+    text = _read_text_excerpt(local_path)
+
+    # --- Markdown / reStructuredText headings ---
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            return stripped[2:].strip()               # "# My Doc" → "My Doc"
+        if stripped.startswith("====") and any(c.isalnum() for c in stripped):
+            return stripped.replace("=", "").strip()
+
+    # --- HTML <title> ---
+    m = re.search(r"<title[^>]*>(.+?)</title>", text, re.IGNORECASE | re.DOTALL)
+    if m:
+        return m.group(1).strip()
+
+    # --- First non-blank line (up to 80 chars) ---
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped and len(stripped) > 3:
+            candidate = stripped[:80]
+            break
+    else:
+        candidate = "uploaded_document"
+
+    return candidate
 
 
 def _build_owui_headers() -> dict:
@@ -535,13 +587,28 @@ async def _wait_for_file_processing(file_id: str, timeout: int = 300) -> dict:
 
 async def _resolve_kb_id(kb_name: str) -> tuple[str | None, str]:
     """Resolve a knowledge-base name (or slug) to its id. Returns (kb_id, error_msg)."""
+    global KB_KB_ID
     server = _owui_base()
     headers = _build_owui_headers()
+
+    # Only the canonical OWUI endpoint is needed now
+    url = f"{server}/api/v1/knowledge/"
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(f"{server}/api/v1/knowledge", headers=headers)
-    if resp.status_code != 200:
-        return None, f"Failed to list KBs: HTTP {resp.status_code}"
-    kbs = resp.json()
+        resp = await client.get(url, headers=headers)
+
+    if resp.status_code != 200 or not resp.text.strip():
+        return None, f"KB endpoint returned status {resp.status_code}"
+
+    try:
+        data = resp.json()
+    except json.JSONDecodeError as e:
+        log.warning("KB list endpoint %s returned non-JSON body", url)
+        return None, "KB endpoint returned invalid JSON"
+
+    kbs = data.get("items") if isinstance(data, dict) and "items" in data else (data if isinstance(data, list) else [])
+    if not kbs:
+        return None, f"Knowledge base is empty — create a KB called '{kb_name}' in OpenWebUI first"
+
     kb_id = None
     for kb in kbs:
         name = kb.get("name", "")
@@ -551,13 +618,16 @@ async def _resolve_kb_id(kb_name: str) -> tuple[str | None, str]:
             break
     if not kb_id:
         for kb in kbs:
-            name = kb.get("name", "").lower()
-            if kb_name.lower() in name:
+            n = kb.get("name", "").lower()
+            if kb_name.lower() in n:
                 kb_id = kb["id"]
                 break
     if not kb_id:
         names = [kb.get("name", "?") for kb in kbs]
         return None, f"KB '{kb_name}' not found (available: {names})"
+
+    KB_KB_ID = kb_id
+    log.info("Resolved KB '%s' → id %s", kb_name, kb_id)
     return kb_id, ""
 
 
@@ -583,23 +653,75 @@ async def _list_kb_documents() -> list[dict]:
     headers = _build_owui_headers()
     # List all KBs
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(f"{server}/api/v1/knowledge", headers=headers)
+        resp = await client.get(f"{server}/api/v1/knowledge/", headers=headers)
+    log.info("KB list status=%d resp=%s", resp.status_code, resp.text[:500])
     if resp.status_code != 200:
         return []
-    kbs = resp.json()
+    kbs_response = resp.json()
+    # API returns { "items": [...], "total": N }, not a bare list
+    if isinstance(kbs_response, dict):
+        kbs = kbs_response.get("items", [])
+    else:
+        kbs = kbs_response
     all_docs: list[dict] = []
+    debug_folder_map: dict = {}  # tmp: track directory memberships
     for kb in kbs:
-        kb_id = kb.get("id", "")
-        kb_name = kb.get("name", "unknown")
-        # List files inside each KB
+        if isinstance(kb, dict):
+            kb_id = kb.get("id", "")
+            kb_name = kb.get("name", kb.get("title", "unknown"))
+        else:
+            kb_id = str(kb)
+            kb_name = str(kb)
+        log.info("Checking KB: id=%s name=%s", kb_id, kb_name)
+        
+        # Try the files endpoint
         files_url = f"{server}/api/v1/knowledge/{kb_id}/files"
         async with httpx.AsyncClient(timeout=30) as client:
-            resp2 = await client.get(files_url, headers=headers)
-        if resp2.status_code == 200:
-            docs = resp2.json()
-            for d in docs:
-                d["kb_name"] = kb_name
-                all_docs.append(d)
+            resp3 = await client.get(files_url, headers=headers)
+        log.info("GET %s status=%d body=%s", files_url, resp3.status_code, resp3.text[:500])
+        if resp3.status_code == 200:
+            file_data = resp3.json()
+            docs_list = None
+            if isinstance(file_data, list):
+                docs_list = file_data
+            elif isinstance(file_data, dict):
+                # API returns { "items": [...], "directories": [...] }
+                docs_list = file_data.get("items", [])
+                # Track directory -> files mapping and add directories as virtual entries
+                for d in file_data.get("directories", []):
+                    if isinstance(d, dict):
+                        dir_name = d.get("name", "?")
+                        all_docs.append({"name": dir_name, "size": 0, "kb_name": kb_name, "is_directory": True})
+                        # Try to find which files belong to this directory
+                        if "id" in d:
+                            debug_folder_map[d["id"]] = dir_name
+                        log.info("Found directory: %s keys=%s", dir_name, list(d.keys())[:8])
+            if docs_list:
+                # Build directory_id -> name mapping
+                dir_id_map = {}
+                for d in file_data.get("directories", []):
+                    if isinstance(d, dict) and "id" in d:
+                        dir_id_map[d["id"]] = d.get("name", "?")
+                
+                for item in docs_list:
+                    entry = dict(item)
+                    entry["kb_name"] = kb_name
+                    # Determine which folder this file belongs to
+                    meta_data = (entry.get("meta") or {}).get("data", {})
+                    if not isinstance(meta_data, dict):
+                        meta_data = {}
+                    dir_id = meta_data.get("directory_id")
+                    if dir_id and dir_id in dir_id_map:
+                        entry["_folder"] = dir_id_map[dir_id]
+                    else:
+                        entry["_folder"] = None  # root
+                    # Check what fields are available on items
+                    log.info("Item fields: %s", {k: entry.get(k) for k in ["name", "filename", "folder_id", "path", "metadata", "meta"] if k in entry})
+                    all_docs.append(entry)
+    log.info("Total documents found: %d", len(all_docs))
+    # Filter to only the target KB
+    all_docs = [d for d in all_docs if d.get("kb_name") == KB_KB_NAME]
+    log.info("Documents in %s: %d", KB_KB_NAME, len(all_docs))
     return all_docs
 
 
@@ -627,26 +749,20 @@ async def upload_kb_command(
     # Priority: attachment > url > error
     if file:
         source_type = "attachment"
-        local_path = await _fetch_file_from_discord(file.url)
+        local_path, size = await _fetch_remote_file(file.url, KB_DIR)
         filename = file.filename
-        size = file.size
     elif interaction.attachments:
-        # Fallback: take the first attachment if no explicit 'file' param was used
         att = interaction.attachments[0]
         if att.size and att.size < 20 * 1024 * 1024:
             source_type = "attachment"
-            local_path = await _fetch_file_from_discord(att.url)
+            local_path, size = await _fetch_remote_file(att.url, KB_DIR)
             filename = att.filename
-            size = att.size
-
-    if source_type is None and url:
+    elif url:
         source_type = "url"
-        # Extract filename from URL or use a default
         url_stripped = url.rstrip("/")
         basename = url_stripped.split("/")[-1].split("?")[0] if "/" in url_stripped else "downloaded_file"
-        filename = basename if basename else "downloaded_file"
-        local_path = await _fetch_file_from_url(url)
-        size = local_path.stat().st_size if hasattr(local_path, 'stat') else None
+        filename = basename or "downloaded_file"
+        local_path, size = await _fetch_remote_file(url, KB_DIR)
 
     if not source_type:
         await interaction.followup.send(
@@ -657,7 +773,18 @@ async def upload_kb_command(
 
     log.info("Processing KB upload: %s (%s)", filename, source_type)
 
-    # Step 1: Upload the file to OpenWebUI
+    # Auto-generate a descriptive filename from the file content and rename temp file
+    kb_display_name = _generate_filename_from_content(local_path)
+    safe_name = "".join(c for c in kb_display_name if c.isalnum() or c in "._- ").strip()
+    safe_name = (safe_name[:60] + "...") if len(kb_display_name) > 60 else safe_name
+    ext = local_path.suffix
+    renamed_path = local_path.parent / f"{safe_name}{ext}"
+    if renamed_path.exists():
+        renamed_path.unlink()
+    local_path.rename(renamed_path)
+    local_path = renamed_path  # update reference so downstream uses the new name
+
+    # Step 1: Upload the file to OpenWebUI (now uses local_path.name automatically)
     await interaction.followup.send(
         "⏳ Step 1/3: Uploading file...",
         ephemeral=True,
@@ -719,11 +846,11 @@ async def upload_kb_command(
     msg_lines = []
     kb_display = f"**{KB_KB_NAME}**" if status_emoji == "✅" else f"**{KB_KB_NAME}** (partial)"
     msg_lines.append(f"{status_emoji} Uploaded to KB {kb_display}")
-    msg_lines.append(f"📄 File: `{filename}`")
+    msg_lines.append(f"📄 File: `{kb_display_name}`")
     msg_lines.append(f"📥 Source: `{source_type}`")
-    local_size = local_path.stat().st_size if hasattr(local_path, 'stat') else None
-    if local_size:
-        msg_lines.append(f"📦 Size: `{local_size:,}` bytes")
+    # `size` was already captured at download time (before the file was unlinked in step 2/3)
+    if size is not None:
+        msg_lines.append(f"📦 Size: `{size:,}` bytes")
     msg_lines.append(f"🆔 File ID: `{file_id}`")
     msg_lines.append("🔖 Details:")
     msg_lines.append("```\n" + detail + "\n```")
@@ -747,19 +874,54 @@ async def list_kb_docs_command(interaction: discord.Interaction):
         return
 
     lines = [f"📚 Documents in **'{KB_KB_NAME}'** ({len(docs)}):"]
-    for d in docs[:50]:
-        name = d.get("name", d.get("filename", "unknown"))
-        size = d.get("size", "?")
-        doc_id = d.get("id", d.get("document_id", "?"))
-        lines.append(f"  - `{name}` — {size:,} bytes (ID: {doc_id})")
 
-    if len(docs) > 50:
-        extra = len(docs) - 50
-        lines.append(f"... and {extra} more.")
+    # Build a tree using the _folder field set during collection (from directory_id),
+    # or fallback to parsing "/" from the name for legacy entries.
+    root_map: dict[str, list[dict]] = {}  # folder -> list of file entries
+    no_folder_docs: list[dict] = []  # files with no folder path
+
+    for d in docs[:100]:
+        full_name = d.get("name", d.get("filename", "unknown"))
+        size = d.get("size") or (d.get("meta") or {}).get("size", 0)
+        if isinstance(size, str):
+            try:
+                size = int(size)
+            except (ValueError, TypeError):
+                size = 0
+        is_folder_entry = d.get("is_directory", False)
+
+        # Use _folder from directory_id mapping; fallback to parsing / in name
+        folder = d.get("_folder")
+        if folder is None and "/" in full_name and not is_folder_entry:
+            parts = full_name.rsplit("/", 1)
+            folder = parts[0]
+
+        basename = os.path.basename(full_name) if "/" in full_name else full_name
+        if folder is not None and not is_folder_entry:
+            if folder not in root_map:
+                root_map[folder] = []
+            root_map[folder].append({"name": basename, "size": size})
+        else:
+            # File in root or a folder entry
+            no_folder_docs.append({"name": full_name, "size": size, "is_folder": is_folder_entry})
+
+    # List root-level folders first, then files
+    if no_folder_docs:
+        lines.append(f"")
+        lines.append(f"📂 **Root:**")
+        for entry in sorted(no_folder_docs, key=lambda x: (not x.get("is_folder", False), x["name"].lower())):
+            icon = "📁 " if entry.get("is_folder", False) else "  📄 "
+            lines.append(f"{icon} `{entry['name']}` — {entry['size']:,} bytes")
+
+    # List files in each folder as sub-sections (after root)
+    for folder in sorted(root_map.keys()):
+        lines.append(f"")
+        lines.append(f"📁 **{folder}/**")
+        for entry in sorted(root_map[folder], key=lambda x: (not x.get("is_folder", False), x["name"].lower())):
+            icon = "📁 " if entry.get("is_folder", False) else "  📄 "
+            lines.append(f"{icon} `{entry['name']}` — {entry['size']:,} bytes")
 
     await interaction.followup.send("\n".join(lines), ephemeral=True)
-
-
 
 @bot.tree.command(
     name="ocr",
@@ -942,8 +1104,22 @@ async def on_ready():
     log.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
     if bot.guilds:
         bot.tree.copy_global_to(guild=discord.Object(id=bot.guilds[0].id))
-    await bot.tree.sync()
+        await bot.tree.sync(guild=discord.Object(id=bot.guilds[0].id))
+    else:
+        await bot.tree.sync()
     log.info("Characters loaded: %s", ", ".join(CHARACTERS) or "(none)")
+    
+    # Resolve KB ID at startup so /ai commands don't block waiting for it
+    try:
+        kb_id, err = await _resolve_kb_id(KB_KB_NAME)
+        if kb_id:
+            global KB_KB_ID
+            KB_KB_ID = kb_id
+            log.info("✅ Knowledge base '%s' resolved at startup (ID: %s)", KB_KB_NAME, kb_id)
+        else:
+            log.error("❌ Failed to resolve knowledge base at startup: %s", err)
+    except Exception as e:
+        log.error("❌ Error resolving KB ID at startup: %s", e)
 
 
 @bot.event
@@ -971,12 +1147,63 @@ async def on_message(message: discord.Message):
     await _send_long_response(message, reply, DEFAULT_CHARACTER)
 
 
+# ─────────────────────────── Single-instance lock (prevents duplicate bots) ────────
+
+PIDFILE = pathlib.Path(__file__).parent / ".bot.pid"
+SOCK_FILE = pathlib.Path(__file__).parent / ".bot.sock"
+
+
+def _enforce_single_instance():
+    """Exit immediately if another instance of this bot is already running.
+
+    Checks both a PID file and a Unix domain socket to reliably detect stale or
+    live duplicate processes, even after crashes where the PID file was not cleaned up.
+    """
+    import socket as _socket
+
+    # 1) Check for an active listener on our unique port (fallback in case sock is gone)
+    try:
+        test_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        test_sock.settimeout(0.5)
+        test_sock.connect(("127.0.0.1", 18765))  # arbitrary unused port
+        test_sock.close()
+        log.info("Another bot instance is already running (port 18765). Exiting.")
+        sys.exit(0)
+    except Exception:
+        test_sock.close() if not test_sock._closed else None
+        pass  # nobody listening — safe to proceed
+
+    # 2) Check PID file for a stale entry
+    if PIDFILE.exists():
+        try:
+            old_pid = int(PIDFILE.read_text().strip())
+            import os as _os, signal as _signal
+            _os.kill(old_pid, 0)  # raises ProcessLookupError if dead
+            log.info("Another bot instance (PID %d) is already running. Exiting.", old_pid)
+            sys.exit(0)
+        except (ProcessLookupError, ValueError):
+            PIDFILE.unlink(missing_ok=True)  # stale file — remove it
+
+    # 3) Write our own PID and set cleanup on exit
+    PIDFILE.write_text(str(os.getpid()))
+    import atexit as _atexit
+
+    @_atexit.register
+    def _cleanup_lock():
+        try:
+            PIDFILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 # ─────────────────────────── Startup ─────────────────────────────────
 
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
         log.error("Please set the DISCORD_BOT_TOKEN environment variable.")
         raise SystemExit(1)
+
+    _enforce_single_instance()
 
     log.info("Connecting to local AI backend at: %s", API_BASE_URL)
     log.info("Using default model:  %s", DEFAULT_MODEL)
