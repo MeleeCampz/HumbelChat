@@ -1,0 +1,36 @@
+# Bot (open-terminal) — docker-compose.example.yml
+# Copy to docker-compose.yml and edit before running.
+# This service runs the Discord bot which reads KB chunks from the shared volume.
+
+version: "3.8"
+
+services:
+  bot:
+    build: .
+    container_name: discord-ai-bot
+    environment:
+      # ── Required ────────────────────────────────
+      DISCORD_BOT_TOKEN: your-discord-bot-token-here       # Discord Developer Portal
+      OPENWEBUI_API_KEY: your-owui-api-key                 # Settings → Keys in OWUI
+
+      # ── RAG / Knowledge Base ──────────────────────
+      KB_SHARED_DIR: /shared-knowledge/kb/uploads          # mount path (bot side)
+      KB_KNOWLEDGE_BASE: HumbleWood                        # which KB to query
+
+      # ── Backend ───────────────────────────────────
+      OPENAI_API_URL: http://open-webui:8080/api/v1        # OWUI gateway URL
+      MODEL_NAME: qwen2.5                                  # loaded in OpenWebUI
+
+    volumes:
+      - kb_shared:/shared-knowledge/kb/uploads:ro          # same volume as open-webui
+    restart: unless-stopped
+    networks:
+      - hbnet                                              # same network as open-webui
+
+volumes:
+  kb_shared:                                               # shared with open-webui
+    driver: local
+
+networks:
+  hbnet:
+    driver: bridge

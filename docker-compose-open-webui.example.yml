@@ -1,0 +1,28 @@
+# Open Web UI — docker-compose.example.yml
+# Copy to docker-compose.yml and edit before running.
+# This is the service that **ingests** knowledge-base documents (PDF, TXT, markdown).
+
+version: "3.8"
+
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    ports:
+      - "3000:8080"          # Web UI on port 3000
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434   # or http://host-ip:11434 if ollama is separate
+      - OPENAI_API_KEY=your-owui-api-key       # needed for RAG / embeddings
+    volumes:
+      - kb_shared:/shared-knowledge/kb/uploads  # ← shared volume with bot
+    restart: unless-stopped
+    networks:
+      - hbnet
+
+volumes:
+  kb_shared:
+    driver: local            # both services mount the same named volume
+
+networks:
+  hbnet:                   # optional — use for container network isolation
+    driver: bridge

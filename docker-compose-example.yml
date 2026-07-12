@@ -1,0 +1,53 @@
+# ──────────────────────────────────────────────────────────────
+#  HumbleChat — Docker Compose (open-webui + bot sharing KB)
+# ──────────────────────────────────────────────────────────────
+#  Copy this to docker-compose.yml then run:
+#    docker compose up -d
+#
+#  This file shows the minimum working configuration for both
+services with inline comments explaining each setting.
+
+version: "3.8"
+
+services:
+  # ─────────── open-webui ────────
+  #  Document ingestion & RAG storage (write access)
+  # ─────────── open-webui-end ───
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: unless-stopped
+    ports: [ "3000:8080" ]                  # Web UI on port 3000
+
+    environment:                              # OWUI internal env vars
+      OLLAMA_BASE_URL: http://ollama:11434   # → your ollama endpoint
+      OPENAI_API_KEY: owui-secret-for-RAG    # → set whatever you like
+      ENABLE_OAUTH_SIGNUP: "true"             # → false if not needed
+    
+    volumes:
+      - kb_shared:/shared/KB                  # shared with bot (read+write)
+
+  # ─────────── bot ────────
+  #  Discord AI Bot — reads KB chunks from volume for RAG
+  # ─────────── bot-end ────
+  bot:
+    build: .                           # Dockerfile in current directory (HumbelChat)
+    container_name: discord-ai-bot
+    restart: unless-stopped
+    
+    environment:                     # all env vars the bot service needs
+      DISCORD_BOT_TOKEN: put-here   # ← REQUIRED — from Discord Developer Portal
+      
+      OPENAI_API_KEY: owui-secret-for-RAG   # same as in open-webui above
+      OPENAI_API_URL: http://open-webui:8080/api/v1
+      MODEL_NAME: qwen2.5                   # → a model loaded in your OWUI instance
+
+      # ── Knowledge Base / RAG settings 
+      KB_KNOWLEDGE_BASE: HumbleWood          # name of YOUR KB in OWUI (must exist)
+      KB_SHARED_DIR: /shared/KB              # ← MUST match above's volume mount point
+
+    volumes:
+      - kb_shared:/shared/KB:ro             # read-only access to shared KB data
+
+volumes:
+  kb_shared:                           # both services share this physical directory
