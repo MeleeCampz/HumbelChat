@@ -426,9 +426,9 @@ async def on_ready():
     log.info("Logged in as %s (ID: %s)", bot.user, bot.user.id)
     if bot.guilds:
         # For testing locally, we use the first guild found to sync commands quickly.
-        target_id = int(bot.guilds[0].id)
-        bot.tree.copy_global_to(discord.Object(id=target_id))
-        await bot.tree.sync(guild=discord.Object(id=target_id))
+        target_guild = bot.guilds[0]
+        bot.tree.copy_global_to(guild=target_guild)
+        await bot.tree.sync(guild=target_guild)
     else:
         await bot.tree.sync()
     char_names = [c.display or c.key for c in _CHAR_CHOICES]

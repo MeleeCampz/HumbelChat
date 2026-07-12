@@ -14,6 +14,21 @@ log = logging.getLogger("bot.bot_core")
 # guild_id -> channel_id -> [messages]
 _chat_history: dict[int, dict[int, list[dict]]] = {}
 
+# Per-guild / per-channel active character map
+_ACTIVE_CHARACTERS: dict[tuple[int, int], str] = {}
+
+def get_active_char_key(guild_id: int | None, channel_id: int) -> str:
+    """Return the active character key for this guild/channel, or default."""
+    from config.characters import default_character
+    if guild_id is not None and (guild_id, channel_id) in _ACTIVE_CHARACTERS:
+        return _ACTIVE_CHARACTERS[(guild_id, channel_id)]
+    return default_character().key
+
+def set_active_char_key(guild_id: int | None, channel_id: int, char_key: str) -> None:
+    """Set the active character for this guild/channel."""
+    if guild_id is not None:
+        _ACTIVE_CHARACTERS[(guild_id, channel_id)] = char_key
+
 # KB state — populated at startup
 _kb_kb_name: str = "humblewood"       # from settings.DEFAULT_KB_NAME
 _kb_path_root: pathlib.Path = settings.KB_PATH
@@ -119,9 +134,9 @@ async def ask_ai(
 
 # ── History helpers (needed by other modules) ────────────────────────
 
-async def clear_history(guild_id: int, channel_id: int) -> str:
+async def clear_history(guild_id: int, channel_s: int) -> str:
     """Clear chat history for this guild+channel. Returns confirmation message."""
-    _chat_history.pop(guild_id, {}).pop(channel_id, None)
+    _chat_history.pop(guild_id, {}).pop(channel_s, None)
     return "Chat history cleared."
 
 
