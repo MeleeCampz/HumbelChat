@@ -59,10 +59,16 @@ vendor/
 credentials/
 secrets/
 
-# Private working files — keep locally, do not expose on GitHub
+# Private working files — keep locally, do not expose on GitHub  
 ISSUES_AND_TODOS.md
 TODOs.txt
 characters.json
+
+# Local AI working tasks — for development-only notes, not tracked
+todo/
+
+# Git
+.git/
 
 # Git
 .git/

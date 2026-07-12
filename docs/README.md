@@ -125,7 +125,7 @@ Manages which AI persona is active per channel. All output is ephemeral (visible
 | Action | Description | Example |
 |---|---|---|
 | `list` *(default)* | Lists all available characters with their models and highlights the current one | `/character list` |
-| `set` | Switches active character for this channel/guild combination | `/character set Trixy Smoldersome` |
+| `set` | Switches active character for this server/channel pair | `/character set Trixy Smoldersome` |
 | `show` | Shows currently active character and its model | `/character show` |
 | `reset` | Clears the per-channel override, reverting to the default from `characters.json` | `/character reset` |
 
@@ -238,7 +238,7 @@ Lists all documents currently stored in the active knowledge base. Shows name, s
 /clear_history
 ```
 
-Clears the conversation history (context window) for this channel/guild combination. The AI will start fresh with no memory of previous messages. Ephemeral confirmation sent upon success.
+Clears the conversation history (context window) for this server/channel combination. The AI will start fresh with no memory of previous messages. Ephemeral confirmation sent upon success.
 
 ---
 
