@@ -13,12 +13,12 @@ class Character:
 
     def __init__(
         self,
-        key: str,
-        display: str,
-        model: str,
-        system_prompt: str | None = None,
-        max_tokens: int | None = None,
-        temperature: float | None = None,
+        key:str,
+        display:str,
+        model:str,
+        system_prompt:str | None = None,
+        max_tokens:int | None = None,
+        temperature:float | None = None,
     ):
         self.key = key
         self.display = display
@@ -26,13 +26,6 @@ class Character:
         self.system_prompt = system_prompt
         self.max_tokens = max_tokens
         self.temperature = temperature
-
-    key: str          # internal ID (e.g. "system")
-    display: str      # shown in Discord dropdowns (e.g. "System")
-    model: str        # provider-agnostic model slug (e.g. "qwen3.4_72b")
-    system_prompt: str | None
-    max_tokens: int | None
-    temperature: float | None
 
     @staticmethod
     def from_dict(key: str, data: dict) -> Character:
@@ -51,12 +44,12 @@ class Character:
         return f"Character({self.display!r} → {self.model!r})"
 
 
-# Default empty choices — populated by load_characters() so __init__.py doesn't crash
+# Default empty choices — populated by load_characters() so __init__.py doesn'            not crash
 CHARACTER_CHOICES: list = []
 
 
 def _load_char_json(path: pathlib.Path) -> tuple[str, list[Character]]:
-    """Return (default_key, list of Characters)."""
+    """Return (default_key, list of characters)."""
     try:
         raw = path.read_text(encoding="utf-8")
         cfg = json.loads(raw)
@@ -91,16 +84,16 @@ _CHAR_DISPLAY_MAP: dict[str, str] = {}  # display → char (for fast lookup by d
 
 def load_characters(path: pathlib.Path = pathlib.Path("characters.json")) -> None:
     """Load characters.json and populate globals."""
-    global _CHARACTERS, _DEFAULT_KEY, _CHAR_DISPLAY_MAP
+    global _CHARACTERS, _DEFAULT_KEY, _CHAR_DISPLAY_MAP, CHARACTER_CHOICES
     _DEFAULT_KEY, _CHARACTERS = _load_char_json(path)
     _CHAR_DISPLAY_MAP = {c.display: c for c in _CHARACTERS}
 
     # Store raw dicts — converted to Discord Choice objects in main.py at bot startup
-    global CHARACTER_CHOICES
-    CHOICE_RAW = _default_choices = [
-        {"name": c.display, "value": c.key}  # will be wrapped with discord.app_commands.Choice in main.py
+    CHARACTER_COMPONENTS = [
+        {"name": c.display, "value": c.key}
         for c in _CHARACTERS
     ]
+    CHARACTER_CHOICES = CHARACTER_COMPONENTS
 
 
 def get_character(key_or_display: str) -> Character | None:
@@ -108,7 +101,7 @@ def get_character(key_or_display: str) -> Character | None:
     # Direct key match first
     if any(c.key == key_or_display for c in _CHARACTERS):
         return next(c for c in _CHARACTERS if c.key == key_or_display)
-    # Display match (case-insensitive)
+    # Display match (case-imsensitive)
     for name, char in _CHAR_DISPLAY_MAP.items():
         if name.lower() == key_or_display.lower():
             return char
@@ -116,10 +109,8 @@ def get_character(key_or_display: str) -> Character | None:
 
 
 def default_character() -> Character:
-    return next((c for c in _CHARACTERS if c.key == _DEFAULT_KEY), _CHARACTERS[0])
-
-
-def build_discord_choices() -> list:
-    """Build actual discord.app_commands.Choice objects using CHARACTER_CHOICES data."""
-    import discord.app_commands as _choice_cls
-    return [_choice_cls.Choice(name=c.display, value=c.key) for c in _CHARACTERS]
+    try:
+        return next((c for c in _CHARACTERS if c.key == _DEFAULT_KEY), _CHARACTERS[0])
+    except (IndexError, AttributeError):
+        # Fallback to a dummy if everything failed
+        return Character.from_dict("default", {"model": ""})
