@@ -16,7 +16,51 @@ Copy `.env.example` to `.env` and configure all values.
 | `CONTEXT_WINDOW` | Number of message *rounds* (pairs) retained per channel | `10` |
 | `AI_REQUEST_TIMEOUT` | HTTP timeout for API calls, in seconds | `120` |
 | `BOT_PREFIX` | Text prefix for non-slash commands (e.g., `!ai`) | `!ai` |
-| `KB_KNOWLEDGE_BASE` | Name of the OpenWebUI knowledge base to use | `Default` |
+| `KB_KNOWLEDGE_BASE` | Name of the OpenWebUI knowledge base to use (usually "HumbleWood") | `Default` |
+| `KB_SHARED_DIR`     | Mount path on bot side for RAG chunk reads from shared KB volume | `/shared-knowledge/kb/uploads` |
+
+---
+
+# Container and Volume Setup for RAG
+
+The bot performs **filesystem-based RAG** — instead of querying OpenWebUI's HTTP API, the bot reads knowledge-base files directly from a Docker named volume declared in each service's compose file. This shared volume lets both Open Web UI (OWUI) and the Discord Bot see the same physical path on disk:
+
+### Steps to configure shared volume
+
+1. Add a named volume declaration to **both** docker-compose.yml files:
+
+```yaml
+volumes:
+  kb_shared:
+    driver: local   # Docker native volume driver
+```
+
+2. Open Web UI mounts it read-write for KB uploads — this is where `/kb/uploads` lives.
+
+
+3. The bot service also mounts the same named volume under `KB_SHARED_DIR`:
+
+```yaml
+services:
+  open-webui:
+    environment:
+      OPENWEBUI_API_KEY: "your-owui-key"
+      KB_UPLOAD_PATH: /kb/uploads   # OWUI writes there on disk
+  
+  bot-open-terminal:
+    environment:
+      KB_SHARED_DIR: "/kb/uploads"    # tell the bot where to find them
+  
+  bot-open-terminal:
+    volumes: 
+      - kb_shared:/shared-knowledge/kb/uploads:ro  # read-only mount into container
+```
+
+Make sure the volume name (`kb_shared` or whatever you choose) and the driver match in both files. The `KB_SHARED_DIR` env var tells the bot at startup which directory to search.
+
+### After adding KB docs through Open Web UI
+
+When you upload a document via `/upload_kb`, the gateway writes its `.chunks.txt` file inside your shared volume (`KB_SHARED_DIR`). On every /ai query the bot reads from that mount path — no cache invalidation or restart necessary.
 
 ---
 

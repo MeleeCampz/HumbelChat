@@ -10,6 +10,7 @@ A self-hosted Discord bot that forwards messages from channels to **OpenWebUI** 
 ## Table of Contents
 
 - [Quick Start](#quick-start)
+- [Container / Volume Setup for Knowledge Base Sharing](#container--volume-setup-for-knowledge-base-sharing)
 - [Slash Commands Reference](#slash-commands-reference)
 - [Character System](#character-system)
 - [Configuration (`.env`)](#configuration-env)
@@ -39,6 +40,42 @@ python main.py
 After startup, all slash commands are registered globally (may take up to 60 min for Discord to propagate). Try `/ai Hello!` or `/character list` in any text channel.
 
 For full documentation see [docs/README.md](docs/README.md).
+
+---
+
+## Container / Volume Setup for Knowledge Base Sharing
+
+The bot performs **filesystem-based RAG** — instead of querying OpenWebUI's HTTP API, it reads KB files directly from a shared Docker volume (`KB_SHARED_DIR`). Both containers must share exactly the same physical path on disk:
+
+1. Add a named volume declaration to both `docker-compose.yml` files (name it `kb_shared`):
+
+```yaml
+volumes:
+  kb_shared:
+    driver: local   # docker native volume driver
+```
+
+2. Open Web UI mounts it read-write for KB uploads — this is where `/kb/uploads` lives inside OWUI container.
+
+
+3. Your bot service also mounts the same named volume under `KB_SHARED_DIR`:
+
+```yaml
+services:
+  open-webui:
+    environment:
+      OPENWEBUI_API_KEY: "your-owui-key"
+  
+  # Bot (bot-open-terminal):
+  environments:
+    KB_SHARED_DIR: /kb/uploads   # tell the bot which directory to search
+  
+  bot-open-terminal:
+    volumes: 
+      - kb_shared:/shared-knowledge/kb/uploads:ro   # read-only mount into container image
+```
+
+The volume name (`kb_shared` or whatever you prefer) and driver must match in both compose files. The `KB_SHARED_DIR` env var passes that path into the bot at startup so it knows which directory on disk to scan for chunk files.
 
 ---
 
@@ -218,6 +255,7 @@ Copy `.env.example` to `.env` and configure all values.
 | `AI_REQUEST_TIMEOUT` | HTTP timeout for API calls, in seconds | `120` |
 | `BOT_PREFIX` | Prefix for non-slash commands (e.g., `!ai`) | `!ai` |
 | `KB_KNOWLEDGE_BASE` | Name of the OpenWebUI knowledge base to use | `Default` |
+| `KB_SHARED_DIR` | Mount path on bot side for RAG chunk reads from shared KB volume | `/shared-knowledge/kb/uploads` |
 
 ---
 
