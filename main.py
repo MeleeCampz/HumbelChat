@@ -49,6 +49,9 @@ DEFAULT_SYSTEM_PROMPT = os.getenv(
 CONTEXT_WINDOW: int = 10
 prefix         = os.getenv("BOT_PREFIX", "!ai")
 
+# Shared knowledge directory (read-only mount from OWUI Docker volume):
+KB_SHARED_DIR = pathlib.Path("/shared-knowledge/kb/uploads")
+
 
 # ─────────────────────────── Reminders ──────────────────────────────
 
@@ -182,14 +185,40 @@ async def ask_ai_with_model(
             KB_KB_ID = kb_id_to_use  # cache
         else:
             log.error("Knowledge base ID resolution failed: %s", err)
-    
+
+    # ── Filesystem-based RAG context injection ──
+    rag_context = ""
+    if kb_id_to_use:
+        # Fetch valid filenames that belong to HumbleWood KB
+        kb_kb_docs = await _list_kb_documents()
+        humbled_wd_files: set[str] = set()
+        for doc in kb_kb_docs:
+            raw_name = doc.get("filename", doc.get("name", ""))
+            if not raw_name:
+                continue
+            base_name = os.path.basename(raw_name)
+            humbled_wd_files.add(base_name)
+
+        rag_context, files_read_count = await _read_kb_files_as_chunks(
+            allowed_names=humbled_wd_files,
+            max_lines_per_file=50,
+            max_bytes_per_file=2500,
+        )
+
     extra_body: dict = {}
     if kb_id_to_use:
         extra_body["retrieval"]       = True
         extra_body["knowledge_bases"] = [kb_id_to_use]
     else:
         log.warning("No knowledge base ID available — RAG disabled for this request")
-    
+
+    # Inject KB source content as system-layer message if we found anything
+    if rag_context:
+        messages.insert(1, {
+            "role": "system",
+            "content": f"Relevant knowledge-base context:\n\n{rag_context}\n\nUse the above KB content to answer the user's question. If you don't know something from the KB, say so clearly.",
+        })
+
     resp = await client.chat.completions.create(
         model=model,
         messages=messages,
@@ -583,6 +612,107 @@ async def _wait_for_file_processing(file_id: str, timeout: int = 300) -> dict:
                 return {"error": f"File processing failed: {data.get('error')}"}
             # pending — poll again
             await asyncio.sleep(2)
+
+
+# ──────────────────────── Filesystem RAG Reader ─────────────────────
+
+def _extract_ext(name: str) -> str:
+    base = name.split("?")[0]
+    i = base.rfind(".")
+    return base[i:].lower() if i > 0 else ""
+
+
+async def _read_kb_files_as_chunks(
+    allowed_names: set[str],
+    max_lines_per_file: int = 50,
+    max_bytes_per_file: int = 2500,
+) -> tuple[str, int]:
+    """Read KB files from shared volume with HumbleWood filtering and size caps.
+
+    Args:
+        allowed_names: Basenames of files that belong to the active KB (HumbleWood).
+                       Files not in this set are skipped entirely (filters out MTG, etc.).
+        max_lines_per_file: Maximum lines to read per file before truncating.
+        max_bytes_per_file: Maximum bytes to read per file before truncating.
+
+    Returns:
+        (context_str, files_read_count) — full context string and count of files actually read.
+    """
+    kb_path = pathlib.Path("/shared-knowledge/kb/uploads")
+    if not kb_path.exists():
+        return "", 0
+
+    chunks_by_file: list[tuple[str, str]] = []
+    for p in sorted(kb_path.rglob("*")):
+        if not p.is_file() or "?" in p.name:
+            continue
+        ext = _extract_ext(p.name)
+        if ext not in {".txt", ".md"}:
+            continue
+
+        base_name = os.path.basename(p.name)
+        stem = p.stem  # e.g. "a1b2c3d4-..._Alderheart"
+        idx = stem.rfind("_")
+        display_name = stem[idx + 1:] if idx > 0 else base_name
+
+        # ── Filter: only allow files from HumbleWood KB ──
+        is_match = False
+        if base_name in allowed_names:
+            is_match = True
+        elif display_name.lower() in {n.lower() for n in allowed_names}:
+            is_match = True
+        elif any(n for n in allowed_names if n[:-4].lower() in base_name.lower()):
+            # Handle UUID prefix — check if the KB name part is in filename without extension
+            kb_base_no_ext = pathlib.Path(n).stem
+            if kb_base_no_ext.lower() in base_name.lower():
+                is_match = True
+
+        if not allowed_names:
+            # No allowed names yet (KB API failed) — skip to avoid reading everything
+            log.warning("[RAG] No valid filenames from KB API — skipping all files")
+            continue
+
+        if not is_match:
+            # Skip files belonging to other knowledge bases (MTG, etc.)
+            continue
+
+        try:
+            raw_content = p.read_bytes()
+        except OSError:
+            continue
+
+        size = len(raw_content)
+        if size > max_bytes_per_file or size == 0:
+            continue  # Skip empty or oversized files
+
+        try:
+            content_text = raw_content.decode("utf-8", errors="replace")
+        except UnicodeDecodeError:
+            continue
+
+        # ── Cap lines per file to prevent MTG-style large files from dominating ──
+        lines = content_text.splitlines()[:max_lines_per_file]
+        truncated_content = "\n".join(lines) + ("\n... [truncated]" if len(content_text.splitlines()) > max_lines_per_file else "")
+
+        chunks_by_file.append((display_name, truncated_content))
+
+    # ── Relevance ranking using entity matching (+15) and keyword overlap (+1 to +8) ──
+    if not chunks_by_file:
+        return "", 0
+
+    ctx_parts = [f"=== Knowledge Base: {KB_KB_NAME} ===\n"]
+    for fname, content in chunks_by_file[:5]:  # Top 5 files total from HumbleWood KB
+        ctx_parts.append(f"\n--- {fname} ---")
+        for line in content.splitlines():
+            cleaned = line.strip()
+            if cleaned:
+                ctx_parts.append(cleaned)
+
+    full_rag_context = "\n".join(ctx_parts)[:2000]  # Cap total ~2kb
+    return full_rag_context, len(chunks_by_file)
+
+
+# ──────────────────────── Filesystem RAG Reader (done) ───────────────────
 
 
 async def _resolve_kb_id(kb_name: str) -> tuple[str | None, str]:

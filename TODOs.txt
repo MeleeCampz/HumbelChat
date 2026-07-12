@@ -1,0 +1,8 @@
+Update git and make a fresh comit.
+ensure the git ignore only has the relevent files needed and nothing that should not be posted publicly.
+review all the docs and readmes and update them according to all the changes that happened.
+currently the MTG knowledge base is queried as well. only the humblewood knowledge database should be used.
+very large files seem to be a problem. come up with a solution to deal with large files as well.
+refaktor the code and remove any left ofters that are no longer needed.
+its not important that the project is backwards compatioble at this point.
+add documentation how to set up the containers for the RAG system to work

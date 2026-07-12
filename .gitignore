@@ -34,20 +34,19 @@ env/
 # IDE
 .idea/
 .vscode/
-*.swp
-*.swo
-*~
+*/.DS_Store
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Logs and temp files
+# Logs and temp output files
 *.log
-*.txt.tmp
-tmp.txt
-_tmp.txt
-*.bak
+bot.log
+chat_response.txt
+nohup.out
+*.tmp
+*_temp.json
 
 # Dependencies (if vendored)
 dependencies/
