@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import mimetypes
 import pathlib
 import uuid
-from datetime import datetime, timezone
+from datetime    import datetime, timezone
 
+from kb.scorch import ChunkIndex
 
 log = logging.getLogger("bot.kb.storage")
 
@@ -58,7 +60,8 @@ def validate_upload(
     """Write uploaded content to KB storage.
 
     Returns (dest_path, summary_dict) where summary has:
-      { "name", "size", "modified", "sha256" }"""
+      { "name", "size", "modified", "sha256" }
+    """
     if len(data) > MAX_FILE_SIZE:
         raise ValueError(
             f"File too large: {len(data):,} bytes (max {MAX_FILE_SIZE:,})"
@@ -66,7 +69,9 @@ def validate_upload(
 
     ext = _infer_extension(filename)
     display_name = _sanitize_filename(filename or "uploaded")
-    unique_name = f"{uuid.uuid4().hex}_{display_name}{ext}"
+    # Use stem to avoid double extensions
+    stem_name = pathlib.Path(display_name).stem
+    unique_name = f"{uuid.uuid4().hex}_{stem_name}{ext}"
 
     kb_root = kb_path if kb_path else pathlib.Path("/shared-knowledge/kb/uploads")
     if not kb_root.exists():
@@ -106,10 +111,7 @@ def _sanitize_filename(name: str) -> str:
 def list_kb_files(
     kb_path: str | pathlib.Path,
 ) -> list[dict]:
-    """Scan the KB directory and return metadata for each file.
-
-    Returns a list of dicts keyed by: name, size, modified, sha256.
-    """
+    """Scan the KB directory and return metadata for each file."""
     kb_root = pathlib.Path(kb_path)
     docs: list[dict] = []
     if not kb_root.exists():
@@ -134,3 +136,23 @@ def list_kb_files(
             })
 
     return docs
+
+def reindex_all_kb_files(kb_path: pathlib.Path) -> int:
+    """Iterate through all files in KB and run ChunkIndex indexing."""
+    count = 0
+    if not kb_path.exists():
+        return 0
+    for p in kb_path.rglob("*"):
+        if p.is_file() and "?" not in p.name:
+            try:
+                content = p.read_text(encoding="utf-8", errors="replace")
+                chunks = ChunkIndex.from_text(content)
+                # Save chunks to a sidecar file for retrieval
+                chunk_file = p.with_suffix(p.suffix + ".chunks.jsonl")
+                with chunk_file.open("w", encoding="utf-8") as f:
+                    for chunk in chunks:
+                        f.write(json.dumps(chunk, ensure_ascii=False) + "\n")
+                count += 1
+            except Exception as e:
+                log.error("Failed to reindex %s: %s", p, e)
+    return count

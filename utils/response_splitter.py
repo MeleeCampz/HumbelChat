@@ -10,6 +10,7 @@ def _split_long_message(text: str, header_text: str = "") -> list[str]:
     """Split *text* into multiple chunks if it exceeds Discord's ~1900-char limit.
 
     Uses paragraph-aware splitting so code blocks and lists stay unbroken.
+    Every chunk will include the header_text if provided.
     
     Args:
         text: The full reply text.
@@ -19,55 +20,56 @@ def _split_long_message(text: str, header_text: str = "") -> list[str]:
         A list of chunks ready to send as separate Discord messages.
     """
     MAX = 1900          # leave room for "[N/M] " metadata prefix
-    meta_prefix = f"{header_text}\n" if header_text else ""
+    header_prefix = f"{header_text}\n" if header_text else ""
 
-    if len(meta_prefix + text) <= MAX:
+    if len(header_prefix + text) <= MAX:
         return [text]
 
-    # Split by double-newlines (paragraphs), then force-split oversized paragraphs
+    chunks: list[str] = []
+    current_chunk_body = ""
+
+    # Split by double-newlines (paragraphs)
     paragraphs = text.split('\n\n')
-    chunks, current = [], ""
 
     for para in paragraphs:
-        candidate = f"{current}\n\n{para}".strip() if current else para
-        if len(meta_prefix) + len(candidate) <= MAX:
-            current = candidate
-        elif current:
-            # Current chunk is full — emit it, start a new one with this paragraph
-            chunks.append(current.strip())
-            # If the single paragraph itself is too long → force-split by words
-            if len(meta_prefix) + len(para) > MAX:
-                words = para.split()
-                word_chunks, sub = [], ""
-                for w in words:
-                    test = f"{sub} {w}".strip() if sub else w
-                    if len(test) > MAX:
-                        chunks.append((meta_prefix + sub).strip())
-                        sub = w
-                    else:
-                        sub = test
-                current = sub
-            else:
-                current = para
-        else:
-            # First paragraph was also too long → force-split
+        separator = "\n\n" if current_chunk_body else ""
+        
+        # Check if the paragraph itself is too large to fit even in a new chunk with header
+        if len(header_pseudo := (header_prefix + para)) > MAX:
+            # Flush existing body before handling the massive paragraph
+            if current_chunk_body:
+                chunks.append(current_chunk_body)
+                current_chunk_body = ""
+            
+            # Split this oversized paragraph by words
             words = para.split()
-            sub, started = "", False
-            for w in words:
-                test = f"{sub} {w}".strip() if sub else w
-                if len(test) > MAX:
-                    chunks.append((meta_prefix + sub).strip())
-                    sub = w
-                    started = True
+            sub_para_body = ""
+            for word in words:
+                word_sep = " " if sub_para_body else ""
+                if len(header_prefix) + len(sub_para_body + word_sep + word) <= MAX:
+                    sub_para_body += (word_sep + word)
                 else:
-                    sub = test
-                    started = True
-            current = sub
+                    # Sub-paragraph is full, flush it
+                    if sub_para_body:
+                        chunks.append(sub_para_body)
+                    sub_para_body = word
+            current_chunk_body = sub_para_body
+        
+        else:
+            # Check if adding this paragraph to the current body exceeds MAX (with header)
+            if len(header_prefix) + len(current_chunk_body + separator + para) <= MAX:
+                current_chunk_body += (separator + para)
+            else:
+                # Flush existing and start new with this paragraph
+                if current_chunk_body:
+                    chunks.append(current_chunk_body)
+                current_chunk_body = para
 
-    if current:
-        chunks.append(current.strip())
+    if current_chunk_body:
+        chunks.append(current_chunk_body)
 
-    return chunks
+    # Prepend header to every chunk so context is preserved
+    return [f"{header_prefix}{c}".strip() for c in chunks if c.strip()]
 
 
 async def send_long_response(source, reply_text: str, char_name: str = "") -> None:
@@ -81,8 +83,8 @@ async def send_long_response(source, reply_text: str, char_name: str = "") -> No
         reply_text: The full reply content.
         char_name: Display name for header metadata.
     """
-    # Determine if we need chunking
-    chunks = _split_long_message(reply_text, f"--- {char_name} ---")
+    # Determine if we need chunking. Each chunk will already have the header text.
+    chunks = _split_long_message(reply_text, f"--- {char_name} ---" if char_name else "")
 
     for idx, chunk in enumerate(chunks, 1):
         meta = f"[{idx}/{len(chunks)}] "

@@ -51,9 +51,11 @@ INTENTS.message_content = True
 load_characters(pathlib.Path("characters.json"))
 
 # Discord Choice objects — built from config at bot startup time (after character loading)
+from config.characters import _CHARACTERS
+
 _Character_RAW_CHOICES = [
-    {"name": c.display, "value": c.key}
-    for c in __import__('config.characters', fromlist=['_CHARACTERS'])._CHARACTERS  # noqa: E501
+    {"name": c.key, "value": c.key}
+    for c in _CHARACTERS
 ]
 _CHAR_CHOICES: list[app_commands.Choice[str]] = [
     app_commands.Choice(name=c["name"], value=c["value"])
@@ -116,7 +118,8 @@ async def character_command(
     await interaction.response.defer(ephemeral=True)
 
     active_key = default_character().key
-    for c in __import__('config.characters', fromlist=['_CHARACTERS'])._CHARACTERS:
+    from config.characters import _CHARACTERS
+    for c in _CHARACTERS:
         if c.key == _get_active_character_key(interaction.guild_id, interaction.channel_id):
             active_key = c.key
             break
@@ -264,6 +267,13 @@ async def list_kb_command(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     from commands.kb_commands import handle_list_kb_docs
     await handle_list_kb_docs(interaction)
+
+
+@bot.tree.command(name="reindex_kb", description="Reindex all files in the knowledge base.")
+async def reindex_kb_command(interaction: discord.Interaction):
+    """Trigger reindexing of all files in the KB."""
+    from commands.kb_commands import handle_reindex_kb
+    await handle_reindex_kb(interaction)
 
 
 @bot.tree.command(
@@ -431,7 +441,7 @@ async def on_ready():
         await bot.tree.sync(guild=target_guild)
     else:
         await bot.tree.sync()
-    char_names = [c.display or c.key for c in _CHAR_CHOICES]
+    char_names = [c.name for c in _CHAR_CHOICES]
     log.info("Characters loaded: %s", ", ".join(char_names) or "(none)")
 
 
