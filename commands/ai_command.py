@@ -1,87 +1,76 @@
-"""Handler for the /ai slash command.
-
-This module is a helper — it does NOT import discord directly.  Instead, main.py
-calls ``handle_ai_command(interaction, message, character)`` with whatever Discord
-interaction object it receives.
-"""
-from __future__ import annotations
-
 import asyncio
-import logging
-
-log = logging.getLogger("bot.commands.ai")
-
+from config.characters import CHARACTER_CHOICES, get_character, default_character
 
 async def handle_ai_command(
-    interaction,                             # any Discord Interaction type
+    interaction,
     message: str,
     character_name: str | None = None,
 ) -> None:
-    """Core handler for ``/ai``.
+    """Core handler for /ai."""
 
-    Flow (mirrors the old inline ai_command in main.py):
-      1. Resolve active character (via config.characters).
-      2. Defer slash-com response + start typing loop.
-      3. Call bot_core.ask_ai() with Character.config.model_slug.
-      4. Send chunked reply via utils.response_splitter.
-    """
+    # 1. Immediate Deferral to prevent "Application did not respond"
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+    except Exception as e:
+        print(f"Error deferring: {e}")
+        return
 
-    # ── 1. Resolve character / model slug ─────────────────────────
-    from config.characters import CHARACTER_CHOICES, get_character, default_character
-
-    char_key = (
-        character_name
-        if character_name is not None
-            and any(c.key == character_name for c in CHARACTER_CHOICES)
-        else _get_active_char(interaction)  # per-guild/channel lookup
-    )
+    # 2. Resolve character
+    char_key = None
+    if character_name:
+        for choice in CHARACTER_CHOICES:
+            if choice["value"] == character_name:
+                char_key = character_name
+                break
+    
+    if char_key is None:
+        # Try to use the helper from main.py if available, otherwise fallback
+        try:
+            from main import _get_active_character_key
+            gid = getattr(interaction, 'guild_id', None)
+            cid = getattr(interaction, 'channel_id', 0)
+            char_key = _get_active_character_key(gid, cid)
+        except (ImportError, AttributeError):
+            char_key = default_character().key
 
     char_obj = get_character(char_key)
     if char_obj is None:
-        await interaction.followup.send(f"Character ``{character_name}`` not found.", ephemeral=True)
+        await interaction.followup.send(f"Character `{character_name}` not found.", ephemeral=True)
         return
 
     model_slug = char_obj.model or ""
 
-    # ── 2. Defer (avoids "Interaction has already been responded to") ─
-    try:
-        await interaction.response.defer()
-    except Exception:
-        pass  # stale slash — no harm continuing (typing loop will fail safely)
-
-    # ── 3. Start typing indicator (background) ────────────────────
+    # 3. Start typing indicator (background task)
     if hasattr(interaction, "channel") and interaction.channel is not None:
-        from utils.typing_loop import typing_loop_task
-        asyncio.create_task(typing_loop_task(interaction.channel))
+        try:
+            from utils.typing_loop import typing_loop_task
+            asyncio.create_task(typing_loop_task(interaction.channel))
+        except Exception as e:
+            print(f"Typing loop error: {e}")
 
-    # ── 4. Ask AI ────────────────────────────────────────────────
+    # 4. Ask AI
     from bot_core import ask_ai
+    try:
+        reply_text, _extra = await ask_ai(
+            user_message=message,
+            model_slug=model_slug,
+            guild_id=interaction.guild_id or 0,
+            channel_id=interaction.channel_id,
+            username=(getattr(interaction, "user", None)
+                          and getattr(getattr(interaction, "user"), "display_name", "")
+                      ) or "",
+        )
+    except Exception as e:
+        import logging
+        logging.error(f"AI request failed: {e}")
+        await interaction.followup.send(f"❌ Error calling AI: {e}", ephemeral=True)
+        return
 
-    reply_text, _extra = await ask_ai(
-        user_message=message,
-        model_slug=model_slug,
-        guild_id=interaction.guild_id or 0,
-        channel_id=interaction.channel_id,
-        username=(getattr(interaction, "user", None)
-                      and getattr(getattr(interaction, "user"), "display_name", "")
-                  ) or "",
-    )
-
-    # ── 5. Send chunked reply ────────────────────────────────────
+    # 5. Send chunked response
     from utils.response_splitter import send_long_response
-
     try:
         await send_long_response(interaction, reply_text, str(char_obj.display))
-    except Exception as exc:
-        log.error("Failed to send AI response: %s", exc)
-
-
-# ── Small helpers ────────────────────────────────────────────────
-
-_ACTIVE_CHARS: dict[tuple[int, int], str] = {}   # (guild_id, channel_id) → char_key
-
-
-def _get_active_char(interaction) -> str:
-    guild_id = getattr(interaction, "guild_id", None) or 0
-    channel_id = getattr(interaction, "channel_id", 0)
-    return _ACTIVE_CHARS.get((guild_id, channel_id))
+    except Exception as e:
+        import logging
+        logging.error(f"Failed to send AI response: {e}")

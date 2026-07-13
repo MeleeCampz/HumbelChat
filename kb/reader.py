@@ -11,7 +11,7 @@ import pathlib
 def read_kb_files(
     kb_path: str | pathlib.Path,
     max_lines_per_file: int = 50,
-    max_bytes_per_file: int = 2500,
+    max_bytes_per_file: int = 1024 * 1024,  # 1 MB limit for reading files into context
 ) -> list[tuple[str, str]]:
     """Read raw KB files from shared volume and return [(display_name, content)]."""
     kb_root = pathlib.Path(kb_path)
