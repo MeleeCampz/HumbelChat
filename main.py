@@ -323,9 +323,6 @@ async def ocr_command(interaction: discord.Interaction, image: discord.Attachmen
     else:
         for i in range(0, len(reply), MAX_LEN):
             await interaction.followup.send(f"🔍 OCR (part {i//MAX_LEN+1})\n\n{reply[i:i+MAX_LEN]}", ephemeral=True)
-
-
-@bot.tree.command(name="summarize", description="Summarize text from a file or recent conversation.")
 @app_commands.describe(file_url="Optional URL to fetch text content")
 async def summarize_command(interaction: discord.Interaction, file_url: str | None = None):
     """Summarize — uses inline chat with provider."""
@@ -334,11 +331,16 @@ async def summarize_command(interaction: discord.Interaction, file_url: str | No
     text = ""
     src  = ""
     if file_url:
-        async with httpx.AsyncClient() as client:
-            resp    = await client.get(file_url)
-            resp.raise_for_status()
-            text     = resp.text[:32000]
-            src       = f"file from `{file_url[:80]}...`"
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(file_url, timeout=10.0)
+                resp.raise_for_status()
+                text = resp.text[:32000]
+                src  = f"file from `{file_url[:80]}...`"
+        except Exception as e:
+            log.error("Failed to fetch file_url: %s", e)
+            await interaction.followup.send(f"⚠️ Error fetching URL: {n}{e}", ephemeral=True)
+            return
     else:
         guild_id = interaction.guild_id or 0
         ch_history = _chat_history.get(guild_id, {}).get(interaction.channel_id, [])
@@ -349,7 +351,7 @@ async def summarize_command(interaction: discord.Interaction, file_url: str | No
         text     = "\n\n".join(parts) if parts else "(no history)"
         src      = "recent conversation"
 
-    if not text.strip():
+    if not text.strip() or text == "(no history)":
         await interaction.followup.send("⚠️ Nothing to summarize.", ephemeral=True)
         return
 
@@ -357,25 +359,39 @@ async def summarize_command(interaction: discord.Interaction, file_url: str | No
         api_key=settings.INFER_API_KEY or "local-model-key",
         base_url=settings.INFER_URL,
     )
-    resp = await client.chat.completions.create(
-        model=settings.DEFAULT_MODEL,
-        messages=[
-            {"role": "system",
-             "content": f"Summarize the following text from {src}. Be concise but complete."},
-            {"role": "user", "content": text},
-        ],
-        temperature=0.3, max_tokens=2048,
-    )
-    summary = resp.choices[0].message.content or "(empty)"
+    
+    # Define fallback models in case the primary one fails
+    models_to_try = [settings.DEFAULT_MODEL]
+    if settings.DEFAULT_MODEL not in ["gemma4:latest", "llama3:latest"]: # simple check for common defaults
+         models_to_try.extend(["gemma4:latest", "llama3:latest"])
 
-    MAX_LEN = 1900
-    if len(summary) <= MAX_LEN:
-        await interaction.followup.send(f"📝 Summary of {src}:\n\n{summary}", ephemeral=True)
+    summary = None
+    for model in models_to_try:
+        try:
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": f"Summarize the following text from {src}. Be concise but complete."},
+                    {"role": "user", "content": text},
+                ],
+                temperature=0.3,
+                max_tokens=2048,
+            )
+            summary = resp.choices[0].message.content or "(empty)"
+            break # Success!
+        except Exception as e:
+            log.error("Summarize error with model %s: %s", model, e)
+            continue
+
+    if summary is None:
+        await interaction.followup.send("⚠️ Failed to generate summary after trying multiple models.", ephemeral=True)
     else:
-        for i in range(0, len(summary), MAX_LEN):
-            await interaction.followup.send(f"📝 Summary (part {i//MAX_LEN+1})\n\n{summary[i:i+MAX_LEN]}", ephemeral=True)
-
-
+        MAX_LEN = 1900
+        if len(summary) <= MAX_LEN:
+            await interaction.followup.send(f"📝 **Summary** ({src}):\n\n{summary}", ephemeral=True)
+        else:
+            for i in range(0, len(summary), MAX_LEN):
+                await interaction.followup.send(f"📝 **Summary** ({src}) (part {i//MAX_LEN+1}):\n\n{summary[i:i+MAX_LEN]}", ephemeral=True)
 @bot.tree.command(name="translate", description="Translate text to a language.")
 @app_commands.describe(
     target_language="Target language (optionally with source: 'Spanish: Hello')",
@@ -441,6 +457,12 @@ async def on_ready():
         await bot.tree.sync(guild=target_guild)
     else:
         await bot.tree.sync()
+
+    char_names = [c.name for c in _CHAR_CHOICES]
+    log.info("Characters loaded: %s", ", ".join(char_names) or "(none)")
+
+    from utils.kb_utils import log_top_kb_files
+    log_top_kb_files(settings.KB_PATH)
     char_names = [c.name for c in _CHAR_CHOICES]
     log.info("Characters loaded: %s", ", ".join(char_names) or "(none)")
 
