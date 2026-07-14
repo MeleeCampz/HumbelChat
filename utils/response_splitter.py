@@ -95,3 +95,4 @@ async def send_long_response(source, reply_text: str, char_name: str = "") -> No
             await source.followup.send(full_msg)
         else:
             await source.reply(full_msg)
+

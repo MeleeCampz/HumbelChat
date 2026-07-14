@@ -118,7 +118,7 @@ def list_kb_files(
         return docs
 
     for entry in sorted(kb_root.rglob("*"), key=lambda p: str(p)):
-        if entry.is_file() and "?" not in entry.name:
+        if entry.is_file() and "?" not in entry.name and not entry.name.endswith(".chunks.jsonl"):
             stat = entry.stat()
             try:
                 raw = entry.read_bytes()
@@ -143,7 +143,7 @@ def reindex_all_kb_files(kb_path: pathlib.Path) -> int:
     if not kb_path.exists():
         return 0
     for p in kb_path.rglob("*"):
-        if p.is_file() and "?" not in p.name:
+        if p.is_file() and "?" not in p.name and not p.name.endswith(".chunks.jsonl"):
             try:
                 content = p.read_text(encoding="utf-8", errors="replace")
                 chunks = ChunkIndex.from_text(content)
@@ -156,3 +156,4 @@ def reindex_all_kb_files(kb_path: pathlib.Path) -> int:
             except Exception as e:
                 log.error("Failed to reindex %s: %s", p, e)
     return count
+

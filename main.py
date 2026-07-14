@@ -538,3 +538,4 @@ if __name__ == "__main__":
              settings.BOT_PREFIX, default_character().display or "Default")
 
     bot.run(settings.DISCORD_TOKEN)
+

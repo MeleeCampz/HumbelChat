@@ -50,3 +50,4 @@ This file tracks the progress of the HumbleChat bot migration and upcoming featu
 - [ ] Finalize `docker-compose.yml` for easy one-command deployment (including an OpenAI-compatible backend like Ollama).
 - [ ] Implement a `.env.example` validation/walkthrough script.
 - [ ] Update `.env.example` and `characters.json.example` to the new unified format.
+

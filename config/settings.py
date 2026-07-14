@@ -38,6 +38,7 @@ DEFAULT_MODEL       = ""          # chars in JSON override these
 DEFAULT_SYSTEM_PROMPT = ""
 CONTEXT_WINDOW      = _safe_int(os.getenv("CONTEXT_WINDOW"), 10)
 REQUEST_TIMEOUT     = _safe_int(os.getenv("AI_REQUEST_TIMEOUT"), 120)
+MAX_TOKENS          = _safe_int(os.getenv("MAX_TOKENS"), 2000)
 
 # ════════════════════════════════════
 #  BOT BEHAVIOUR
@@ -73,6 +74,7 @@ class _Settings:
     DEFAULT_SYSTEM_PROMPT: str
     CONTEXT_WINDOW: int
     REQUEST_TIMEOUT: int
+    MAX_TOKENS: int
     BOT_PREFIX: str
     CHAT_HISTORY_RESET: str | None
     KB_PATH: pathlib.Path
@@ -91,7 +93,7 @@ settings = _Settings()
 _INIT_ATTRS = (
     "DISCORD_TOKEN", "INFER_URL", "INFER_API_KEY", "DEFAULT_MODEL",
     "DEFAULT_SYSTEM_PROMPT", "CONTEXT_WINDOW", "REQUEST_TIMEOUT",
-    "BOT_PREFIX", "CHAT_HISTORY_RESET", "KB_PATH", "DEFAULT_KB_NAME",
+    "MAX_TOKENS", "BOT_PREFIX", "CHAT_HISTORY_RESET", "KB_PATH", "DEFAULT_KB_NAME",
     "CHUNK_TARGET", "OPENWEBUI_API_KEY",
 )
 
@@ -103,6 +105,7 @@ _INIT_VALUES = {
     "DEFAULT_SYSTEM_PROMPT": DEFAULT_SYSTEM_PROMPT,
     "CONTEXT_WINDOW": CONTEXT_WINDOW,
     "REQUEST_TIMEOUT": REQUEST_TIMEOUT,
+    "MAX_TOKENS": MAX_TOKENS,
     "BOT_PREFIX": BOT_PREFIX,
     "CHAT_HISTORY_RESET": CHAT_HISTORY_RESET,
     "KB_PATH": KB_PATH,
@@ -115,3 +118,4 @@ for _attr in sorted(_INIT_ATTRS):
     setattr(settings, _attr, _INIT_VALUES[_attr])
 
 del (DISCORD_TOKEN, INFER_URL, INFER_API_KEY, DEFAULT_MODEL)  # noqa: F821
+

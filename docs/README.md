@@ -299,3 +299,4 @@ On first run the bot calls `bot.tree.sync()` to register all slash commands glob
 | Summarize / KB upload → HTTP 400 | Knowledge base payload missing context injection or wrong auth | Ensure `OPENWEBUI_API_KEY` is set; verify OpenWebUI backend is reachable at `API_BASE_URL` |
 | AI responses not appearing | API timeout (default 120s) | Increase `AI_REQUEST_TIMEOUT` in `.env`; check backend logs for model load delays |
 | `characters.json not found` warning | File missing or misnamed | Ensure `characters.json` exists at project root with valid JSON syntax |
+
