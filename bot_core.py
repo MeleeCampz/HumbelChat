@@ -111,12 +111,13 @@ async def ask_ai(
         model=model_slug,
         messages=messages,
         temperature=0.7,
-        max_tokens=1024,
+        max_tokens=settings.MAX_TOKENS,
         stream=False,
         timeout=timeout_sec,
     )
 
     reply_text = resp.choices[0].message.content or "(empty response)"
+    log.info("RAW_AI_RESPONSE_START\n%s\nRAW_AI_RESPONSE_END", reply_text)
 
     # ── 7. Update history (bounded) ──────────────────────────────────────
     history.append({"role": "user", "content": user_content})
@@ -143,3 +144,4 @@ async def clear_history(guild_id: int, channel_s: int) -> str:
 def get_current_message_count(guild_id: int, channel_id: int) -> int:
     """Return the number of messages currently in history for this channel."""
     return len(_chat_history.get(guild_id, {}).get(channel_id, []))
+

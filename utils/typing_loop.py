@@ -23,3 +23,4 @@ async def typing_loop_task(channel, duration_sec: int = 30) -> None:
         except Exception:
             pass  # Permission error, channel deleted, etc.
         await asyncio.sleep(10)
+

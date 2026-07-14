@@ -74,3 +74,4 @@ async def handle_ai_command(
     except Exception as e:
         import logging
         logging.error(f"Failed to send AI response: {e}")
+

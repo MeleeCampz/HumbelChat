@@ -56,3 +56,4 @@ def _extract_ext(name: str) -> str:
     base = name.split("?")[0]
     i = base.rfind(".")
     return base[i:].lower() if i > 0 else ""
+

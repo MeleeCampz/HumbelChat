@@ -51,3 +51,4 @@ services:
 
 volumes:
   kb_shared:                           # both services share this physical directory
+

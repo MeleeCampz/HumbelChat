@@ -107,3 +107,4 @@ async def handle_reindex_kb(interaction):
     except Exception as e:
         log.error("Reindexing failed: %s", e)
         await interaction.followup.send(f"❌ Failed to reindex KB: **{e}**", ephemeral=True)
+
