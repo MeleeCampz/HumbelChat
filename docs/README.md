@@ -16,7 +16,7 @@ Copy `.env.example` to `.env` and configure the following variables:
 | `CONTEXT_WINDOW` | Number of message rounds retained per channel | `10` |
 | `BOT_PREFIX` | Prefix for non-slash commands (e.g., `!ai`) | `!ai` |
 | `AI_REQUEST_TIMEOUT` | HTTP timeout in seconds | `120` |
-| `KB_PATH` | Path to knowledge base files | `/shared-knowledge/kb/uploads` |
+| `KB_PATH` | Path to knowledge base files | `./data/knowledge` (default) |
 | `CHUNK_SIZE` | Tokens per KB chunk for indexing | `2000` |
 
 ---
