@@ -69,12 +69,21 @@ async def ask_ai(
     max_messages = settings.CONTEXT_WINDOW  # number of (user+assistant) pairs to keep
 
     # ── 2. System prompt ─────────────────────────────────────────────────
-    system_p = settings.DEFAULT_SYSTEM_PROMPT or "You are a helpful AI assistant."
+    from config.characters import get_character, default_character
+    active_key = get_active_char_key(guild_id, channel_id)
+    char_obj = get_character(active_key) or default_character()
+    system_p = char_obj.system_prompt if char_obj and hasattr(char_obj, 'system_prompt') and char_obj.system_prompt else settings.DEFAULT_SYSTEM_PROMPT
+    if not system_p:
+        system_p = settings.DEFAULT_SYSTEM_PROMPT or "You are a helpful AI assistant."
 
     # ── 3. RAG context injection ──────────────────────────────────────────
     rag_context = ""
     kb_docs = read_kb_files(settings.KB_PATH)
+    
     if kb_docs:
+        doc_names = [name for name, _ in kb_docs[:5]]
+        log.info("RAG: Attaching %d KB document(s) to context: [%s]", 
+                 len(doc_names), ', '.join(f'"{n}"' for n in doc_names))
         parts = [f"=== Knowledge Base: {_kb_kb_name} ===\n"]
         for display_name, content in kb_docs[:5]:  # top 5 files
             parts.append(f"\n--- {display_name} ---")
@@ -144,4 +153,3 @@ async def clear_history(guild_id: int, channel_s: int) -> str:
 def get_current_message_count(guild_id: int, channel_id: int) -> int:
     """Return the number of messages currently in history for this channel."""
     return len(_chat_history.get(guild_id, {}).get(channel_id, []))
-
