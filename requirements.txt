@@ -1,4 +1,4 @@
 python-dotenv
 discord.py[voice]
 openai>=1.0.0
-
+httpx
