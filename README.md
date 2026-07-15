@@ -1,52 +1,61 @@
-# HumbleChat — Local-Only Discord AI Bot
+# HumbelChat - AI-Powered Discord Bot
 
-A self-hosted Discord bot that forwards messages from servers to **OpenWebUI** (your local AI gateway) and returns AI responses as Discord messages. All inference runs through OpenWebUI's OpenAI-compatible API layer — nothing touches a model backend directly.
+A feature-rich Discord bot that brings conversational AI capabilities to your server, with built-in RAG (Retrieval-Augmented Generation) for contextual knowledge responses.
 
-> **Local-only:** All inference runs on your own hardware. No cloud APIs. Private by design.
-> **Gateway-first:** Every request routes through OpenWebUI, giving you centralized access to knowledge bases, user management, and model creation for the future.
+## What This Bot Does
 
----
+**Primary Functions:**
+- **Conversational AI**: Engage in natural, multi-turn conversations with an AI assistant
+- **RAG Integration**: Pull relevant information from filesystem-based knowledge bases to provide accurate, context-aware responses
+- **Slash Commands**: Modern Discord interaction framework with intuitive commands like `/ask`, `/chat`, and `/knowledge`
+
+**Key Features:**
+- Personality-driven conversations (configurable character personalities)
+- Session memory for coherent multi-message dialogues
+- Knowledge base integration via filesystem storage
+- Token-limited response handling to prevent Discord limits
+- Async-compatible architecture built on discord.py
 
 ## Quick Start
 
 ```bash
-# 1. Create virtual environment and install dependencies
-python3 -m venv venv
-source venv/bin/activate       # Linux/macOS
+# Clone and install dependencies
+git clone https://github.com/MeleeCampz/HumbelChat.git
+cd HumbelChat
 pip install -r requirements.txt
 
-# 2. Copy configuration files
-cp .env.example .env                    # Edit .env — DISCORD_BOT_TOKEN is required
-cp characters.example.json characters.json  # Configure your AI personas and models
+# Configure environment
+cp .env.example .env
+# Edit .env with your Discord bot token and OpenAI API key
 
-# 3. Run the bot
+# Run the bot
 python main.py
 ```
 
-After startup, all slash commands are registered globally (may take up to 60 min for Discord to propagate). Try `/ai Hello!` or `/character list` in any text channel.
+## Configuration
 
-For full documentation see [docs/README.md](docs/README.md).
+Set these environment variables in `.env`:
+- `DISCORD_TOKEN` - Your Discord bot token
+- `OPENAI_API_KEY` - Your OpenAI API key  
+- `DEFAULT_PERSONALITY` - Character personality file to load by default
+- `MAX_TOKENS` - Maximum tokens per response (default: 1500)
 
----
+## Project Structure
 
-## Configuration Files
+```
+discord-ai-bot/
+├── main.py              # Bot entry point and command handlers
+├── bot_core.py          # Core bot logic and conversation management
+├── config/              # Settings, characters, and environment variables
+├── kb/                  # Knowledge base reader and storage (filesystem-based RAG)
+├── commands/            # Slash command implementations
+└── utils/               # Helper functions for responses and utilities
+```
 
-### .env
-Contains sensitive credentials and bot configuration:
-- `DISCORD_BOT_TOKEN` - Your Discord bot token (required)
-- Model endpoints, API keys, and other settings
+## Building Your Own Knowledge Base
 
-Copy `.env.example` to `.env` before running the bot. Never commit `.env` to version control.
-
-### characters.json
-Defines AI personas and their configurations:
-- Each character has a model assignment, system prompt, and optional parameters
-- **Private file** - do not share or commit with real character data
-
-Copy `characters.example.json` to `characters.json` and customize for your use case.
-
----
+Place `.txt` files in the `kb/` directory to create a filesystem-based knowledge base. The bot will automatically index and search these documents when answering questions.
 
 ## License
 
-MIT
+MIT License - Feel free to fork, modify, and deploy on your own Discord servers.
