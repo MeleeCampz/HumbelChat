@@ -56,6 +56,7 @@ def validate_upload(
     data: bytes,
     filename: str | None = "uploaded",
     kb_path: pathlib.Path | None = None,
+    subfolder: str | None = None,
 ) -> tuple[pathlib.Path, dict]:
     """Write uploaded content to KB storage.
 
@@ -69,18 +70,25 @@ def validate_upload(
 
     ext = _infer_extension(filename)
     display_name = _sanitize_filename(filename or "uploaded")
-    # Use stem to avoid double extensions
     stem_name = pathlib.Path(display_name).stem
-    unique_name = f"{uuid.uuid4().hex}_{stem_name}{ext}"
 
     kb_root = kb_path if kb_path else pathlib.Path("/shared-knowledge/kb/uploads")
-    if not kb_root.exists():
-        raise FileNotFoundError(
-            "KB storage directory does not exist. "
-            "Ensure the Docker volume is mounted correctly."
-        )
+    
+    if subfolder:
+        kb_root = kb_root / subfolder
+        try:
+            kb_root.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            log.error("Failed to create subfolder %s: %s", subfolder, e)
+            raise FileNotFoundError(f"Could not create subfolder: {subfolder}")
 
-    dest = kb_root / unique_name
+    dest = kb_root / f"{stem_name}{ext}"
+    
+    # Collision handling: if file exists, append a short unique ID
+    if dest.exists():
+        unique_id = uuid.uuid4().hex[:8]
+        dest = kb_root / f"{stem_name}_{unique_id}{ext}"
+
     dest.write_bytes(data)
 
     sha = _compute_sha256(data)

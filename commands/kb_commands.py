@@ -13,9 +13,9 @@ log = logging.getLogger("bot.commands.kb")
 async def handle_upload_kb(
     interaction,                           # Discord Interaction
     kb_name: str | None = None,            # override for KB folder name
-    url: str | 
-None = None,                 # remote URL → download
+    url: str | None = None,                 # remote URL → download
     attachment=None,                        # discord.Attachment or None
+    subfolder: str | None = None,           # optional subfolder
 ) -> None:
     """Upload a file directly to the local KB storage directory."""
     from config.settings import settings
@@ -39,7 +39,7 @@ None = None,                 # remote URL → download
 
     # --- step 2 & 3: validate + write to KB_PATH ---
     try:
-        dest, summary = validate_upload(data, filename=fname, kb_path=settings.KB_PATH)
+        dest, summary = validate_upload(data, filename=fname, kb_path=settings.KB_PATH, subfolder=subfolder)
     except ValueError as exc:
         await interaction.followup.send(f"Upload rejected: **{exc}**", ephemeral=True)
         return
@@ -49,11 +49,17 @@ None = None,                 # remote URL → download
 
     # --- step 4: auto-index chunks (non-blocking) ---
     try:
+        import json
         content = pathlib.Path(dest).read_text(encoding="utf-8", errors="replace")
-        ChunkIndex.from_text(content, chunk_size=settings.CHUNK_TARGET)
-        log.info("Auto-indexed %d chunks for %s", summary["size"], dest.name)
-    except Exception:
-        log.warning("Failed to auto-index %s — will need manual /reindex_kb", dest.name)
+        chunks = ChunkIndex.from_text(content, chunk_size=settings.CHUNK_TARGET)
+        # Save chunks to a sidecar file for retrieval
+        chunk_file = dest.with_suffix(dest.suffix + ".chunks.jsonl")
+        with chunk_file.open("w", encoding="utf-8") as f:
+            for chunk in chunks:
+                f.write(json.dumps(chunk, ensure_ascii=False) + "\n")
+        log.info("Auto-indexed %d chunks for %s", len(chunks), dest.name)
+    except Exception as e:
+        log.warning("Failed to auto-index %s — will need manual /reindex_chunks: %s", dest.name, e)
 
     # --- step 5: reply with summary ---
     chunk_hint = ""
