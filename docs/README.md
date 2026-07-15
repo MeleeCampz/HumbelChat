@@ -64,6 +64,19 @@ When you upload a document via `/upload_kb`, the gateway writes its `.chunks.txt
 
 ---
 
+# Knowledge Base (RAG) Logging
+
+The bot provides console logging for knowledge base document usage:
+
+```
+RAG: Attaching 3 KB document(s) to context: ["HumbleWood Lore", "Character Races", "Campaign Guide"]
+ask_ai → model=gemma4:latest messages_in_prompt=8 KB_files=3
+```
+
+This helps you see which documents are being included in each AI request for debugging and optimization purposes.
+
+---
+
 # Character Configuration (`characters.json`)
 
 Controls which AI personas/models are available. Structure:
@@ -74,10 +87,12 @@ Controls which AI personas/models are available. Structure:
   "characters": {
     "System": {
       "model": "qwen3.6:latest",
-      "system_prompt": "Optional custom system prompt for this character."
+      "system_prompt": ""
     },
     "Trixy Smoldersome": {
-      "model": "some-other-model"
+      "display": "Trixy Smoldersome",
+      "model": "hf.co/HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced:Q4_K_M",
+      "system_prompt": "..."
     }
   }
 }
@@ -87,7 +102,11 @@ Controls which AI personas/models are available. Structure:
 |---|---|
 | `default` | Character used when none is explicitly selected |
 | `characters.<name>` | Each key becomes an available persona in the `/character list` dropdown and `/ai` autocomplete |
+| `display` | Human-readable name shown in Discord UI (optional, falls back to key) |
 | `model` | Model slug sent to the inference API for that character |
+| `system_prompt` | Custom system prompt for this persona (optional) |
+| `max_tokens` | Maximum tokens for responses (optional) |
+| `temperature` | Creativity setting 0-1 (optional, default 0.7) |
 
 Characters are loaded at bot startup and synced into a Discord dropdown menu automatically. Per-guild per-channel overrides keep separate active characters — switching one channel doesn't affect others.
 
@@ -144,7 +163,7 @@ Schedules a deferred reminder that pings you back at the specified time. Minimum
 | Parameter | Description | Valid values |
 |---|---|---|
 | `amount` | Numeric value (integer ≥ 1) | Any positive integer |
-| `unit` | Time unit | `seconds`/`s`, `minutes`/`min`/`m`, `hours`/`hr`/`h` |
+| `unit` | Time unit | `seconds`/`s`, `minutes`/`min`/`m`, `hours`/hr`/`h` |
 | `message` | Reminder text | Free text (shown when the reminder fires) |
 
 **Examples:**
@@ -168,7 +187,8 @@ Downloads an attached image, downloads it from Discord's CDN, encodes it as a ba
 |---|---|
 | `image` | Attach an image file when invoking the command |
 
-**Supported formats:** PNG, JPEG, GIF, WebP (auto-detected from filename; defaults to PNG).  \nUses `VISION_MODEL` (falls back to `MODEL_NAME`) for inference.
+**Supported formats:** PNG, JPEG, GIF, WebP (auto-detected from filename; defaults to PNG).  
+Uses `VISION_MODEL` (falls back to `MODEL_NAME`) for inference.
 
 ---
 
@@ -300,3 +320,4 @@ On first run the bot calls `bot.tree.sync()` to register all slash commands glob
 | AI responses not appearing | API timeout (default 120s) | Increase `AI_REQUEST_TIMEOUT` in `.env`; check backend logs for model load delays |
 | `characters.json not found` warning | File missing or misnamed | Ensure `characters.json` exists at project root with valid JSON syntax |
 
+---
