@@ -8,7 +8,7 @@ build/
 develop-eggs/
 dist/
 downloads/
-eggs/
+ eggs/
 .eggs/
 lib/
 lib64/
@@ -64,11 +64,14 @@ ISSUES_AND_TODOS.md
 TODOs.txt
 characters.json
 
+# AI model artifacts - local only, may contain private data
+.qwen/
+
 # Local AI working tasks — for development-only notes, not tracked
 todo/
 
-# Git
-.git/
+# Data folder - keep locally but don't track in git
+data/
 
 # Git
 .git/

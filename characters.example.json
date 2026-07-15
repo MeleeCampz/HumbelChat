@@ -1,0 +1,12 @@
+{
+  "default": "System",
+  "characters": {
+    "System": {
+      "display": "System",
+      "model": "",
+      "system_prompt": "Your are a helpful discord bot.",
+      "max_tokens": 131072,
+      "temperature": 0.7
+    }
+  }
+}

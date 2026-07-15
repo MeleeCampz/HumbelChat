@@ -81,6 +81,20 @@ This helps you see which documents are being included in each AI request for deb
 
 Controls which AI personas/models are available. Structure:
 
+## Setup Instructions
+
+**Important:** The `characters.json` file contains private configuration and should NOT be committed to the repository.
+
+1. Copy the example template:
+   ```bash
+   cp characters.example.json characters.json
+   ```
+2. Edit `characters.json` with your actual model names, system prompts, and character definitions
+3. The file is automatically ignored by `.gitignore` — keep it local only
+4. Restart the bot after any changes to load new character configurations
+
+### Example Configuration
+
 ```json
 {
   "default": "System",
