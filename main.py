@@ -174,14 +174,10 @@ async def translate_command(
 @bot.event
 async def on_ready():
     log.info("Logged in as %s (ID: %s)", bot.user, bot.user.id)
-    if bot.guilds:
-        # For testing locally, we use the first guild found to sync commands quickly.
-        target_guild = bot.guilds[0]
-        bot.tree.copy_global_to(guild=target_guild)
-        await bot.tree.sync(guild=target_guild)
-    else:
-        await bot.tree.sync()
-
+    
+    # Global sync only — registered once, available in every guild
+    await bot.tree.sync()
+    
     from utils.kb_utils import log_top_kb_files
     log_top_kb_files(settings.KB_PATH)
 
