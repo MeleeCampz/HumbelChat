@@ -2,9 +2,6 @@
 
 This file wires everything together — bot setup, event handlers, slash commands,
 import from config / kb / bot_core modules, and startup logic.
-
-OWUI-dependent code (~400 lines) has been removed; KB operations now use native
-filesystem reads via kb.storage and kb.reader instead of the OpenWebUI API.
 """
 from __future__ import annotations
 
@@ -188,7 +185,7 @@ async def on_ready():
     from utils.kb_utils import log_top_kb_files
     log_top_kb_files(settings.KB_PATH)
 
-    char_names = [c.display for c in _CHAR_CHOICES]
+    char_names = [c.name for c in _CHAR_CHOICES]
     log.info("Characters loaded: %s", ", ".join(char_names) or "(none)")
 
 
