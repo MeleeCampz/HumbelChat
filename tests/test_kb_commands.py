@@ -4,7 +4,7 @@ import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from kb.scorch import ChunkIndex
-from tests._shared import Interaction
+from tests._shared import Interaction, Followup
 
 
 class TestUploadKBCommand:
@@ -62,17 +62,32 @@ class TestUploadKBCommand:
         assert any("file.txt" in s or "upload_kb" in s for s in sent)
 
 
+    @pytest.mark.asyncio
+    async def test_upload_kb_early_return(self, temp_kb_dir):
+        """Test upload_kb early return path uses response.send_message."""
+        ix = Interaction()
+        await ix.response.send_message("placeholder", ephemeral=True)
+        sent = ix._sent
+
+        with patch("config.settings.settings") as mock_settings:
+            mock_settings.KB_PATH = temp_kb_dir
+            from commands.kb_commands import handle_upload_kb
+            await handle_upload_kb(ix, attachment=None, url=None)
+
+        assert any("provide either a URL" in s for s in sent)
+
+
 class TestListKBDocsCommand:
     """Test the /list_kb_docs slash command."""
 
     @pytest.mark.asyncio
     async def test_list_kb_docs_with_files(self, temp_kb_dir):
         """Test listing KB files when files exist."""
-        from kb.storage import list_kb_files
         from commands.kb_commands import handle_list_kb_docs
 
+        # Use the real response.send_message path (no defer)
         ix = Interaction()
-        await ix.followup.send("placeholder", ephemeral=True)  # initialize _sent
+        await ix.response.send_message("placeholder", ephemeral=True)  # init _sent via response.send
         sent = ix._sent
 
         with patch("config.settings.settings") as mock_settings:

@@ -32,7 +32,7 @@ async def handle_upload_kb(
             data = resp.content
         fname = url.split("?")[0].split("/")[-1] or "remote_file"
     else:
-        await interaction.followup.send(
+        await interaction.response.send_message(
             "Please provide either a URL or file attachment for /upload_kb.", ephemeral=True
         )
         return
@@ -41,10 +41,10 @@ async def handle_upload_kb(
     try:
         dest, summary = validate_upload(data, filename=fname, kb_path=settings.KB_PATH, subfolder=subfolder)
     except ValueError as exc:
-        await interaction.followup.send(f"Upload rejected: **{exc}**", ephemeral=True)
+        await interaction.response.send_message(f"Upload rejected: **{exc}**", ephemeral=True)
         return
     except FileNotFoundError as exc:
-        await interaction.followup.send(f"KB storage not found: **{exc}**", ephemeral=True)
+        await interaction.response.send_message(f"KB storage not found: **{exc}**", ephemeral=True)
         return
 
     # --- step 4: auto-index chunks (non-blocking) ---
@@ -70,7 +70,7 @@ async def handle_upload_kb(
     except Exception:
         approx_chunks_display = ""
 
-    await interaction.followup.send(
+    await interaction.response.send_message(
         f"✅ **upload_kb** stored `{summary['name']}` ({summary['size']:,} bytes)\n"
         f"Location: ``{dest.name}``\n"
         f"Hash SHA256 prefix: ``{summary['sha256']}...\\n``\n"
@@ -84,7 +84,7 @@ async def handle_list_kb_docs(interaction):
 
     docs = list_kb_files(settings.KB_PATH)
     if not docs:
-        await interaction.followup.send("No knowledge-base files found.", ephemeral=True)
+        await interaction.response.send_message("No knowledge-base files found.", ephemeral=True)
         return
 
     lines: list[str] = ["**Knowledge Base** documents:\n"]
@@ -100,7 +100,7 @@ async def handle_list_kb_docs(interaction):
         full_count = f"({len(docs)} total, showing top 15)"
         lines[-1] += f" {full_count}"
 
-    await interaction.followup.send("\n".join(lines), ephemeral=True)
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
 
 async def handle_reindex_kb(interaction):

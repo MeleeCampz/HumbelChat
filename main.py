@@ -167,6 +167,46 @@ async def translate_command(
     await handle_translate_command(interaction, target_language, source_language)
 
 
+@bot.tree.command(
+    name="upload_kb",
+    description="Upload a file or URL into the knowledge base.",
+)
+@app_commands.describe(
+    file="File attachment to upload",
+    url="URL to download and upload as a KB document",
+    subfolder="Optional subfolder inside the KB directory",
+)
+async def upload_kb_command(
+    interaction: discord.Interaction,
+    file: discord.Attachment | None = None,
+    url: str | None = None,
+    subfolder: str | None = None,
+):
+    """Upload a document to the knowledge base — wired to commands/kb_commands.py."""
+    from commands.kb_commands import handle_upload_kb
+    await handle_upload_kb(interaction, attachment=file, url=url, subfolder=subfolder)
+
+
+@bot.tree.command(
+    name="list_kb_docs",
+    description="List all documents currently stored in the knowledge base.",
+)
+async def list_kb_docs_command(interaction: discord.Interaction):
+    """List KB documents — wired to commands/kb_commands.py."""
+    from commands.kb_commands import handle_list_kb_docs
+    await handle_list_kb_docs(interaction)
+
+
+@bot.tree.command(
+    name="reindex_kb",
+    description="Re-index all files in the knowledge base for semantic search.",
+)
+async def reindex_kb_command(interaction: discord.Interaction):
+    """Re-index KB files — wired to commands/kb_commands.py."""
+    from commands.kb_commands import handle_reindex_kb
+    await handle_reindex_kb(interaction)
+
+
 # ════════════════════════════════════════════════════════════════════════
 #  Event handlers + startup
 # ════════════════════════════════════════════════════════════════════════
