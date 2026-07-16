@@ -27,9 +27,9 @@ python3 -m venv venv
 source venv/bin/activate   # Linux/macOS
 pip install -r requirements.txt
 
-# Configure environment variables
+# Configure environment — required before first run:
 cp .env.example .env
-# Edit .env — at minimum, set DISCORD_BOT_TOKEN and INFER_URL
+# Edit .env and set at minimum: DISCORD_BOT_TOKEN and INFER_URL
 
 # Run the bot
 python main.py
