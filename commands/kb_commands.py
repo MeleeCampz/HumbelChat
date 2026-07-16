@@ -109,7 +109,7 @@ async def handle_reindex_kb(interaction):
     await interaction.response.defer(ephemeral=True)
     try:
         count = reindex_all_kb_files(pathlib.Path(settings.KB_PATH))
-        await interaction.followup.send(f"✅ Successfully reindexed **{count}** files in the knowledge base.", ephemeral=	True)
+        await interaction.followup.send(f"✅ Successfully reindexed **{count}** files in the knowledge base.", ephemeral=True)
     except Exception as e:
         log.error("Reindexing failed: %s", e)
         await interaction.followup.send(f"❌ Failed to reindex KB: **{e}**", ephemeral=True)

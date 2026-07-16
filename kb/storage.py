@@ -41,9 +41,10 @@ def _infer_extension(raw_filename: str | None) -> str:
     }
     mime, _ = mimetypes.guess_type(raw_filename)
     if mime:
-        guess_ext = mime_map.get(mime, ".bin")
-        return guess_ext
-    # Return known extension from filename suffix
+        guess_ext = mime_map.get(mime)
+        if guess_ext:
+            return guess_ext
+    # Return known extension from filename suffix (fallback)
     return ext if len(ext) >= 1 else ".txt"
 
 

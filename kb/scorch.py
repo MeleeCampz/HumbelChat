@@ -77,7 +77,7 @@ def _tf(term: str, tokens: list[str]) -> float:
 
 
 def _idf(term: str, term_docs: dict[str, set], n_docs: int) -> float:
-    df = sum(1 for s in term_docs.values() if term in s)
+    df = len(term_docs.get(term, set()))
     return math.log((n_docs + 1) / (df + 1)) + 1
 
 

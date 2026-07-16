@@ -28,7 +28,7 @@ DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
 # ════════════════════════════════════
 #  AI PROVIDER (any OpenAI-compatible)
 # ════════════════════════════════════
-INFER_URL     = os.getenv("INFER_URL", "http://192.168.178.96:11434/v1")
+INFER_URL     = os.getenv("INFER_URL", "http://127.0.0.1:11434/v1")
 INFER_API_KEY = os.getenv("INFER_API_KEY", "")  # sometimes empty for local
 
 # ════════════════════════════════════
@@ -57,7 +57,6 @@ CHUNK_TARGET        = _safe_int(os.getenv("CHUNK_SIZE"), 2000)
 #  LEGACY COMPAT (read but don't use in new code)
 # ════════════════════════════════════
 _OPENWEBUI_KEY      = os.getenv("OPENWEBUI_API_KEY", "")
-_OPENAI_URL         = os.getenv("OPENAI_API_URL")
 _KB_KNOWLEDGE_BASE  = os.getenv("KB_KNOWLEDGE_BASE", "HumbleWood")
 
 

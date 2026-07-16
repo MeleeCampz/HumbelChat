@@ -11,7 +11,7 @@ Copy `.env.example` to `.env` and configure the following variables:
 | Variable | Description | Default |
 |---|---|---|
 | `DISCORD_BOT_TOKEN` | Discord bot token (required) | — |
-| `INFER_URL` | Base URL for AI inference backend | `http://192.168.178.96:11434/v1` |
+| `INFER_URL` | Base URL for AI inference backend | `http://127.0.0.1:11434/v1` |
 | `INFER_API_KEY` | API key for the inference provider | *(empty for local)* |
 | `CONTEXT_WINDOW` | Number of message rounds retained per channel | `10` |
 | `BOT_PREFIX` | Prefix for non-slash commands (e.g., `!ai`) | `!ai` |
@@ -51,6 +51,10 @@ The bot performs filesystem-based RAG instead of querying OpenWebUI's HTTP API. 
 ### Supported File Types
 - `.txt` - Plain text files
 - `.md` - Markdown files
+- `.csv` - CSV spreadsheets
+- `.html` - HTML documents
+- `.xml` - XML documents
+- `.rtf` - Rich Text Format
 
 ---
 
@@ -66,8 +70,8 @@ Controls AI personas/models. Structure:
       "model": "qwen3:latest",
       "system_prompt": ""
     },
-    "Trixy": {
-      "display": "Trixy Smoldersome",
+    "Assistant": {
+      "display": "Chat Assistant",
       "model": "gemma4:latest",
       "system_prompt": "..."
     }
