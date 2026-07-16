@@ -23,11 +23,6 @@ A feature-rich Discord bot that brings conversational AI capabilities to your se
 # Clone and install dependencies
 git clone https://github.com/MeleeCampz/discord-ai-bot.git
 cd discord-ai-bot
-pip install -r requirements.txt
-
-# Configure environment
-cp .env.example .env
-# Edit .env with your Discord bot token and AI provider details
 python3 -m venv venv
 source venv/bin/activate   # Linux/macOS
 pip install -r requirements.txt
@@ -182,7 +177,6 @@ The bot performs filesystem-based RAG — it reads `.txt` and `.md` files direct
 # 1. Create virtual environment and install dependencies
 python3 -m venv venv
 source venv/bin/activate       # Linux/macOS
-pip install -r requirements.txt
 
 # 2. Copy configuration files
 cp .env.example .env                    # Edit with your credentials
