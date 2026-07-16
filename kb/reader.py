@@ -27,10 +27,7 @@ def read_kb_files(
         if ext not in {".txt", ".md"}:
             continue
 
-        try:
-            content_text = p.read_bytes().decode("utf-8", errors="replace")
-        except UnicodeDecodeError:
-            content_text = p.read_bytes().decode("latin-1", errors="replace")
+        content_text = p.read_bytes().decode("utf-8", errors="replace")
 
         if len(content_text) == 0 or len(content_text) > max_bytes_per_file:
             continue
