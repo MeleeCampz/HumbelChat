@@ -178,7 +178,7 @@ async def on_ready():
     # Clear stale guild-scoped commands first (from the old copy_global_to pattern)
     for guild in bot.guilds or []:
         try:
-            await bot.tree.clear_commands(guild=guild)
+            bot.tree.clear_commands(guild=guild)
         except discord.NotFound:
             pass
     
