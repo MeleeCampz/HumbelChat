@@ -27,6 +27,10 @@ python3 -m venv venv
 source venv/bin/activate   # Linux/macOS
 pip install -r requirements.txt
 
+# Configure environment variables
+cp .env.example .env
+# Edit .env — at minimum, set DISCORD_BOT_TOKEN and INFER_URL
+
 # Run the bot
 python main.py
 ```
@@ -51,22 +55,38 @@ Set these environment variables in `.env`:
 
 ```
 discord-ai-bot/
-├── main.py              # Bot entry point, event handlers, slash commands
-├── bot_core.py          # Core AI client + conversation history (shared state)
-├── config/              # Settings and character configuration
-│   ├── settings.py      # Environment variable loading & singleton
-│   └── characters.py    # Character/persona loading & display mapping
-├── commands/            # Slash command implementations
-│   ├── ai_command.py    # /ai command handler (delegates to bot_core)
-│   └── kb_commands.py   # /upload_kb, /list_kb_docs, /reindex_kb handlers
-├── kb/                  # Knowledge base modules
-│   ├── reader.py        # Filesystem-based KB reading (RAG source)
-│   ├── storage.py       # Upload, validate, list KB files
-│   └── scorch.py        # TF-IDF relevance scoring for chunks
-└── utils/               # Helper functions
-    ├── kb_utils.py      # KB logging utilities
-    ├── response_splitter.py  # Long message chunking (paragraph-aware)
-    └── typing_loop.py   # Typing indicator task
+├── main.py                   # Bot entry point, event handlers, slash command registrations
+├── bot_core.py               # Core AI client + conversation history (shared state)
+├── config/                   # Settings and character configuration
+│   ├── __init__.py           # Package init
+│   ├── settings.py           # Environment variable loading & singleton
+│   └── characters.py         # Character/persona loading & display mapping
+├── commands/                 # Slash command implementations
+│   ├── __init__.py           # Package init
+│   ├── ai_command.py              # /ai command handler (delegates to bot_core)
+│   ├── character_commands.py      # /character command handler
+│   ├── clear_history_command.py   # /clear_history handler
+│   ├── kb_commands.py             # /upload_kb, /list_kb_docs, /reindex_kb handlers
+│   └── utility_commands.py        # /remind, /ocr, /summarize, /translate handlers
+├── kb/                     # Knowledge base modules
+│   ├── __init__.py           # Package init
+│   ├── reader.py             # Filesystem-based KB reading (RAG source)
+│   ├── storage.py            # Upload, validate, list KB files
+│   └── scorch.py             # TF-IDF relevance scoring for chunks
+├── utils/                  # Helper functions
+│   ├── __init__.py           # Package init
+│   ├── kb_utils.py               # KB logging utilities
+│   ├── response_splitter.py      # Long message chunking (paragraph-aware)
+│   └── typing_loop.py            # Typing indicator task
+├── tests/                  # Unit tests
+│   └── test_kb_reader.py
+├── docs/                   # Additional documentation
+│   └── README.md
+├── characters.json         # (optional) Character/persona config — NOT committed
+├── .env                    # Environment variables (from .env.example)
+├── .env.example            # Example environment variable template
+├── requirements.txt        # Python dependencies
+└── README.md               # This file
 ```
 
 ## Slash Commands Reference
@@ -170,33 +190,6 @@ The bot performs filesystem-based RAG — it reads `.txt` and `.md` files direct
 - `.html` - HTML documents
 - `.xml` - XML documents
 - `.rtf` - Rich Text Format
-
-## Startup & Deployment
-
-```bash
-# 1. Create virtual environment and install dependencies
-python3 -m venv venv
-source venv/bin/activate       # Linux/macOS
-
-# 2. Copy configuration files
-cp .env.example .env                    # Edit with your credentials
-# Place characters.json in project root (optional)
-mkdir -p data/knowledge                 # Create KB directory
-
-# 3. Run the bot
-python main.py
-```
-
-On first run, slash commands are registered globally (may take up to an hour for Discord propagation).
-
-## Troubleshooting
-
-| Symptom | Likely Cause | Fix |
-|---|---|---|
-| Commands invisible in dropdown | Command sync not propagated | Re-run `python main.py` or wait ~60 min; check `.env` token validity |
-| AI responses not appearing | API timeout (default 120s) | Increase `AI_REQUEST_TIMEOUT` in `.env`; check backend logs |
-| `characters.json not found` warning | File missing or misnamed | Ensure file exists at project root with valid JSON syntax |
-| KB files not loading | Wrong path or unsupported format | Check `KB_PATH` points to correct directory; use `.txt` or `.md` files |
 
 ## License
 
