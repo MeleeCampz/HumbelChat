@@ -73,5 +73,9 @@ todo/
 # Data folder - keep locally but don't track in git
 data/
 
+# Bot runtime files (local only)
+.bot.pid
+.bot.sock
+
 # Git
 .git/
