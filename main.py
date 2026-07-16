@@ -175,6 +175,13 @@ async def translate_command(
 async def on_ready():
     log.info("Logged in as %s (ID: %s)", bot.user, bot.user.id)
     
+    # Clear stale guild-scoped commands first (from the old copy_global_to pattern)
+    for guild in bot.guilds or []:
+        try:
+            await bot.tree.set_commands([], guild=guild)
+        except discord.NotFound:
+            pass
+    
     # Global sync only — registered once, available in every guild
     await bot.tree.sync()
     
