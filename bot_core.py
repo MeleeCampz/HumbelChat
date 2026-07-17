@@ -91,11 +91,12 @@ async def ask_ai(
     kb_docs = read_kb_files(settings.KB_PATH, query=user_message)
 
     if kb_docs:
-        doc_names = [name for name, _ in kb_docs[:5]]
+        limit = settings.RAG_MAX_DOCS
+        doc_names = [name for name, _ in kb_docs[:limit]]
         log.info("RAG: Attaching %d KB document(s) to context: [%s]",
                  len(doc_names), ', '.join(f'"{n}"' for n in doc_names))
         parts = [f"=== Knowledge Base: {_kb_kb_name} ===\n"]
-        for display_name, content in kb_docs[:5]:  # top 5 files
+        for display_name, content in kb_docs[:limit]:  # top N files (configurable via RAG_MAX_DOCS)
             parts.append(f"\n--- {display_name} ---")
             parts.append(content)
         rag_context = "\n".join(parts)

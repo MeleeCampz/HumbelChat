@@ -52,6 +52,7 @@ CHAT_HISTORY_RESET: str | None = _or_clear(os.getenv("CHAT_HISTORY_RESET"))
 KB_PATH             = pathlib.Path(os.getenv("KB_PATH", "data/knowledge"))
 DEFAULT_KB_NAME     = os.getenv("KB_DEFAULT_KB", "humblewood").lower()
 CHUNK_TARGET        = _safe_int(os.getenv("CHUNK_SIZE"), 2000)
+RAG_MAX_DOCS         = _safe_int(os.getenv("RAG_MAX_DOCS"), 10)
 
 # ════════════════════════════════════
 #  LEGACY COMPAT (read but don't use in new code)
@@ -79,6 +80,7 @@ class _Settings:
     KB_PATH: pathlib.Path
     DEFAULT_KB_NAME: str
     CHUNK_TARGET: int
+    RAG_MAX_DOCS: int
     OPENWEBUI_API_KEY: str  # legacy — kept for reference
 
     def __repr__(self):
@@ -93,7 +95,7 @@ _INIT_ATTRS = (
     "DISCORD_TOKEN", "INFER_URL", "INFER_API_KEY", "DEFAULT_MODEL",
     "DEFAULT_SYSTEM_PROMPT", "CONTEXT_WINDOW", "REQUEST_TIMEOUT",
     "MAX_TOKENS", "BOT_PREFIX", "CHAT_HISTORY_RESET", "KB_PATH", "DEFAULT_KB_NAME",
-    "CHUNK_TARGET", "OPENWEBUI_API_KEY",
+    "CHUNK_TARGET", "RAG_MAX_DOCS", "OPENWEBUI_API_KEY",
 )
 
 _INIT_VALUES = {
@@ -110,6 +112,7 @@ _INIT_VALUES = {
     "KB_PATH": KB_PATH,
     "DEFAULT_KB_NAME": DEFAULT_KB_NAME,
     "CHUNK_TARGET": CHUNK_TARGET,
+    "RAG_MAX_DOCS": RAG_MAX_DOCS,
     "OPENWEBUI_API_KEY": _OPENWEBUI_KEY,
 }
 
