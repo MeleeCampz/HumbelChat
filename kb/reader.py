@@ -20,12 +20,33 @@ def _extract_ext(name: str) -> str:
 
 
 def _normalize_query(query: str) -> list[str]:
-    """Extract meaningful query terms (≥3 alphabetic chars), deduplicated in order."""
+    """Extract meaningful query terms (≥3 alphabetic chars), deduplicated and de-noised.
+
+    Filters out common English stop words that pollute relevance scoring,
+since they appear in nearly every document and drown out real signals.
+    """
+    _STOP_WORDS = frozenset({
+        # pronouns & determiners
+        'the', 'a', 'an', 'this', 'that', 'these', 'those',
+        'i', 'you', 'he', 'she', 'we', 'they',
+        'it', 'its', 'my', 'your', 'his', 'her', 'our', 'their',
+        # auxiliary / common verbs
+        'is', 'are', 'was', 'were', 'be', 'been', 'being',
+        'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would',
+        'shall', 'should', 'may', 'might', 'must', 'can', 'could',
+        # prepositions & conjunctions
+        'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'from',
+        'and', 'but', 'or', 'nor', 'if', 'so', 'as', 'than',
+        # question / filler words
+        'about', 'tell', 'what', 'who', 'which', 'where', 'when',
+        'why', 'how', 'all', 'each', 'every', 'both', 'few',
+        'more', 'most', 'some', 'such', 'no', 'not', 'only',
+    })
     words = re.findall(r"[a-zA-Z_]{3,}", query.lower())
     seen: set[str] = set()
     unique: list[str] = []
     for w in words:
-        if w not in seen:
+        if w not in seen and w not in _STOP_WORDS:
             seen.add(w)
             unique.append(w)
     return unique
@@ -56,6 +77,9 @@ def _score_file(
             or name_lower.startswith(t + "_")
             or name_lower.endswith("_" + t)
             or name_lower == t
+            # Also check individual underscore-separated segments so that
+            # e.g. "Humble_World_Overview.txt" matches term "humblewood"
+            or any(seg == t for seg in name_lower.replace(".", "_").split("_"))
         ):
             score += 15
 
@@ -134,8 +158,9 @@ def read_kb_files(
 
         base_name = os.path.basename(p.name)
         stem = p.stem
-        idx_pos = stem.rfind("_")
-        display_name = stem[idx_pos + 1:] if idx_pos > 0 else base_name
+        # Strip leading numeric prefix (e.g., "70_Species_Equipment" → "Species_Equipment")
+        clean_stem = re.sub(r'^\d+', '', stem)
+        display_name = f"{clean_stem}{p.suffix}" if clean_stem else base_name
 
         raw_files.append((display_name, truncated))
 
