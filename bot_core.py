@@ -5,7 +5,7 @@ import logging
 import pathlib
 from openai import AsyncOpenAI
 from config.settings import settings
-from kb.reader import read_kb_files
+from kb.retrievers import retrieve_kb_documents, get_available_strategies
 
 log = logging.getLogger("bot.bot_core")
 
@@ -88,7 +88,12 @@ async def ask_ai(
 
     # ── 3. RAG context injection (query-aware relevance ranking) ───────
     rag_context = ""
-    kb_docs = read_kb_files(settings.KB_PATH, query=user_message)
+    kb_docs = retrieve_kb_documents(
+        query=user_message,
+        kb_path=settings.KB_PATH,
+        strategy=settings.RAG_RETRIEVAL_METHOD,
+        top_n=settings.RAG_MAX_DOCS,
+    )
 
     if kb_docs:
         limit = settings.RAG_MAX_DOCS
