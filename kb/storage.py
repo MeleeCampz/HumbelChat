@@ -119,14 +119,30 @@ def _sanitize_filename(name: str) -> str:
 
 def list_kb_files(
     kb_path: str | pathlib.Path,
+    subfolder: str | None = None,
+    recursive: bool = True,
 ) -> list[dict]:
-    """Scan the KB directory and return metadata for each file."""
+    """Scan the KB directory and return metadata for each file.
+
+    Args:
+        kb_path: Root knowledge base directory.
+        subfolder: Optional subdirectory to start listing from.
+                   If given, files are listed relative to this subfolder.
+        recursive: If True (default), scans all subdirectories.
+                   If False and no *subfolder*, only returns root-level files.
+    """
     kb_root = pathlib.Path(kb_path)
     docs: list[dict] = []
     if not kb_root.exists():
         return docs
 
-    for entry in sorted(kb_root.rglob("*"), key=lambda p: str(p)):
+    # Determine the scanning root
+    scan_root = kb_root / subfolder if subfolder else kb_root
+
+    # Determine glob pattern
+    pattern = "**/*" if recursive else "*"
+
+    for entry in sorted(scan_root.glob(pattern), key=lambda p: str(p)):
         if entry.is_file() and "?" not in entry.name and not entry.name.endswith(".chunks.jsonl"):
             stat = entry.stat()
             try:
@@ -135,7 +151,7 @@ def list_kb_files(
             except OSError:
                 sha = "unreadable"
             docs.append({
-                "name": str(entry.relative_to(kb_root)),
+                "name": str(entry.relative_to(scan_root)),
                 "filename": entry.name,
                 "size": stat.st_size,
                 "modified": datetime.fromtimestamp(

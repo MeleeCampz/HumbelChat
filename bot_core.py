@@ -59,6 +59,16 @@ async def ask_ai(
     """
 
     # ── 1. Prepare client ────────────────────────────────────────────────
+    effective_model = model_slug or settings.DEFAULT_MODEL
+    if not effective_model:
+        raise ValueError(
+            f"No model configured for this request. Character model='{model_slug}' is empty "
+            f"and DEFAULT_MODEL (from env MODEL_NAME) is not set either. "
+            f"Set MODEL_NAME in your .env file, or add a non-empty 'model' field to the "
+            f"character in characters.json (e.g. 'qwen3.5:9b')."
+        )
+    log.debug("Using model '%s' for this request.", effective_model)
+
     client = AsyncOpenAI(
         api_key=settings.INFER_API_KEY or "local-model-key",
         base_url=settings.INFER_URL,
@@ -76,13 +86,13 @@ async def ask_ai(
     if not system_p:
         system_p = settings.DEFAULT_SYSTEM_PROMPT or "You are a helpful AI assistant."
 
-    # ── 3. RAG context injection ──────────────────────────────────────────
+    # ── 3. RAG context injection (query-aware relevance ranking) ───────
     rag_context = ""
-    kb_docs = read_kb_files(settings.KB_PATH)
-    
+    kb_docs = read_kb_files(settings.KB_PATH, query=user_message)
+
     if kb_docs:
         doc_names = [name for name, _ in kb_docs[:5]]
-        log.info("RAG: Attaching %d KB document(s) to context: [%s]", 
+        log.info("RAG: Attaching %d KB document(s) to context: [%s]",
                  len(doc_names), ', '.join(f'"{n}"' for n in doc_names))
         parts = [f"=== Knowledge Base: {_kb_kb_name} ===\n"]
         for display_name, content in kb_docs[:5]:  # top 5 files
@@ -116,14 +126,26 @@ async def ask_ai(
 
     # ── 6. Call provider ─────────────────────────────────────────────────
     timeout_sec = settings.REQUEST_TIMEOUT
-    resp = await client.chat.completions.create(
-        model=model_slug,
-        messages=messages,
-        temperature=0.7,
-        max_tokens=settings.MAX_TOKENS,
-        stream=False,
-        timeout=timeout_sec,
-    )
+    try:
+        resp = await client.chat.completions.create(
+            model=effective_model,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=settings.MAX_TOKENS,
+            stream=False,
+            timeout=timeout_sec,
+        )
+    except Exception as e:
+        import traceback
+        error_msg = str(e)
+        status_code = getattr(getattr(e, 'response', None), 'status_code', None) or (getattr(e, 'status_code', None))
+        if status_code == 400 or 'model not found' in error_msg.lower():
+            raise ValueError(
+                f"Model '{effective_model}' not found on the AI backend at {settings.INFER_URL}. "
+                f"Requested character model: '{model_slug}'. Make sure this model exists and is available.\n"
+                f"Full error: {error_msg}"
+            ) from e
+        raise
 
     reply_text = resp.choices[0].message.content or "(empty response)"
     log.info("RAW_AI_RESPONSE_START\n%s\nRAW_AI_RESPONSE_END", reply_text)
@@ -137,7 +159,7 @@ async def ask_ai(
 
     approx_tokens = len(reply_text.split())
     return reply_text, {
-        "model_used": model_slug,
+        "model_used": effective_model,
         "tokens_approx": approx_tokens,
     }
 

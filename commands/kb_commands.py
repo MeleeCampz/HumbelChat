@@ -78,27 +78,67 @@ async def handle_upload_kb(
     )
 
 
-async def handle_list_kb_docs(interaction):
-    """List all documents in KB_PATH directory."""
+def get_root_directories(kb_path: pathlib.Path) -> list[str]:
+    """Return sorted list of subdirectory names at the root level."""
+    if not kb_path.exists():
+        return []
+    dirs = []
+    for entry in kb_path.iterdir():
+        if entry.is_dir():
+            dirs.append(entry.name)
+    return sorted(dirs)
+
+
+async def handle_list_kb_docs(interaction, subfolder_path: str | None = None):
+    """List all documents in KB_PATH directory.
+
+    If *subfolder_path* is given, recurses into that subfolder.
+    Otherwise shows only root-level items (files + directories).
+    """
     from config.settings import settings
 
-    docs = list_kb_files(settings.KB_PATH)
+    if subfolder_path:
+        # Subfolder view: recurse into that path
+        docs = list_kb_files(settings.KB_PATH, subfolder=subfolder_path, recursive=True)
+        lines: list[str] = [
+            f"**Knowledge Base** documents — `{subfolder_path}`",
+            "📂 **Subdirectories:**",
+        ]
+        # Show nested directories within the subfolder
+        scan_root = pathlib.Path(settings.KB_PATH) / subfolder_path
+        subdirs = get_root_directories(scan_root)
+        for d in sorted(subdirs):
+            lines.append(f"  📂 `{d}`")
+    else:
+        # Root view: show directories + root-level files only
+        docs = list_kb_files(settings.KB_PATH, subfolder=None, recursive=False)
+        dirs = get_root_directories(settings.KB_PATH)
+        lines = [
+            "**Knowledge Base** documents",
+            "📁 **Root directories:**",
+        ]
+        for d in sorted(dirs):
+            lines.append(f"  📂 `{d}`")
+
     if not docs:
-        await interaction.response.send_message("No knowledge-base files found.", ephemeral=True)
+        lines.append("")
+        lines.append("(no files found)")
+        await interaction.response.send_message("\n".join(lines), ephemeral=True)
         return
 
-    lines: list[str] = ["**Knowledge Base** documents:\n"]
-    for doc in docs[:15]:  # cap at 15 to avoid huge messages
+    # --- unified file listing (same format for both views) ---
+    section_label = "🔹 **Root files:**" if not subfolder_path else "📂 **Files:**"
+    lines.append("")
+    lines.append(section_label)
+    for doc in docs[:30]:  # cap at 30
         size_kb = doc["size"] / 1024 or "0"
-        name = doc.get("name", doc.get("filename", "unknown"))[:60]
+        name = doc.get("name", doc.get("filename", "unknown"))
         sha8 = (doc.get("sha256", "?")[:8])
         date = doc.get("modified", "?")[:10]
         lines.append(f"  • `{name}` — {size_kb:.1f} KB — {date} — sha:`{sha8}...`")
 
-    if len(docs) > 15:
-        lines.append(f"\n\n… and {len(docs) - 15} more documents.")
-        full_count = f"({len(docs)} total, showing top 15)"
-        lines[-1] += f" {full_count}"
+    if len(docs) > 30:
+        lines.append(f"\n… and {len(docs) - 30} more documents.")
 
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
@@ -113,4 +153,3 @@ async def handle_reindex_kb(interaction):
     except Exception as e:
         log.error("Reindexing failed: %s", e)
         await interaction.followup.send(f"❌ Failed to reindex KB: **{e}**", ephemeral=True)
-

@@ -34,7 +34,7 @@ INFER_API_KEY = os.getenv("INFER_API_KEY", "")  # sometimes empty for local
 # ════════════════════════════════════
 #  CHARACTER defaults (per-char in characters.json)
 # ════════════════════════════════════
-DEFAULT_MODEL       = ""          # chars in JSON override these
+DEFAULT_MODEL       = os.getenv("MODEL_NAME")
 DEFAULT_SYSTEM_PROMPT = ""
 CONTEXT_WINDOW      = _safe_int(os.getenv("CONTEXT_WINDOW"), 10)
 REQUEST_TIMEOUT     = _safe_int(os.getenv("AI_REQUEST_TIMEOUT"), 120)
