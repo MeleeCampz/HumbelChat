@@ -191,10 +191,13 @@ async def upload_kb_command(
     name="list_kb_docs",
     description="List all documents currently stored in the knowledge base.",
 )
-async def list_kb_docs_command(interaction: discord.Interaction):
+@app_commands.describe(
+    path="Optional subfolder path to list (omit for root-level overview).",
+)
+async def list_kb_docs_command(interaction: discord.Interaction, path: str | None = None):
     """List KB documents — wired to commands/kb_commands.py."""
     from commands.kb_commands import handle_list_kb_docs
-    await handle_list_kb_docs(interaction)
+    await handle_list_kb_docs(interaction, subfolder_path=path)
 
 
 @bot.tree.command(
