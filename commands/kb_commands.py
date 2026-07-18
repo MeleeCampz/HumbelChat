@@ -144,12 +144,49 @@ async def handle_list_kb_docs(interaction, subfolder_path: str | None = None):
 
 
 async def handle_reindex_kb(interaction):
-    """Trigger reindexing of all files in the KB."""
+    """Trigger reindexing of all files in the KB using the vector index."""
     from config.settings import settings
+
+    kb_path = pathlib.Path(settings.KB_PATH)
     await interaction.response.defer(ephemeral=True)
+
+    # --- Phase 2: use persistent vector index (KBIndexStore) ---
+    from kb.index import KBIndexStore
+    from kb.retrievers import retrieve_kb_documents, DEFAULT_METHOD
+
+    strategy = DEFAULT_METHOD
+    msg_parts: list[str] = []
+
     try:
-        count = reindex_all_kb_files(pathlib.Path(settings.KB_PATH))
-        await interaction.followup.send(f"✅ Successfully reindexed **{count}** files in the knowledge base.", ephemeral=True)
+        store = KBIndexStore(kb_path)
+        idx = await store.load(force_rebuild=True)
+
+        if idx is None or idx.is_empty():
+            # Index didn't build — check why (no KB files? no embedding backend?)
+            docs = list_kb_files(kb_path, recursive=True)
+            msg_parts.append(f"❌ Vector index could not be built.")
+            msg_parts.append(f"KB has {len(docs)} file(s) but 0 chunks.")
+        else:
+            doc_count = idx.count()
+            msg_parts.append(f"✅ Successfully rebuilt the vector index for **{kb_path}**.")
+            msg_parts.append(f"   • **{doc_count:,}** chunk(s) indexed")
+            msg_parts.append(f"   • Strategy: `{strategy}`")
+
+            # Quick sanity test — does retrieval actually work?
+            try:
+                sample_query = "test"
+                results = retrieve_kb_documents(sample_query, kb_path, strategy=strategy, top_n=3)
+                if results:
+                    msg_parts.append(f"   • Retrival test: {len(results)} document(s) found")
+                else:
+                    msg_parts.append(f"   • ⚠️ Retrieval returned 0 documents for a sample query")
+            except Exception as re:
+                msg_parts.append(f"   • ⚠️ Retrieval sanity check failed: {re}")
+
+        await store.shutdown()
+
     except Exception as e:
-        log.error("Reindexing failed: %s", e)
-        await interaction.followup.send(f"❌ Failed to reindex KB: **{e}**", ephemeral=True)
+        log.error("Reindexing failed: %s", e, exc_info=True)
+        msg_parts = [f"❌ Failed to reindex KB: **{e}**"]
+
+    await interaction.followup.send("\n".join(msg_parts), ephemeral=True)

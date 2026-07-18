@@ -99,15 +99,28 @@ class OpenAIEmbedder:
         # ── Resolve runtime settings (lazy to avoid circular import) ────
         from config.settings import settings as _s  # type: ignore[attr-defined]
 
-        base_url = _s.INFER_URL.rstrip("/") + "/api/v1"
+        base_url = _s.INFER_URL.rstrip("/")
+
+        # Determine what suffix to append so the /embeddings endpoint is correct.
+        # Users may set INFER_URL already ending in /api/v1 or /v1, or none of those.
+        if base_url.endswith("/api/v1"):
+            api_v1_base = base_url
+            remaining_suffixes = ["/embeddings"]
+        elif base_url.endswith("/v1"):
+            api_v1_base = base_url
+            remaining_suffixes = ["/embeddings"]
+        else:
+            api_v1_base = base_url + "/api/v1"
+            # For generic URLs (e.g. http://host:port), try both conventions
+            remaining_suffixes = ["/embeddings", "/v1/embeddings"]
+
         api_key = _s.INFER_API_KEY or ""
         headers: dict[str, str] = {}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
 
         # OpenWebUI embeddings endpoint is typically /embeddings or /v1/embeddings
-        # Try both; default to the simpler path first.
-        endpoints_to_try = ["/embeddings", "/v1/embeddings"]
+        endpoints_to_try = remaining_suffixes
 
         last_exc: Exception | None = None
         for suffix in endpoints_to_try:

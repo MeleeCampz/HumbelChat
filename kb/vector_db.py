@@ -76,7 +76,7 @@ class KBVectorIndex:
     async def from_kb_path(
         cls,
         kb_path: str | pathlib.Path,
-        max_lines_per_file: int = 50,
+        max_lines_per_file: int = 500,  # Increased so full tables/text sections are visible to Chunker
         max_bytes_per_file: int = 1024 * 1024,
     ) -> KBVectorIndex:
         """Scan a KB directory and build the vector index.

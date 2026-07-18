@@ -127,8 +127,26 @@ async def ask_ai(
         user_content = user_message
     messages.append({"role": "user", "content": user_content})
 
-    log.info("ask_ai → model=%s messages_in_prompt=%d KB_files=%d",
-             model_slug, len(messages), len(kb_docs))
+    # ── 5b. Context size logging ─────────────────────────────────────────
+    _total_chars = sum(len(m.get("content", "")) for m in messages)
+    _approx_tokens = int(_total_chars / 4)  # rough estimate: ~4 chars per token
+    log.info("ask_ai → model=%s messages_in_prompt=%d KB_files=%d system_chars=%d rag_chars=%d history_msgs=%d total_chars=%.1fK estimated_tokens=%d",
+             model_slug,
+             len(messages),
+             len(kb_docs),
+             len(system_p),
+             len(rag_context) if rag_context else 0,
+             len(recent_history),
+             _total_chars / 1024,
+             _approx_tokens)
+
+    # Per-file RAG breakdown (for monitoring context bloat)
+    if kb_docs:
+        for display_name, content in kb_docs[:limit]:
+            log.info("RAG doc: %s — %.1fK chars (%d estimated tokens)",
+                     display_name,
+                     len(content) / 1024,
+                     int(len(content) / 4))
 
     # ── 6. Call provider ─────────────────────────────────────────────────
     timeout_sec = settings.REQUEST_TIMEOUT

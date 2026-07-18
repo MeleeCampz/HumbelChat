@@ -45,7 +45,7 @@ logger = logging.getLogger("kb.index")
 
 # ──────────────────────────── Schema ────────────────────────────────────
 
-_SCHEMA = """\
+_SCHEMA_CREATE_DOC_INDEX = """\
 CREATE TABLE IF NOT EXISTS document_index (
     file_path   TEXT PRIMARY KEY,
     doc_name    TEXT NOT NULL,
@@ -53,7 +53,9 @@ CREATE TABLE IF NOT EXISTS document_index (
     embedding   BLOB NOT NULL,          -- pickle'd list[float]
     updated_at  REAL DEFAULT (strftime('%s','now'))
 );
+"""
 
+_SCHEMA_CREATE_METADATA = """\
 CREATE TABLE IF NOT EXISTS metadata (
     key       TEXT PRIMARY KEY,
     value     TEXT NOT NULL
@@ -84,30 +86,42 @@ class KBIndexStore:
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 
-    async def load(self) -> KBVectorIndex:
+    async def load(self, force_rebuild: bool = False) -> KBVectorIndex:
         """Load or build the vector index.
 
-        1. If a valid SQLite cache exists, load embeddings from disk.
+        1. If a valid SQLite cache exists (and not forced rebuild), load embeddings from disk.
         2. Otherwise, build from scratch using OpenWebUI /embeddings endpoint.
         3. Save to disk for future runs.
+
+        Parameters
+        ----------
+        force_rebuild : If True, skips the cache and always rebuilds from KB files.
         """
         if self._index is not None:
             return self._index
 
-        # Try loading from disk cache first
-        if self._db_path.exists() and self._is_cache_valid():
+        # If we have a valid in-memory index, reuse it
+        # (Note: _index is only set below after load completes)
+
+        # Try loading from disk cache first — unless forced to rebuild
+        if not force_rebuild and self._db_path.exists() and self._is_cache_valid():
             logger.info("Loading vector index from SQLite cache (%s)", self._db_path)
             self._index = await self._load_from_disk()
-            return self._index
+            if self._index is not None and not self._index.is_empty():
+                return self._index
+            # Cache was valid but empty — fall through to rebuild below
+            logger.warning("SQLite cache exists but has 0 entries; rebuilding from KB files")
 
-        # Build fresh
+        # Build fresh (or forced rebuild)
         logger.info("Building vector index from scratch for '%s'", self.kb_path)
         self._index = await KBVectorIndex.from_kb_path(
             self.kb_path,
             max_lines_per_file=self.max_lines,
             max_bytes_per_file=self.max_bytes,
         )
-        if self._index is not None and not self._index.is_empty():
+        if self._index is None or self._index.is_empty():
+            logger.error("Index build produced empty result for '%s' — check embedding backend connectivity", self.kb_path)
+        else:
             await self._save_to_disk()
             logger.info("Index built and saved to cache (%d docs)", self._index.count())
         return self._index
@@ -242,6 +256,11 @@ class KBIndexStore:
 
         try:
             conn = sqlite3.connect(str(self._db_path))
+            # Ensure tables exist before querying (IF NOT EXISTS is safe to call repeatedly)
+            conn.execute(_SCHEMA_CREATE_DOC_INDEX)
+            conn.commit()
+            conn.execute(_SCHEMA_CREATE_METADATA)
+            conn.commit()
             cursor = conn.execute("SELECT doc_name, content, embedding FROM document_index ORDER BY updated_at DESC")
         except sqlite3.Error as exc:
             logger.error("Failed to load SQLite index: %s", exc)
@@ -281,7 +300,10 @@ class KBIndexStore:
             os.makedirs(self.persist_dir, exist_ok=True)
 
             conn = sqlite3.connect(str(self._db_path))
-            conn.execute(_SCHEMA)
+            # Execute each CREATE TABLE separately (sqlite3 prohibits multi-statement execute)
+            conn.execute(_SCHEMA_CREATE_DOC_INDEX)
+            conn.commit()
+            conn.execute(_SCHEMA_CREATE_METADATA)
             conn.commit()
 
             # Clear existing cache (simple approach — replace entire table)

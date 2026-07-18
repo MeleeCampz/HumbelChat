@@ -75,10 +75,30 @@ def _retrieve_keyword(
     kb_path: str | pathlib.Path,
     top_n: int,
 ) -> list[tuple[str, str]]:
-    """Keyword-based retrieval using the existing heuristic engine."""
-    from kb.reader import read_kb_files  # type: ignore[import]
+    """Keyword-based retrieval using the existing heuristic engine.
 
-    return read_kb_files(kb_path, query=query, top_n=top_n)
+    Phase 1: Score all files against *query* terms using a lightweight scan
+             (first 300 lines is sufficient for relevance ranking).
+    Phase 2: Extract only relevant line-windows from the top-N documents
+             via get_relevant_chunks(), avoiding full-file dump in context.
+    """
+    from kb.reader import read_kb_files, get_relevant_chunks
+
+    # Phase 1 — quick scoring pass (300 lines is plenty for keyword overlap)
+    scored = read_kb_files(kb_path, query=query, top_n=top_n * 3, max_lines_per_file=300)
+    if not scored:
+        return []
+
+    # Phase 2 — extract only matched windows from top documents
+    doc_names = [name for name, _ in scored[:top_n]]
+    chunks = get_relevant_chunks(kb_path, doc_names, query=query, window_lines=5)
+
+    logger.info(
+        "Keyword retrieval: %d files ranked → %d relevant chunk(s) with ~%.0f chars",
+        len(scored), len(chunks),
+        sum(len(c) for _, c in chunks) if chunks else 0,
+    )
+    return chunks
 
 
 async def _retrieve_vector(
@@ -86,9 +106,13 @@ async def _retrieve_vector(
     kb_path: str | pathlib.Path,
     top_n: int,
 ) -> list[tuple[str, str]]:
-    """Vector-similarity retrieval using the persist-backed index.
+    """Hybrid vector+keyword retrieval using the persist-backed index.
 
-    Falls back to keyword if the vector index is unavailable.
+    Falls back to keyword-only if the vector index is unavailable.
+    Combines cosine-similarity of chunks with filename/body keyword boosting
+    so that files whose names or content match query terms strongly (e.g. a
+    file literally named ``Humblewood_Calendar.md`` when searching for the
+    "humblewood time system") are not drowned out by general-topic matches.
     """
     try:
         from kb.reader import read_kb_files  # type: ignore[import]
@@ -98,27 +122,197 @@ async def _retrieve_vector(
     store = await _ensure_index_store(kb_path)
     if store is None:
         logger.warning("Vector index store unavailable for '%s'; falling back to keyword", kb_path)
-        return read_kb_files(kb_path, query=query, top_n=top_n) if read_kb_files else []
+        from kb.reader import get_relevant_chunks
+        scored = read_kb_files(kb_path, query=query, top_n=top_n * 3, max_lines_per_file=300) if read_kb_files else []
+        doc_names = [name for name, _ in scored[:top_n]] if scored else []
+        chunks = get_relevant_chunks(kb_path, doc_names, query=query, window_lines=5)
+        logger.info(
+            "Vector→keyword fallback: %d files ranked → %d relevant chunk(s) with ~%.0f chars",
+            len(scored), len(chunks),
+            sum(len(c) for _, c in chunks) if chunks else 0,
+        )
+        return chunks
 
     idx = store.get_index()
     if idx is None or idx.is_empty():
         logger.warning("Vector index is empty for '%s'; falling back to keyword", kb_path)
-        return read_kb_files(kb_path, query=query, top_n=top_n) if read_kb_files else []
+        from kb.reader import get_relevant_chunks
+        scored = read_kb_files(kb_path, query=query, top_n=top_n * 3, max_lines_per_file=300) if read_kb_files else []
+        doc_names = [name for name, _ in scored[:top_n]] if scored else []
+        chunks = get_relevant_chunks(kb_path, doc_names, query=query, window_lines=5)
+        logger.info(
+            "Vector→keyword fallback (empty index): %d files ranked → %d relevant chunk(s) with ~%.0f chars",
+            len(scored), len(chunks),
+            sum(len(c) for _, c in chunks) if chunks else 0,
+        )
+        return chunks
 
-    ranked_names = await idx.query(query, top_n=top_n)
-    if not ranked_names:
-        return []
+    # ── Query expansion (uses configured LLM backend) ────────────────────
+    try:
+        from kb.query_rewriter import create_query_rewriter
+        rewriter = create_query_rewriter()
+        expanded_queries = await rewriter.expand(query)
+    except Exception:
+        expanded_queries = [query]
+        logger.debug("Query expansion unavailable; using original query only")
 
-    # Pull the actual content for the ranked names (keyword engine reads files)
-    all_docs = read_kb_files(kb_path, top_n=999) if read_kb_files else []
-    name_set = {name for name, _ in ranked_names}
-    ranked_list: list[tuple[str, str]] = []
-    for display_name, content in all_docs:
-        if display_name in name_set:
-            ranked_list.append((display_name, content))
-        if len(ranked_list) >= top_n:
+    # ── Vector search on all expanded queries ────────────────────────────
+    import math
+
+    def _cosine_sim(a: list[float], b: list[float]) -> float:
+        dot = sum(x * y for x, y in zip(a, b))
+        na = math.sqrt(sum(x * x for x in a))
+        nb = math.sqrt(sum(x * x for x in b))
+        if na == 0 or nb == 0:
+            return 0.0
+        return dot / (na * nb)
+
+    # Load all docs from the vector index to score against expanded queries
+    conn_path = store._db_path  # type: ignore[attr-defined]
+    import sqlite3, pickle, json
+    if not conn_path.exists():
+        # Index is in-memory only — use vector-ranked file names but extract chunks only
+        ranked_names = await idx.query(query, top_n=top_n * 20)
+        if ranked_names:
+            name_set: set[str] = set()
+            for name, _ in ranked_names:
+                name_set.add(name)
+                if " [" in name:
+                    name_set.add(name.split(" [")[0])
+            # Extract base file names from chunk keys
+            doc_stems = sorted({n.split(" [")[0] if " [" in n else n for n in name_set})
+            from kb.reader import get_relevant_chunks
+            ranked_list = get_relevant_chunks(kb_path, doc_stems[:top_n], query=query, window_lines=5)
+        else:
+            # No ranked names → full fallback to keyword
+            from kb.reader import get_relevant_chunks
+            scored = read_kb_files(kb_path, query=query, top_n=top_n * 3, max_lines_per_file=300) if read_kb_files else []
+            doc_names = [name for name, _ in scored[:top_n]] if scored else []
+            ranked_list = get_relevant_chunks(kb_path, doc_names, query=query, window_lines=5)
+        logger.info(
+            "Vector→keyword fallback (in-memory DB): %d relevant chunk(s) with ~%.0f chars",
+            len(ranked_list),
+            sum(len(c) for _, c in ranked_list) if ranked_list else 0,
+        )
+        return ranked_list
+
+    conn = sqlite3.connect(str(conn_path))
+    cursor = conn.execute("SELECT doc_name, content, embedding FROM document_index")
+    all_chunks: list[tuple[str, str, bytes | str]] = cursor.fetchall()
+    conn.close()
+
+    # Embed all expanded queries and collect scores per chunk
+    try:
+        from kb.embedder_openai import OpenAIEmbedder
+        embedder = OpenAIEmbedder(model_name="nomic-embed-text:latest")
+        embeddings = await embedder.encode(expanded_queries)
+    except Exception as exc:
+        logger.warning("Query embedding failed (%s); falling back to keyword", exc)
+        from kb.reader import get_relevant_chunks
+        scored = read_kb_files(kb_path, query=query, top_n=top_n * 3, max_lines_per_file=300) if read_kb_files else []
+        doc_names = [name for name, _ in scored[:top_n]] if scored else []
+        ranked_list = get_relevant_chunks(kb_path, doc_names, query=query, window_lines=5)
+        logger.info(
+            "Vector→keyword fallback (embedding error): %d files ranked → %d relevant chunk(s) with ~%.0f chars",
+            len(scored), len(ranked_list),
+            sum(len(c) for _, c in ranked_list) if ranked_list else 0,
+        )
+        return ranked_list
+
+    # Score each chunk: max cosine similarity across expanded queries (clipped to [0,1])
+    def _safe_cosine(q_emb: list[float], doc_emb: bytes | str) -> float:
+        if isinstance(doc_emb, bytes):
+            try:
+                emb_data = pickle.loads(doc_emb)
+            except Exception:
+                emb_data = json.loads(doc_emb)
+        else:
+            emb_data = doc_emb
+        sim = _cosine_sim(q_emb, emb_data)
+        return max(0.0, min(1.0, sim))
+
+    chunk_scores: dict[str, float] = {}  # doc_name -> best (clipped) similarity
+    for i, q_emb in enumerate(embeddings):
+        for name, content, emb_blob in all_chunks:
+            raw_sim = _cosine_sim(q_emb, emb_blob)
+            clipped = max(0.0, min(1.0, raw_sim))
+            if clipped > chunk_scores.get(name, 0):
+                chunk_scores[name] = clipped
+
+    # ── Keyword/filename boost ───────────────────────────────────────────
+    from kb.reader import _normalize_query as _norm_terms
+
+    query_terms = _norm_terms(query)
+
+    def _filename_boost(display_name: str) -> int:
+        """Return a keyword score for filename / header overlap.
+
+        Exact filename match (stem match, case-insensitive) gets +100;
+        partial term-in-name match gets +15 per term.
+        """
+        # Check exact stem match first (strongest signal)
+        stem_match = any(
+            t.lower() == display_name.lower().replace('.md', '').replace('.txt', '')
+            or f"{t}.md" in display_name.lower()
+            or f"{t}.txt" in display_name.lower()
+            for t in query_terms
+        )
+        if stem_match:
+            return 100
+        # Partial match per term
+        return sum(15 for t in query_terms if t.lower() in display_name.lower())
+
+    def _header_body_boost(content: str) -> int:
+        lines = content.splitlines()[:300]
+        score = 0
+        for line in lines:
+            cl = line.strip().lower()
+            for term in query_terms:
+                t = term.lower()
+                # Header detection (short, starts with uppercase, no spaces)
+                is_header = len(line.strip()) <= 40 and line.strip() and line.strip()[0].isupper() and " " not in line.strip()
+                if is_header and t in cl:
+                    score += 10
+                else:
+                    hits = cl.count(t)
+                    hits = min(hits, 4)
+                    if hits > 0:
+                        score += hits * 2
+        return score
+
+    # Build combined hybrid scores for all chunks
+    # all_chunks is [(doc_name(str), content(str), embedding(blob|bytes))] per SQLite query
+    hybrid_scores: list[tuple[float, str, str]] = []  # (hybrid_score, name, content)
+    for doc_name, chunk_content, emb_blob in all_chunks:
+        vector_score = chunk_scores.get(doc_name, 0.0)
+        fname_boost = _filename_boost(doc_name) / 100.0  # normalise to [0, ~1]
+        body_boost = _header_body_boost(chunk_content) / 500.0  # normalise to [0, ~1]
+        hybrid = vector_score + fname_boost + body_boost
+        hybrid_scores.append((hybrid, doc_name, chunk_content))
+
+    hybrid_scores.sort(key=lambda t: -t[0])
+
+    # ── Deduplicate to unique files, collecting top chunks per file ────────
+    # We need doc_stems (file stems) for get_relevant_chunks
+    seen_files: set[str] = set()
+    doc_stems: list[str] = []
+    for hybrid_score, name, content in hybrid_scores:
+        if len(doc_stems) >= top_n * 3:  # gather more candidates for chunk extraction
             break
+        base_name = name.split(" [")[0] if " [" in name else name
+        if base_name not in seen_files:
+            seen_files.add(base_name)
+            doc_stems.append(base_name)
 
+    # ── Extract relevant chunks from top-ranked unique files ─────────────
+    from kb.reader import get_relevant_chunks
+    ranked_list = get_relevant_chunks(kb_path, doc_stems, query=query, window_lines=5)
+
+    logger.info(
+        "Vector retrieval: %d files scored → %d relevant chunk(s) with ~%.0f chars",
+        len(doc_stems), len(ranked_list),
+        sum(len(c) for _, c in ranked_list) if ranked_list else 0,
+    )
     return ranked_list
 
 
