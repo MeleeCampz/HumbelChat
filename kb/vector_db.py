@@ -1,8 +1,12 @@
-"""In-memory vector index for KB document retrieval using fastembed embeddings.
+"""In-memory vector index for KB document retrieval using OpenAI-compatible backend embeddings.
 
 Provides cosine-similarity based document ranking as an alternative to the
-keyword-matching engine in reader.py.  Documents are indexed once and can be
-queried efficiently without external services.
+keyword-matching engine in reader.py.  Documents are **chunked** semantically
+before embedding so that queries for specific topics (e.g., "time system")
+hit only relevant sections — not drowned out by unrelated content.
+
+Uses ``kb.embedder_openai.OpenAIEmbedder`` powered by the configured INFER_URL
+(OpenWebUI) backend with model ``nomic-embed-text:latest``.
 """
 from __future__ import annotations
 
@@ -13,12 +17,14 @@ import re
 from dataclasses import dataclass, field
 
 
-# ──────────────────────────── Lazy-import of fastembed ────────────────
+# ──────────────────────────── Chunking provider ──────────────────────
 
-try:
-    from fastembed import TextEmbedding  # type: ignore[import-untyped]
-except ImportError:
-    TextEmbedding = None  # type: ignore[misc]
+from kb.chunker import Chunker
+
+
+# ──────────────────────────── Embedding provider ──────────────────────
+
+from kb.embedder_openai import OpenAIEmbedder
 
 
 # ──────────────────────────── Data structures ─────────────────────────
@@ -52,41 +58,42 @@ def _normalize_display_name(p: pathlib.Path, base_name: str) -> str:
 class KBVectorIndex:
     """Lightweight in-memory vector index for KB documents.
 
-    Build once at startup with `KBVectorIndex.from_kb_path()`, then query
-    with `index.query("some text", top_n=5)`.
+    Build once at startup with ``KBVectorIndex.from_kb_path()``, then query
+    with ``index.query("some text", top_n=5)``.
 
-    Requires `fastembed` and `onnxruntime` installed.
+    Uses the configured OpenWebUI-compatible backend (see ``kb.embedder_openai``).
+    Returns an empty index when the embedding backend is unreachable — caller
+    should fall back to keyword search via ``kb.retrievers.is_vector_available()``.
     """
 
-    def __init__(self, model_name: str = "BAAI/bge-small-en-v1.5") -> None:
+    def __init__(self) -> None:
         self._docs: list[_DocEntry] = []
-        self._model_name = model_name
-        self._embedding_model: TextEmbedding | None = None
+        self._embedder = OpenAIEmbedder()
 
     # ── Construction ────────────────────────────────────────────────
 
     @classmethod
-    def from_kb_path(
+    async def from_kb_path(
         cls,
         kb_path: str | pathlib.Path,
         max_lines_per_file: int = 50,
         max_bytes_per_file: int = 1024 * 1024,
-        model_name: str = "BAAI/bge-small-en-v1.5",
-    ) -> KBVectorIndex | None:
+    ) -> KBVectorIndex:
         """Scan a KB directory and build the vector index.
 
-        Returns ``None`` if fastembed is not available.
-        """
-        if TextEmbedding is None:
-            return None  # type: ignore[return-value]
+        Documents are **semantically chunked** (by Markdown headers or paragraphs)
+        before embedding so that each chunk targets a specific topic area.
 
+        Returns an (possibly empty) ``KBVectorIndex``.  When embedding fails
+        the caller should fall back to keyword retrieval.
+        """
         root = pathlib.Path(kb_path)
         if not root.exists():
-            return None
+            return cls()  # empty index
 
-        index = cls(model_name)
+        index = cls()
 
-        entries: list[tuple[str, str]] = []
+        entries: list[tuple[str, str]] = []  # (display_name_with_section, content)
         for p in sorted(root.rglob("*")):
             if not p.is_file() or "?" in p.name:
                 continue
@@ -97,26 +104,44 @@ class KBVectorIndex:
             if not content_text or len(content_text) > max_bytes_per_file:
                 continue
 
-            lines = content_text.splitlines()[:max_lines_per_file]
-            truncated = "\n".join(lines)
-            if len(content_text.splitlines()) > max_lines_per_file:
-                truncated += "\n... [truncated]"
+            # Chunk the file instead of using whole-file blobs
+            chunks = await Chunker.split_file(p, max_lines_per_file=max_lines_per_file)
+            for chunk in chunks:
+                display_name = f"{chunk.display_name} [{chunk.section_path}]"
+                entries.append((display_name, chunk.content))
 
-            base_name = os.path.basename(p.name)
-            display_name = _normalize_display_name(p, base_name)
-            entries.append((display_name, truncated))
+        # If chunking produced nothing (e.g., tiny files), fall back to whole-file
+        if not entries:
+            for p in sorted(root.rglob("*")):
+                if not p.is_file() or "?" in p.name:
+                    continue
+                ext = _extract_ext(p.name)
+                if ext not in {".txt", ".md"}:
+                    continue
+                content_text = p.read_bytes().decode("utf-8", errors="replace")
+                if not content_text or len(content_text) > max_bytes_per_file:
+                    continue
 
-        # Build the index (embeds all documents)
+                lines = content_text.splitlines()[:max_lines_per_file]
+                truncated = "\n".join(lines)
+                if len(content_text.splitlines()) > max_lines_per_file:
+                    truncated += "\n... [truncated]"
+
+                base_name = os.path.basename(p.name)
+                display_name = _normalize_display_name(p, base_name)
+                entries.append((display_name, truncated))
+
+        # Build the index (embeds all chunks via OpenWebUI backend)
         if entries:
             names, contents = zip(*entries)
             try:
-                embeddings = list(index._get_model().embed(contents))  # type: ignore[attr-defined]
+                embeddings = await index._embedder.encode(list(contents))
                 index._docs = [
-                    _DocEntry(display_name=n, content=c, embedding=e.tolist())
+                    _DocEntry(display_name=n, content=c, embedding=e)  # type: ignore[arg-type]
                     for n, c, e in zip(names, contents, embeddings)
                 ]
             except Exception as exc:
-                os.environ.setdefault("KB_VECTOR_INDEX_LOG", "1")  # signal caller to fall back
+                os.environ.setdefault("KB_VECTOR_INDEX_LOG", "1")
                 index._log_error(str(exc))
 
         return index
@@ -129,7 +154,7 @@ class KBVectorIndex:
 
     # ── Querying ────────────────────────────────────────────────────
 
-    def query(
+    async def query(
         self,
         text: str,
         top_n: int = 5,
@@ -142,8 +167,10 @@ class KBVectorIndex:
         if self.is_empty() or not text.strip():
             return []
 
-        q_emb = self._get_query_embedding(text)
-        if q_emb is None:
+        try:
+            q_emb = await self._embedder.encode([text])
+            q_emb = q_emb[0]
+        except Exception:
             return []
 
         scored: list[tuple[str, float]] = []
@@ -157,28 +184,6 @@ class KBVectorIndex:
 
         scored.sort(key=lambda t: -t[1])
         return scored[:top_n]
-
-    # ── Internal helpers ────────────────────────────────────────────
-
-    _EMBED_DIM = 384  # bge-small-en-v1.5 dimension
-
-    def _get_model(self) -> TextEmbedding:
-        if self._embedding_model is None:
-            self._embedding_model = TextEmbedding(
-                model_name=self._model_name,
-                cuda=False,
-            )
-        return self._embedding_model
-
-    def _get_query_embedding(self, text: str) -> list[float] | None:
-        """Encode query text to a vector. Returns None on failure."""
-        try:
-            emb = list(self._get_model().embed([text]))
-            if emb and len(emb[0]) == self._EMBED_DIM:
-                return emb[0].tolist()
-        except Exception:
-            pass
-        return None
 
     @staticmethod
     def _log_error(msg: str) -> None:
