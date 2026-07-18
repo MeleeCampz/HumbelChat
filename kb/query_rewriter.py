@@ -40,6 +40,7 @@ class QueryRewriter:
     """Dynamically expand queries using the configured LLM backend."""
 
     MAX_EXPANSIONS = 3
+    REWRITE_TIMEOUT_SEC = 5
     REWRITE_PROMPT_TEMPLATE = """\
 You are a search query expansion assistant. Your task is to generate additional search terms that capture related concepts, synonyms, and contextual meanings of the user's original query — all within the domain of {kb_domain}.
 
@@ -125,7 +126,7 @@ Expansions:
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,  # Low for consistent, focused expansions
                 max_tokens=256,
-                timeout=15.0,
+                timeout=self.REWRITE_TIMEOUT_SEC,
             )
 
             content = response.choices[0].message.content or ""
@@ -133,7 +134,7 @@ Expansions:
             return lines[: self.max_expansions]  # type: ignore[arg-type]
 
         except Exception as exc:
-            logger.error("Query rewrite failed: %s", exc)
+            logger.warning("Query rewrite attempt failed (%s); returning no expansions", exc)
             return []
 
 

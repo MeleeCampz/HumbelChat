@@ -53,7 +53,7 @@ KB_PATH             = pathlib.Path(os.getenv("KB_PATH", "data/knowledge"))
 DEFAULT_KB_NAME     = os.getenv("KB_DEFAULT_KB", "humblewood").lower()
 CHUNK_TARGET        = _safe_int(os.getenv("CHUNK_SIZE"), 2000)
 RAG_MAX_DOCS           = _safe_int(os.getenv("RAG_MAX_DOCS"), 10)
-RAG_RETRIEVAL_METHOD   = os.getenv("RAG_RETRIEVAL_METHOD", "keyword").lower()  # keyword | vector
+RAG_RETRIEVAL_METHOD   = os.getenv("RAG_RETRIEVAL_METHOD", "vector").lower()  # vector (recommended) | keyword
 
 # ════════════════════════════════════
 #  LEGACY COMPAT (read but don't use in new code)

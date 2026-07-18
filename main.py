@@ -27,10 +27,47 @@ from config.characters import (
 from bot_core import ask_ai as core_ask_ai, ensure_history, clear_history as core_clear_history
 from bot_core import _chat_history  # for prefix command history lookup
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+# Ensure a log directory exists
+LOG_DIR = pathlib.Path(__file__).resolve().parent / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+
+# Set up console handler (color-capable terminal detection omitted for simplicity)
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.INFO)
+console_format = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+console_handler.setFormatter(console_format)
+
+# Set up file handlers with rotation
+file_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+from logging.handlers import RotatingFileHandler
+
+bot_log = RotatingFileHandler(
+    LOG_DIR / "bot.log",
+    maxBytes=10 * 1024 * 1024,  # 10 MB per file
+    backupCount=5,
+    encoding="utf-8",
 )
+bot_log.setLevel(logging.INFO)
+bot_log.setFormatter(file_formatter)
+
+dev_log = RotatingFileHandler(
+    LOG_DIR / "dev.log",
+    maxBytes=10 * 1024 * 1024,
+    backupCount=5,
+    encoding="utf-8",
+)
+dev_log.setLevel(logging.DEBUG)
+dev_log.setFormatter(file_formatter)
+
+# Root logger gets both handlers
+root_logger = logging.getLogger()
+root_logger.handlers.clear()
+root_logger.addHandler(bot_log)
+root_logger.addHandler(dev_log)
+root_logger.addHandler(console_handler)
+root_logger.setLevel(logging.INFO)
+
 log = logging.getLogger("bot")
 
 INTENTS = discord.Intents.default()
