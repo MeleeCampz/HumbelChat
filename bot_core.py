@@ -88,7 +88,7 @@ async def ask_ai(
 
     # ── 3. RAG context injection (query-aware relevance ranking) ───────
     rag_context = ""
-    kb_docs = retrieve_kb_documents(
+    kb_docs = await retrieve_kb_documents(
         query=user_message,
         kb_path=settings.KB_PATH,
         strategy=settings.RAG_RETRIEVAL_METHOD,

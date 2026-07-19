@@ -49,14 +49,12 @@ class Chunker:
     async def split_file(
         cls,
         file_path: str | pathlib.Path,
-        max_lines_per_file: int = 50,
     ) -> list[ChunkInfo]:
         """Split a single file into semantic chunks.
 
         Parameters
         ----------
         file_path : Path to the file to chunk.
-        max_lines_per_file : Limit content to this many lines (prevents OOM).
 
         Returns
         -------
@@ -86,22 +84,16 @@ class Chunker:
                 )
             ]
 
-        # For larger files, cap lines to prevent OOM during processing
-        lines = content_text.splitlines()[:max_lines_per_file]
-        truncated = "\n".join(lines)
-        if len(content_text.splitlines()) > max_lines_per_file:
-            truncated += "\n... [truncated]"
-
         chunks: list[ChunkInfo] = []
 
         # 2. Smart Header Splitting with Minimum-Size Merging
-        header_chunks = cls._split_by_headers(truncated, display_name, source_name)
+        header_chunks = cls._split_by_headers(content_text, display_name, source_name)
         if header_chunks:
             chunks.extend(header_chunks)
 
         # 3. Fallback to adaptive chunking if no headers found
         if not chunks:
-            chunks.extend(cls._split_adaptive(truncated, display_name, source_name))
+            chunks.extend(cls._split_adaptive(content_text, display_name, source_name))
 
         logger.debug("File %s (%d chars): produced %d chunk(s)", source_name, len(content_text), len(chunks))
         return chunks
