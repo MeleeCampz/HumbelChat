@@ -288,6 +288,14 @@ def get_relevant_chunks(
             if not too_close:
                 final_anchors.append(li)
 
+        # === SIZE-CONDITIONAL FULL DOCUMENT RETURN ===
+        # Per directive: files < 8000 tokens (~32000 chars) get full doc content.
+        TOKEN_CHAR_RATIO = 4
+        if len(content_text) < (8000 * TOKEN_CHAR_RATIO):
+            chunks = [f"[Full content of {doc_name}]\n{content_text}"]
+            results.append((f"{doc_name} (full document)", "\n\n".join(chunks)))
+            continue
+        
         # Step 4: Build windows around each anchor and merge overlapping ones.
         matched_windows: list[tuple[int, int]] = []
         for line_idx in sorted(final_anchors):
@@ -296,9 +304,7 @@ def get_relevant_chunks(
             if matched_windows and start <= matched_windows[-1][1] + 1:
                 # Merge with previous window
                 new_end = max(matched_windows[-1][1], end)
-                merged_text_len = len("\n".join(all_lines[matched_windows[-1][0]:new_end + 1]))
-                if merged_text_len <= 2000:  # hard char cap per file
-                    matched_windows[-1] = (matched_windows[-1][0], new_end)
+                matched_windows[-1] = (matched_windows[-1][0], new_end)
             else:
                 matched_windows.append((start, end))
 

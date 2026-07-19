@@ -53,7 +53,8 @@ KB_PATH             = pathlib.Path(os.getenv("KB_PATH", "data/knowledge"))
 DEFAULT_KB_NAME     = os.getenv("KB_DEFAULT_KB", "humblewood").lower()
 CHUNK_TARGET        = _safe_int(os.getenv("CHUNK_SIZE"), 2000)
 RAG_MAX_DOCS           = _safe_int(os.getenv("RAG_MAX_DOCS"), 10)
-RAG_RETRIEVAL_METHOD   = os.getenv("RAG_RETRIEVAL_METHOD", "vector").lower()  # vector (recommended) | keyword
+RAG_RETRIEVAL_METHOD   = os.getenv("RAG_RETRIEVAL_METHOD", "vector").lower()  # vector (recommended) | word
+RAG_MAX_CHARS          = _safe_int(os.getenv("RAG_MAX_CHARS"), 24000)    # hard cap on RAG context sent to the LLM
 
 # ════════════════════════════════════
 #  LEGACY COMPAT (read but don't use in new code)
@@ -83,6 +84,7 @@ class _Settings:
     CHUNK_TARGET: int
     RAG_MAX_DOCS: int
     RAG_RETRIEVAL_METHOD: str
+    RAG_MAX_CHARS: int
     OPENWEBUI_API_KEY: str  # legacy — kept for reference
 
     def __repr__(self):
@@ -97,7 +99,7 @@ _INIT_ATTRS = (
     "DISCORD_TOKEN", "INFER_URL", "INFER_API_KEY", "DEFAULT_MODEL",
     "DEFAULT_SYSTEM_PROMPT", "CONTEXT_WINDOW", "REQUEST_TIMEOUT",
     "MAX_TOKENS", "BOT_PREFIX", "CHAT_HISTORY_RESET", "KB_PATH", "DEFAULT_KB_NAME",
-    "CHUNK_TARGET", "RAG_MAX_DOCS", "RAG_RETRIEVAL_METHOD", "OPENWEBUI_API_KEY",
+    "CHUNK_TARGET", "RAG_MAX_DOCS", "RAG_RETRIEVAL_METHOD", "RAG_MAX_CHARS", "OPENWEBUI_API_KEY",
 )
 
 _INIT_VALUES = {
@@ -116,6 +118,7 @@ _INIT_VALUES = {
     "CHUNK_TARGET": CHUNK_TARGET,
     "RAG_MAX_DOCS": RAG_MAX_DOCS,
     "RAG_RETRIEVAL_METHOD": RAG_RETRIEVAL_METHOD,
+    "RAG_MAX_CHARS": RAG_MAX_CHARS,
     "OPENWEBUI_API_KEY": _OPENWEBUI_KEY,
 }
 
