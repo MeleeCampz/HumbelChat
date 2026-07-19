@@ -76,7 +76,6 @@ class KBVectorIndex:
     async def from_kb_path(
         cls,
         kb_path: str | pathlib.Path,
-        max_lines_per_file: int = 500,  # Increased so full tables/text sections are visible to Chunker
         max_bytes_per_file: int = 1024 * 1024,
     ) -> KBVectorIndex:
         """Scan a KB directory and build the vector index.
@@ -105,7 +104,7 @@ class KBVectorIndex:
                 continue
 
             # Chunk the file instead of using whole-file blobs
-            chunks = await Chunker.split_file(p, max_lines_per_file=max_lines_per_file)
+            chunks = await Chunker.split_file(p)
             for chunk in chunks:
                 display_name = f"{chunk.display_name} [{chunk.section_path}]"
                 entries.append((display_name, chunk.content))
@@ -122,14 +121,9 @@ class KBVectorIndex:
                 if not content_text or len(content_text) > max_bytes_per_file:
                     continue
 
-                lines = content_text.splitlines()[:max_lines_per_file]
-                truncated = "\n".join(lines)
-                if len(content_text.splitlines()) > max_lines_per_file:
-                    truncated += "\n... [truncated]"
-
-                base_name = os.path.basename(p.name)
-                display_name = _normalize_display_name(p, base_name)
-                entries.append((display_name, truncated))
+                # No line cap — let the full content reach the Chunker for intelligent splitting
+                display_name = _normalize_display_name(p, os.path.basename(p.stem))
+                entries.append((display_name, content_text.strip()))
 
         # Build the index (embeds all chunks via OpenWebUI backend)
         if entries:

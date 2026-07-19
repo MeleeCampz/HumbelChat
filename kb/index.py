@@ -72,12 +72,10 @@ class KBIndexStore:
         *,
         persist_dir: str = "kb/.index_cache",
         model_name: str = "nomic-embed-text:latest",
-        max_lines_per_file: int = 50,
         max_bytes_per_file: int = 1024 * 1024,
     ) -> None:
         self.kb_path = pathlib.Path(kb_path)
         self.persist_dir = pathlib.Path(persist_dir)
-        self.max_lines = max_lines_per_file
         self.max_bytes = max_bytes_per_file
 
         self._db_path = self.persist_dir / "vector_index.db"
@@ -100,9 +98,6 @@ class KBIndexStore:
         if self._index is not None:
             return self._index
 
-        # If we have a valid in-memory index, reuse it
-        # (Note: _index is only set below after load completes)
-
         # Try loading from disk cache first — unless forced to rebuild
         if not force_rebuild and self._db_path.exists() and self._is_cache_valid():
             logger.info("Loading vector index from SQLite cache (%s)", self._db_path)
@@ -112,11 +107,11 @@ class KBIndexStore:
             # Cache was valid but empty — fall through to rebuild below
             logger.warning("SQLite cache exists but has 0 entries; rebuilding from KB files")
 
-        # Build fresh (or forced rebuild)
+        # Build fresh (or forced rebuild) — no max_lines_per_file override
+        # Let vector_db.py use its default of 500 for full context
         logger.info("Building vector index from scratch for '%s'", self.kb_path)
         self._index = await KBVectorIndex.from_kb_path(
             self.kb_path,
-            max_lines_per_file=self.max_lines,
             max_bytes_per_file=self.max_bytes,
         )
         if self._index is None or self._index.is_empty():
@@ -139,7 +134,7 @@ class KBIndexStore:
             # Index doesn't exist yet — rebuild entire index
             logger.warning("No active index; rebuilding full index after adding '%s'", file_path)
             self._index = await KBVectorIndex.from_kb_path(
-                self.kb_path, max_lines_per_file=self.max_lines, max_bytes_per_file=self.max_bytes
+                self.kb_path, max_bytes_per_file=self.max_bytes
             )
             if self._index is not None:
                 await self._save_to_disk()
@@ -153,20 +148,16 @@ class KBIndexStore:
             logger.warning("File '%s' does not exist; skipping update", file_path)
             return False
 
-        chunks = await Chunker.split_file(path, max_lines_per_file=self.max_lines)
+        chunks = await Chunker.split_file(path)
         if not chunks:
             # No chunked content — fall back to whole-file blob
             content_text = path.read_bytes().decode("utf-8", errors="replace")
-            lines = content_text.splitlines()[: self.max_lines]
-            truncated = "\n".join(lines)
-            if len(content_text.splitlines()) > self.max_lines:
-                truncated += "\n... [truncated]"
             chunks = [
                 type("_SingleChunk", (), {
                     "display_name": pathlib.Path(file_path).stem,
                     "source_file": path.name,
                     "section_path": "Full file",
-                    "content": truncated,
+                    "content": content_text.strip(),
                 })()
             ]
 
