@@ -197,12 +197,14 @@ async def _retrieve_vector(
     query: str,
     kb_path: str | pathlib.Path,
     top_n: int,
+    window_lines: int = 80,
 ) -> list[tuple[str, str]]:
     """Vector-based retrieval using the persist-backed index.
 
     Uses pure cosine-similarity ranking (no hybrid/adaptive-k).
     Falls back to keyword-only if the vector index is unavailable.
     """
+    from kb.reader import get_relevant_chunks
     try:
         from kb.reader import read_kb_files  # type: ignore[import]
     except ImportError:
@@ -211,10 +213,9 @@ async def _retrieve_vector(
     store = await _ensure_index_store(kb_path)
     if store is None:
         logger.warning("Vector index store unavailable for '%s'; falling back to keyword", kb_path)
-        from kb.reader import get_relevant_chunks
         scored = read_kb_files(kb_path, query=query, top_n=top_n * 3, max_lines_per_file=300) if read_kb_files else []
         doc_names = [name for name, _ in scored[:top_n]] if scored else []
-        chunks = get_relevant_chunks(kb_path, doc_names, query=query, window_lines=15)
+        chunks = get_relevant_chunks(kb_path, doc_names, query=query, window_lines=window_lines)
         logger.info(
             "Vector→keyword fallback: %d files ranked → %d relevant chunk(s) with ~%.0f chars",
             len(scored), len(chunks),
@@ -225,10 +226,9 @@ async def _retrieve_vector(
     idx = store.get_index()
     if idx is None or idx.is_empty():
         logger.warning("Vector index is empty for '%s'; falling back to keyword", kb_path)
-        from kb.reader import get_relevant_chunks
         scored = read_kb_files(kb_path, query=query, top_n=top_n * 3, max_lines_per_file=300) if read_kb_files else []
         doc_names = [name for name, _ in scored[:top_n]] if scored else []
-        chunks = get_relevant_chunks(kb_path, doc_names, query=query, window_lines=15)
+        chunks = get_relevant_chunks(kb_path, doc_names, query=query, window_lines=window_lines)
         logger.info(
             "Vector→keyword fallback (empty index): %d files ranked → %d relevant chunk(s) with ~%.0f chars",
             len(scored), len(chunks),
@@ -236,8 +236,9 @@ async def _retrieve_vector(
         )
         return chunks
 
-    # ── Vector search via direct index query (no expansion needed during stabilization) ────
-    ranked_names = await idx.query(query, top_n=top_n * 2)
+    # ── Vector search via direct index query ────
+    # Query a wider candidate set so the top-ranked doc is almost always relevant.
+    ranked_names = await idx.query(query, top_n=min(top_n * 4, 32))
     
     conn_path = store._db_path  # type: ignore[attr-defined]
     import sqlite3, pickle, json
@@ -250,13 +251,11 @@ async def _retrieve_vector(
                 if " [" in name:
                     name_set.add(name.split(" [")[0])
             doc_stems = sorted({n.split(" [")[0] if " [" in n else n for n in name_set})
-            from kb.reader import get_relevant_chunks
-            ranked_list = get_relevant_chunks(kb_path, doc_stems[:top_n], query=query, window_lines=15)
+            ranked_list = get_relevant_chunks(kb_path, doc_stems[:top_n], query=query, window_lines=window_lines)
         else:
-            from kb.reader import get_relevant_chunks
             scored = read_kb_files(kb_path, query=query, top_n=top_n * 3, max_lines_per_file=300) if read_kb_files else []
             doc_names = [name for name, _ in scored[:top_n]] if scored else []
-            ranked_list = get_relevant_chunks(kb_path, doc_names, query=query, window_lines=15)
+            ranked_list = get_relevant_chunks(kb_path, doc_names, query=query, window_lines=window_lines)
         logger.info(
             "Vector→keyword fallback (in-memory DB): %d relevant chunk(s) with ~%.0f chars",
             len(ranked_list),
@@ -276,10 +275,9 @@ async def _retrieve_vector(
         embeddings = await embedder.encode([query])
     except Exception as exc:
         logger.warning("Query embedding failed (%s); falling back to keyword", exc)
-        from kb.reader import get_relevant_chunks
         scored = read_kb_files(kb_path, query=query, top_n=top_n * 3, max_lines_per_file=300) if read_kb_files else []
         doc_names = [name for name, _ in scored[:top_n]] if scored else []
-        ranked_list = get_relevant_chunks(kb_path, doc_names, query=query, window_lines=15)
+        ranked_list = get_relevant_chunks(kb_path, doc_names, query=query, window_lines=window_lines)
         logger.info(
             "Vector→keyword fallback (embedding error): %d files ranked → %d relevant chunk(s) with ~%.0f chars",
             len(scored), len(ranked_list),
@@ -338,8 +336,8 @@ async def _retrieve_vector(
             seen.add(s)
             doc_stems.append(s)
 
-    from kb.reader import get_relevant_chunks
-    ranked_list = get_relevant_chunks(kb_path, doc_stems, query=query, window_lines=15)
+    # Widen context windows so complete spell/ability entries are captured.
+    ranked_list = get_relevant_chunks(kb_path, doc_stems, query=query, window_lines=80)
 
     logger.info(
         "Vector retrieval (pure vector ranking): %d unique stems → %d relevant chunk(s) with ~%.0f chars",
@@ -357,6 +355,7 @@ async def retrieve_kb_documents(
     *,
     strategy: str = DEFAULT_METHOD,
     top_n: int = 5,
+    window_lines: int = 80,
 ) -> list[tuple[str, str]]:
     """Retrieve relevant KB documents for *query* using the selected strategy.
 
@@ -366,6 +365,7 @@ async def retrieve_kb_documents(
     kb_path : Path to the knowledge-base root directory.
     strategy : ``"keyword"`` or ``"vector"`` (default: ``"vector"``).
     top_n : Soft cap on documents retrieved.
+    window_lines : Lines above/below each match anchor (default 80).
 
     Returns
     -------
@@ -382,7 +382,7 @@ async def retrieve_kb_documents(
         return _retrieve_keyword(query, kb_path, top_n)
 
     if method == "vector":
-        return await _retrieve_vector(query, kb_path, top_n)
+        return await _retrieve_vector(query, kb_path, top_n, window_lines=window_lines)
 
     # Unknown strategy — fall back to keyword with a warning
     logger.warning(

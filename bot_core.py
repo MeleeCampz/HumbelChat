@@ -93,6 +93,7 @@ async def ask_ai(
         kb_path=settings.KB_PATH,
         strategy=settings.RAG_RETRIEVAL_METHOD,
         top_n=settings.RAG_MAX_DOCS,
+        window_lines=settings.RAG_WINDOW_LINES,
     )
 
     if kb_docs:
@@ -101,28 +102,29 @@ async def ask_ai(
         log.info("RAG: Attaching %d KB document(s) to context: [%s]",
                  len(doc_names), ', '.join(f'"{n}"' for n in doc_names))
 
-        # Build RAG context with a hard character cap to prevent context bloat
+        # Build RAG context — only include complete documents (never truncate mid-doc)
         max_chars = settings.RAG_MAX_CHARS
         parts = [f"=== Knowledge Base: {_kb_kb_name} ===\n"]
         chars_used = len(parts[-1])  # header line length
         docs_added = 0
-        for display_name, content in kb_docs[:limit]:
+        for display_name, content in kb_docs:
             doc_block = f"\n--- {display_name} ---\n{content}"
             if chars_used + len(doc_block) > max_chars:
-                # Partially include this document up to the cap
-                remaining = max_chars - chars_used
-                if remaining > 100:  # only bother if there's meaningful space left
-                    doc_block = doc_block[:remaining]
-                    doc_block += f"\n... [truncated — context cap of {max_chars} chars reached]"
-                parts.append(doc_block)
-                chars_used += len(doc_block)
+                # Complete doc doesn't fit — skip it entirely (never partial).
+                log.info(
+                    "RAG: skipped doc '%s' (%d chars) — remaining budget %d chars",
+                    display_name, len(doc_block), max_chars - chars_used,
+                )
                 break
             parts.append(doc_block)
             chars_used += len(doc_block)
             docs_added += 1
         rag_context = "\n".join(parts)
-        if chars_used >= max_chars and docs_added == limit:
-            log.warning("RAG context hit char cap (%d) with all %d docs — consider increasing RAG_MAX_CHARS or reducing RAG_MAX_DOCS", max_chars, limit)
+        if docs_added < len(kb_docs):
+            log.info(
+                "RAG: included %d/%d documents (~%.0fK chars) — budget cap reached",
+                docs_added, len(kb_docs), chars_used / 1024,
+            )
 
     messages: list[dict] = []
     if rag_context:
