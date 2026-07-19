@@ -100,11 +100,29 @@ async def ask_ai(
         doc_names = [name for name, _ in kb_docs[:limit]]
         log.info("RAG: Attaching %d KB document(s) to context: [%s]",
                  len(doc_names), ', '.join(f'"{n}"' for n in doc_names))
+
+        # Build RAG context with a hard character cap to prevent context bloat
+        max_chars = settings.RAG_MAX_CHARS
         parts = [f"=== Knowledge Base: {_kb_kb_name} ===\n"]
-        for display_name, content in kb_docs[:limit]:  # top N files (configurable via RAG_MAX_DOCS)
-            parts.append(f"\n--- {display_name} ---")
-            parts.append(content)
+        chars_used = len(parts[-1])  # header line length
+        docs_added = 0
+        for display_name, content in kb_docs[:limit]:
+            doc_block = f"\n--- {display_name} ---\n{content}"
+            if chars_used + len(doc_block) > max_chars:
+                # Partially include this document up to the cap
+                remaining = max_chars - chars_used
+                if remaining > 100:  # only bother if there's meaningful space left
+                    doc_block = doc_block[:remaining]
+                    doc_block += f"\n... [truncated — context cap of {max_chars} chars reached]"
+                parts.append(doc_block)
+                chars_used += len(doc_block)
+                break
+            parts.append(doc_block)
+            chars_used += len(doc_block)
+            docs_added += 1
         rag_context = "\n".join(parts)
+        if chars_used >= max_chars and docs_added == limit:
+            log.warning("RAG context hit char cap (%d) with all %d docs — consider increasing RAG_MAX_CHARS or reducing RAG_MAX_DOCS", max_chars, limit)
 
     messages: list[dict] = []
     if rag_context:

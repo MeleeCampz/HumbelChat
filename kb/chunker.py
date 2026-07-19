@@ -1,10 +1,9 @@
 """Smart document chunking for KB vector search.
 
 Splits KB documents into semantically coherent chunks by:
-1. Markdown headers (## level or deeper) — primary splitting strategy
-2. Paragraph boundaries (~350-500 chars) — fallback when no headers exist
-
-Each chunk preserves context about which section/file it came from.
+1. Full document strategy for small files (≤8000 chars) — preserves context
+2. Smart header-based splitting with min-size merging for larger docs
+3. Adaptive paragraph boundaries as fallback with structural awareness
 
 Usage
 -----
@@ -17,9 +16,12 @@ Usage
 
 from __future__ import annotations
 
+import logging
 import pathlib
 import re
 from dataclasses import dataclass, field
+
+logger = logging.getLogger("kb.chunker")
 
 
 @dataclass
@@ -33,11 +35,15 @@ class ChunkInfo:
 
 
 class Chunker:
-    """Split documents into semantic chunks for better embedding quality."""
+    """Split documents into semantic chunks for better embedding quality.
 
-    MAX_CHUNK_SIZE = 500  # chars per chunk (target)
-    MIN_CHUNK_SIZE = 80   # skip chunks smaller than this
-    HEADER_RE = re.compile(r"^(#{2,6})\s+(.+)$", re.MULTILINE)
+    Uses Full Document strategy for small files and Smart Header Splitting with
+    minimum-size merging for larger docs to prevent tiny, semantically broken chunks.
+    """
+
+    MIN_CHUNK_SIZE = 80   # chars — below this, merge with neighbor
+    MAX_CHUNK_SIZE = 7500  # chars — never exceed embedder context safety margin (2048 tokens)
+    HEADER_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
 
     @classmethod
     async def split_file(
@@ -64,69 +70,135 @@ class Chunker:
         if not content_text:
             return []
 
+        source_name = root.name
+        display_name = cls._normalize_display_name(root, source_name)
+
+        # 1. Full Document Strategy: files ≤ 8000 chars stay intact to preserve semantic context
+        if len(content_text) <= 8000:
+            logger.debug("File %s (%d chars): full document", source_name, len(content_text))
+            return [
+                ChunkInfo(
+                    display_name=display_name,
+                    source_file=source_name,
+                    section_path="Full Document",
+                    content=content_text.strip(),
+                    header_hash="",
+                )
+            ]
+
+        # For larger files, cap lines to prevent OOM during processing
         lines = content_text.splitlines()[:max_lines_per_file]
         truncated = "\n".join(lines)
         if len(content_text.splitlines()) > max_lines_per_file:
             truncated += "\n... [truncated]"
 
-        source_name = root.name
-        display_name = cls._normalize_display_name(root, source_name)
-
         chunks: list[ChunkInfo] = []
 
-        # Strategy 1: Split by Markdown headers (## through ######)
+        # 2. Smart Header Splitting with Minimum-Size Merging
         header_chunks = cls._split_by_headers(truncated, display_name, source_name)
         if header_chunks:
             chunks.extend(header_chunks)
 
-        # Strategy 2: If no headers found, split by paragraphs/size
+        # 3. Fallback to adaptive chunking if no headers found
         if not chunks:
-            chunks.extend(cls._split_by_paragraphs(truncated, display_name, source_name))
+            chunks.extend(cls._split_adaptive(truncated, display_name, source_name))
 
+        logger.debug("File %s (%d chars): produced %d chunk(s)", source_name, len(content_text), len(chunks))
         return chunks
 
     @classmethod
     def _split_by_headers(
         cls, content: str, display_name: str, source_file: str
     ) -> list[ChunkInfo]:
-        """Split content by Markdown headers (## through ######)."""
-        # Find all header positions and their text
-        headers = list(cls.HEADER_RE.finditer(content))
-        if len(headers) < 2:
-            return []  # need at least 2 headers to split into sections
+        """Split content by Markdown headers with minimum-size merging.
 
-        chunks: list[ChunkInfo] = []
-        
+        Collects all header-based sections, then merges adjacent small chunks together
+        so no chunk falls below MIN_CHUNK_SIZE. This prevents the "tiny fragment" problem
+        where lots of ## headers break a document into unusable pieces.
+
+        Headers are split at every level (# through ######) to capture full context,
+        but merged when necessary.
+        """
+        # Step 1: Collect all header regions (each includes its header line + content until next header)
+        headers = list(cls.HEADER_RE.finditer(content))
+        if not headers:
+            return []
+
+        raw_chunks: list[tuple[str, str]] = []  # (header_line_text, section_content_after_header)
+
         for i, header_match in enumerate(headers):
             header_text = header_match.group(2).strip()
             level = len(header_match.group(1))
-            
-            # Skip title-level (#) or very high levels (6+) unless it's the only header
-            if level >= 6:
-                continue
+            prefix = "#" * level
 
             # Get content from this header to the next (or end of file)
             start = header_match.end()
             end = headers[i + 1].start() if i + 1 < len(headers) else len(content)
-            
+
             section_content = content[start:end].strip()
-            
-            # Don't apply size filter to header-based chunks — a short section under
-            # a meaningful header is still valuable for retrieval (e.g., "Time System" might be one line)
             if not section_content or not section_content.replace('#', '').replace('*', '').strip():
                 continue
 
-            chunks.append(
+            # Full chunk including the header line itself
+            full_chunk_text = f"{prefix} {header_text}\n{section_content}"
+            raw_chunks.append((full_chunk_text, len(full_chunk_text)))
+
+        if not raw_chunks:
+            return []
+
+        # Step 2: Merge adjacent chunks if current chunk is below MIN_CHUNK_SIZE.
+        # We accumulate into 'merged' until adding the next chunk would exceed MAX_CHUNK_SIZE.
+        merged: list[str] = []
+        accumulator: str = ""
+
+        for text, size in raw_chunks:
+            if size >= cls.MIN_CHUNK_SIZE and not accumulator:
+                # This chunk is large enough on its own — emit immediately
+                merged.append(text)
+                continue
+
+            if accumulator:
+                # Try to merge with the current accumulated content
+                combined_size = len(accumulator) + size
+                if combined_size <= cls.MAX_CHUNK_SIZE:
+                    # Merge: insert a separator between old and new section
+                    accumulator += "\n---\n" + text
+                    continue
+                else:
+                    # Would exceed max — emit accumulator, start new one
+                    merged.append(accumulator)
+                    accumulator = text
+                    continue
+
+            # First chunk or nothing accumulated yet
+            accumulator = text
+
+        # Flush any remaining accumulator
+        if accumulator:
+            merged.append(accumulator)
+
+        if not merged:
+            return []
+
+        logger.debug("Header split + merge produced %d chunk(s)", len(merged))
+
+        # Step 3: Convert to ChunkInfo objects
+        result: list[ChunkInfo] = []
+        for idx, section_text in enumerate(merged):
+            # Extract the primary header text for section_path
+            first_header = re.match(r"^(#{1,6})\s+(.+)$", section_text.strip(), re.MULTILINE)
+            section_path = first_header.group(2).strip() if first_header else f"Section {idx + 1}"
+
+            result.append(
                 ChunkInfo(
                     display_name=display_name,
                     source_file=source_file,
-                    section_path=header_text,
-                    content=section_content,
-                    header_hash=cls._hash(header_text),
+                    section_path=section_path,
+                    content=section_text.strip(),
+                    header_hash=cls._hash(section_text),
                 )
             )
-
-        return chunks
+        return result
 
     @classmethod
     def _split_by_paragraphs(
@@ -170,6 +242,90 @@ class Chunker:
                     source_file=source_file,
                     section_path="Paragraph group",
                     content="\n\n".join(current_chunk),
+                    header_hash="",
+                )
+            )
+
+        return chunks
+
+    @classmethod
+    def _split_adaptive(
+        cls, content: str, display_name: str, source_file: str
+    ) -> list[ChunkInfo]:
+        """Adaptive Chunking: choose best strategy based on document structure.
+
+        Uses intrinsic metrics (Block Integrity, Structural Coherence) to decide
+        whether header-based or paragraph-based chunking is superior for this specific file.
+        """
+        line_count = len(content.splitlines())
+
+        # If small enough, keep as single block (preserves semantic coherence)
+        if line_count < 50:
+            logger.debug("File %s: adaptive split to single block (%d lines)", source_file, line_count)
+            return [
+                ChunkInfo(
+                    display_name=display_name,
+                    source_file=source_file,
+                    section_path="Full Document",
+                    content=content.strip(),
+                    header_hash="",
+                )
+            ]
+
+        # Check for list/table markers that might be broken by paragraph splitting
+        list_markers = sum(1 for line in content.splitlines() if line.strip().startswith(('-', '*', '•', '>', '|')))
+        paragraph_count = len(re.split(r"\n\s*\n", content.strip()))
+
+        # If there are many structural markers but few paragraphs, paragraph splitting
+        # would break Block Integrity. Use recursive size-based chunking instead.
+        if list_markers > paragraph_count and line_count > 100:
+            logger.debug("File %s: adaptive split by structure (dense content, %d lines)", source_file, line_count)
+            return cls._split_recursive_by_size(content, display_name, source_file)
+
+        # Default: use standard paragraph splitting for structure-awareness
+        return cls._split_by_paragraphs(content, display_name, source_file)
+
+    @classmethod
+    def _split_recursive_by_size(
+        cls, content: str, display_name: str, source_file: str
+    ) -> list[ChunkInfo]:
+        """Recursive size-based splitting for dense/unstructured content.
+
+        Splits by individual lines while respecting MAX_CHUNK_SIZE to preserve
+        structural integrity (lists, tables) better than paragraph splitting.
+        """
+        chunks: list[ChunkInfo] = []
+        current_lines: list[str] = []
+        current_size = 0
+
+        for line in content.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            if current_size + len(stripped) > cls.MAX_CHUNK_SIZE and current_lines:
+                chunks.append(
+                    ChunkInfo(
+                        display_name=display_name,
+                        source_file=source_file,
+                        section_path="Structured chunk",
+                        content="\n".join(current_lines),
+                        header_hash="",
+                    )
+                )
+                current_lines = []
+                current_size = 0
+
+            current_lines.append(stripped)
+            current_size += len(stripped)
+
+        if current_lines:
+            chunks.append(
+                ChunkInfo(
+                    display_name=display_name,
+                    source_file=source_file,
+                    section_path="Structured chunk",
+                    content="\n".join(current_lines),
                     header_hash="",
                 )
             )

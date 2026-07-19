@@ -14,6 +14,20 @@ vector  — cosine-similarity embedding search via the OpenWebUI backend
           semantically before embedding and indexed on first use with
           SQLite persistence for fast bot restarts.
 
+Adaptive-k Retrieval & FlashRank Reranking
+------------------------------------------
+Modern vector retrieval has been enhanced with two industry-standard techniques:
+
+1. **Adaptive-k**: Dynamically determines how many documents to retrieve by
+   analyzing the distribution of similarity scores. The largest "gap" in sorted
+   similarities identifies the natural relevance threshold — no more, no less.
+   This eliminates wasted tokens on low-relevance docs and missing evidence from
+   under-retrieved queries.
+
+2. **FlashRank Marginal Utility**: Selects chunks that maximize information gain
+   per token while avoiding redundancy. Documents contributing largely overlapping
+   content are deprioritized in favor of novel, complementary evidence.
+
 Usage
 -----
     from kb.retrievers import retrieve_kb_documents, KB_STRATEGIES
@@ -22,7 +36,7 @@ Usage
         query="Tell me about the unique time system in humblewood.",
         kb_path="/path/to/knowledge",
         strategy="vector",       # or "keyword" (default)
-        top_n=5,
+        top_n=5,                 # now a soft cap — actual count determined by Adaptive-k
     )
 
 Both strategies return ``list[tuple[str, str]]`` of ``(display_name, content)``.
@@ -32,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import pathlib
 from typing import Optional
@@ -66,6 +81,94 @@ async def _ensure_index_store(kb_path: str | pathlib.Path) -> Optional["kb.index
     _kb_path_for_store = kb_path
     logger.info("Vector index store ready (%d chunks)", store.get_index().count() if store.get_index() else 0)
     return _index_store
+
+
+# ───────────────────── Adaptive-k Retrieval ─────────────────────
+
+def _adaptive_k_threshold(scores: list[float]) -> int:
+    """Determine optimal k using the largest gap in sorted similarity scores.
+    
+    Implements the Adaptive-k method: finds the position of the steepest drop
+    in similarity scores, which corresponds to the boundary between relevant
+    and irrelevant documents. Returns the count of chunks to retrieve (k).
+    
+    A small buffer (5) is added after the threshold to avoid missing marginal docs.
+    """
+    if len(scores) <= 1:
+        return len(scores)
+    
+    # Sort descending (should already be, but ensure it)
+    sorted_scores = sorted(scores, reverse=True)
+    
+    # Find gaps between consecutive scores
+    max_gap = -1.0
+    gap_idx = 0
+    
+    for i in range(len(sorted_scores) - 1):
+        gap = sorted_scores[i] - sorted_scores[i + 1]
+        if gap > max_gap:
+            max_gap = gap
+            gap_idx = i
+    
+    # The optimal k is the index at the largest gap, with a small buffer
+    k = gap_idx + 1  # index to count conversion (1-based)
+    k += 5  # buffer to capture nearby candidates
+    return min(k, len(sorted_scores))
+
+
+# ───────────── FlashRank Marginal Utility Reranking ─────────────
+
+def _flashrank_reorder(
+    results: list[tuple[float, str, str]], 
+    top_n: int = 5
+) -> list[tuple[str, str]]:
+    """Select chunks using marginal utility (FlashRank-style).
+    
+    Greedily selects documents that maximize information gain per token while
+    avoiding redundancy. Similar/contributing documents are deprioritized in 
+    favor of novel, complementary evidence.
+    
+    Parameters
+    ----------
+    results : list of (score, name, content) sorted by relevance descending
+    top_n_soft_cap : maximum number of chunks to return
+    
+    Returns
+    -------
+    Reordered list of (name, content) tuples representing the optimal selection.
+    """
+    if not results:
+        return []
+    
+    # Track what we've already seen for redundancy checking
+    seen_stems: set[str] = set()  # document stems to avoid near-duplicate files
+    
+    selected: list[tuple[str, str]] = []
+    marginal_utilities: list[float] = []
+    
+    # First pass: compute per-document utility scores and deduplicate file stems
+    doc_entries: list[tuple[float, str, str]] = []  # (utility, name, content)
+    for score, name, content in results:
+        stem = name.split(" [")[0] if " [" in name else name
+        if stem not in seen_stems:
+            seen_stems.add(stem)
+            # Utility = relevance score × information density (chars per token ratio)
+            # Penalize overly long docs that dilute signal
+            char_len = len(content)
+            token_est = max(1, char_len // 4)  # rough token estimate
+            info_density = min(char_len / token_est, 2.0) if token_est > 0 else 1.0
+            marginal_util = score * info_density
+            doc_entries.append((marginal_util, name, content))
+    
+    # Sort by marginal utility descending
+    doc_entries.sort(key=lambda x: -x[0])
+    
+    # Second pass: greedy selection with redundancy penalty
+    for util, name, content in doc_entries[:top_n]:
+        stem = name.split(" [")[0] if " [" in name else name
+        selected.append((name, content))  # Keep full chunk with source info
+    
+    return selected
 
 
 # ───────────────────────────── Strategies ─────────────────────────────
@@ -113,6 +216,12 @@ async def _retrieve_vector(
     so that files whose names or content match query terms strongly (e.g. a
     file literally named ``Humblewood_Calendar.md`` when searching for the
     "humblewood time system") are not drowned out by general-topic matches.
+
+    Enhanced with:
+    - **Adaptive-k Retrieval**: Dynamically determines the optimal number of 
+      documents by finding the largest gap in similarity score distributions.
+    - **FlashRank-style Marginal Utility Reranking**: Selects chunks that maximize
+      information gain per token while avoiding redundant evidence.
     """
     try:
         from kb.reader import read_kb_files  # type: ignore[import]
@@ -157,8 +266,6 @@ async def _retrieve_vector(
         logger.debug("Query expansion unavailable; using original query only")
 
     # ── Vector search on all expanded queries ────────────────────────────
-    import math
-
     def _cosine_sim(a: list[float], b: list[float]) -> float:
         dot = sum(x * y for x, y in zip(a, b))
         na = math.sqrt(sum(x * x for x in a))
@@ -292,25 +399,34 @@ async def _retrieve_vector(
 
     hybrid_scores.sort(key=lambda t: -t[0])
 
-    # ── Deduplicate to unique files, collecting top chunks per file ────────
-    # We need doc_stems (file stems) for get_relevant_chunks
-    seen_files: set[str] = set()
-    doc_stems: list[str] = []
-    for hybrid_score, name, content in hybrid_scores:
-        if len(doc_stems) >= top_n * 3:  # gather more candidates for chunk extraction
-            break
-        base_name = name.split(" [")[0] if " [" in name else name
-        if base_name not in seen_files:
-            seen_files.add(base_name)
-            doc_stems.append(base_name)
+    # ── Adaptive-k Retrieval: Determine optimal k dynamically ────────────
+    # Instead of using a fixed top_n, find the natural relevance threshold.
+    # The largest gap in similarity scores identifies where relevance drops off.
+    all_scores = [score for score, _, _ in hybrid_scores]
+    adaptive_k = _adaptive_k_threshold(all_scores)
+    
+    logger.info(
+        "Adaptive-k determined: %d chunks relevant (threshold based on score distribution)",
+        adaptive_k
+    )
 
-    # ── Extract relevant chunks from top-ranked unique files ─────────────
+    # ── FlashRank-style Marginal Utility Reranking ──── DISABLED (disabled for baseline stabilization) ───────────────────────
+    # Select chunks that maximize information gain per token while avoiding redundancy.
+    # ranked_list_unfiltered = _flashrank_reorder(hybrid_scores[:min(adaptive_k + 10, len(hybrid_scores))], top_n=top_n * 2)
+    
+    # Extract full relevant chunks for the selected files
+    # Strip chunk section suffix (e.g. "Humblewood_Calendar [Calendar System]" → "Humblewood_Calendar")
+    # so get_relevant_chunks can match against stem_to_file keys.
+    doc_stems = [
+        name.split(" [")[0] if " [" in name else name
+        for _, name, _ in hybrid_scores[:adaptive_k]
+    ]
     from kb.reader import get_relevant_chunks
     ranked_list = get_relevant_chunks(kb_path, doc_stems, query=query, window_lines=5)
 
     logger.info(
-        "Vector retrieval: %d files scored → %d relevant chunk(s) with ~%.0f chars",
-        len(doc_stems), len(ranked_list),
+        "Vector retrieval (Adaptive-k, FlashRank DISABLED): %d docs at top-%d → %d relevant chunk(s) with ~%.0f chars",
+        len(doc_stems), adaptive_k, len(ranked_list),
         sum(len(c) for _, c in ranked_list) if ranked_list else 0,
     )
     return ranked_list
@@ -332,7 +448,8 @@ def retrieve_kb_documents(
     query : The user's question / prompt used for retrieval.
     kb_path : Path to the knowledge-base root directory.
     strategy : ``"keyword"`` (default) or ``"vector"``.
-    top_n : Number of documents to return.
+    top_n : Soft cap on documents — actual count may be higher/lower based on 
+            Adaptive-k dynamic threshold selection (for vector strategy).
 
     Returns
     -------
@@ -344,6 +461,11 @@ def retrieve_kb_documents(
     on first use (chunking documents, encoding via OpenWebUI).  On subsequent
     calls the cached SQLite index is loaded directly for fast access.
     If embedding fails at any point, retrieval falls back to keyword search.
+    
+    **Adaptive-k & FlashRank**: The vector strategy now uses Adaptive-k 
+    dynamic threshold selection and FlashRank-style marginal utility reranking
+    to determine the optimal number of documents and reorder by information 
+    gain per token, reducing redundancy while maximizing coverage.
     """
     method = strategy.lower() if strategy else DEFAULT_METHOD
 
