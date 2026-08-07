@@ -151,7 +151,7 @@ def _get_default_client() -> AsyncOpenAI | None:
         from openai import AsyncOpenAI  # type: ignore[import-untyped]
 
         return AsyncOpenAI(
-            api_key=_s.INFER_API_KEY or "local-model-key",
+            api_key=_s.INFER_API_KEY,
             base_url=_s.INFER_URL,
         )
     except Exception:

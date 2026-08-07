@@ -175,6 +175,7 @@ def _retrieve_keyword(
              via get_relevant_chunks(), avoiding full-file dump in context.
     """
     from kb.reader import read_kb_files, get_relevant_chunks
+    from config.settings import settings  # noqa: local-only
 
     # Phase 1 — quick scoring pass (300 lines is plenty for keyword overlap)
     scored = read_kb_files(kb_path, query=query, top_n=top_n * 3, max_lines_per_file=300)
@@ -183,7 +184,7 @@ def _retrieve_keyword(
 
     # Phase 2 — extract only matched windows from top documents
     doc_names = [name for name, _ in scored[:top_n]]
-    chunks = get_relevant_chunks(kb_path, doc_names, query=query, window_lines=15)
+    chunks = get_relevant_chunks(kb_path, doc_names, query=query, window_lines=settings.RAG_WINDOW_LINES)
 
     logger.info(
         "Keyword retrieval: %d files ranked → %d relevant chunk(s) with ~%.0f chars",
@@ -336,8 +337,10 @@ async def _retrieve_vector(
             seen.add(s)
             doc_stems.append(s)
 
+    from config.settings import settings
+    
     # Widen context windows so complete spell/ability entries are captured.
-    ranked_list = get_relevant_chunks(kb_path, doc_stems, query=query, window_lines=80)
+    ranked_list = get_relevant_chunks(kb_path, doc_stems, query=query, window_lines=settings.RAG_WINDOW_LINES)
 
     logger.info(
         "Vector retrieval (pure vector ranking): %d unique stems → %d relevant chunk(s) with ~%.0f chars",

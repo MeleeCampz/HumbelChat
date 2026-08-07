@@ -30,7 +30,7 @@ logger = logging.getLogger("kb.embedder_openai")
 # ──────────────── Constants ───────────────────────────────────────────────
 
 _DEFAULT_MODEL = "nomic-embed-text:latest"
-_BATCH_SIZE = 2048  # tokens per batch (safe for most embedding models)
+_BATCH_SIZE = 8  # documents per batch (conservative for OpenWebUI compatibility)
 
 
 class OpenAIEmbedder:
@@ -76,16 +76,15 @@ class OpenAIEmbedder:
         all_embeddings: dict[int, list[float]] = {}
         for i in range(0, len(unique_texts), self.batch_size):
             batch = unique_texts[i : i + self.batch_size]
-            try:
-                vectors = await self._call_api(batch)
-            except EmbeddingError as exc:
-                logger.error("Embedding API call failed: %s", exc)
-                raise
-
+            vectors = await self._call_api(batch)
             for idx, vec in enumerate(vectors):
                 all_embeddings[seen[batch[idx]]] = vec
 
-        return [all_embeddings[j] for j in range(len(texts))]
+        # Reconstruct result in original order, mapping each text back to its seen index
+        result: list[list[float]] = []
+        for t in texts:
+            result.append(all_embeddings[seen[t]])
+        return result
 
     # ── HTTP helpers ───────────────────────────────────────────────────
 
