@@ -94,7 +94,7 @@ async def handle_ocr_command(
     data_uri = f"data:{mime};base64,{b64}"
 
     client = AsyncOpenAI(
-        api_key=settings.INFER_API_KEY or "local-model-key",
+        api_key=settings.INFER_API_KEY,
         base_url=settings.INFER_URL,
     )
     resp = await client.chat.completions.create(
@@ -155,7 +155,7 @@ async def handle_summarize_command(
         return
 
     client = AsyncOpenAI(
-        api_key=settings.INFER_API_KEY or "local-model-key",
+        api_key=settings.INFER_API_KEY,
         base_url=settings.INFER_URL,
     )
 
@@ -222,7 +222,7 @@ async def handle_translate_command(
 
     src_clause = f" from {source_language}" if source_language else ""
 
-    client = AsyncOpenAI(api_key=settings.INFER_API_KEY or "local-model-key", base_url=settings.INFER_URL)
+    client = AsyncOpenAI(api_key=settings.INFER_API_KEY, base_url=settings.INFER_URL)
     resp = await client.chat.completions.create(
         model=settings.DEFAULT_MODEL,
         messages=[

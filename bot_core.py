@@ -70,7 +70,7 @@ async def ask_ai(
     log.debug("Using model '%s' for this request.", effective_model)
 
     client = AsyncOpenAI(
-        api_key=settings.INFER_API_KEY or "local-model-key",
+        api_key=settings.INFER_API_KEY,
         base_url=settings.INFER_URL,
     )
 

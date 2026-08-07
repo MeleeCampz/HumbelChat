@@ -175,7 +175,7 @@ async def handle_reindex_kb(interaction):
             # Quick sanity test — does retrieval actually work?
             try:
                 sample_query = "test"
-                results = retrieve_kb_documents(sample_query, kb_path, strategy=strategy, top_n=3)
+                results = await retrieve_kb_documents(sample_query, kb_path, strategy=strategy, top_n=3)
                 if results:
                     msg_parts.append(f"   • Retrival test: {len(results)} document(s) found")
                 else:
