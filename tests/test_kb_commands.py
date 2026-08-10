@@ -108,13 +108,21 @@ class TestReindexKBCommand:
         await ix.followup.send("placeholder", ephemeral=True)  # initialize _sent
         sent = ix._sent
 
-        with patch("commands.kb_commands.reindex_all_kb_files", return_value=2):
+        mock_idx = MagicMock()
+        mock_idx.count.return_value = 5
+        mock_idx.is_empty.return_value = False
+
+        mock_store = AsyncMock()
+        mock_store.load = AsyncMock(return_value=mock_idx)
+        mock_store.shutdown = AsyncMock()
+
+        with patch("kb.index.KBIndexStore", return_value=mock_store):
             with patch("config.settings.settings") as mock_settings:
                 mock_settings.KB_PATH = temp_kb_dir
                 from commands.kb_commands import handle_reindex_kb
                 await handle_reindex_kb(ix)
 
-        assert any("reindexed" in s.lower() for s in sent)
+        assert any("rebuilt" in s.lower() for s in sent)
 
 
 class TestKBCommandsStructural:

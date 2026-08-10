@@ -62,9 +62,9 @@ class TestFlashRankRerank:
             (0.8, "Doc B [Section 1]", "content3"),
         ]
         result = _flashrank_reorder(results, top_n=5)
-        # Should only have one Doc A entry
-        stems = [r[0] for r in result]
-        assert stems.count("Doc A") == 1
+        # Should only have one Doc A entry (function keeps full names like 'Doc A [Section 1]')
+        doc_a_count = sum(1 for s in result if s[0].startswith("Doc A"))
+        assert doc_a_count == 1
 
     def test_info_density_bonus(self):
         """Documents with better info density should rank higher."""
