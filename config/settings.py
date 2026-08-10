@@ -35,10 +35,14 @@ INFER_API_KEY = os.getenv("INFER_API_KEY", "")  # sometimes empty for local
 #  CHARACTER defaults (per-char in characters.json)
 # ════════════════════════════════════
 DEFAULT_MODEL       = os.getenv("MODEL_NAME")
-DEFAULT_SYSTEM_PROMPT = ""
+DEFAULT_SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "")
 CONTEXT_WINDOW      = _safe_int(os.getenv("CONTEXT_WINDOW"), 10)
 REQUEST_TIMEOUT     = _safe_int(os.getenv("AI_REQUEST_TIMEOUT"), 120)
 MAX_TOKENS          = _safe_int(os.getenv("MAX_TOKENS"), 2000)
+
+# Fallback models tried (in order) when DEFAULT_MODEL fails during summarize/translate.
+# Comma-separated list of model slugs.
+FALLBACK_MODELS    = [m.strip() for m in os.getenv("FALLBACK_MODELS", "").split(",") if m.strip()]
 
 # ════════════════════════════════════
 #  BOT BEHAVIOUR
@@ -78,6 +82,7 @@ class _Settings:
     CONTEXT_WINDOW: int
     REQUEST_TIMEOUT: int
     MAX_TOKENS: int
+    FALLBACK_MODELS: list[str]
     BOT_PREFIX: str
     CHAT_HISTORY_RESET: str | None
     KB_PATH: pathlib.Path
@@ -100,7 +105,7 @@ settings = _Settings()
 _INIT_ATTRS = (
     "DISCORD_TOKEN", "INFER_URL", "INFER_API_KEY", "DEFAULT_MODEL",
     "DEFAULT_SYSTEM_PROMPT", "CONTEXT_WINDOW", "REQUEST_TIMEOUT",
-    "MAX_TOKENS", "BOT_PREFIX", "CHAT_HISTORY_RESET", "KB_PATH", "DEFAULT_KB_NAME",
+    "MAX_TOKENS", "FALLBACK_MODELS", "BOT_PREFIX", "CHAT_HISTORY_RESET", "KB_PATH", "DEFAULT_KB_NAME",
     "CHUNK_TARGET", "RAG_MAX_DOCS", "RAG_RETRIEVAL_METHOD", "RAG_MAX_CHARS",
     "RAG_WINDOW_LINES", "OPENWEBUI_API_KEY",
 )
@@ -114,6 +119,7 @@ _INIT_VALUES = {
     "CONTEXT_WINDOW": CONTEXT_WINDOW,
     "REQUEST_TIMEOUT": REQUEST_TIMEOUT,
     "MAX_TOKENS": MAX_TOKENS,
+    "FALLBACK_MODELS": FALLBACK_MODELS,
     "BOT_PREFIX": BOT_PREFIX,
     "CHAT_HISTORY_RESET": CHAT_HISTORY_RESET,
     "KB_PATH": KB_PATH,

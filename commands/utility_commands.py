@@ -159,10 +159,10 @@ async def handle_summarize_command(
         base_url=settings.INFER_URL,
     )
 
-    # Define fallback models in case the primary one fails
+    # Define fallback models in case the primary one fails.
+    # FALLBACK_MODELS is configurable via .env (comma-separated model slugs).
     models_to_try = [settings.DEFAULT_MODEL]
-    if settings.DEFAULT_MODEL not in ["gemma4:latest", "llama3:latest"]:  # noqa: simple check for common defaults
-        models_to_try.extend(["gemma4:latest", "llama3:latest"])
+    models_to_try.extend(settings.FALLBACK_MODELS)
 
     summary = None
     for model in models_to_try:

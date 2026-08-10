@@ -201,7 +201,7 @@ class KBIndexStore:
             if not self._matches_file(doc, file_path)
         ]
 
-        removed = len(old_docs) - len(new_docs)
+        removed = old_count - len(new_docs)
         if removed > 0:
             self._index._docs = new_docs  # type: ignore[attr-defined]
             await self._save_to_disk()

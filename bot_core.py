@@ -30,7 +30,7 @@ def set_active_char_key(guild_id: int | None, channel_id: int, char_key: str) ->
         _ACTIVE_CHARACTERS[(guild_id, channel_id)] = char_key
 
 # KB state — populated at startup
-_kb_kb_name: str = "humblewood"       # from settings.DEFAULT_KB_NAME
+_kb_kb_name: str = settings.DEFAULT_KB_NAME
 _kb_path_root: pathlib.Path = settings.KB_PATH
 
 
