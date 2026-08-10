@@ -10,7 +10,6 @@ import uuid
 from datetime    import datetime, timezone
 
 from config.settings import settings
-from kb.scorch import ChunkIndex
 
 log = logging.getLogger("bot.kb.storage")
 
@@ -163,23 +162,5 @@ def list_kb_files(
 
     return docs
 
-def reindex_all_kb_files(kb_path: pathlib.Path) -> int:
-    """Iterate through all files in KB and run ChunkIndex indexing."""
-    count = 0
-    if not kb_path.exists():
-        return 0
-    for p in kb_path.rglob("*"):
-        if p.is_file() and "?" not in p.name and not p.name.endswith(".chunks.jsonl"):
-            try:
-                content = p.read_text(encoding="utf-8", errors="replace")
-                chunks = ChunkIndex.from_text(content)
-                # Save chunks to a sidecar file for retrieval
-                chunk_file = p.with_suffix(p.suffix + ".chunks.jsonl")
-                with chunk_file.open("w", encoding="utf-8") as f:
-                    for chunk in chunks:
-                        f.write(json.dumps(chunk, ensure_ascii=False) + "\n")
-                count += 1
-            except Exception as e:
-                log.error("Failed to reindex %s: %s", p, e)
-    return count
+
 

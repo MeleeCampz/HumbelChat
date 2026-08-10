@@ -125,6 +125,4 @@ def default_character() -> Character:
     except (IndexError, AttributeError):
         return Character("default", "Default", "")
 
-# Wait, I see a typo in default_character: _CHAR_CHARS should be _CHARACTERS. 
-# Also, i'll fix it right now.
 

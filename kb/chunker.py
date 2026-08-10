@@ -344,9 +344,4 @@ def _extract_ext(name: str) -> str:
     return base[i:].lower() if i > 0 else ""
 
 
-# Reuse the normalization helper from vector_db for consistency
-def _normalize_display_name(p: pathlib.Path, base_name: str) -> str:
-    """Build human-readable display name from path and filename."""
-    stem = p.stem
-    clean_stem = re.sub(r"^\d+", "", stem)
-    return f"{clean_stem}{p.suffix}" if clean_stem else base_name
+

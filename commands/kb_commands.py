@@ -4,8 +4,7 @@ from __future__ import annotations
 import logging
 import pathlib
 
-from kb.storage import validate_upload, list_kb_files, reindex_all_kb_files
-from kb.scorch import ChunkIndex
+from kb.storage import validate_upload, list_kb_files
 
 log = logging.getLogger("bot.commands.kb")
 
@@ -47,21 +46,7 @@ async def handle_upload_kb(
         await interaction.response.send_message(f"KB storage not found: **{exc}**", ephemeral=True)
         return
 
-    # --- step 4: auto-index chunks (non-blocking) ---
-    try:
-        import json
-        content = pathlib.Path(dest).read_text(encoding="utf-8", errors="replace")
-        chunks = ChunkIndex.from_text(content, chunk_size=settings.CHUNK_TARGET)
-        # Save chunks to a sidecar file for retrieval
-        chunk_file = dest.with_suffix(dest.suffix + ".chunks.jsonl")
-        with chunk_file.open("w", encoding="utf-8") as f:
-            for chunk in chunks:
-                f.write(json.dumps(chunk, ensure_ascii=False) + "\n")
-        log.info("Auto-indexed %d chunks for %s", len(chunks), dest.name)
-    except Exception as e:
-        log.warning("Failed to auto-index %s — will need manual /reindex_chunks: %s", dest.name, e)
-
-    # --- step 5: reply with summary ---
+    # --- step 4: reply with summary ---
     chunk_hint = ""
     try:
         n = len(pathlib.Path(dest).read_text(encoding="utf-8", errors="replace"))
@@ -177,7 +162,7 @@ async def handle_reindex_kb(interaction):
                 sample_query = "test"
                 results = await retrieve_kb_documents(sample_query, kb_path, strategy=strategy, top_n=3)
                 if results:
-                    msg_parts.append(f"   • Retrival test: {len(results)} document(s) found")
+                    msg_parts.append(f"   • Retrieval test: {len(results)} document(s) found")
                 else:
                     msg_parts.append(f"   • ⚠️ Retrieval returned 0 documents for a sample query")
             except Exception as re:

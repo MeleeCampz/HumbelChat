@@ -288,15 +288,9 @@ def get_relevant_chunks(
             if not too_close:
                 final_anchors.append(li)
 
-        # === SIZE-CONDITIONAL FULL DOCUMENT RETURN (DISABLED) ===
-        # Disabled: returning full docs for files < 32KB defeats RAG_MAX_CHARS budget.
+        # NOTE: Full-document return was disabled because it defeats RAG_MAX_CHARS budget.
         # A 17KB file would consume ~74% of a 24K char budget, leaving nothing
         # for other relevant documents. Always use targeted line-windows instead.
-        # TOKEN_CHAR_RATIO = 4
-        # if len(content_text) < (8000 * TOKEN_CHAR_RATIO):
-        #     chunks = [f"[Full content of {doc_name}]\n{content_text}"]
-        #     results.append((f"{doc_name} (full document)", "\n\n".join(chunks)))
-        #     continue
         
         # Step 4: Build windows around each anchor and merge overlapping ones.
         matched_windows: list[tuple[int, int]] = []
