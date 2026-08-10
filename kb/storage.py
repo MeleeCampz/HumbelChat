@@ -9,6 +9,7 @@ import pathlib
 import uuid
 from datetime    import datetime, timezone
 
+from config.settings import settings
 from kb.scorch import ChunkIndex
 
 log = logging.getLogger("bot.kb.storage")
@@ -73,7 +74,7 @@ def validate_upload(
     display_name = _sanitize_filename(filename or "uploaded")
     stem_name = pathlib.Path(display_name).stem
 
-    kb_root = kb_path if kb_path else pathlib.Path("/shared-knowledge/kb/uploads")
+    kb_root = kb_path if kb_path else settings.KB_PATH
     
     if subfolder:
         kb_root = kb_root / subfolder
