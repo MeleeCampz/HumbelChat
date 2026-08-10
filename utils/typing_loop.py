@@ -13,8 +13,9 @@ async def typing_loop_task(channel, duration_sec: int = 30) -> None:
         channel: The Discord TextChannel to send typing indicators on.
         duration_sec: How long to keep sending typing (default 30s).
     """
-    end_at = asyncio.get_event_loop().time() + duration_sec
-    while asyncio.get_event_loop().time() < end_at:
+    loop = asyncio.get_running_loop()
+    end_at = loop.time() + duration_sec
+    while loop.time() < end_at:
         try:
             await channel.typing()
         except TypeError:

@@ -53,11 +53,11 @@ async def handle_remind_command(
 
 async def _send_reminder(channel_id: int, message: str, delay: int) -> None:
     """Background reminder sender. Sleeps *delay* seconds before sending."""
-    from main import bot  # noqa: circular import
+    from main import bot as _bot  # Lazy import to avoid circular dependency at module load
 
     await asyncio.sleep(delay)
     try:
-        chan = bot.get_channel(channel_id)
+        chan = _bot.get_channel(channel_id)
         if chan:
             await chan.send(f"\u23f0 **Reminder:** {message}")
     except Exception as e:
