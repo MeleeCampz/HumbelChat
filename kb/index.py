@@ -220,10 +220,15 @@ class KBIndexStore:
     # ── Internal Helpers ────────────────────────────────────────────────
 
     def _matches_file(self, doc: _DocEntry, file_path: str | pathlib.Path) -> bool:
-        """Check if a document entry belongs to the given file."""
-        path_name = pathlib.Path(file_path).name.lower()
-        display = doc.display_name.lower()
-        return path_name in display
+        """Check if a document entry belongs to the given file.
+
+        Matches against the file stem (name without section suffix) to avoid
+        false positives from substring matches on similarly-named files.
+        """
+        target_name = pathlib.Path(file_path).name.lower()
+        # Strip section suffix (e.g. "doc.md [Section]" -> "doc.md")
+        display_stem = doc.display_name.split(" [")[0].lower()
+        return display_stem == target_name
 
     def _is_cache_valid(self) -> bool:
         """Check if SQLite cache is newer than any KB file."""

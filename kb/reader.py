@@ -144,7 +144,7 @@ def read_kb_files(
             continue
 
         ext = _extract_ext(p.name)
-        if ext not in {".txt", ".md"}:
+        if ext not in {".txt", ".md", ".csv", ".html", ".xml", ".rtf"}:
             continue
 
         content_text = p.read_bytes().decode("utf-8", errors="replace")
@@ -215,7 +215,7 @@ def get_relevant_chunks(
         if not p.is_file() or "?" in p.name:
             continue
         ext = _extract_ext(p.name)
-        if ext not in {".txt", ".md"}:
+        if ext not in {".txt", ".md", ".csv", ".html", ".xml", ".rtf"}:
             continue
         clean_stem = re.sub(r'^\d+', '', p.stem)
         if clean_stem:

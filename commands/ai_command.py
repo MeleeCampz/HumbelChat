@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from config.characters import CHARACTER_CHOICES, get_character, default_character
+from config.characters import get_character, default_character
 
 log = logging.getLogger("bot.commands.ai_command")
 
@@ -20,13 +20,8 @@ async def handle_ai_command(
         return
 
     # 2. Resolve character
-    char_key = None
-    if character_name:
-        for choice in CHARACTER_CHOICES:
-            if choice["value"] == character_name:
-                char_key = character_name
-                break
-    
+    char_key = character_name
+
     if char_key is None:
         # Try to use the helper from main.py if available, otherwise fallback
         try:

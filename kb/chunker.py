@@ -69,7 +69,7 @@ class Chunker:
             return []
 
         source_name = root.name
-        display_name = cls._normalize_display_name(root, source_name)
+        display_name = _normalize_display_name(root, source_name)
 
         # 1. Full Document Strategy: files ≤ 8000 chars stay intact to preserve semantic context
         if len(content_text) <= 8000:
@@ -325,14 +325,14 @@ class Chunker:
         return chunks
 
     @staticmethod
-    def _normalize_display_name(p: pathlib.Path, base_name: str) -> str:
-        """Build human-readable display name from path and filename."""
-        stem = p.stem
-        clean_stem = re.sub(r"^\d+", "", stem)
-        return f"{clean_stem}{p.suffix}" if clean_stem else base_name
-
-    @staticmethod
     def _hash(text: str) -> str:
         """Simple hash for header deduplication."""
         return hex(abs(hash(text)))[-8:]
+
+
+def _normalize_display_name(p: pathlib.Path, base_name: str) -> str:
+    """Build human-readable display name from path and filename."""
+    stem = p.stem
+    clean_stem = re.sub(r"^\d+", "", stem)
+    return f"{clean_stem}{p.suffix}" if clean_stem else base_name
 

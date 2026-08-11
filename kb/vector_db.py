@@ -11,7 +11,6 @@ Uses ``kb.embedder_openai.OpenAIEmbedder`` powered by the configured INFER_URL
 from __future__ import annotations
 
 import math
-import os
 import pathlib
 import re
 from dataclasses import dataclass, field
@@ -19,7 +18,8 @@ from dataclasses import dataclass, field
 
 # ──────────────────────────── Chunking provider ──────────────────────
 
-from kb.chunker import Chunker
+from kb.chunker import Chunker, _normalize_display_name
+from kb.reader import _extract_ext
 
 
 # ──────────────────────────── Embedding provider ──────────────────────
@@ -38,20 +38,6 @@ class _DocEntry:
 
 
 # ──────────────────────────── Helpers ─────────────────────────────────
-
-def _extract_ext(name: str) -> str:
-    """Extract file extension (lowercased), stripping any query-string suffix."""
-    base = name.split("?")[0]
-    i = base.rfind(".")
-    return base[i:].lower() if i > 0 else ""
-
-
-def _normalize_display_name(p: pathlib.Path, base_name: str) -> str:
-    """Build human-readable display name from path and filename."""
-    stem = p.stem
-    clean_stem = re.sub(r'^\d+', '', stem)
-    return f"{clean_stem}{p.suffix}" if clean_stem else base_name
-
 
 # ──────────────────────────── Vector Index ───────────────────────────
 
@@ -97,13 +83,10 @@ class KBVectorIndex:
             if not p.is_file() or "?" in p.name:
                 continue
             ext = _extract_ext(p.name)
-            if ext not in {".txt", ".md"}:
-                continue
-            content_text = p.read_bytes().decode("utf-8", errors="replace")
-            if not content_text or len(content_text) > max_bytes_per_file:
+            if ext not in {".txt", ".md", ".csv", ".html", ".xml", ".rtf"}:
                 continue
 
-            # Chunk the file instead of using whole-file blobs
+            # Let Chunker handle file reading and sizing internally
             chunks = await Chunker.split_file(p)
             for chunk in chunks:
                 display_name = f"{chunk.display_name} [{chunk.section_path}]"
@@ -115,14 +98,14 @@ class KBVectorIndex:
                 if not p.is_file() or "?" in p.name:
                     continue
                 ext = _extract_ext(p.name)
-                if ext not in {".txt", ".md"}:
+                if ext not in {".txt", ".md", ".csv", ".html", ".xml", ".rtf"}:
                     continue
                 content_text = p.read_bytes().decode("utf-8", errors="replace")
                 if not content_text or len(content_text) > max_bytes_per_file:
                     continue
 
                 # No line cap — let the full content reach the Chunker for intelligent splitting
-                display_name = _normalize_display_name(p, os.path.basename(p.stem))
+                display_name = _normalize_display_name(p, p.stem)
                 entries.append((display_name, content_text.strip()))
 
         # Build the index (embeds all chunks via OpenWebUI backend)
