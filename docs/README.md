@@ -202,9 +202,10 @@ python main.py
 
 ### Using the Startup Script
 ```bash
-chmod +x start_bot.sh
 ./start_bot.sh
 ```
+
+The startup script is committed as executable. If your checkout loses the execute bit, run `chmod +x start_bot.sh` once as a one-off.
 
 The startup script automatically:
 - Creates log directory structure
