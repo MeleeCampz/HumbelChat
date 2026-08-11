@@ -116,7 +116,7 @@ def get_character(key_or_display: str | None) -> Character | None:
 
 
 def default_character() -> Character:
-    """Return the default characterOrDefault to first available."""
+    """Return the default character, or default to first available."""
     try:
         for c in _CHARACTERS:
             if c.key == _DEFAULT_KEY:

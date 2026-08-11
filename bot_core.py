@@ -210,9 +210,9 @@ async def ask_ai(
 
 # ── History helpers (needed by other modules) ────────────────────────
 
-async def clear_history(guild_id: int, channel_s: int) -> str:
+async def clear_history(guild_id: int, channel_id: int) -> str:
     """Clear chat history for this guild+channel. Returns confirmation message."""
-    _chat_history.pop(guild_id, {}).pop(channel_s, None)
+    _chat_history.pop(guild_id, {}).pop(channel_id, None)
     return "Chat history cleared."
 
 
