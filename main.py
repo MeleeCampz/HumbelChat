@@ -231,12 +231,12 @@ async def on_message(message: discord.Message) -> None:
         return
 
     content = message.content.strip()
-    if not content.startswith(settings.BOT_PREFIX):
+    if not content.startswith(BOT_PREFIX):
         return
 
-    prompt = content[len(settings.BOT_PREFIX):].strip()
+    prompt = content[len(BOT_PREFIX):].strip()
     if not prompt:
-        await message.channel.send(f"Usage: {settings.BOT_PREFIX} <your question>")
+        await message.channel.send(f"Usage: {BOT_PREFIX} <your question>")
         return
 
     guild_id = message.guild_id or 0
@@ -311,7 +311,7 @@ def _enforce_single_instance() -> None:
 # ── Startup ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    if not settings.DISCORD_TOKEN:
+    if not DISCORD_TOKEN:
         log.error("Please set the DISCORD_BOT_TOKEN environment variable.")
         raise SystemExit(1)
 
