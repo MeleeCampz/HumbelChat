@@ -69,10 +69,10 @@ class TestOCRCommand:
         mock_resp = MagicMock()
         mock_resp.choices = [MagicMock(message=MagicMock(content="Extracted text here"))]
 
-        with patch("commands.utility_commands.AsyncOpenAI") as MockCls:
+        with patch("commands.utility_commands._make_client") as MockClient:
             inst = MagicMock()
             inst.chat.completions.create = AsyncMock(return_value=mock_resp)
-            MockCls.return_value = inst
+            MockClient.return_value = inst
             await handle_ocr_command(ix, image=image)
 
         assert len(ix._sent) > 0
@@ -92,7 +92,7 @@ class TestSummarizeCommand:
     async def test_summarize_with_history(self, ix):
         """Test summarizing recent chat history (no file_url)."""
         from commands.utility_commands import handle_summarize_command
-        from bot_core import _chat_history
+        from bot_core.history import _chat_history
 
         gid = 4441237890
         cid = 5552348901
@@ -106,10 +106,10 @@ class TestSummarizeCommand:
         mock_resp = MagicMock()
         mock_resp.choices = [MagicMock(message=MagicMock(content="Summary text"))]
 
-        with patch("commands.utility_commands.AsyncOpenAI") as MockCls:
+        with patch("commands.utility_commands._make_client") as MockClient:
             inst = MagicMock()
             inst.chat.completions.create = AsyncMock(return_value=mock_resp)
-            MockCls.return_value = inst
+            MockClient.return_value = inst
             await handle_summarize_command(ix)
 
         assert len(ix._sent) > 0
@@ -133,10 +133,10 @@ class TestTranslateCommand:
         mock_resp = MagicMock()
         mock_resp.choices = [MagicMock(message=MagicMock(content="Traducción"))]
 
-        with patch("commands.utility_commands.AsyncOpenAI") as MockCls:
+        with patch("commands.utility_commands._make_client") as MockClient:
             inst = MagicMock()
             inst.chat.completions.create = AsyncMock(return_value=mock_resp)
-            MockCls.return_value = inst
+            MockClient.return_value = inst
             await handle_translate_command(ix, target_language="Spanish: Hello world", source_language="English")
 
         assert len(ix._sent) > 0

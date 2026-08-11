@@ -111,8 +111,8 @@ Expansions:
             return []
 
         if not self.model_slug:
-            from config.settings import settings as _s  # type: ignore[attr-defined]
-            self.model_slug = _s.DEFAULT_MODEL or ""
+            from config.settings import DEFAULT_MODEL
+            self.model_slug = DEFAULT_MODEL or ""
 
         prompt = self.REWRITE_PROMPT_TEMPLATE.format(
             kb_domain=self.kb_domain,
@@ -147,12 +147,12 @@ class QueryExpansionError(RuntimeError):
 def _get_default_client() -> AsyncOpenAI | None:
     """Lazily create an OpenAI client for query rewriting if needed."""
     try:
-        from config.settings import settings as _s  # type: ignore[attr-defined]
+        from config.settings import INFER_API_KEY, INFER_URL
         from openai import AsyncOpenAI  # type: ignore[import-untyped]
 
         return AsyncOpenAI(
-            api_key=_s.INFER_API_KEY,
-            base_url=_s.INFER_URL,
+            api_key=INFER_API_KEY,
+            base_url=INFER_URL,
         )
     except Exception:
         return None
@@ -160,15 +160,15 @@ def _get_default_client() -> AsyncOpenAI | None:
 
 def create_query_rewriter() -> QueryRewriter:
     """Factory to create a configured query rewriter instance."""
-    from config.settings import settings as _s  # type: ignore[attr-defined]
+    from config.settings import DEFAULT_MODEL
 
-    enabled = getattr(_s, "RAG_QUERY_EXPANSION_ENABLED", True)
+    enabled = True  # RAG_QUERY_EXPANSION_ENABLED — not currently configurable via env
     client = _get_default_client()
 
     return QueryRewriter(
         client=client,
         kb_domain="Humblewood fantasy worldbuilding",
-        max_expansions=getattr(_s, "RAG_QUERY_MAX_EXPANSIONS", 3),
+        max_expansions=3,  # RAG_QUERY_MAX_EXPANSIONS
         enabled=enabled,
-        model_slug=getattr(_s, "RAG_QUERY_REWRITER_MODEL", ""),
+        model_slug=DEFAULT_MODEL or "",
     )

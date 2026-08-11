@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import mimetypes
 import pathlib
 import uuid
-from datetime    import datetime, timezone
+from datetime import datetime, timezone
 
-from config.settings import settings
+from config.settings import KB_PATH
 
 log = logging.getLogger("bot.kb.storage")
 
@@ -32,11 +31,11 @@ def _infer_extension(raw_filename: str | None) -> str:
         return ".txt"
     ext = pathlib.Path(raw_filename).suffix.lower()
     mime_map = {
-        "text/plain":     ".txt",
-        "text/markdown":  ".md",
-        "text/csv":       ".csv",
-        "text/html":      ".html",
-        "text/xml":       ".xml",
+        "text/plain": ".txt",
+        "text/markdown": ".md",
+        "text/csv": ".csv",
+        "text/html": ".html",
+        "text/xml": ".xml",
         "application/rtf": ".rtf",
     }
     mime, _ = mimetypes.guess_type(raw_filename)
@@ -73,8 +72,8 @@ def validate_upload(
     display_name = _sanitize_filename(filename or "uploaded")
     stem_name = pathlib.Path(display_name).stem
 
-    kb_root = kb_path if kb_path else settings.KB_PATH
-    
+    kb_root = kb_path if kb_path else KB_PATH
+
     if subfolder:
         kb_root = kb_root / subfolder
         try:
@@ -84,7 +83,7 @@ def validate_upload(
             raise FileNotFoundError(f"Could not create subfolder: {subfolder}")
 
     dest = kb_root / f"{stem_name}{ext}"
-    
+
     # Collision handling: if file exists, append a short unique ID
     if dest.exists():
         unique_id = uuid.uuid4().hex[:8]
@@ -161,6 +160,3 @@ def list_kb_files(
             })
 
     return docs
-
-
-

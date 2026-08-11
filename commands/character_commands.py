@@ -2,9 +2,8 @@
 from __future__ import annotations
 
 import discord
-import discord.app_commands as app_commands
 from config.characters import _CHARACTERS, get_character, default_character
-
+from bot_core.history import get_active_char_key, set_active_char_key
 
 async def handle_character_command(
     interaction: discord.Interaction,
@@ -12,8 +11,6 @@ async def handle_character_command(
     name: str | None = None,
 ) -> None:
     """Handle the /character slash command."""
-    from bot_core import set_active_char_key, get_active_char_key
-
     await interaction.response.defer(ephemeral=True)
 
     active_key = default_character().key
@@ -27,7 +24,7 @@ async def handle_character_command(
     if action == "list":
         lines = ["**Available characters:**\n"]
         for char in _CHARACTERS:
-            marker = f" ← current" if char.key == active_key else ""
+            marker = " ← current" if char.key == active_key else ""
             lines.append(f"  • `{char.key}` — display: `{char.display or char.key}`{marker}")
         await interaction.followup.send("\n".join(lines), ephemeral=True)
 
@@ -37,7 +34,6 @@ async def handle_character_command(
             return
         char_obj = get_character(name)
         if char_obj is None:
-            # Try matching by key explicitly
             for c in _CHARACTERS:
                 if getattr(c, "key", "") == name:
                     char_obj = c
@@ -51,12 +47,13 @@ async def handle_character_command(
         if interaction.guild_id is not None:
             set_active_char_key(interaction.guild_id, interaction.channel_id, char_obj.key)
         await interaction.followup.send(
-            f"Switched to **{char_obj.display}** (model: ``{char_obj.model or '(none set)'}``)", ephemeral=True
+            f"Switched to **{char_obj.display}** (model: ``{char_obj.model or '(none set)'}``)",
+            ephemeral=True,
         )
 
     elif action == "show":
         display = current_char.display if current_char else "Default"
-        model   = current_char.model if current_char else "(not set)"
+        model = current_char.model if current_char else "(not set)"
         await interaction.followup.send(
             f"**Current character:** `{display}`\n**Model:** ``{model}``", ephemeral=True
         )

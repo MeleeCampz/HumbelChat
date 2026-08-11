@@ -7,8 +7,10 @@ import logging
 import httpx
 
 import discord
-import discord.app_commands as app_commands
-from openai import AsyncOpenAI
+
+from config.settings import DEFAULT_MODEL, FALLBACK_MODELS
+from bot_core.history import get_history
+from bot_core.ai_client import _make_client
 
 log = logging.getLogger("bot.utility_commands")
 
@@ -46,8 +48,8 @@ async def handle_remind_command(
     asyncio.create_task(_send_reminder(channel_id, message, delay=delay))
 
     unit_singular = time_unit.rstrip("s") if time_value != 1 else time_unit
-    prompt_text = "\u2705 Reminder set for **" + str(time_value) + " " + unit_singular + "** from now!"
-    confirmation = prompt_text + f'\n\U0001f4dd I"ll ping you with: "{message}"'
+    prompt_text = "✅ Reminder set for **" + str(time_value) + " " + unit_singular + "** from now!"
+    confirmation = prompt_text + f'\n📝 I\'ll ping you with: "{message}"'
     await interaction.followup.send(confirmation, ephemeral=True)
 
 
@@ -59,7 +61,7 @@ async def _send_reminder(channel_id: int, message: str, delay: int) -> None:
     try:
         chan = _bot.get_channel(channel_id)
         if chan:
-            await chan.send(f"\u23f0 **Reminder:** {message}")
+            await chan.send(f"⏰ **Reminder:** {message}")
     except Exception as e:
         log.error("Failed to send reminder: %s", e)
 
@@ -68,15 +70,13 @@ async def _send_reminder(channel_id: int, message: str, delay: int) -> None:
 
 async def handle_ocr_command(
     interaction: discord.Interaction,
-    image: discord.Attachment = None,
+    image: discord.Attachment | None = None,
 ) -> None:
     """Vision-based OCR."""
-    from config.settings import settings  # noqa: local-only
-
     await interaction.response.defer(ephemeral=True)
 
     if not image:
-        await interaction.followup.send("\u26a0\ufe0f Please attach an image.", ephemeral=True)
+        await interaction.followup.send("⚠️ Please attach an image.", ephemeral=True)
         return
 
     async with httpx.AsyncClient() as client:
@@ -85,34 +85,42 @@ async def handle_ocr_command(
 
     # MIME detection
     mime = "image/png"
-    fn   = (image.filename or "").lower()
-    if fn.endswith((".jpg", ".jpeg")):  mime = "image/jpeg"
-    if fn.endswith((".gif")):           mime = "image/gif"
-    if fn.endswith((".webp")):          mime = "image/webp"
+    fn = (image.filename or "").lower()
+    if fn.endswith((".jpg", ".jpeg")):
+        mime = "image/jpeg"
+    if fn.endswith(".gif"):
+        mime = "image/gif"
+    if fn.endswith(".webp"):
+        mime = "image/webp"
 
-    b64   = base64.b64encode(img_data).decode("utf-8")
+    b64 = base64.b64encode(img_data).decode("utf-8")
     data_uri = f"data:{mime};base64,{b64}"
 
-    client = AsyncOpenAI(
-        api_key=settings.INFER_API_KEY,
-        base_url=settings.INFER_URL,
-    )
+    client = _make_client()
     resp = await client.chat.completions.create(
-        model=settings.DEFAULT_MODEL,
-        messages=[{"role": "user", "content": [
-            {"type": "text", "text": "Extract all text from this image accurately."},
-            {"type": "image_url", "image_url": {"url": data_uri}},
-        ]}],
-        temperature=0, max_tokens=4096,
+        model=DEFAULT_MODEL,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Extract all text from this image accurately."},
+                    {"type": "image_url", "image_url": {"url": data_uri}},
+                ],
+            }
+        ],
+        temperature=0,
+        max_tokens=4096,
     )
     reply = resp.choices[0].message.content or "(no text found)"
 
     MAX_LEN = 1900
     if len(reply) <= MAX_LEN:
-        await interaction.followup.send(f"\U0001f50d Extracted text:\n\n{reply}", ephemeral=True)
+        await interaction.followup.send(f"🔍 Extracted text:\n\n{reply}", ephemeral=True)
     else:
         for i in range(0, len(reply), MAX_LEN):
-            await interaction.followup.send(f"\U0001f50d OCR (part {i//MAX_LEN+1})\n\n{reply[i:i+MAX_LEN]}", ephemeral=True)
+            await interaction.followup.send(
+                f"🔍 OCR (part {i // MAX_LEN + 1})\n\n{reply[i:i + MAX_LEN]}", ephemeral=True
+            )
 
 
 # ── Summarize ────────────────────────────────────────────────────────────
@@ -122,47 +130,39 @@ async def handle_summarize_command(
     file_url: str | None = None,
 ) -> None:
     """Summarize recent chat history or a file from a URL."""
-    from config.settings import settings  # noqa: local-only
-    from bot_core import _chat_history  # noqa: local-only
-
     await interaction.response.defer(ephemeral=True)
 
     text = ""
-    src  = ""
+    src = ""
     if file_url:
         try:
             async with httpx.AsyncClient() as client:
                 resp = await client.get(file_url, timeout=10.0)
                 resp.raise_for_status()
                 text = resp.text[:32000]
-                src  = f"file from `{file_url[:80]}...`"
+                src = f"file from `{file_url[:80]}...`"
         except Exception as e:
             log.error("Failed to fetch file_url: %s", e)
-            await interaction.followup.send(f"\u26a0\ufe0f Error fetching URL: {e}", ephemeral=True)
+            await interaction.followup.send(f"⚠️ Error fetching URL: {e}", ephemeral=True)
             return
     else:
         guild_id = interaction.guild_id or 0
-        ch_history = _chat_history.get(guild_id, {}).get(interaction.channel_id, [])
+        ch_history = get_history(guild_id, interaction.channel_id)
         parts = []
         for msg in ch_history[-30:]:
             role_name = {"user": "User", "assistant": "AI"}.get(msg["role"], msg["role"])
             parts.append(f"[{role_name}]: {msg['content']}")
-        text     = "\n\n".join(parts) if parts else "(no history)"
-        src      = "recent conversation"
+        text = "\n\n".join(parts) if parts else "(no history)"
+        src = "recent conversation"
 
     if not text.strip() or text == "(no history)":
-        await interaction.followup.send("\u26a0\ufe0f Nothing to summarize.", ephemeral=True)
+        await interaction.followup.send("⚠️ Nothing to summarize.", ephemeral=True)
         return
 
-    client = AsyncOpenAI(
-        api_key=settings.INFER_API_KEY,
-        base_url=settings.INFER_URL,
-    )
+    client = _make_client()
 
-    # Define fallback models in case the primary one fails.
-    # FALLBACK_MODELS is configurable via .env (comma-separated model slugs).
-    models_to_try = [settings.DEFAULT_MODEL]
-    models_to_try.extend(settings.FALLBACK_MODELS)
+    models_to_try = [DEFAULT_MODEL]
+    models_to_try.extend(FALLBACK_MODELS)
 
     summary = None
     for model in models_to_try:
@@ -170,7 +170,10 @@ async def handle_summarize_command(
             resp = await client.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": f"Summarize the following text from {src}. Be concise but complete."},
+                    {
+                        "role": "system",
+                        "content": f"Summarize the following text from {src}. Be concise but complete.",
+                    },
                     {"role": "user", "content": text},
                 ],
                 temperature=0.3,
@@ -183,14 +186,19 @@ async def handle_summarize_command(
             continue
 
     if summary is None:
-        await interaction.followup.send("\u26a0\ufe0f Failed to generate summary after trying multiple models.", ephemeral=True)
+        await interaction.followup.send(
+            "⚠️ Failed to generate summary after trying multiple models.", ephemeral=True
+        )
     else:
         MAX_LEN = 1900
         if len(summary) <= MAX_LEN:
-            await interaction.followup.send(f"\U0001f4dd **Summary** ({src}):\n\n{summary}", ephemeral=True)
+            await interaction.followup.send(f"📄 **Summary** ({src}):\n\n{summary}", ephemeral=True)
         else:
             for i in range(0, len(summary), MAX_LEN):
-                await interaction.followup.send(f"\U0001f4dd **Summary** ({src}) (part {i//MAX_LEN+1}):\n\n{summary[i:i+MAX_LEN]}", ephemeral=True)
+                await interaction.followup.send(
+                    f"📄 **Summary** ({src}) (part {i // MAX_LEN + 1}):\n\n{summary[i:i + MAX_LEN]}",
+                    ephemeral=True,
+                )
 
 
 # ── Translate ────────────────────────────────────────────────────────────
@@ -201,44 +209,46 @@ async def handle_translate_command(
     source_language: str | None = None,
 ) -> None:
     """Translate text via the AI provider."""
-    from config.settings import settings  # noqa: local-only
-    from bot_core import _chat_history  # noqa: local-only
-
-    parts   = target_language.split(":", 1)
-    tgt     = parts[0].strip()
+    parts = target_language.split(":", 1)
+    tgt = parts[0].strip()
     text_to = parts[1].strip() if len(parts) > 1 else None
 
     if not text_to:
-        guild_id  = interaction.guild_id or 0
-        ch_hist   = _chat_history.get(guild_id, {}).get(interaction.channel_id, [])
+        guild_id = interaction.guild_id or 0
+        ch_hist = get_history(guild_id, interaction.channel_id)
         last_user = [m["content"] for m in reversed(ch_hist) if m["role"] == "user"]
-        text_to   = last_user[0] if last_user else None
+        text_to = last_user[0] if last_user else None
 
     if not text_to:
         await interaction.followup.send(
-            "\u26a0\ufe0f No text to translate.  Provide text as ``/translate Spanish: Hello world``.", ephemeral=True
+            "⚠️ No text to translate.  Provide text as ``/translate Spanish: Hello world``.",
+            ephemeral=True,
         )
         return
 
     src_clause = f" from {source_language}" if source_language else ""
 
-    client = AsyncOpenAI(api_key=settings.INFER_API_KEY, base_url=settings.INFER_URL)
+    client = _make_client()
     resp = await client.chat.completions.create(
-        model=settings.DEFAULT_MODEL,
+        model=DEFAULT_MODEL,
         messages=[
-            {"role": "system",
-             "content": f"Translate{src_clause} text into {tgt}. Return ONLY translated text."},
+            {
+                "role": "system",
+                "content": f"Translate{src_clause} text into {tgt}. Return ONLY translated text.",
+            },
             {"role": "user", "content": text_to},
         ],
-        temperature=0.3, max_tokens=4096,
+        temperature=0.3,
+        max_tokens=4096,
     )
     translated = resp.choices[0].message.content or "(translation failed)"
 
     MAX_LEN = 1900
     if len(translated) <= MAX_LEN:
-        await interaction.followup.send(f"\U0001f310 Translated to **{tgt}**:\n\n{translated}", ephemeral=True)
+        await interaction.followup.send(f"🌐 Translated to **{tgt}**:\n\n{translated}", ephemeral=True)
     else:
         for i in range(0, len(translated), MAX_LEN):
             await interaction.followup.send(
-                f"\U0001f310 Translated to **{tgt}** (part {i//MAX_LEN+1})\n\n{translated[i:i+MAX_LEN]}", ephemeral=True
+                f"🌐 Translated to **{tgt}** (part {i // MAX_LEN + 1})\n\n{translated[i:i + MAX_LEN]}",
+                ephemeral=True,
             )

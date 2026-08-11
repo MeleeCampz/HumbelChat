@@ -27,8 +27,7 @@ class TestUploadKBCommand:
 
         with patch("kb.storage._compute_sha256", return_value="abc123def456"):
             with patch.object(ChunkIndex, "from_text", return_value=[]):
-                with patch("config.settings.settings") as mock_settings:
-                    mock_settings.KB_PATH = temp_kb_dir
+                with patch("config.settings.KB_PATH", temp_kb_dir):
                     from commands.kb_commands import handle_upload_kb
 
                     await handle_upload_kb(ix, attachment=attachment, kb_name=None, url=None)
@@ -53,14 +52,12 @@ class TestUploadKBCommand:
 
         with patch("httpx.AsyncClient", return_value=mock_client):
             with patch.object(ChunkIndex, "from_text", return_value=[]):
-                with patch("config.settings.settings") as mock_settings:
-                    mock_settings.KB_PATH = temp_kb_dir
+                with patch("config.settings.KB_PATH", temp_kb_dir):
                     from commands.kb_commands import handle_upload_kb
 
                     await handle_upload_kb(ix, attachment=None, url="https://example.com/file.txt", kb_name=None)
 
         assert any("file.txt" in s or "upload_kb" in s for s in sent)
-
 
     @pytest.mark.asyncio
     async def test_upload_kb_early_return(self, temp_kb_dir):
@@ -69,8 +66,7 @@ class TestUploadKBCommand:
         await ix.response.send_message("placeholder", ephemeral=True)
         sent = ix._sent
 
-        with patch("config.settings.settings") as mock_settings:
-            mock_settings.KB_PATH = temp_kb_dir
+        with patch("config.settings.KB_PATH", temp_kb_dir):
             from commands.kb_commands import handle_upload_kb
             await handle_upload_kb(ix, attachment=None, url=None)
 
@@ -90,8 +86,7 @@ class TestListKBDocsCommand:
         await ix.response.send_message("placeholder", ephemeral=True)  # init _sent via response.send
         sent = ix._sent
 
-        with patch("config.settings.settings") as mock_settings:
-            mock_settings.KB_PATH = temp_kb_dir
+        with patch("config.settings.KB_PATH", temp_kb_dir):
             await handle_list_kb_docs(ix)
 
         assert any(s for s in sent if "test_doc" in s or "nested" in s.lower())
@@ -117,8 +112,7 @@ class TestReindexKBCommand:
         mock_store.shutdown = AsyncMock()
 
         with patch("kb.index.KBIndexStore", return_value=mock_store):
-            with patch("config.settings.settings") as mock_settings:
-                mock_settings.KB_PATH = temp_kb_dir
+            with patch("config.settings.KB_PATH", temp_kb_dir):
                 from commands.kb_commands import handle_reindex_kb
                 await handle_reindex_kb(ix)
 

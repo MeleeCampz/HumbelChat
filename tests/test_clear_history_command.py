@@ -12,7 +12,8 @@ class TestClearHistoryCommand:
     async def test_clear_history_clears_messages(self):
         """Test that clear history clears chat history."""
         from commands.clear_history_command import handle_clear_history_command
-        from bot_core import _chat_history, get_current_message_count
+        from bot_core.history import _chat_history
+        from bot_core.ai_client import get_current_message_count
 
         # Set up some history first
         guild_id = 123456
@@ -50,7 +51,7 @@ class TestClearHistoryCommand:
     async def test_clear_history_confirmation_message(self):
         """Test that clear history sends a confirmation message."""
         from commands.clear_history_command import handle_clear_history_command
-        from bot_core import _chat_history
+        from bot_core.history import _chat_history
 
         guild_id = 123456
         channel_id = 789012
@@ -60,6 +61,7 @@ class TestClearHistoryCommand:
         ]
 
         sent = []
+
         async def on_send(content="", ephemeral=False):
             sent.append(str(content))
 

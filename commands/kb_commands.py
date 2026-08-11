@@ -17,8 +17,6 @@ async def handle_upload_kb(
     subfolder: str | None = None,           # optional subfolder
 ) -> None:
     """Upload a file directly to the local KB storage directory."""
-    from config.settings import settings
-
     # --- step 1: get bytes ---
     if attachment is not None:
         data = await attachment.read()
@@ -38,7 +36,7 @@ async def handle_upload_kb(
 
     # --- step 2 & 3: validate + write to KB_PATH ---
     try:
-        dest, summary = validate_upload(data, filename=fname, kb_path=settings.KB_PATH, subfolder=subfolder)
+        dest, summary = validate_upload(data, filename=fname, kb_path=None, subfolder=subfolder)
     except ValueError as exc:
         await interaction.response.send_message(f"Upload rejected: **{exc}**", ephemeral=True)
         return
@@ -49,8 +47,9 @@ async def handle_upload_kb(
     # --- step 4: reply with summary ---
     chunk_hint = ""
     try:
+        from config.settings import CHUNK_TARGET
         n = len(pathlib.Path(dest).read_text(encoding="utf-8", errors="replace"))
-        approx_chunks = n // settings.CHUNK_TARGET if settings.CHUNK_TARGET else "?"
+        approx_chunks = n // CHUNK_TARGET if CHUNK_TARGET else "?"
         approx_chunks_display = " (approx %d chunks)" % approx_chunks
     except Exception:
         approx_chunks_display = ""
@@ -80,24 +79,24 @@ async def handle_list_kb_docs(interaction, subfolder_path: str | None = None):
     If *subfolder_path* is given, recurses into that subfolder.
     Otherwise shows only root-level items (files + directories).
     """
-    from config.settings import settings
+    from config.settings import KB_PATH
 
     if subfolder_path:
         # Subfolder view: recurse into that path
-        docs = list_kb_files(settings.KB_PATH, subfolder=subfolder_path, recursive=True)
+        docs = list_kb_files(KB_PATH, subfolder=subfolder_path, recursive=True)
         lines: list[str] = [
             f"**Knowledge Base** documents — `{subfolder_path}`",
             "📂 **Subdirectories:**",
         ]
         # Show nested directories within the subfolder
-        scan_root = pathlib.Path(settings.KB_PATH) / subfolder_path
+        scan_root = pathlib.Path(KB_PATH) / subfolder_path
         subdirs = get_root_directories(scan_root)
         for d in sorted(subdirs):
             lines.append(f"  📂 `{d}`")
     else:
         # Root view: show directories + root-level files only
-        docs = list_kb_files(settings.KB_PATH, subfolder=None, recursive=False)
-        dirs = get_root_directories(settings.KB_PATH)
+        docs = list_kb_files(KB_PATH, subfolder=None, recursive=False)
+        dirs = get_root_directories(KB_PATH)
         lines = [
             "**Knowledge Base** documents",
             "📁 **Root directories:**",
@@ -130,9 +129,9 @@ async def handle_list_kb_docs(interaction, subfolder_path: str | None = None):
 
 async def handle_reindex_kb(interaction):
     """Trigger reindexing of all files in the KB using the vector index."""
-    from config.settings import settings
+    from config.settings import KB_PATH
 
-    kb_path = pathlib.Path(settings.KB_PATH)
+    kb_path = pathlib.Path(KB_PATH)
     await interaction.response.defer(ephemeral=True)
 
     # --- Phase 2: use persistent vector index (KBIndexStore) ---

@@ -96,9 +96,9 @@ class OpenAIEmbedder:
         }
 
         # ── Resolve runtime settings (lazy to avoid circular import) ────
-        from config.settings import settings as _s  # type: ignore[attr-defined]
+        from config.settings import INFER_URL
 
-        base_url = _s.INFER_URL.rstrip("/")
+        base_url = INFER_URL.rstrip("/")
 
         # Determine what suffix to append so the /embeddings endpoint is correct.
         # Users may set INFER_URL already ending in /api/v1 or /v1, or none of those.
@@ -113,7 +113,8 @@ class OpenAIEmbedder:
             # For generic URLs (e.g. http://host:port), try both conventions
             remaining_suffixes = ["/embeddings", "/v1/embeddings"]
 
-        api_key = _s.INFER_API_KEY or ""
+        from config.settings import INFER_API_KEY
+        api_key = INFER_API_KEY or ""
         headers: dict[str, str] = {}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
