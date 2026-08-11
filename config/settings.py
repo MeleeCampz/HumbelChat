@@ -40,6 +40,7 @@ DEFAULT_SYSTEM_PROMPT: str = os.getenv("SYSTEM_PROMPT", "")
 CONTEXT_WINDOW: int = _safe_int(os.getenv("CONTEXT_WINDOW"), 10)
 REQUEST_TIMEOUT: int = _safe_int(os.getenv("AI_REQUEST_TIMEOUT"), 120)
 MAX_TOKENS: int = _safe_int(os.getenv("MAX_TOKENS"), 2000)
+MAX_TOKENS_HARD_CAP: int = _safe_int(os.getenv("MAX_TOKENS_HARD_CAP"), 4096)
 
 # Fallback models tried (in order) when DEFAULT_MODEL fails during summarize/translate.
 # Comma-separated list of model slugs.
