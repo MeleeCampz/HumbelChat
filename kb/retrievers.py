@@ -193,7 +193,7 @@ def _retrieve_keyword(
              via get_relevant_chunks(), avoiding full-file dump in context.
     """
     from kb.reader import read_kb_files, get_relevant_chunks
-    from config.settings import settings  # noqa: local-only
+    from config.settings import RAG_WINDOW_LINES
 
     # Phase 1 — quick scoring pass (300 lines is plenty for keyword overlap)
     scored = read_kb_files(kb_path, query=query, top_n=top_n * 3, max_lines_per_file=300)
@@ -202,7 +202,7 @@ def _retrieve_keyword(
 
     # Phase 2 — extract only matched windows from top documents
     doc_names = [name for name, _ in scored[:top_n]]
-    chunks = get_relevant_chunks(kb_path, doc_names, query=query, window_lines=settings.RAG_WINDOW_LINES)
+    chunks = get_relevant_chunks(kb_path, doc_names, query=query, window_lines=RAG_WINDOW_LINES)
 
     logger.info(
         "Keyword retrieval: %d files ranked → %d relevant chunk(s) with ~%.0f chars",
@@ -323,9 +323,9 @@ async def _retrieve_vector(
             seen.add(stem)
             doc_stems.append(stem)
 
-    from config.settings import settings
+    from config.settings import RAG_WINDOW_LINES
 
-    ranked_list = get_relevant_chunks(kb_path, doc_stems, query=query, window_lines=settings.RAG_WINDOW_LINES)
+    ranked_list = get_relevant_chunks(kb_path, doc_stems, query=query, window_lines=RAG_WINDOW_LINES)
 
     logger.info(
         "Vector retrieval (pure vector ranking): %d unique stems → %d relevant chunk(s) with ~%.0f chars",
@@ -406,9 +406,9 @@ async def shutdown_vector_store() -> None:
 
 def get_available_strategies() -> list[str]:
     """Return the list of available retrieval strategies."""
-    from config.settings import settings  # type: ignore[attr-defined]
+    from config.settings import INFER_URL, INFER_API_KEY
 
-    has_vector = bool(settings.INFER_URL and settings.INFER_API_KEY)
+    has_vector = bool(INFER_URL and INFER_API_KEY)
     strategies = ["keyword"]
     if has_vector:
         strategies.append("vector")
@@ -417,6 +417,6 @@ def get_available_strategies() -> list[str]:
 
 def is_vector_available() -> bool:
     """Quick check whether the vector retrieval backend is configured."""
-    from config.settings import settings  # type: ignore[attr-defined]
+    from config.settings import INFER_URL, INFER_API_KEY
 
-    return bool(settings.INFER_URL and settings.INFER_API_KEY)
+    return bool(INFER_URL and INFER_API_KEY)

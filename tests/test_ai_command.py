@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+from pathlib import Path
 
 
 class TestAICommand:
@@ -11,23 +12,27 @@ class TestAICommand:
     async def test_ai_command_basic(self):
         """Test basic AI command execution."""
         from commands.ai_command import handle_ai_command
+        from config.characters import load_characters
+
+        # Ensure characters are loaded (mirrors main.py startup)
+        load_characters(Path("characters.json.example"))
 
         ix = MagicMock()
         ix.guild_id = 123456
         ix.channel_id = 789012
         ix.response = MagicMock(is_done=MagicMock(return_value=True))
         ix.channel = MagicMock()
-        ix.followup_send = AsyncMock()
+        ix.followup.send = AsyncMock()
         ix._sent = []
 
         async def fake_followup(content, **kw):
             ix._sent.append(str(content))
 
-        ix.followup_send.side_effect = fake_followup
+        ix.followup.send.side_effect = fake_followup
 
         mock_reply = ("AI reply", {})
 
-        with patch("bot_core.ask_ai", new_callable=AsyncMock, return_value=mock_reply) as mock_ask:
+        with patch("bot_core.ai_client.ask_ai", new_callable=AsyncMock, return_value=mock_reply) as mock_ask:
             await handle_ai_command(ix, message="Hello")
 
             mock_ask.assert_called_once()
@@ -40,23 +45,26 @@ class TestAICommand:
     async def test_ai_command_with_character(self):
         """Test AI command with a specific character."""
         from commands.ai_command import handle_ai_command
+        from config.characters import load_characters
+
+        load_characters(Path("characters.json.example"))
 
         ix = MagicMock()
         ix.guild_id = 123456
         ix.channel_id = 789012
         ix.response = MagicMock(is_done=MagicMock(return_value=True))
         ix.channel = MagicMock()
-        ix.followup_send = AsyncMock()
+        ix.followup.send = AsyncMock()
         ix._sent = []
 
         async def fake_followup(content, **kw):
             ix._sent.append(str(content))
 
-        ix.followup_send.side_effect = fake_followup
+        ix.followup.send.side_effect = fake_followup
 
         mock_reply = ("AI reply", {})
 
-        with patch("bot_core.ask_ai", new_callable=AsyncMock, return_value=mock_reply) as mock_ask:
+        with patch("bot_core.ai_client.ask_ai", new_callable=AsyncMock, return_value=mock_reply) as mock_ask:
             await handle_ai_command(ix, message="Hello", character_name="system")
 
             mock_ask.assert_called_once()
@@ -67,24 +75,26 @@ class TestAICommand:
     async def test_ai_command_defers_response(self):
         """Test that the AI command properly defers to prevent timeout."""
         from commands.ai_command import handle_ai_command
+        from config.characters import load_characters
+
+        load_characters(Path("characters.json.example"))
 
         ix = MagicMock()
         ix.guild_id = 123456
         ix.channel_id = 789012
-        # Mark response as already done so defer is skipped
         ix.response = MagicMock(is_done=MagicMock(return_value=True))
         ix.channel = MagicMock()
-        ix.followup_send = AsyncMock()
+        ix.followup.send = AsyncMock()
         ix._sent = []
 
         async def fake_followup(content, **kw):
             ix._sent.append(str(content))
 
-        ix.followup_send.side_effect = fake_followup
+        ix.followup.send.side_effect = fake_followup
 
         mock_reply = ("AI reply", {})
 
-        with patch("bot_core.ask_ai", new_callable=AsyncMock, return_value=mock_reply):
+        with patch("bot_core.ai_client.ask_ai", new_callable=AsyncMock, return_value=mock_reply):
             await handle_ai_command(ix, message="Hello")
 
         # Since we mocked response.is_done() to return True, defer should not be called

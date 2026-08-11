@@ -1,2 +1,47 @@
-from .settings import settings
+"""Configuration package."""
+from .settings import (
+    BOT_PREFIX,
+    CHAT_HISTORY_RESET,
+    CHUNK_TARGET,
+    CONTEXT_WINDOW,
+    DEFAULT_KB_NAME,
+    DEFAULT_MODEL,
+    DEFAULT_SYSTEM_PROMPT,
+    DISCORD_TOKEN,
+    FALLBACK_MODELS,
+    INFER_API_KEY,
+    INFER_URL,
+    KB_PATH,
+    MAX_TOKENS,
+    RAG_MAX_CHARS,
+    RAG_MAX_DOCS,
+    RAG_RETRIEVAL_METHOD,
+    RAG_WINDOW_LINES,
+    REQUEST_TIMEOUT,
+)
+from .characters import load_characters, get_character, default_character, _CHARACTERS
 
+__all__ = [
+    "BOT_PREFIX",
+    "CHAT_HISTORY_RESET",
+    "CHUNK_TARGET",
+    "CONTEXT_WINDOW",
+    "DEFAULT_KB_NAME",
+    "DEFAULT_MODEL",
+    "DEFAULT_SYSTEM_PROMPT",
+    "DISCORD_TOKEN",
+    "FALLBACK_MODELS",
+    "INFER_API_KEY",
+    "INFER_URL",
+    "KB_PATH",
+    "MAX_TOKENS",
+    "RAG_MAX_CHARS",
+    "RAG_MAX_DOCS",
+    "RAG_RETRIEVAL_METHOD",
+    "RAG_WINDOW_LINES",
+    "REQUEST_TIMEOUT",
+    "load_characters",
+    "get_character",
+    "default_character",
+    "_CHARACTERS",
+]
