@@ -36,7 +36,7 @@ cp .env.example .env
 # Run the bot
 python main.py
 # Or use the startup script for automatic logging:
-chmod +x start_bot.sh && ./start_bot.sh
+./start_bot.sh
 ```
 
 ## Configuration
@@ -57,7 +57,18 @@ Set these environment variables in `.env`:
 |---|---|---|
 | `MODEL_NAME` | Default model slug for AI requests | *(empty — uses character config)* |
 | `AI_REQUEST_TIMEOUT` | HTTP timeout in seconds | `120` |
-| `MAX_TOKENS` | Maximum tokens per response | `2000` |
+| `MAX_TOKENS` | Baseline max tokens per response | `2000` |
+| `MAX_TOKENS_HARD_CAP` | Absolute upper bound applied on top of per-character/global value | `4096` |
+
+### Response Length Defaults
+
+The bot determines `max_tokens` for each request using this order of precedence, and clamps the final value to `MAX_TOKENS_HARD_CAP`:
+
+1. Per-character `max_tokens` from `characters.json` (if set)
+2. Global `MAX_TOKENS` from `.env`
+3. `MAX_TOKENS_HARD_CAP` from `.env` (final clamp)
+
+Keeping these values small (for example `2000`) keeps responses closer to Discord size limits and reduces risk of over-long outputs.
 
 ### Bot Behavior
 
@@ -270,6 +281,7 @@ Controls AI personas/models. Structure:
 | `display` | Human-readable name (optional) |
 | `model` | Model slug for the inference API |
 | `system_prompt` | Custom system prompt (optional) |
+| `max_tokens` | Optional per-character max tokens; overrides the global `MAX_TOKENS` baseline |
 
 **Important:** `characters.json` is private and should NOT be committed. It's in `.gitignore`.
 

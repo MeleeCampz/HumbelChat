@@ -15,6 +15,7 @@ from config.settings import (
     CONTEXT_WINDOW,
     REQUEST_TIMEOUT,
     MAX_TOKENS,
+    MAX_TOKENS_HARD_CAP,
     KB_PATH,
     RAG_MAX_DOCS,
     RAG_MAX_CHARS,
@@ -115,12 +116,18 @@ async def ask_ai(
                      display_name, len(content) / 1024, int(len(content) / 4))
 
     timeout_sec = REQUEST_TIMEOUT
+
+    _char_max = char_obj.max_tokens if (char_obj and char_obj.max_tokens) else None
+    _request_max_tokens: int = _char_max if _char_max else MAX_TOKENS
+
+    _request_max_tokens = min(_request_max_tokens, MAX_TOKENS_HARD_CAP)
+
     try:
         resp = await client.chat.completions.create(
             model=effective_model,
             messages=messages,
             temperature=0.7,
-            max_tokens=MAX_TOKENS,
+            max_tokens=_request_max_tokens,
             stream=False,
             timeout=timeout_sec,
         )

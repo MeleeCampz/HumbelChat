@@ -1,20 +1,19 @@
 {
-  "default": "System", 
+  "default": "System",
   "characters": {
     "System": {
       "display": "System",
       "model": "qwen3.6:latest",
       "system_prompt": "",
-      "max_tokens": 1024,
+      "max_tokens": 2000,
       "temperature": 0.7
     },
     "Assistant": {
       "display": "Chat Assistant",
       "model": "some-other-model",
       "system_prompt": "You are a helpful assistant.",
-      "max_tokens": 1024,
+      "max_tokens": 2000,
       "temperature": 0.7
     }
   }
 }
-
