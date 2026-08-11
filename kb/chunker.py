@@ -336,12 +336,3 @@ class Chunker:
         """Simple hash for header deduplication."""
         return hex(abs(hash(text)))[-8:]
 
-
-def _extract_ext(name: str) -> str:
-    """Extract file extension (lowercased), stripping any query-string suffix."""
-    base = name.split("?")[0]
-    i = base.rfind(".")
-    return base[i:].lower() if i > 0 else ""
-
-
-

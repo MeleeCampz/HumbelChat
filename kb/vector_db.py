@@ -135,7 +135,6 @@ class KBVectorIndex:
                     for n, c, e in zip(names, contents, embeddings)
                 ]
             except Exception as exc:
-                os.environ.setdefault("KB_VECTOR_INDEX_LOG", "1")
                 index._log_error(str(exc))
 
         return index

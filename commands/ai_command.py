@@ -1,5 +1,8 @@
 import asyncio
+import logging
 from config.characters import CHARACTER_CHOICES, get_character, default_character
+
+log = logging.getLogger("bot.commands.ai_command")
 
 async def handle_ai_command(
     interaction,
@@ -13,7 +16,7 @@ async def handle_ai_command(
         if not interaction.response.is_done():
             await interaction.response.defer()
     except Exception as e:
-        print(f"Error deferring: {e}")
+        log.error("Error deferring interaction: %s", e)
         return
 
     # 2. Resolve character
@@ -47,7 +50,7 @@ async def handle_ai_command(
             from utils.typing_loop import typing_loop_task
             asyncio.create_task(typing_loop_task(interaction.channel))
         except Exception as e:
-            print(f"Typing loop error: {e}")
+            log.warning("Typing loop error: %s", e)
 
     # 4. Ask AI
     from bot_core import ask_ai
@@ -62,8 +65,7 @@ async def handle_ai_command(
                       ) or "",
         )
     except Exception as e:
-        import logging
-        logging.error(f"AI request failed: {e}")
+        log.error("AI request failed: %s", e)
         await interaction.followup.send(f"❌ Error calling AI: {e}", ephemeral=True)
         return
 
@@ -72,6 +74,5 @@ async def handle_ai_command(
     try:
         await send_long_response(interaction, reply_text, str(char_obj.display))
     except Exception as e:
-        import logging
-        logging.error(f"Failed to send AI response: {e}")
+        log.error("Failed to send AI response: %s", e)
 

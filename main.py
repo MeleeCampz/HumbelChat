@@ -10,6 +10,7 @@ import logging
 import os
 import pathlib
 import sys
+from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -39,8 +40,6 @@ console_handler.setFormatter(console_format)
 
 # Set up file handlers with rotation
 file_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-
-from logging.handlers import RotatingFileHandler
 
 bot_log = RotatingFileHandler(
     LOG_DIR / "bot.log",
