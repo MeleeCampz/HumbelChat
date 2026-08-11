@@ -30,12 +30,16 @@ This helps queries hit relevant sections without being drowned out by unrelated 
 
 ## Supported file types
 
+The knowledge base accepts and meaningfully reads/indexes:
+
 - `.txt`
 - `.md`
 - `.csv`
 - `.html`
 - `.xml`
 - `.rtf`
+
+These are the expected file types for KB use. Storage itself does not strictly enforce only these extensions — uploaded files use MIME-based inference and fall back to `.txt` when the extension or MIME type is unknown — but files whose extensions are not in the set above are generally not read or indexed by the same path.
 
 ## Commands
 

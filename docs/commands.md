@@ -29,7 +29,7 @@ Send a message to the active AI character. Uses per-channel conversation history
 
 ### `/upload_kb`
 
-Upload a document to the knowledge base. Supported file types are `.txt`, `.md`, `.csv`, `.html`, `.xml`, and `.rtf`. Uploaded files are chunked for indexing.
+Upload a document to the knowledge base. The expected file types are `.txt`, `.md`, `.csv`, `.html`, `.xml`, and `.rtf`. These are the types the bot will read and index properly. Storage uses MIME-based inference and defaults to `.txt` when the extension is unrecognized, but unsupported extensions are not reliably indexed.
 
 ### `/list_kb_docs`
 
