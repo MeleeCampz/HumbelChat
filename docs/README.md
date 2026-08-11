@@ -226,30 +226,40 @@ On first run, slash commands are registered globally (may take up to an hour for
 ```
 discord-ai-bot/
 ├── main.py                   # Bot entry point, event handlers, slash command registrations
-├── bot_core.py               # Core AI client + conversation history (shared state)
+├── bot_core/                 # Core AI client + conversation history
+│   ├── __init__.py           # Re-exports for backward compatibility
+│   ├── ai_client.py          # Provider calls + RAG orchestration
+│   └── history.py            # Per-channel conversation history (singleton)
 ├── config/                   # Settings and character configuration
-│   ├── settings.py           # Environment variable loading & singleton
+│   ├── __init__.py           # Package init (re-exports constants)
+│   ├── settings.py           # Environment variable loading & typed constants
 │   └── characters.py         # Character/persona loading & display mapping
 ├── commands/                 # Slash command implementations
-│   ├── ai_command.py              # /ai command handler
+│   ├── __init__.py           # Package init
+│   ├── ai_command.py              # /ai command handler (delegates to bot_core.ai_client)
 │   ├── character_commands.py      # /character command handler
 │   ├── clear_history_command.py   # /clear_history handler
 │   ├── kb_commands.py             # /upload_kb, /list_kb_docs, /reindex_kb handlers
 │   └── utility_commands.py        # /remind, /ocr, /summarize, /translate handlers
 ├── kb/                     # Knowledge base & RAG modules
-│   ├── reader.py             # Filesystem-based KB reading (RAG source)
+│   ├── __init__.py           # Package init
+│   ├── reader.py             # Filesystem-based KB reading + relevance scoring
 │   ├── storage.py            # Upload, validate, list KB files
 │   ├── scorch.py             # TF-IDF relevance scoring for chunks
 │   ├── vector_db.py          # In-memory vector index with cosine similarity
 │   ├── embedder_openai.py    # Async embedding via OpenWebUI /embeddings endpoint
 │   ├── chunker.py            # Smart document chunking (header-aware + paragraph fallback)
 │   ├── index.py              # Persistent SQLite-backed vector index store
+│   ├── retrievers.py         # Unified retriever (keyword + vector strategies)
 │   └── query_rewriter.py     # Automatic LLM-powered query expansion for RAG
 ├── utils/                  # Helper functions
+│   ├── __init__.py           # Package init
 │   ├── kb_utils.py               # KB logging utilities
 │   ├── response_splitter.py      # Long message chunking (paragraph-aware)
 │   └── typing_loop.py            # Typing indicator task
-├── tests/                  # Unit tests
+├── tests/                  # Unit tests (65 tests)
+│   ├── conftest.py           # Test fixtures
+│   └── ...
 ├── data/knowledge/         # Knowledge base source files (not committed)
 ├── characters.json.example # Example character configuration
 ├── .env.example            # Example environment variable template
