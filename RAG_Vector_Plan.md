@@ -8,10 +8,10 @@ This document tracks the vector search migration from keyword-only to hybrid RAG
 
 ## Phase 1: Embedding Engine Swap ✅
 
-Replaced local `fastembed`/Ollama dependency with OpenWebUI backend (`nomic-embed-text:latest`).
+Replaced local `fastembed`/Ollama dependency with an OpenAI-compatible inference backend (`nomic-embed-text:latest`).
 
 ### Files Created/Modified
-- `kb/embedder_openai.py` — Async wrapper for OpenWebUI `/embeddings` endpoint using `httpx`
+- `kb/embedder.py` — Async wrapper for an OpenAI-compatible `/embeddings` endpoint using `httpx`
 - `kb/vector_db.py` — Refactored to use `OpenAIEmbedder`; `from_kb_path()` is async; `.query()` returns `(display_name, score)` tuples
 
 ### Design Decisions

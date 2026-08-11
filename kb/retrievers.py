@@ -9,7 +9,7 @@ Available strategies
 keyword — heuristic scoring of filenames, headers, and body overlap
           (existing engine in kb.reader).
 
-vector  — cosine-similarity embedding search via the OpenWebUI backend
+vector  — cosine-similarity embedding search via the configured inference backend
           using model ``nomic-embed-text:latest``.  Documents are chunked
           semantically before embedding and indexed on first use with
           SQLite persistence for fast bot restarts.
@@ -271,8 +271,8 @@ async def _retrieve_vector(
     # The query embedding is obtained from the index's internal state after idx.query().
     # We re-derive it here to score all chunks consistently.
     try:
-        from kb.embedder_openai import OpenAIEmbedder
-        embedder = OpenAIEmbedder(model_name="nomic-embed-text:latest")
+        from kb.embedder import OpenAIEmbedder
+        embedder = Embedder(model_name="nomic-embed-text:latest")
         embeddings = await embedder.encode([query])
     except Exception as exc:
         logger.warning("Query embedding failed (%s); falling back to keyword", exc)

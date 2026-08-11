@@ -1,4 +1,4 @@
-"""Async embedding engine powered by the OpenWebUI-compatible backend.
+"""Async embedding engine for an OpenAI-compatible /embeddings backend.
 
 Uses ``INFER_URL`` + ``INFER_API_KEY`` from settings plus the model name
 configured for embeddings (defaults to ``nomic-embed-text:latest``).
@@ -8,9 +8,9 @@ retries and fallback logging if the backend is unreachable.
 
 Usage
 -----
-    from kb.embedder_openai import OpenAIEmbedder
+    from kb.embedder import Embedder
 
-    embedder = OpenAIEmbedder()
+    embedder = Embedder()
     vectors = await embedder.encode(["query text", "doc content"])
 """
 
@@ -25,15 +25,15 @@ import httpx
 if TYPE_CHECKING:
     from config.settings import Settings  # noqa: F401
 
-logger = logging.getLogger("kb.embedder_openai")
+logger = logging.getLogger("kb.embedder")
 
 # ──────────────── Constants ───────────────────────────────────────────────
 
 _DEFAULT_MODEL = "nomic-embed-text:latest"
-_BATCH_SIZE = 8  # documents per batch (conservative for OpenWebUI compatibility)
+_BATCH_SIZE = 8  # documents per batch (conservative for shared inference backends)
 
 
-class OpenAIEmbedder:
+class Embedder:
     """Async embedding provider wrapping an OpenAI-compatible /embeddings endpoint.
 
     Parameters
@@ -89,7 +89,7 @@ class OpenAIEmbedder:
     # ── HTTP helpers ───────────────────────────────────────────────────
 
     async def _call_api(self, texts: list[str]) -> list[list[float]]:
-        """Send a batch to the OpenWebUI /embeddings endpoint."""
+        """Send a batch to the configured /embeddings endpoint."""
         payload: dict[str, Any] = {
             "model": self.model_name,
             "input": texts,
@@ -119,7 +119,7 @@ class OpenAIEmbedder:
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
 
-        # OpenWebUI embeddings endpoint is typically /embeddings or /v1/embeddings
+        # OpenAI-compatible embeddings endpoints are typically /embeddings or /v1/embeddings
         endpoints_to_try = remaining_suffixes
 
         last_exc: Exception | None = None

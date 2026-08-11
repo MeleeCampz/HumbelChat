@@ -38,7 +38,7 @@ import time
 from typing import Any, Optional
 
 from kb.vector_db import KBVectorIndex, _DocEntry
-from kb.embedder_openai import OpenAIEmbedder
+from kb.embedder import Embedder
 
 logger = logging.getLogger("kb.index")
 
@@ -80,7 +80,7 @@ class KBIndexStore:
 
         self._db_path = self.persist_dir / "vector_index.db"
         self._index: Optional[KBVectorIndex] = None
-        self._embedder = OpenAIEmbedder(model_name=model_name)
+        self._embedder = Embedder(model_name=model_name)
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 
@@ -88,7 +88,7 @@ class KBIndexStore:
         """Load or build the vector index.
 
         1. If a valid SQLite cache exists (and not forced rebuild), load embeddings from disk.
-        2. Otherwise, build from scratch using OpenWebUI /embeddings endpoint.
+        2. Otherwise, build from scratch using the configured /embeddings endpoint.
         3. Save to disk for future runs.
 
         Parameters
