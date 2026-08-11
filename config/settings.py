@@ -135,5 +135,3 @@ _INIT_VALUES = {
 for _attr in sorted(_INIT_ATTRS):
     setattr(settings, _attr, _INIT_VALUES[_attr])
 
-del (DISCORD_TOKEN, INFER_URL, INFER_API_KEY, DEFAULT_MODEL)  # noqa: F821
-

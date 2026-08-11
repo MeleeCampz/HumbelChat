@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 import os
 import pathlib
 from typing import Optional
@@ -72,33 +71,55 @@ async def _ensure_index_store(kb_path: str | pathlib.Path) -> Optional["kb.index
     return _index_store
 
 
+# ───────────────────────────── Helpers ──────────────────────────────
+
+async def _keyword_fallback(
+    query: str,
+    kb_path: str | pathlib.Path,
+    top_n: int,
+    window_lines: int,
+) -> list[tuple[str, str]]:
+    """Fallback to keyword/TF-IDF retrieval when vector index is unavailable."""
+    from kb.reader import read_kb_files, get_relevant_chunks
+
+    scored = read_kb_files(kb_path, query=query, top_n=top_n * 3, max_lines_per_file=300)
+    doc_names = [name for name, _ in scored[:top_n]] if scored else []
+    chunks = get_relevant_chunks(kb_path, doc_names, query=query, window_lines=window_lines)
+    logger.info(
+        "Keyword fallback: %d files ranked → %d relevant chunk(s) with ~%.0f chars",
+        len(scored), len(chunks),
+        sum(len(c) for _, c in chunks) if chunks else 0,
+    )
+    return chunks
+
+
 # ───────────────────── Adaptive-k Retrieval ─────────────────────
 
 def _adaptive_k_threshold(scores: list[float]) -> int:
     """Determine optimal k using the largest gap in sorted similarity scores.
-    
+
     Implements the Adaptive-k method: finds the position of the steepest drop
     in similarity scores, which corresponds to the boundary between relevant
     and irrelevant documents. Returns the count of chunks to retrieve (k).
-    
+
     A small buffer (5) is added after the threshold to avoid missing marginal docs.
     """
     if len(scores) <= 1:
         return len(scores)
-    
+
     # Sort descending (should already be, but ensure it)
     sorted_scores = sorted(scores, reverse=True)
-    
+
     # Find gaps between consecutive scores
     max_gap = -1.0
     gap_idx = 0
-    
+
     for i in range(len(sorted_scores) - 1):
         gap = sorted_scores[i] - sorted_scores[i + 1]
         if gap > max_gap:
             max_gap = gap
             gap_idx = i
-    
+
     # The optimal k is the index at the largest gap, with a small buffer
     k = gap_idx + 1  # index to count conversion (1-based)
     k += 5  # buffer to capture nearby candidates
@@ -108,33 +129,32 @@ def _adaptive_k_threshold(scores: list[float]) -> int:
 # ───────────── FlashRank Marginal Utility Reranking ─────────────
 
 def _flashrank_reorder(
-    results: list[tuple[float, str, str]], 
-    top_n: int = 5
+    results: list[tuple[float, str, str]],
+    top_n: int = 5,
 ) -> list[tuple[str, str]]:
     """Select chunks using marginal utility (FlashRank-style).
-    
+
     Greedily selects documents that maximize information gain per token while
-    avoiding redundancy. Similar/contributing documents are deprioritized in 
+    avoiding redundancy. Similar/contributing documents are deprioritized in
     favor of novel, complementary evidence.
-    
+
     Parameters
     ----------
     results : list of (score, name, content) sorted by relevance descending
-    top_n_soft_cap : maximum number of chunks to return
-    
+    top_n : maximum number of chunks to return
+
     Returns
     -------
     Reordered list of (name, content) tuples representing the optimal selection.
     """
     if not results:
         return []
-    
+
     # Track what we've already seen for redundancy checking
     seen_stems: set[str] = set()  # document stems to avoid near-duplicate files
-    
+
     selected: list[tuple[str, str]] = []
-    marginal_utilities: list[float] = []
-    
+
     # First pass: compute per-document utility scores and deduplicate file stems
     doc_entries: list[tuple[float, str, str]] = []  # (utility, name, content)
     for score, name, content in results:
@@ -142,21 +162,19 @@ def _flashrank_reorder(
         if stem not in seen_stems:
             seen_stems.add(stem)
             # Utility = relevance score × information density (chars per token ratio)
-            # Penalize overly long docs that dilute signal
             char_len = len(content)
             token_est = max(1, char_len // 4)  # rough token estimate
             info_density = min(char_len / token_est, 2.0) if token_est > 0 else 1.0
             marginal_util = score * info_density
             doc_entries.append((marginal_util, name, content))
-    
+
     # Sort by marginal utility descending
     doc_entries.sort(key=lambda x: -x[0])
-    
-    # Second pass: greedy selection with redundancy penalty
+
+    # Second pass: greedy selection
     for util, name, content in doc_entries[:top_n]:
-        stem = name.split(" [")[0] if " [" in name else name
-        selected.append((name, content))  # Keep full chunk with source info
-    
+        selected.append((name, content))
+
     return selected
 
 
@@ -206,45 +224,21 @@ async def _retrieve_vector(
     Falls back to keyword-only if the vector index is unavailable.
     """
     from kb.reader import get_relevant_chunks
-    try:
-        from kb.reader import read_kb_files  # type: ignore[import]
-    except ImportError:
-        read_kb_files = None  # pragma: nocover
 
     store = await _ensure_index_store(kb_path)
-    if store is None:
-        logger.warning("Vector index store unavailable for '%s'; falling back to keyword", kb_path)
-        scored = read_kb_files(kb_path, query=query, top_n=top_n * 3, max_lines_per_file=300) if read_kb_files else []
-        doc_names = [name for name, _ in scored[:top_n]] if scored else []
-        chunks = get_relevant_chunks(kb_path, doc_names, query=query, window_lines=window_lines)
-        logger.info(
-            "Vector→keyword fallback: %d files ranked → %d relevant chunk(s) with ~%.0f chars",
-            len(scored), len(chunks),
-            sum(len(c) for _, c in chunks) if chunks else 0,
-        )
-        return chunks
+    if store is None or store.get_index() is None or store.get_index().is_empty():
+        logger.warning("Vector index unavailable or empty for '%s'; falling back to keyword", kb_path)
+        return await _keyword_fallback(query, kb_path, top_n, window_lines)
 
     idx = store.get_index()
-    if idx is None or idx.is_empty():
-        logger.warning("Vector index is empty for '%s'; falling back to keyword", kb_path)
-        scored = read_kb_files(kb_path, query=query, top_n=top_n * 3, max_lines_per_file=300) if read_kb_files else []
-        doc_names = [name for name, _ in scored[:top_n]] if scored else []
-        chunks = get_relevant_chunks(kb_path, doc_names, query=query, window_lines=window_lines)
-        logger.info(
-            "Vector→keyword fallback (empty index): %d files ranked → %d relevant chunk(s) with ~%.0f chars",
-            len(scored), len(chunks),
-            sum(len(c) for _, c in chunks) if chunks else 0,
-        )
-        return chunks
 
-    # ── Vector search via direct index query ────
-    # Query a wider candidate set so the top-ranked doc is almost always relevant.
+    # Query the index — idx.query() already embeds the query internally
     ranked_names = await idx.query(query, top_n=min(top_n * 4, 32))
-    
+
+    # If the SQLite cache doesn't exist, the index is in-memory only.
+    # Use vector-ranked file stems to extract relevant chunks from disk.
     conn_path = store._db_path  # type: ignore[attr-defined]
-    import sqlite3, pickle, json
     if not conn_path.exists():
-        # Index is in-memory only — use vector-ranked file names but extract chunks only
         if ranked_names:
             name_set: set[str] = set()
             for name, _ in ranked_names:
@@ -252,41 +246,40 @@ async def _retrieve_vector(
                 if " [" in name:
                     name_set.add(name.split(" [")[0])
             doc_stems = sorted({n.split(" [")[0] if " [" in n else n for n in name_set})
-            ranked_list = get_relevant_chunks(kb_path, doc_stems[:top_n], query=query, window_lines=window_lines)
         else:
-            scored = read_kb_files(kb_path, query=query, top_n=top_n * 3, max_lines_per_file=300) if read_kb_files else []
-            doc_names = [name for name, _ in scored[:top_n]] if scored else []
-            ranked_list = get_relevant_chunks(kb_path, doc_names, query=query, window_lines=window_lines)
+            doc_stems = []
+        ranked_list = get_relevant_chunks(kb_path, doc_stems[:top_n], query=query, window_lines=window_lines)
         logger.info(
-            "Vector→keyword fallback (in-memory DB): %d relevant chunk(s) with ~%.0f chars",
-            len(ranked_list),
+            "Vector retrieval (in-memory): %d stems → %d relevant chunk(s) with ~%.0f chars",
+            len(doc_stems), len(ranked_list),
             sum(len(c) for _, c in ranked_list) if ranked_list else 0,
         )
         return ranked_list
 
+    # Load all chunks from SQLite and compute cosine similarity against the
+    # query embedding that idx.query() already produced.
+    import sqlite3
     conn = sqlite3.connect(str(conn_path))
     cursor = conn.execute("SELECT doc_name, content, embedding FROM document_index")
     all_chunks: list[tuple[str, str, bytes | str]] = cursor.fetchall()
     conn.close()
 
-    # Embed the query
+    if not all_chunks:
+        return await _keyword_fallback(query, kb_path, top_n, window_lines)
+
+    # Compute best vector score per chunk name.
+    # The query embedding is obtained from the index's internal state after idx.query().
+    # We re-derive it here to score all chunks consistently.
     try:
         from kb.embedder_openai import OpenAIEmbedder
         embedder = OpenAIEmbedder(model_name="nomic-embed-text:latest")
         embeddings = await embedder.encode([query])
     except Exception as exc:
         logger.warning("Query embedding failed (%s); falling back to keyword", exc)
-        scored = read_kb_files(kb_path, query=query, top_n=top_n * 3, max_lines_per_file=300) if read_kb_files else []
-        doc_names = [name for name, _ in scored[:top_n]] if scored else []
-        ranked_list = get_relevant_chunks(kb_path, doc_names, query=query, window_lines=window_lines)
-        logger.info(
-            "Vector→keyword fallback (embedding error): %d files ranked → %d relevant chunk(s) with ~%.0f chars",
-            len(scored), len(ranked_list),
-            sum(len(c) for _, c in ranked_list) if ranked_list else 0,
-        )
-        return ranked_list
+        return await _keyword_fallback(query, kb_path, top_n, window_lines)
 
-    # Compute best vector score per chunk name (across expanded queries)
+    # Local cosine helpers
+    import math
     def _cosine_sim(a: list[float], b: list[float]) -> float:
         dot = sum(x * y for x, y in zip(a, b))
         na = math.sqrt(sum(x * x for x in a))
@@ -296,7 +289,9 @@ async def _retrieve_vector(
         return dot / (na * nb)
 
     def _safe_cosine(q_emb: list[float], doc_emb: bytes | str) -> float:
+        import json
         if isinstance(doc_emb, bytes):
+            import pickle
             try:
                 emb_data = pickle.loads(doc_emb)
             except Exception:
@@ -307,39 +302,29 @@ async def _retrieve_vector(
         return max(0.0, min(1.0, sim))
 
     chunk_best_scores: dict[str, float] = {}
-    for i, q_emb in enumerate(embeddings):
+    for q_emb in embeddings:
         for name, content, emb_blob in all_chunks:
             raw_sim = _safe_cosine(q_emb, emb_blob)
-            clipped = max(0.0, min(1.0, raw_sim))
-            if clipped > chunk_best_scores.get(name, 0):
-                chunk_best_scores[name] = clipped
+            if raw_sim > chunk_best_scores.get(name, 0):
+                chunk_best_scores[name] = raw_sim
 
-    # Build (vector_score, doc_name, content) list and sort by pure vector score
+    # Build and sort by pure vector score
     scored_list: list[tuple[float, str, str]] = []
     for doc_name, chunk_content, emb_blob in all_chunks:
-        vec_score = chunk_best_scores.get(doc_name, 0.0)
-        scored_list.append((vec_score, doc_name, chunk_content))
-
-    # Pure vector ranking (no hybrid scoring/adaptive-k during stabilization)
+        scored_list.append((chunk_best_scores.get(doc_name, 0.0), doc_name, chunk_content))
     scored_list.sort(key=lambda t: -t[0])
 
-    # Take all unique stems from ranked list — ensures relevant files are included
-    doc_stems_raw = [
-        name.split(" [")[0] if " [" in name else name
-        for _, name, _ in scored_list
-    ]
-
-    # Deduplicate preserving order (first occurrence wins)
+    # Extract unique file stems preserving rank order
     doc_stems: list[str] = []
     seen: set[str] = set()
-    for s in doc_stems_raw:
-        if s not in seen:
-            seen.add(s)
-            doc_stems.append(s)
+    for _, name, _ in scored_list:
+        stem = name.split(" [")[0] if " [" in name else name
+        if stem not in seen:
+            seen.add(stem)
+            doc_stems.append(stem)
 
     from config.settings import settings
-    
-    # Widen context windows so complete spell/ability entries are captured.
+
     ranked_list = get_relevant_chunks(kb_path, doc_stems, query=query, window_lines=settings.RAG_WINDOW_LINES)
 
     logger.info(

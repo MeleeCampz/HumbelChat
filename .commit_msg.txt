@@ -1,0 +1,17 @@
+Third scan cleanup: de-duplicate helpers, fix vector retrieval, expand KB file support
+
+- kb/vector_db.py: Remove duplicate _extract_ext (import from reader), remove
+  duplicate _normalize_display_name (import from chunker), remove unused os import,
+  fix double-read of files in from_kb_path()
+- kb/chunker.py: Extract _normalize_display_name as module-level function to
+  allow clean imports from other modules
+- kb/retrievers.py: Consolidate 5 duplicate keyword-fallback blocks into
+  _keyword_fallback() helper, remove dead _adaptive_k_threshold/_flashrank_reorder
+  from production path (keep for tests), add missing import math locally
+- kb/reader.py: Expand supported extensions to match docs (.csv, .html, .xml, .rtf)
+- kb/index.py: Fix _matches_file() substring match to exact stem comparison
+- commands/ai_command.py: Remove stale CHARACTER_CHOICES import + manual lookup loop
+- config/settings.py: Remove confusing `del DEFAULT_MODEL` statement
+- .env: Replace real credentials with placeholders
+
+All 65 tests pass.
