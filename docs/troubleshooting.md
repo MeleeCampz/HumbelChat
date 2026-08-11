@@ -33,7 +33,7 @@ Likely cause: wrong path or unsupported format.
 
 Fix:
 - Check `KB_PATH` points to the correct directory
-- Use supported file types: `.txt`, `.md`, `.csv`, `.html`, `.xml`, `.rtf`
+- Use supported file types: `.txt`, `.md`, `.csv`, `.html`, `.xml`, `.rtf` (the bot may still accept other files via MIME-based inference or a `.txt` default, but unsupported extensions are not reliably read or indexed)
 
 ## Vector search returns no results
 
