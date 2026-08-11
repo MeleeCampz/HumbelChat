@@ -13,7 +13,7 @@ A feature-rich Discord bot that brings conversational AI capabilities to your se
 - Personality-driven conversations (configurable character personalities)
 - Session memory for coherent multi-message dialogues per guild/channel
 - **Knowledge base integration** via filesystem storage with two retrieval strategies:
-  - **Vector similarity search** (default): Semantic embedding search using OpenWebUI's `nomic-embed-text` model with persistent SQLite indexing
+  - **Vector similarity search** (default): Semantic embedding search using the configured inference backend's embedding model with persistent SQLite indexing
   - **Keyword/TF-IDF fallback**: Heuristic scoring for environments without vector backend access
 - **Smart document chunking**: Head-aware splitting that preserves semantic boundaries for better retrieval quality
 - **Paragraph-aware response splitting** to respect Discord's 2000-char limit
@@ -84,7 +84,7 @@ Set these environment variables in `.env`:
 ```
 ┌──────────┐    ┌─────────────┐    ┌─────────────────┐
 │  Discord │◄──►│   Bot (Py-  │◄──►│  AI Backend     │    ← Conversational AI
-│  Gateway │    │  discord)   │    │  (OpenWebUI, etc.)│    
+│  Gateway │    │  discord)   │    │  (AI backend, etc.)│    
 └──────────┘    └─────────────┘    └─────────────────┘    
 
                     │
@@ -127,7 +127,7 @@ discord-ai-bot/
 │   ├── storage.py            # Upload, validate, list KB files
 │   ├── scorch.py             # TF-IDF relevance scoring for chunks
 │   ├── vector_db.py          # In-memory vector index with cosine similarity
-│   ├── embedder_openai.py    # Async embedding via OpenWebUI /embeddings endpoint
+│   ├── embedder.py    # Async embedding via configured /embeddings endpoint
 │   ├── chunker.py            # Smart document chunking (header-aware + paragraph fallback)
 │   ├── index.py              # Persistent SQLite-backed vector index store
 │   ├── retrievers.py         # Unified retriever (keyword + vector strategies)
@@ -188,7 +188,7 @@ Uploads `.txt`, `.md`, `.csv`, `.html`, `.xml`, or `.rtf` files to the local KB 
 Lists all documents in `KB_PATH`. Shows name, size, modification date, and SHA256 prefix.
 
 ### `/reindex_kb` — Reindex Knowledge Base
-Rebuilds the vector index from scratch using smart chunking and OpenWebUI embeddings.
+Rebuilds the vector index from scratch using smart chunking and configured embeddings.
 
 ### `/clear_history` — Clear Conversation History
 Clears the conversation history for this server/channel.

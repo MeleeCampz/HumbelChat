@@ -47,7 +47,7 @@ Copy `.env.example` to `.env` and configure the following variables:
 ```
 ┌──────────┐    ┌─────────────┐    ┌─────────────────┐    
 │  Discord │◄──►│   Bot (Py-  │◄──►│  AI Backend     │    
-│  Gateway │    │  discord)   │    │  (OpenWebUI, etc.)│    
+│  Gateway │    │  discord)   │    │  (AI backend, etc.)│    
 └──────────┘    └─────────────┘    └─────────────────┘    
 
                     │
@@ -67,7 +67,7 @@ Copy `.env.example` to `.env` and configure the following variables:
 - **Bot framework:** `discord.py` with `app_commands` for slash commands
 - **AI client:** `openai.AsyncOpenAI` - routes through OpenAI-compatible gateway
 - **Knowledge Base:** Filesystem-based RAG with dual retrieval strategies:
-  - **Vector search** (default): Semantic embedding via OpenWebUI backend, SQLite-persisted index
+  - **Vector search** (default): Semantic embedding via configured inference backend, SQLite-persisted index
   - **Keyword/TF-IDF fallback**: Heuristic scoring for environments without vector backend
 - **Smart chunking:** Head-aware splitting preserves semantic boundaries for better retrieval quality
 - **State management:** In-memory dicts keyed by `(guild_id, channel_id)`
@@ -164,7 +164,7 @@ Uploads `.txt`, `.md`, `.csv`, `.html`, `.xml`, or `.rtf` files to the local KB 
 Lists all documents in `KB_PATH`. Shows name, size, and modification date.
 
 ### `/reindex_kb` — Reindex Knowledge Base
-Rebuilds the vector index from scratch using smart chunking and OpenWebUI embeddings.
+Rebuilds the vector index from scratch using smart chunking and configured embeddings.
 
 ### `/clear_history` — Clear Conversation History
 Clears the conversation history for this server/channel.
@@ -247,7 +247,7 @@ discord-ai-bot/
 │   ├── storage.py            # Upload, validate, list KB files
 │   ├── scorch.py             # TF-IDF relevance scoring for chunks
 │   ├── vector_db.py          # In-memory vector index with cosine similarity
-│   ├── embedder_openai.py    # Async embedding via OpenWebUI /embeddings endpoint
+│   ├── embedder.py    # Async embedding via configured /embeddings endpoint
 │   ├── chunker.py            # Smart document chunking (header-aware + paragraph fallback)
 │   ├── index.py              # Persistent SQLite-backed vector index store
 │   ├── retrievers.py         # Unified retriever (keyword + vector strategies)

@@ -5,8 +5,8 @@ keyword-matching engine in reader.py.  Documents are **chunked** semantically
 before embedding so that queries for specific topics (e.g., "time system")
 hit only relevant sections — not drowned out by unrelated content.
 
-Uses ``kb.embedder_openai.OpenAIEmbedder`` powered by the configured INFER_URL
-(OpenWebUI) backend with model ``nomic-embed-text:latest``.
+Uses ``kb.embedder.Embedder`` powered by the configured INFER_URL
+(OpenAI-compatible) backend with model ``nomic-embed-text:latest``.
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from kb.reader import _extract_ext
 
 # ──────────────────────────── Embedding provider ──────────────────────
 
-from kb.embedder_openai import OpenAIEmbedder
+from kb.embedder import Embedder
 
 
 # ──────────────────────────── Data structures ─────────────────────────
@@ -47,7 +47,7 @@ class KBVectorIndex:
     Build once at startup with ``KBVectorIndex.from_kb_path()``, then query
     with ``index.query("some text", top_n=5)``.
 
-    Uses the configured OpenWebUI-compatible backend (see ``kb.embedder_openai``).
+    Uses the configured inference backend (see ``kb.embedder``).
     Returns an empty index when the embedding backend is unreachable — caller
     should fall back to keyword search via ``kb.retrievers.is_vector_available()``.
     """
