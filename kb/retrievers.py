@@ -271,7 +271,7 @@ async def _retrieve_vector(
     # The query embedding is obtained from the index's internal state after idx.query().
     # We re-derive it here to score all chunks consistently.
     try:
-        from kb.embedder import OpenAIEmbedder
+        from kb.embedder import Embedder
         embedder = Embedder(model_name="nomic-embed-text:latest")
         embeddings = await embedder.encode([query])
     except Exception as exc:

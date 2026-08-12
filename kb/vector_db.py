@@ -54,7 +54,7 @@ class KBVectorIndex:
 
     def __init__(self) -> None:
         self._docs: list[_DocEntry] = []
-        self._embedder = OpenAIEmbedder()
+        self._embedder = Embedder()
 
     # ── Construction ────────────────────────────────────────────────
 
