@@ -8,10 +8,21 @@ Provides:
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 from unittest.mock import MagicMock, AsyncMock
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _disable_history_persistence(tmp_path, monkeypatch):
+    """Keep tests from writing to (or reading from) the real history file."""
+    monkeypatch.setenv("HISTORY_PERSIST_FILE", str(tmp_path / "history_test.json"))
+    from bot_core import history as _h
+    monkeypatch.setattr(_h, "_persist_path", None, raising=False)
+    _h._chat_history.clear()
+    _h._active_characters.clear()
 
 
 def _build_ix(**attrs) -> MagicMock:

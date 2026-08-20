@@ -72,6 +72,10 @@ INTENTS.message_content = True
 # ── Character loading ───────────────────────────────────────────────────
 load_characters(pathlib.Path("characters.json"))
 
+# Restore conversation history + active-character selections from disk
+from bot_core.history import load_persisted
+load_persisted()
+
 _CHAR_CHOICES: list[app_commands.Choice[str]] = [
     app_commands.Choice(name=c.key, value=c.key)
     for c in _CHARACTERS
