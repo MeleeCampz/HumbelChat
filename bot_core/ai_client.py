@@ -135,11 +135,15 @@ async def ask_ai(
 
     _request_max_tokens = min(_request_max_tokens, MAX_TOKENS_HARD_CAP)
 
+    # Per-character temperature (characters.json), falling back to a sane default.
+    _char_temp = getattr(char_obj, "temperature", None)
+    _request_temp: float = float(_char_temp) if isinstance(_char_temp, (int, float)) else 0.7
+
     try:
         resp = await client.chat.completions.create(
             model=effective_model,
             messages=messages,
-            temperature=0.7,
+            temperature=_request_temp,
             max_tokens=_request_max_tokens,
             stream=False,
             timeout=timeout_sec,
