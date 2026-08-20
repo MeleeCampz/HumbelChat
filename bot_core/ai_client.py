@@ -81,11 +81,13 @@ async def ask_ai(
             if chars_used + len(doc_block) > max_chars:
                 log.info("RAG: skipped doc '%s' (%d chars) — remaining budget %d chars",
                          display_name, len(doc_block), max_chars - chars_used)
-                break
+                # Continue (not break): an oversized top-ranked doc must not
+                # block smaller, still-fitting documents from being attached.
+                continue
             parts.append(doc_block)
             chars_used += len(doc_block)
             docs_added += 1
-        rag_context = "\n".join(parts)
+        rag_context = "\n".join(parts) if docs_added else ""
         if docs_added < len(kb_docs):
             log.info("RAG: included %d/%d documents (~%.0fK chars) — budget cap reached",
                      docs_added, len(kb_docs), chars_used / 1024)
