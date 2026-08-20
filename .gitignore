@@ -77,5 +77,11 @@ data/
 .bot.pid
 .bot.sock
 
+# Command-sync marker file (local state, not repo content)
+.commands_synced
+
+# KB vector index cache — built locally, rebuildable, never track
+kb/.index_cache/
+
 # Git
 .git/
