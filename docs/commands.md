@@ -59,6 +59,18 @@ Summarize recent chat history or content from a URL using AI.
 
 Translate text into the specified target language.
 
+### `/sync`
+
+Re-sync all slash commands with Discord. Use this if commands appear duplicated in the slash command menu or if newly added commands are not showing up.
+
+This command clears Discord's command cache and re-registers the current set of commands globally. It may take a few minutes for Discord to fully update its cache after running `/sync`.
+
+#### Why isn't this done automatically?
+
+The bot used to sync commands on every startup/reconnect, which caused duplicates to accumulate in Discord's cache over time. The fix is a **one-time sync on first run** (tracked by a `.commands_synced` marker file) plus this manual `/sync` command for when you need to refresh.
+
+If you want to force a fresh sync on the next startup (e.g., after adding new commands), delete the `.commands_synced` file in the project root and restart the bot.
+
 ## Prefix command
 
 ```
@@ -75,5 +87,6 @@ Uses the default character and shares history with slash commands.
 ## Notes
 
 - Slash commands are registered globally on first run and may take up to an hour to appear in Discord.
+- If commands appear duplicated, run `/sync` to flush Discord's command cache and re-register.
 - History is tracked per channel, not globally.
 - RAG context is added automatically when relevant documents are available.
