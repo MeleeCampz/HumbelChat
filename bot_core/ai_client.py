@@ -25,9 +25,17 @@ from config.settings import (
 
 log = logging.getLogger("bot.bot_core")
 
+# ── Shared client (singleton) ─────────────────────────────────────────
+# Creating an AsyncOpenAI per request opened a new connection pool each
+# time; reuse one client (and its httpx pool) for the process lifetime.
+_shared_client: AsyncOpenAI | None = None
+
 
 def _make_client() -> AsyncOpenAI:
-    return AsyncOpenAI(api_key=INFER_API_KEY, base_url=INFER_URL)
+    global _shared_client
+    if _shared_client is None:
+        _shared_client = AsyncOpenAI(api_key=INFER_API_KEY, base_url=INFER_URL)
+    return _shared_client
 
 
 async def ask_ai(
@@ -50,7 +58,8 @@ async def ask_ai(
     # Guard against stale character models: fall back to the .env default
     # instead of failing with a 400 mid-conversation.
     try:
-        available = {m.id for m in client.models.list().data}
+        models_resp = await client.models.list()
+        available = {m.id for m in models_resp.data}
         if available and effective_model not in available and effective_model != DEFAULT_MODEL:
             log.warning("Model '%s' not found on backend; falling back to '%s'", effective_model, DEFAULT_MODEL)
             effective_model = DEFAULT_MODEL
