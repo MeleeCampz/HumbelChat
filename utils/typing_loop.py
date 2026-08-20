@@ -18,7 +18,7 @@ async def typing_loop_task(channel, duration_sec: int = 30) -> None:
     while loop.time() < end_at:
         try:
             await channel.typing()
-        except TypeError:
+        except (TypeError, asyncio.CancelledError):
             # Event loop already closed (shutting down) — stop immediately
             break
         except Exception:

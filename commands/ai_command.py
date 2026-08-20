@@ -35,12 +35,19 @@ async def handle_ai_command(
 
     model_slug = char_obj.model or ""
 
-    # 3. Start typing indicator (background task)
+    # 3. Start typing indicator (background task; keep a reference so it
+    #    can't be garbage-collected and can be cancelled when we're done)
+    typing_task = None
     if hasattr(interaction, "channel") and interaction.channel is not None:
         try:
             from utils.typing_loop import typing_loop_task
 
-            asyncio.create_task(typing_loop_task(interaction.channel))
+            typing_task = asyncio.create_task(typing_loop_task(interaction.channel))
+            bot_ref = getattr(interaction, "bot", None)
+            if bot_ref is not None:
+                tasks = getattr(bot_ref, "typing_tasks", None)
+                if isinstance(tasks, list):
+                    tasks.append(typing_task)
         except Exception as e:
             log.warning("Typing loop error: %s", e)
 
@@ -59,8 +66,13 @@ async def handle_ai_command(
         )
     except Exception as e:
         log.error("AI request failed: %s", e)
+        if typing_task is not None:
+            typing_task.cancel()
         await interaction.followup.send(f"❌ Error calling AI: {e}", ephemeral=True)
         return
+
+    if typing_task is not None:
+        typing_task.cancel()
 
     # 5. Send chunked response
     from utils.response_splitter import send_long_response

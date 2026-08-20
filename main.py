@@ -285,7 +285,11 @@ async def on_message(message: discord.Message) -> None:
         prompt[:80],
     )
 
-    await message.channel.typing()
+    import asyncio
+    from utils.typing_loop import typing_loop_task
+    typing_task = asyncio.create_task(typing_loop_task(message.channel))
+    bot.typing_tasks = getattr(bot, "typing_tasks", [])
+    bot.typing_tasks.append(typing_task)
 
     sys_char = default_character()
     sys_model = sys_char.model if sys_char else DEFAULT_MODEL
@@ -296,6 +300,8 @@ async def on_message(message: discord.Message) -> None:
         channel_id=message.channel.id,
         username=message.author.display_name or "",
     )
+
+    typing_task.cancel()
 
     from utils.response_splitter import send_long_response
 
