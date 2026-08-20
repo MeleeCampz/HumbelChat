@@ -83,6 +83,30 @@ bot = commands.Bot(
     intents=INTENTS,
 )
 
+# ── One-time command sync on first startup ──────────────────────────────
+# Track whether we've synced commands to avoid duplicate registrations.
+# Use a marker file in the project root; if it exists, we skip auto-sync.
+SYNC_MARKER = pathlib.Path(__file__).parent / ".commands_synced"
+
+
+async def _ensure_commands_synced() -> None:
+    """Sync commands once on first run; skip on subsequent restarts.
+
+    This avoids the duplication problem caused by syncing on every
+    on_ready event (which fires on every reconnect).
+    """
+    if SYNC_MARKER.exists():
+        log.info("Commands already synced previously; skipping auto-sync.")
+        return
+
+    log.info("First startup detected; syncing commands globally...")
+    try:
+        await bot.tree.sync()
+        SYNC_MARKER.touch(exist_ok=True)
+        log.info("Commands synced and marker written.")
+    except Exception as e:
+        log.error("Initial command sync failed: %s", e)
+
 
 # ════════════════════════════════════════════════════════════════════════
 #  Slash commands — delegate to command modules
@@ -199,6 +223,16 @@ async def reindex_kb_command(interaction: discord.Interaction) -> None:
     await handle_reindex_kb(interaction)
 
 
+@bot.tree.command(
+    name="sync",
+    description="Re-sync all slash commands with Discord (fixes duplicated command listings).",
+)
+async def sync_command(interaction: discord.Interaction) -> None:
+    """Re-sync commands — delegated to commands/sync_command.py."""
+    from commands.sync_command import handle_sync_command
+    await handle_sync_command(interaction)
+
+
 # ════════════════════════════════════════════════════════════════════════
 #  Event handlers
 # ════════════════════════════════════════════════════════════════════════
@@ -207,15 +241,14 @@ async def reindex_kb_command(interaction: discord.Interaction) -> None:
 async def on_ready() -> None:
     log.info("Logged in as %s (ID: %s)", bot.user, bot.user.id)
 
-    # Clear stale guild-scoped commands first
-    for guild in bot.guilds or []:
-        try:
-            bot.tree.clear_commands(guild=guild)
-        except discord.NotFound:
-            pass
+    # One-time sync on first run only — avoids command duplication from
+    # repeated syncs on every reconnect.
+    await _ensure_commands_synced()
 
-    # Global sync only — registered once, available in every guild
-    await bot.tree.sync()
+    # NOTE: We no longer auto-sync on every on_ready.
+    # Auto-syncing on every reconnect causes command duplication in Discord's cache.
+    # Commands are registered once when the bot starts; if they need re-syncing,
+    # use the /sync command (which is always available since it's registered at startup).
 
     from utils.kb_utils import log_top_kb_files
 
