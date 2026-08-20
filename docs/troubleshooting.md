@@ -9,6 +9,17 @@ Fix:
 - Or wait up to about an hour for Discord to propagate the update
 - Verify `DISCORD_BOT_TOKEN` is valid in `.env`
 
+## Commands duplicated in the slash command menu
+
+Likely cause: bot was restarted multiple times and previously synced commands on every reconnect (pre-fix behavior), causing duplicates to accumulate in Discord's cache.
+
+Fix:
+- Run `/sync` to flush Discord's command cache and re-register the current command set
+- Wait a few minutes for Discord to update its cache
+- If duplicates persist, try `/sync` again after a short wait
+
+Note: The bot now uses a one-time sync on first startup (tracked via `.commands_synced` marker file) to prevent this issue going forward. If you need to force a fresh sync (e.g., after adding new commands), delete the `.commands_synced` file and restart the bot, or just run `/sync`.
+
 ## AI responses not appearing
 
 Likely cause: API timeout or backend issue.
@@ -51,3 +62,12 @@ Likely cause: stale PID or port conflict from a previous run.
 Fix:
 - Use `./start_bot.sh`; it auto-kills stale instances via PID file
 - If needed, manually remove the stale PID/log state from the bot's runtime directory
+
+## New commands not appearing after code changes
+
+Likely cause: bot was restarted but commands weren't re-synced, or Discord hasn't propagated the update yet.
+
+Fix:
+- Run `/sync` to force a re-registration of all commands
+- Wait up to an hour if the sync command itself doesn't appear immediately
+- Alternatively, delete the `.commands_synced` marker file and restart the bot to trigger a fresh sync on startup

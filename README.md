@@ -34,6 +34,7 @@ Or use the startup script:
 - `/list_kb_docs` — list knowledge base documents
 - `/reindex_kb` — rebuild the knowledge base index
 - `/clear_history` — clear channel conversation history
+- `/sync` — re-sync all slash commands (fixes duplicated commands)
 - `/ocr` — extract text from an image
 - `/summarize` — summarize chat history or a URL
 - `/translate` — translate text into a target language
