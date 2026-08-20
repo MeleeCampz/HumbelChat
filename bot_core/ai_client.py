@@ -37,7 +37,7 @@ async def ask_ai(
     channel_id: int,
     username: str = "",
 ) -> tuple[str, dict]:
-    effective_model = model_slug or DEFAULT_MODEL
+    effective_model = (model_slug or "").strip() or DEFAULT_MODEL
     if not effective_model:
         raise ValueError(
             f"No model configured for this request. Character model='{model_slug}' is empty "
@@ -46,6 +46,17 @@ async def ask_ai(
     log.debug("Using model '%s' for this request.", effective_model)
 
     client = _make_client()
+
+    # Guard against stale character models: fall back to the .env default
+    # instead of failing with a 400 mid-conversation.
+    try:
+        available = {m.id for m in client.models.list().data}
+        if available and effective_model not in available and effective_model != DEFAULT_MODEL:
+            log.warning("Model '%s' not found on backend; falling back to '%s'", effective_model, DEFAULT_MODEL)
+            effective_model = DEFAULT_MODEL
+    except Exception as e:
+        log.warning("Could not list backend models at %s: %s", INFER_URL, e)
+
     ensure_history(guild_id, channel_id)
     history = get_history(guild_id, channel_id)
     max_messages = CONTEXT_WINDOW
