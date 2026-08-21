@@ -54,10 +54,24 @@ FALLBACK_MODELS: list[str] = [
 BOT_PREFIX: str = os.getenv("BOT_PREFIX", "!ai")
 CHAT_HISTORY_RESET: str | None = _or_clear(os.getenv("CHAT_HISTORY_RESET"))
 
+def _or_default(value: str | None, default: str) -> str:
+    """Return value if non-empty, else default (for optional path overrides)."""
+    return value if value else default
+
+
 # ════════════════════════════════════
 #  KNOWLEDGE BASE
 # ════════════════════════════════════
-KB_PATH: pathlib.Path = pathlib.Path(os.getenv("KB_PATH", "data/knowledge"))
+# Repo root, resolved from this file so all paths work regardless of CWD.
+_REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+KB_PATH: pathlib.Path = pathlib.Path(
+    _or_default(os.getenv("KB_PATH"), str(_REPO_ROOT / "data" / "knowledge"))
+)
+CHARACTERS_FILE: pathlib.Path = pathlib.Path(
+    _or_default(os.getenv("CHARACTERS_FILE"), str(_REPO_ROOT / "characters.json"))
+)
+
 DEFAULT_KB_NAME: str = os.getenv("KB_DEFAULT_KB", "humblewood").lower()
 CHUNK_TARGET: int = _safe_int(os.getenv("CHUNK_SIZE"), 2000)
 RAG_MAX_DOCS: int = _safe_int(os.getenv("RAG_MAX_DOCS"), 4)

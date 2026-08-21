@@ -19,7 +19,7 @@ import discord
 from discord.ext import commands
 import discord.app_commands as app_commands
 
-from config.settings import BOT_PREFIX, KB_PATH, INFER_URL, DEFAULT_MODEL, DISCORD_TOKEN
+from config.settings import BOT_PREFIX, KB_PATH, CHARACTERS_FILE, INFER_URL, DEFAULT_MODEL, DISCORD_TOKEN
 from config.characters import load_characters, default_character, _CHARACTERS
 from bot_core.ai_client import ask_ai as core_ask_ai
 from bot_core.history import get_history
@@ -70,7 +70,7 @@ INTENTS.guild_messages = True
 INTENTS.message_content = True
 
 # ── Character loading ───────────────────────────────────────────────────
-load_characters(pathlib.Path("characters.json"))
+load_characters(CHARACTERS_FILE)
 
 # Restore conversation history + active-character selections from disk
 from bot_core.history import load_persisted
@@ -260,6 +260,12 @@ async def on_ready() -> None:
 
     char_names = [c.name for c in _CHAR_CHOICES]
     log.info("Characters loaded: %s", ", ".join(char_names) or "(none)")
+
+    # Re-arm any persisted reminders that haven't fired yet (survives restarts)
+    from bot_core.reminders import rearm_pending_reminders
+    n_rearmed = rearm_pending_reminders()
+    if n_rearmed:
+        log.info("Re-armed %d pending reminder(s)", n_rearmed)
 
 
 @bot.event
