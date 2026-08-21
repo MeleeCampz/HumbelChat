@@ -25,6 +25,16 @@ def _disable_history_persistence(tmp_path, monkeypatch):
     _h._active_characters.clear()
 
 
+@pytest.fixture(autouse=True)
+def _disable_reminders_persistence(tmp_path, monkeypatch):
+    """Keep reminder tests from writing to the real reminders file."""
+    monkeypatch.setenv("REMINDERS_PERSIST_FILE", str(tmp_path / "reminders_test.json"))
+    from bot_core import reminders as _r
+    monkeypatch.setattr(_r, "_store_path", None, raising=False)
+    _r._reminders.clear()
+    _r._tasks.clear()
+
+
 def _build_ix(**attrs) -> MagicMock:
     """Return a mock Interaction where followup.send / response.send_message are real async."""
     sent = []

@@ -1,7 +1,6 @@
 """Utility slash commands: remind, ocr, summarize, translate."""
 from __future__ import annotations
 
-import asyncio
 import base64
 import logging
 import httpx
@@ -45,25 +44,15 @@ async def handle_remind_command(
 
     channel_id = interaction.channel.id
     await interaction.response.defer(ephemeral=True)
-    asyncio.create_task(_send_reminder(channel_id, message, delay=delay))
+
+    # Persist + schedule via the reminder store (survives restarts)
+    from bot_core.reminders import schedule_reminder
+    schedule_reminder(channel_id, message, delay)
 
     unit_singular = time_unit.rstrip("s") if time_value != 1 else time_unit
     prompt_text = "✅ Reminder set for **" + str(time_value) + " " + unit_singular + "** from now!"
     confirmation = prompt_text + f'\n📝 I\'ll ping you with: "{message}"'
     await interaction.followup.send(confirmation, ephemeral=True)
-
-
-async def _send_reminder(channel_id: int, message: str, delay: int) -> None:
-    """Background reminder sender. Sleeps *delay* seconds before sending."""
-    from main import bot as _bot  # Lazy import to avoid circular dependency at module load
-
-    await asyncio.sleep(delay)
-    try:
-        chan = _bot.get_channel(channel_id)
-        if chan:
-            await chan.send(f"⏰ **Reminder:** {message}")
-    except Exception as e:
-        log.error("Failed to send reminder: %s", e)
 
 
 # ── OCR ──────────────────────────────────────────────────────────────────
