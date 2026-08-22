@@ -35,6 +35,14 @@ class _DocEntry:
     display_name: str
     content: str
     embedding: list[float] | None = field(default=None, repr=False)
+    source_file: str | None = field(default=None, repr=False)
+
+    def source(self) -> str:
+        """Best-effort original filename for this chunk (for cache bookkeeping)."""
+        if self.source_file:
+            return self.source_file
+        # Legacy entries: display name is "name.md [Section]" — the stem is the file.
+        return self.display_name.split(" [")[0]
 
 
 # ──────────────────────────── Helpers ─────────────────────────────────
@@ -78,7 +86,7 @@ class KBVectorIndex:
 
         index = cls()
 
-        entries: list[tuple[str, str]] = []  # (display_name_with_section, content)
+        entries: list[tuple[str, str, str]] = []  # (display_name_with_section, content, source_file)
         for p in sorted(root.rglob("*")):
             if not p.is_file() or "?" in p.name:
                 continue
@@ -90,36 +98,36 @@ class KBVectorIndex:
             chunks = await Chunker.split_file(p)
             for chunk in chunks:
                 display_name = f"{chunk.display_name} [{chunk.section_path}]"
-                entries.append((display_name, chunk.content))
+                entries.append((display_name, chunk.content, p.name))
 
-        # If chunking produced nothing (e.g., tiny files), fall back to whole-file
-        if not entries:
-            for p in sorted(root.rglob("*")):
-                if not p.is_file() or "?" in p.name:
-                    continue
-                ext = _extract_ext(p.name)
-                if ext not in {".txt", ".md", ".csv", ".html", ".xml", ".rtf"}:
-                    continue
-                content_text = p.read_bytes().decode("utf-8", errors="replace")
-                if not content_text or len(content_text) > max_bytes_per_file:
-                    continue
-
-                # No line cap — let the full content reach the Chunker for intelligent splitting
-                display_name = _normalize_display_name(p, p.stem)
-                entries.append((display_name, content_text.strip()))
 
         # Build the index (embeds all chunks via OpenWebUI backend)
         if entries:
-            names, contents = zip(*entries)
+            names, contents, sources = zip(*entries)
             try:
                 embeddings = await index._embedder.encode(list(contents))
                 index._docs = [
-                    _DocEntry(display_name=n, content=c, embedding=e)  # type: ignore[arg-type]
-                    for n, c, e in zip(names, contents, embeddings)
+                    _DocEntry(display_name=n, content=c, embedding=e, source_file=s)  # type: ignore[arg-type]
+                    for n, c, e, s in zip(names, contents, embeddings, sources)
                 ]
             except Exception as exc:
                 index._log_error(str(exc))
 
+        return index
+
+    @classmethod
+    def from_entries(
+        cls,
+        entries: list[tuple[str, str, str]],  # (display_name, content, source_file)
+        embeddings: list[list[float]],
+    ) -> KBVectorIndex:
+        """Build an index from pre-embedded entries (no API calls)."""
+        index = cls.__new__(cls)
+        index._embedder = Embedder()
+        index._docs = [
+            _DocEntry(display_name=n, content=c, embedding=e, source_file=s)
+            for (n, c, s), e in zip(entries, embeddings)
+        ]
         return index
 
     def is_empty(self) -> bool:
@@ -160,6 +168,40 @@ class KBVectorIndex:
 
         scored.sort(key=lambda t: -t[1])
         return scored[:top_n]
+
+    async def query_with_embeddings(
+        self,
+        text: str,
+        top_n: int = 5,
+    ) -> tuple[list[tuple[str, str, float]], list[float]]:
+        """Query and also return the query embedding.
+
+        Returns ``(results, q_embedding)`` where ``results`` is
+        ``[(display_name, content, similarity), ...]`` sorted descending.
+        Callers that need to score additional chunks (e.g. disk-backed
+        fallbacks) can reuse *q_embedding* instead of paying for a second
+        embedding API call.
+        """
+        if self.is_empty() or not text.strip():
+            return [], []
+
+        try:
+            q_emb = (await self._embedder.encode([text]))[0]
+        except Exception:
+            return [], []
+
+        scored: list[tuple[str, str, float]] = []
+        for doc in self._docs:
+            emb = doc.embedding
+            if emb is None:
+                continue
+            sim = _cosine_similarity(q_emb, emb)
+            if sim > 0:
+                scored.append((doc.display_name, doc.content, sim))
+
+        scored.sort(key=lambda t: -t[2])
+        return scored[:top_n], q_emb
+
 
     @staticmethod
     def _log_error(msg: str) -> None:

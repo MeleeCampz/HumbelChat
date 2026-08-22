@@ -299,13 +299,26 @@ async def on_message(message: discord.Message) -> None:
 
     sys_char = default_character()
     sys_model = sys_char.model if sys_char else DEFAULT_MODEL
-    reply, _extra = await core_ask_ai(
-        prompt,
-        model_slug=sys_model or "",
-        guild_id=guild_id,
-        channel_id=message.channel.id,
-        username=message.author.display_name or "",
-    )
+
+    from bot_core.ai_client import RateLimitError
+
+    try:
+        reply, _extra = await core_ask_ai(
+            prompt,
+            model_slug=sys_model or "",
+            guild_id=guild_id,
+            channel_id=message.channel.id,
+            username=message.author.display_name or "",
+            user_id=message.author.id,
+        )
+    except RateLimitError as e:
+        typing_task.cancel()
+        await message.channel.send(f"⏳ Rate limit reached — please try again in {e.retry_after}s.")
+        return
+    except ValueError as e:
+        typing_task.cancel()
+        await message.channel.send(f"⚠️ {e}")
+        return
 
     typing_task.cancel()
 
