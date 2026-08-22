@@ -80,6 +80,20 @@ RAG_MAX_CHARS: int = _safe_int(os.getenv("RAG_MAX_CHARS"), 24000)
 RAG_WINDOW_LINES: int = _safe_int(os.getenv("RAG_WINDOW_LINES"), 80)
 
 # ════════════════════════════════════
+#  INPUT VALIDATION
+# ════════════════════════════════════
+# Hard cap on user prompt length (chars).  Prevents a user from pasting
+# 100 K+ chars which would blow past any context window once RAG is added.
+MAX_INPUT_CHARS: int = _safe_int(os.getenv("MAX_INPUT_CHARS"), 50_000)
+
+# ════════════════════════════════════
+#  RATE LIMITING
+# ════════════════════════════════════
+# Max AI requests per user in a sliding window.
+AI_RATE_LIMIT_MAX: int = _safe_int(os.getenv("AI_RATE_LIMIT_MAX"), 5)
+AI_RATE_LIMIT_WINDOW: int = _safe_int(os.getenv("AI_RATE_LIMIT_WINDOW"), 60)
+
+# ════════════════════════════════════
 #  LEGACY COMPAT (read but don't use in new code)
 # ════════════════════════════════════
 _OPENWEBUI_KEY: str = os.getenv("OPENWEBUI_API_KEY", "")

@@ -220,116 +220,44 @@ async def _retrieve_vector(
 ) -> list[tuple[str, str]]:
     """Vector-based retrieval using the persist-backed index.
 
-    Uses pure cosine-similarity ranking (no hybrid/adaptive-k).
-    Falls back to keyword-only if the vector index is unavailable.
+    Pure cosine-similarity ranking over the in-memory index (which the
+    disk-backed store keeps fully hydrated at load time).  Falls back to
+    keyword-only if the vector index is unavailable or the query returns
+    no hits.  Only **one** embedding API call is made per query.
     """
     from kb.reader import get_relevant_chunks
+    from config.settings import RAG_WINDOW_LINES
 
     store = await _ensure_index_store(kb_path)
-    if store is None or store.get_index() is None or store.get_index().is_empty():
+    idx = store.get_index() if store is not None else None
+    if idx is None or idx.is_empty():
         logger.warning("Vector index unavailable or empty for '%s'; falling back to keyword", kb_path)
         return await _keyword_fallback(query, kb_path, top_n, window_lines)
 
-    idx = store.get_index()
-
-    # Query the index — idx.query() already embeds the query internally
-    ranked_names = await idx.query(query, top_n=min(top_n * 4, 32))
-
-    # If the SQLite cache doesn't exist, the index is in-memory only.
-    # Use vector-ranked file stems to extract relevant chunks from disk.
-    conn_path = store._db_path  # type: ignore[attr-defined]
-    if not conn_path.exists():
-        if ranked_names:
-            name_set: set[str] = set()
-            for name, _ in ranked_names:
-                name_set.add(name)
-                if " [" in name:
-                    name_set.add(name.split(" [")[0])
-            doc_stems = sorted({n.split(" [")[0] if " [" in n else n for n in name_set})
-        else:
-            doc_stems = []
-        ranked_list = get_relevant_chunks(kb_path, doc_stems[:top_n], query=query, window_lines=window_lines)
-        logger.info(
-            "Vector retrieval (in-memory): %d stems → %d relevant chunk(s) with ~%.0f chars",
-            len(doc_stems), len(ranked_list),
-            sum(len(c) for _, c in ranked_list) if ranked_list else 0,
-        )
-        return ranked_list
-
-    # Load all chunks from SQLite and compute cosine similarity against the
-    # query embedding that idx.query() already produced.
-    import sqlite3
-    conn = sqlite3.connect(str(conn_path))
-    cursor = conn.execute("SELECT doc_name, content, embedding FROM document_index")
-    all_chunks: list[tuple[str, str, bytes | str]] = cursor.fetchall()
-    conn.close()
-
-    if not all_chunks:
+    # One embedding call: rank the in-memory chunks AND keep the query vector.
+    ranked, _q_emb = await idx.query_with_embeddings(query, top_n=min(top_n * 4, 32))
+    if not ranked:
+        logger.warning("Vector query returned no hits for '%s'; falling back to keyword", kb_path)
         return await _keyword_fallback(query, kb_path, top_n, window_lines)
 
-    # Compute best vector score per chunk name.
-    # The query embedding is obtained from the index's internal state after idx.query().
-    # We re-derive it here to score all chunks consistently.
-    try:
-        from kb.embedder import Embedder
-        embedder = Embedder(model_name="nomic-embed-text:latest")
-        embeddings = await embedder.encode([query])
-    except Exception as exc:
-        logger.warning("Query embedding failed (%s); falling back to keyword", exc)
-        return await _keyword_fallback(query, kb_path, top_n, window_lines)
-
-    # Local cosine helpers
-    import math
-    def _cosine_sim(a: list[float], b: list[float]) -> float:
-        dot = sum(x * y for x, y in zip(a, b))
-        na = math.sqrt(sum(x * x for x in a))
-        nb = math.sqrt(sum(x * x for x in b))
-        if na == 0 or nb == 0:
-            return 0.0
-        return dot / (na * nb)
-
-    def _safe_cosine(q_emb: list[float], doc_emb: bytes | str) -> float:
-        import json
-        if isinstance(doc_emb, bytes):
-            import pickle
-            try:
-                emb_data = pickle.loads(doc_emb)
-            except Exception:
-                emb_data = json.loads(doc_emb)
-        else:
-            emb_data = doc_emb
-        sim = _cosine_sim(q_emb, emb_data)
-        return max(0.0, min(1.0, sim))
-
-    chunk_best_scores: dict[str, float] = {}
-    for q_emb in embeddings:
-        for name, content, emb_blob in all_chunks:
-            raw_sim = _safe_cosine(q_emb, emb_blob)
-            if raw_sim > chunk_best_scores.get(name, 0):
-                chunk_best_scores[name] = raw_sim
-
-    # Build and sort by pure vector score
-    scored_list: list[tuple[float, str, str]] = []
-    for doc_name, chunk_content, emb_blob in all_chunks:
-        scored_list.append((chunk_best_scores.get(doc_name, 0.0), doc_name, chunk_content))
-    scored_list.sort(key=lambda t: -t[0])
-
-    # Extract unique file stems preserving rank order
+    # Deduplicate by source file, preserving rank order, cap at top_n files.
     doc_stems: list[str] = []
     seen: set[str] = set()
-    for _, name, _ in scored_list:
+    for name, _content, _score in ranked:
         stem = name.split(" [")[0] if " [" in name else name
         if stem not in seen:
             seen.add(stem)
             doc_stems.append(stem)
-
-    from config.settings import RAG_WINDOW_LINES
+    doc_stems = doc_stems[:top_n]
 
     ranked_list = get_relevant_chunks(kb_path, doc_stems, query=query, window_lines=RAG_WINDOW_LINES)
+    if not ranked_list:
+        # Disk extraction failed (e.g. files moved) — serve chunk content directly.
+        ranked_list = [(name, content) for name, content, _ in ranked[:top_n]]
 
     logger.info(
-        "Vector retrieval (pure vector ranking): %d unique stems → %d relevant chunk(s) with ~%.0f chars",
-        len(doc_stems), len(ranked_list),
+        "Vector retrieval: %d ranked chunk(s) → %d file(s) → %d relevant chunk(s) with ~%.0f chars",
+        len(ranked), len(doc_stems), len(ranked_list),
         sum(len(c) for _, c in ranked_list) if ranked_list else 0,
     )
     return ranked_list
@@ -382,9 +310,19 @@ async def retrieve_kb_documents(
 async def update_kb_document(file_path: str | pathlib.Path) -> bool:
     """Re-index or add a single KB document. Use after ``!add_kb_file``."""
     global _index_store
-    if _index_store is None or _index_store.get_index() is None:
-        logger.warning("No index to update; full rebuild needed")
+    if _index_store is not None and _index_store.get_index() is not None:
+        return await _index_store.update_single_document(file_path)
+
+    # No store yet — initialize one (loads the disk cache) and update through it.
+    logger.warning("No index loaded; initializing store for single-document update")
+    from kb.index import KBIndexStore
+    from config.settings import KB_PATH
+    store = KBIndexStore(KB_PATH)
+    await store.load()
+    if store.get_index() is None or store.get_index().is_empty():
         return False
+    _index_store = store
+    _kb_path_for_store = KB_PATH
     return await _index_store.update_single_document(file_path)
 
 

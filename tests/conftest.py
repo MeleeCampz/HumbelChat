@@ -26,6 +26,12 @@ def _disable_history_persistence(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _disable_streaming(monkeypatch):
+    """Tests mock the non-streaming ask_ai; keep streaming off by default."""
+    monkeypatch.setenv("AI_STREAMING", "0")
+
+
+@pytest.fixture(autouse=True)
 def _disable_reminders_persistence(tmp_path, monkeypatch):
     """Keep reminder tests from writing to the real reminders file."""
     monkeypatch.setenv("REMINDERS_PERSIST_FILE", str(tmp_path / "reminders_test.json"))
