@@ -1,11 +1,14 @@
 # Discord AI Bot — Code Review Findings
 *Review date: 2026-08-20 · Bot: HumbleChat · Repo: /home/user/discord-ai-bot*
+*Status updated: 2026-08-22 — items marked ✅ have been fixed and covered by tests (124 passing).*
+
+**Status legend:** ✅ fixed · ⏳ partially addressed · ❌ open
 
 ---
 
 ## 1. BUGS (observed in logs or traceable in code)
 
-### 1.1 CRITICAL — RAG budget can deliver **zero** documents
+### 1.1 CRITICAL — RAG budget can deliver **zero** documents — ✅ fixed (`22a1720`)
 **Where:** `bot_core/ai_client.py`, RAG loop (~lines 78-95)
 **Symptom (bot.log 2026-08-02 15:15):**
 ```
@@ -19,13 +22,13 @@ The `break` on the first doc that exceeds the remaining budget means that if the
 
 ---
 
-### 1.2 Character `temperature` is never applied
+### 1.2 Character `temperature` is never applied — ✅ fixed (`b6f9587`)
 **Where:** `characters.json` defines `"temperature": 0.7` per character; `bot_core/ai_client.py` hardcodes `temperature=0.7`.
 The per-character value is silently ignored. Changing it in `characters.json` has no effect.
 
 ---
 
-### 1.3 `AsyncOpenAI` client created per request
+### 1.3 `AsyncOpenAI` client created per request — ✅ fixed (`2987598`)
 **Where:** `bot_core/ai_client.py` → `_make_client()` called inside `ask_ai()` and also by every utility command.
 Each call opens a new HTTP session. Over a busy session this wastes TCP handshakes and prevents connection keep-alive.
 
@@ -33,7 +36,7 @@ Each call opens a new HTTP session. Over a busy session this wastes TCP handshak
 
 ---
 
-### 1.4 In-memory history lost on every restart
+### 1.4 In-memory history lost on every restart — ✅ fixed (`9bfa1c2`)
 **Where:** `bot_core/history.py` — `_chat_history` is a plain dict.
 Every bot restart (or Discord gateway reconnect that triggers a re-import) wipes all per-channel conversation context. The logs show multiple restarts per day.
 
@@ -41,13 +44,13 @@ Every bot restart (or Discord gateway reconnect that triggers a re-import) wipes
 
 ---
 
-### 1.5 Single-instance lock checks a port that is never bound
+### 1.5 Single-instance lock checks a port that is never bound — ✅ fixed (`39b76bc`, tests in `cd54cee`)
 **Where:** `main.py` → `_enforce_single_instance()` connects to `127.0.0.1:18765`.
 Nothing in the codebase listens on port 18765, so the check always passes (connection refused → `except: pass`). The real guard is only the PID file, which is fine, but the port check is dead/misleading code.
 
 ---
 
-### 1.6 Typing indicator expires on long AI calls
+### 1.6 Typing indicator expires on long AI calls — ✅ fixed (`f68ac76`)
 **Where:** `main.py` `on_message` calls `message.channel.typing()` **once**.
 AI calls routinely take 60-180 s (see logs). Discord's typing indicator expires after ~10 s. The bot appears dead to users.
 `utils/typing_loop.py` exists and is used by the `/ai` slash command, but **not** by the `!ai` prefix path in `on_message`.
@@ -56,25 +59,25 @@ AI calls routinely take 60-180 s (see logs). Discord's typing indicator expires 
 
 ---
 
-### 1.7 Reminders lost on restart
+### 1.7 Reminders lost on restart — ✅ fixed (`03d4734`)
 **Where:** `commands/utility_commands.py` → `_send_reminder` uses `asyncio.create_task(asyncio.sleep(delay))`.
 If the bot restarts before the delay elapses, the reminder is silently lost. There is no persistence.
 
 ---
 
-### 1.8 OCR / Summarize / Translate use `DEFAULT_MODEL`, not the character's model
+### 1.8 OCR / Summarize / Translate use `DEFAULT_MODEL`, not the character's model — ✅ fixed (`39b76bc`)
 **Where:** `commands/utility_commands.py` — all three call `_make_client()` then pass `DEFAULT_MODEL` (or `FALLBACK_MODELS`).
 If the user has set a specific model per character (e.g. `"trixysmoldersome"`), these utility commands ignore it and use the global default, which may not even exist on the backend (see §2.4).
 
 ---
 
-### 1.9 OCR: no download size / timeout guard
+### 1.9 OCR: no download size / timeout guard — ✅ fixed (`39b76bc`)
 **Where:** `commands/utility_commands.py` `handle_ocr_command`
 `client.get(image.url)` has no `timeout` parameter and no max-size check. A large attachment or slow CDN can hang the command indefinitely.
 
 ---
 
-### 1.10 Test MagicMock pollution in production log
+### 1.10 Test MagicMock pollution in production log — ✅ fixed (`39b76bc`, tests in `cd54cee`)
 **Where:** `logs/bot.log` (Aug 10-11)
 ```
 ERROR root: Failed to send AI response: object MagicMock can't be used in 'await' expression
@@ -86,7 +89,7 @@ The test suite imports `main.py` (which calls `logging.getLogger()` and attaches
 
 ---
 
-### 1.11 `_send_reminder` lazy-imports `main` → circular import fragility
+### 1.11 `_send_reminder` lazy-imports `main` → circular import fragility — ✅ fixed (`03d4734` — reminders refactored into `bot_core.reminders`, no lazy `main` import remains)
 **Where:** `commands/utility_commands.py:58`
 ```python
 from main import bot as _bot
@@ -99,7 +102,8 @@ This triggered `NameError: name 'settings' is not defined` in test runs (Aug 11)
 
 ## 2. RUNTIME / OPERATIONAL ISSUES (from bot.log)
 
-### 2.1 Vector index rebuilt from scratch on every (or many) startups
+### 2.1 Vector index rebuilt from scratch on every (or many) startups — ✅ fixed (`0d65167` — content-hash cache key)
+
 Seen repeatedly:
 ```
 kb.index: Building vector index from scratch for 'data/knowledge'
@@ -112,14 +116,16 @@ The cache key / invalidation logic appears to be triggering full rebuilds. Each 
 Observed errors: `400 Bad Request`, `405 Method Not Allowed`, `500 Internal Server Error`, `501 Not Implemented`.
 The keyword-search fallback works but degrades answer quality significantly (see §2.1).
 
-### 2.3 Frequent AI request timeouts (120 s+)
+### 2.3 Frequent AI request timeouts (120 s+) — ⏳ open (backend-dependent; see §3.7 for structured taxonomy)
+
 With RAG context of 240 K+ chars (~60 K tokens), the backend model often times out:
 ```
 ERROR bot.commands.ai_command: AI request failed: Request timed out.
 ```
 The timeout is set to 120 s (`REQUEST_TIMEOUT`). For large contexts, this may be too short, or the model is too slow.
 
-### 2.4 Model-not-found errors (repeated)
+### 2.4 Model-not-found errors (repeated) — ✅ mitigated (`3ff2167` — stale-model guard on both chat and utility paths)
+
 ```
 Model 'qwen3.6:latest' not found ...
 Model 'unsloth/gemma-4-12b-it-GGUF' not found ...
@@ -127,7 +133,8 @@ Model 'base_model_id:ministral-3:14b' not found ...
 ```
 The model name in `characters.json` or `.env` doesn't match what the backend has loaded. The error message is clear but the root cause (mismatched model name) is a configuration issue that recurs.
 
-### 2.5 "Characters loaded: (none)" on several recent starts
+### 2.5 "Characters loaded: (none)" on several recent starts — ✅ fixed (`03d4734` — absolute-path resolution)
+
 ```
 2026-08-12 22:50:52 [INFO] bot: Characters loaded: (none)
 2026-08-12 22:54:00 [INFO] bot: Characters loaded: (none)
@@ -141,19 +148,24 @@ Every log message appears twice (e.g. `2026-07-19 05:23:53,940 [INFO] bot: ...` 
 
 ## 3. DESIGN / IMPROVEMENT OPPORTUNITIES
 
-### 3.1 No concurrency or rate limiting
+### 3.1 No concurrency or rate limiting — ✅ fixed (`0d65167` — per-channel rate limit)
+
 Multiple users can fire `/ai` simultaneously. Each one triggers a full RAG retrieval + embedding + LLM call. There is no semaphore, queue, or per-channel rate limit. A burst of 5 users could saturate the backend.
 
-### 3.2 No streaming
+### 3.2 No streaming — ✅ fixed (`0d65167`)
+
 All responses are non-streaming (`stream=False`). For 60-180 s generation times, users see nothing until the entire response is ready. Streaming would dramatically improve perceived latency.
 
-### 3.3 RAG context is prepended to the system prompt
+### 3.3 RAG context is prepended to the system prompt — ✅ fixed (`0d65167` — RAG in user message)
+
 The 24-285 K chars of KB context is stuffed into the system message. This is token-expensive and may dilute the actual system prompt. A dedicated "context" message role (if the backend supports it) or a separate user/assistant pair would be cleaner.
 
-### 3.4 `characters.json` loaded at import time with relative path
+### 3.4 `characters.json` loaded at import time with relative path — ✅ fixed (`03d4734`)
+
 `main.py` line 72: `load_characters(pathlib.Path("characters.json"))` — CWD-dependent. Should be `pathlib.Path(__file__).parent / "characters.json"`.
 
-### 3.5 No input validation on user prompts
+### 3.5 No input validation on user prompts — ✅ fixed (`0d65167` — input length cap)
+
 `on_message` in `main.py` passes the raw prompt to `ask_ai` with no length check. A user could paste 100 K chars of text, which combined with RAG context would exceed any reasonable context window.
 
 ### 3.6 `_or_clear` helper is misleading
@@ -168,7 +180,8 @@ Discord's actual limit is 2000 chars, but markdown formatting (code blocks, link
 ### 3.9 No health-check endpoint or liveness probe
 If the AI backend (`192.168.178.96:3000`) goes down, every user request fails with a timeout after 120 s. A lightweight health check at startup (and periodic) would fail fast.
 
-### 3.10 `requirements.txt` is minimal (139 bytes)
+### 3.10 `requirements.txt` is minimal (139 bytes) — ✅ fixed (`39b76bc` — all deps pinned)
+
 Only 3-4 packages listed. The actual dependency tree (openai, httpx, discord.py, python-dotenv, numpy, sqlite3) is not fully pinned, which risks environment drift.
 
 ---
@@ -188,19 +201,29 @@ Only 3-4 packages listed. The actual dependency tree (openai, httpx, discord.py,
 
 ## 5. SUMMARY / PRIORITY MATRIX
 
-| Priority | Item | Impact |
-|----------|------|--------|
-| **P0** | 1.1 — RAG zero-doc budget bug | Bot gives empty/wrong answers |
-| **P0** | 2.4 — Model not found | Bot completely non-functional |
-| **P1** | 1.4 — History lost on restart | UX regression |
-| **P1** | 1.6 — Typing indicator (prefix path) | Bot appears dead |
-| **P1** | 1.3 — No client reuse | Latency / resource waste |
-| **P1** | 1.2 — Temperature ignored | Config silently ignored |
-| **P2** | 1.7 — Reminders lost | Feature unreliable |
-| **P2** | 2.1 — Index rebuild every start | Wasted API calls, slow startup |
-| **P2** | 3.1 — No rate limiting | Backend saturation |
-| **P2** | 3.2 — No streaming | Poor perceived latency |
-| **P3** | 1.5 — Dead port check | Misleading code |
-| **P3** | 1.10 — Test log pollution | Ops confusion |
-| **P3** | 3.4 — Relative path for characters.json | Breaks on CWD change |
-| **P3** | Various minor | Code quality |
+*Updated 2026-08-22 — see status marks in each section. Test suite: 124 passing.*
+
+| Priority | Item | Impact | Status |
+|----------|------|--------|--------|
+| **P0** | 1.1 — RAG zero-doc budget bug | Bot gives empty/wrong answers | ✅ `22a1720` |
+| **P0** | 2.4 — Model not found | Bot completely non-functional | ✅ `3ff2167` (guard) |
+| **P1** | 1.4 — History lost on restart | UX regression | ✅ `9bfa1c2` |
+| **P1** | 1.6 — Typing indicator (prefix path) | Bot appears dead | ✅ `f68ac76` |
+| **P1** | 1.3 — No client reuse | Latency / resource waste | ✅ `2987598` |
+| **P1** | 1.2 — Temperature ignored | Config silently ignored | ✅ `b6f9587` |
+| **P2** | 1.7 — Reminders lost | Feature unreliable | ✅ `03d4734` |
+| **P2** | 2.1 — Index rebuild every start | Wasted API calls, slow startup | ✅ `0d65167` |
+| **P2** | 3.1 — No rate limiting | Backend saturation | ✅ `0d65167` |
+| **P2** | 3.2 — No streaming | Poor perceived latency | ✅ `0d65167` |
+| **P2** | 3.3 — RAG in system prompt | Token cost | ✅ `0d65167` |
+| **P2** | 3.5 — No input cap | Prompt injection / OOM | ✅ `0d65167` |
+| **P3** | 1.5 — Dead port check | Misleading code | ✅ `39b76bc` + tests `cd54cee` |
+| **P3** | 1.8 — Utility model bypass | Wrong model | ✅ `39b76bc` |
+| **P3** | 1.9 — OCR no guard | DoS vector | ✅ `39b76bc` |
+| **P3** | 1.10 — Test log pollution | Ops confusion | ✅ `39b76bc` + tests `cd54cee` |
+| **P3** | 1.11 — Circular import | Fragile | ✅ `03d4734` |
+| **P3** | 2.5 / 3.4 — Relative paths | Breaks on CWD change | ✅ `03d4734` |
+| **P3** | 3.10 — Unpinned deps | Env drift | ✅ `39b76bc` |
+| **P3** | Various minor | Code quality | ❌ open (see §4) |
+
+**Still open:** §2.2 (embedding endpoint instability — backend-side), §2.3 (AI request timeouts — backend-dependent), §2.6 (duplicate log lines), §3.6 (naming nit), §3.7 (structured error taxonomy), §3.8 (splitter edge cases), §3.9 (health-check endpoint), §4.* cosmetic items.
