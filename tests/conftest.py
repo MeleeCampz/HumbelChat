@@ -14,6 +14,24 @@ from unittest.mock import MagicMock, AsyncMock
 
 import pytest
 
+# Prevent main.py from attaching production log-file handlers when the test
+# suite imports it (code review §1.10). Must be set before `import main`.
+os.environ["BOT_NO_LOG_FILES"] = "1"
+
+
+@pytest.fixture(autouse=True)
+def _quiet_file_loggers():
+    """Extra safety net: strip any file handlers the main import may have added."""
+    import logging
+    root = logging.getLogger()
+    removed = [h for h in list(root.handlers) if isinstance(h, logging.FileHandler)]
+    for h in removed:
+        root.removeHandler(h)
+        h.close()
+    yield
+    for h in removed:
+        h.close()
+
 
 @pytest.fixture(autouse=True)
 def _disable_history_persistence(tmp_path, monkeypatch):
