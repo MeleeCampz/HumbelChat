@@ -25,42 +25,47 @@ from bot_core.ai_client import ask_ai as core_ask_ai
 from bot_core.history import get_history
 
 # ── Logging setup ───────────────────────────────────────────────────────
-LOG_DIR = pathlib.Path(__file__).resolve().parent / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+_NO_FILE_LOGS = os.environ.get("BOT_NO_LOG_FILES") == "1"
 
-console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setLevel(logging.INFO)
-console_format = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-console_handler.setFormatter(console_format)
+if _NO_FILE_LOGS:
+    log = logging.getLogger("bot")
+else:
+    LOG_DIR = pathlib.Path(__file__).resolve().parent / "logs"
+    LOG_DIR.mkdir(exist_ok=True)
 
-file_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_format = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    console_handler.setFormatter(console_format)
 
-bot_log = RotatingFileHandler(
-    LOG_DIR / "bot.log",
-    maxBytes=10 * 1024 * 1024,
-    backupCount=5,
-    encoding="utf-8",
-)
-bot_log.setLevel(logging.INFO)
-bot_log.setFormatter(file_formatter)
+    file_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
-dev_log = RotatingFileHandler(
-    LOG_DIR / "dev.log",
-    maxBytes=10 * 1024 * 1024,
-    backupCount=5,
-    encoding="utf-8",
-)
-dev_log.setLevel(logging.DEBUG)
-dev_log.setFormatter(file_formatter)
+    bot_log = RotatingFileHandler(
+        LOG_DIR / "bot.log",
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    bot_log.setLevel(logging.INFO)
+    bot_log.setFormatter(file_formatter)
 
-root_logger = logging.getLogger()
-root_logger.handlers.clear()
-root_logger.addHandler(bot_log)
-root_logger.addHandler(dev_log)
-root_logger.addHandler(console_handler)
-root_logger.setLevel(logging.INFO)
+    dev_log = RotatingFileHandler(
+        LOG_DIR / "dev.log",
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    dev_log.setLevel(logging.DEBUG)
+    dev_log.setFormatter(file_formatter)
 
-log = logging.getLogger("bot")
+    root_logger = logging.getLogger()
+    root_logger.handlers.clear()
+    root_logger.addHandler(bot_log)
+    root_logger.addHandler(dev_log)
+    root_logger.addHandler(console_handler)
+    root_logger.setLevel(logging.INFO)
+
+    log = logging.getLogger("bot")
 
 # ── Intents ─────────────────────────────────────────────────────────────
 INTENTS = discord.Intents.default()
@@ -333,20 +338,8 @@ PIDFILE = pathlib.Path(__file__).parent / ".bot.pid"
 
 def _enforce_single_instance() -> None:
     """Exit immediately if another instance of this bot is already running."""
-    import socket as _socket
-
-    # Port check
-    try:
-        test_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-        test_sock.settimeout(0.5)
-        test_sock.connect(("127.0.0.1", 18765))
-        test_sock.close()
-        log.info("Another bot instance running (port 18765). Exiting.")
-        sys.exit(0)
-    except Exception:
-        pass
-
-    # PID file check
+    # PID file check (the port check was removed — nothing ever bound 18765,
+    # so it was dead code; see code review §1.5)
     if PIDFILE.exists():
         try:
             old_pid = int(PIDFILE.read_text().strip())

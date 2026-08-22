@@ -150,6 +150,120 @@ class TestTranslateCommand:
         assert "No text to translate" in ix._sent[0]
 
 
+class TestUtilityActiveCharacter:
+    """Code review §1.8: utility commands must honour the active character's model."""
+
+    @pytest.mark.asyncio
+    async def test_ocr_uses_active_character_model(self, ix, monkeypatch):
+        from commands import utility_commands as uc
+
+        monkeypatch.setattr(uc, "_validated_utility_model",
+                            AsyncMock(return_value="char-specific-model"))
+
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock(message=MagicMock(content="Text"))]
+
+        with patch("commands.utility_commands._make_client") as MockClient:
+            inst = MagicMock()
+            inst.chat.completions.create = AsyncMock(return_value=mock_resp)
+            MockClient.return_value = inst
+            await uc.handle_ocr_command(ix, image=_fake_image("scan.png"))
+
+        assert inst.chat.completions.create.awaited
+        _, kwargs = inst.chat.completions.create.call_args
+        assert kwargs["model"] == "char-specific-model"
+
+    @pytest.mark.asyncio
+    async def test_translate_uses_active_character_model(self, ix, monkeypatch):
+        from commands import utility_commands as uc
+
+        monkeypatch.setattr(uc, "_validated_utility_model",
+                            AsyncMock(return_value="char-specific-model"))
+
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock(message=MagicMock(content="Hola"))]
+
+        with patch("commands.utility_commands._make_client") as MockClient:
+            inst = MagicMock()
+            inst.chat.completions.create = AsyncMock(return_value=mock_resp)
+            MockClient.return_value = inst
+            await uc.handle_translate_command(ix, target_language="Spanish: Hello")
+
+        _, kwargs = inst.chat.completions.create.call_args
+        assert kwargs["model"] == "char-specific-model"
+
+    def test_resolve_prefers_active_character(self, monkeypatch):
+        from commands import utility_commands as uc
+        from config import characters as cfg
+
+        char = cfg.Character("hero", "Hero", "gemma4:hero", temperature=0.4, max_tokens=512)
+        monkeypatch.setattr(cfg, "_CHARACTERS", [char])
+        monkeypatch.setattr(cfg, "_DEFAULT_KEY", "default")
+
+        from bot_core import history as hist
+        monkeypatch.setitem(hist._active_characters, (111, 222), "hero")
+
+        model, temp, max_tok = uc._resolve_utility_model(111, 222)
+        assert model == "gemma4:hero"
+        assert temp == 0.4
+        assert max_tok == 512
+
+    def test_resolve_falls_back_to_default_model(self, monkeypatch):
+        from commands import utility_commands as uc
+        from config import characters as cfg
+
+        char = cfg.Character("plain", "Plain", "", temperature=None, max_tokens=None)
+        monkeypatch.setattr(cfg, "_CHARACTERS", [char])
+        monkeypatch.setattr(cfg, "_DEFAULT_KEY", "plain")
+
+        from config.settings import DEFAULT_MODEL
+        model, temp, max_tok = uc._resolve_utility_model(111, 222)
+        assert model == DEFAULT_MODEL
+
+
+class TestOcrGuards:
+    """Code review §1.9: reject non-image uploads before any API call."""
+
+    @pytest.mark.asyncio
+    async def test_ocr_rejects_text_file(self, ix):
+        from commands.utility_commands import handle_ocr_command
+        await handle_ocr_command(ix, image=_fake_image("notes.txt"))
+        assert "looks like a text file" in ix._sent[0]
+
+    @pytest.mark.asyncio
+    async def test_ocr_rejects_markdown_file(self, ix):
+        from commands.utility_commands import handle_ocr_command
+        await handle_ocr_command(ix, image=_fake_image("README.md"))
+        assert "looks like a text file" in ix._sent[0]
+
+    @pytest.mark.asyncio
+    async def test_ocr_rejects_unknown_extension(self, ix):
+        from commands.utility_commands import handle_ocr_command
+        await handle_ocr_command(ix, image=_fake_image("data.zip"))
+        assert "doesn't look like an image" in ix._sent[0]
+
+    @pytest.mark.asyncio
+    async def test_ocr_rejects_oversized_download(self, ix):
+        from commands import utility_commands as uc
+        big = b"x" * (uc.OCR_MAX_DOWNLOAD_BYTES + 1)
+        await uc.handle_ocr_command(ix, image=_fake_image("huge.png", data=big))
+        assert "too large" in ix._sent[0]
+
+    @pytest.mark.asyncio
+    async def test_ocr_rejects_empty_download(self, ix):
+        from commands import utility_commands as uc
+        await uc.handle_ocr_command(ix, image=_fake_image("empty.png", data=b""))
+        assert "Could not download" in ix._sent[0]
+
+
+def _fake_image(filename: str, data: bytes = b"\x89PNG\r\n\x1a\nfake"):
+    image = MagicMock()
+    image.url = f"https://cdn.example.com/{filename}"
+    image.filename = filename
+    image.read = AsyncMock(return_value=data)
+    return image
+
+
 class TestUtilityModuleImports:
 
     def test_handle_remind_command_exists(self):

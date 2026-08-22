@@ -1,17 +1,45 @@
 """Utility slash commands: remind, ocr, summarize, translate."""
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
-import httpx
 
 import discord
 
 from config.settings import DEFAULT_MODEL, FALLBACK_MODELS
-from bot_core.history import get_history
-from bot_core.ai_client import _make_client
+from bot_core.history import get_active_char_key, get_history
+from bot_core.ai_client import _make_client, _validate_model
+from config.characters import get_character
 
 log = logging.getLogger("bot.utility_commands")
+
+# OCR download guards (code review §1.9)
+OCR_DOWNLOAD_TIMEOUT = 30.0   # seconds
+OCR_MAX_DOWNLOAD_BYTES = 8 * 1024 * 1024
+OCR_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".heic", ".heif")
+OCR_TEXT_EXTS = (".txt", ".md", ".csv", ".json", ".log", ".xml", ".html", ".htm", ".ini", ".yaml", ".yml")
+
+
+def _resolve_utility_model(guild_id: int | None, channel_id: int) -> tuple[str, float | None, int | None]:
+    """Resolve (model, temperature, max_tokens) from the channel's active
+    character, falling back to DEFAULT_MODEL when unset (code review §1.8).
+    """
+    char_key = get_active_char_key(guild_id, channel_id)
+    char = get_character(char_key)
+    model = (char.model if (char and char.model) else "").strip()
+    if not model:
+        return DEFAULT_MODEL, None, None
+    temp = getattr(char, "temperature", None)
+    max_tok = getattr(char, "max_tokens", None)
+    return model, temp, max_tok
+
+
+async def _validated_utility_model(guild_id: int | None, channel_id: int) -> str:
+    """Resolve + guard against stale model slugs (P0 model-not-found guard)."""
+    model, _, _ = _resolve_utility_model(guild_id, channel_id)
+    client = _make_client()
+    return await _validate_model(client, model)
 
 
 # ── Remind ───────────────────────────────────────────────────────────────
@@ -68,13 +96,44 @@ async def handle_ocr_command(
         await interaction.followup.send("⚠️ Please attach an image.", ephemeral=True)
         return
 
-    async with httpx.AsyncClient() as client:
-        img_resp = await client.get(image.url)
-    img_data = img_resp.content
+    # Non-image guards (code review §1.9): refuse text/unknown extensions
+    # *before* spending a download on a file the vision model can't read.
+    fn = (image.filename or "").lower()
+    if fn.endswith(OCR_TEXT_EXTS):
+        await interaction.followup.send(
+            f"⚠️ `{image.filename}` looks like a text file — no OCR needed. "
+            "Attach an actual image (PNG/JPG/GIF/WebP).",
+            ephemeral=True,
+        )
+        return
+    if fn and not fn.endswith(OCR_IMAGE_EXTS):
+        await interaction.followup.send(
+            f"⚠️ `{image.filename}` doesn't look like an image. "
+            f"Supported: {', '.join(sorted(set(OCR_IMAGE_EXTS)))}.",
+            ephemeral=True,
+        )
+        return
+
+    # Download guards (code review §1.9): timeout + max size on the bytes.
+    # Read via the Discord attachment API (discord.py's own session applies
+    # its own timeout; we bound this read step explicitly).
+    try:
+        img_data = await asyncio.wait_for(image.read(), timeout=OCR_DOWNLOAD_TIMEOUT)
+    except asyncio.TimeoutError:
+        await interaction.followup.send("⚠️ Timed out downloading the image.", ephemeral=True)
+        return
+    if not img_data:
+        await interaction.followup.send("⚠️ Could not download the image.", ephemeral=True)
+        return
+    if len(img_data) > OCR_MAX_DOWNLOAD_BYTES:
+        await interaction.followup.send(
+            f"⚠️ Image too large to process (> {OCR_MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB).",
+            ephemeral=True,
+        )
+        return
 
     # MIME detection
     mime = "image/png"
-    fn = (image.filename or "").lower()
     if fn.endswith((".jpg", ".jpeg")):
         mime = "image/jpeg"
     if fn.endswith(".gif"):
@@ -85,9 +144,12 @@ async def handle_ocr_command(
     b64 = base64.b64encode(img_data).decode("utf-8")
     data_uri = f"data:{mime};base64,{b64}"
 
+    model = await _validated_utility_model(
+        interaction.guild_id, interaction.channel_id
+    )
     client = _make_client()
     resp = await client.chat.completions.create(
-        model=DEFAULT_MODEL,
+        model=model,
         messages=[
             {
                 "role": "user",
@@ -148,9 +210,11 @@ async def handle_summarize_command(
         await interaction.followup.send("⚠️ Nothing to summarize.", ephemeral=True)
         return
 
+    guild_id = interaction.guild_id or 0
+    primary_model, char_temp, _ = _resolve_utility_model(guild_id, interaction.channel_id)
     client = _make_client()
 
-    models_to_try = [DEFAULT_MODEL]
+    models_to_try = [primary_model]
     models_to_try.extend(FALLBACK_MODELS)
 
     summary = None
@@ -217,9 +281,10 @@ async def handle_translate_command(
 
     src_clause = f" from {source_language}" if source_language else ""
 
+    model = await _validated_utility_model(interaction.guild_id, interaction.channel_id)
     client = _make_client()
     resp = await client.chat.completions.create(
-        model=DEFAULT_MODEL,
+        model=model,
         messages=[
             {
                 "role": "system",
