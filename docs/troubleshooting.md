@@ -70,8 +70,8 @@ Fix:
 Likely cause: stale PID or port conflict from a previous run.
 
 Fix:
-- Use `./start_bot.sh`; it auto-kills stale instances via PID file
-- If needed, manually remove the stale PID/log state from the bot's runtime directory
+- Use `./botctl.sh restart` (or `stop` then `start`) — it kills the existing tmux session and starts fresh
+- If `./start_bot.sh` reports "Bot already running", remove the stale `.bot.pid` file in the project root (the process is dead, so nothing else needs cleaning up)
 
 ## New commands not appearing after code changes
 

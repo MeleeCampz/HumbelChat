@@ -13,7 +13,7 @@ The bot can attach relevant local knowledge-base content to AI prompts. This is 
 
 Controlled by `RAG_RETRIEVAL_METHOD`:
 
-- `vector` (default): semantic search using embeddings from the configured inference backend. A SQLite-backed index caches embeddings so restarts do not require re-embedding.
+- `vector` (default): semantic search using embeddings from the configured inference backend. A SQLite-backed index in `<KB_PATH>/.vector_index_cache/` caches embeddings so restarts do not require re-embedding.
 - `keyword`: TF-IDF-style heuristic scoring based on filenames, headers, and body text overlap. Works without a vector backend.
 
 If vector search is unavailable, keyword search can be used as a fallback.
@@ -52,7 +52,7 @@ These are the expected file types for KB use. Storage itself does not strictly e
 | Variable | Purpose |
 |---|---|
 | `KB_PATH` | Where KB files are stored |
-| `CHUNK_SIZE` | Target chunk size for auto-chunking |
+| `CHUNK_SIZE` | Display-only "approx N chunks" estimate in `/list_kb_docs`; the chunker uses fixed character-based limits |
 | `RAG_MAX_DOCS` | Max documents attached per query |
 | `RAG_MAX_CHARS` | Max RAG context chars sent to the LLM |
 | `RAG_WINDOW_LINES` | Window around each match anchor |
