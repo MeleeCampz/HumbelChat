@@ -1,12 +1,19 @@
 """Knowledge-base commands — /upload_kb, /list_kb_docs and /reindex_kb."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import pathlib
+
+import httpx
 
 from kb.storage import validate_upload, list_kb_files
 
 log = logging.getLogger("bot.commands.kb")
+
+# URL-upload guard: cap the bytes we will ever pull into memory.
+UPLOAD_MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024  # matches storage.MAX_FILE_SIZE
+UPLOAD_DOWNLOAD_TIMEOUT = 60.0  # seconds
 
 
 async def handle_upload_kb(
@@ -17,19 +24,32 @@ async def handle_upload_kb(
     subfolder: str | None = None,           # optional subfolder
 ) -> None:
     """Upload a file directly to the local KB storage directory."""
+    # Defer first — URL downloads can exceed Discord's 15 s interaction window.
+    await interaction.response.defer(ephemeral=True)
+
     # --- step 1: get bytes ---
     if attachment is not None:
         data = await attachment.read()
         fname = attachment.filename or "attachment"
     elif url:
-        import httpx
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.get(url, follow_redirects=True)
-            resp.raise_for_status()
-            data = resp.content
+        try:
+            async with httpx.AsyncClient(timeout=UPLOAD_DOWNLOAD_TIMEOUT) as client:
+                resp = await client.get(url, follow_redirects=True)
+                resp.raise_for_status()
+                data = resp.content
+        except (httpx.HTTPError, asyncio.TimeoutError) as exc:
+            await interaction.followup.send(
+                f"⚠️ Failed to download `{url[:120]}`: {exc.__class__.__name__}", ephemeral=True
+            )
+            return
+        if len(data) > UPLOAD_MAX_DOWNLOAD_BYTES:
+            await interaction.followup.send(
+                f"⚠️ Remote file too large (> {UPLOAD_MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB).", ephemeral=True
+            )
+            return
         fname = url.split("?")[0].split("/")[-1] or "remote_file"
     else:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "Please provide either a URL or file attachment for /upload_kb.", ephemeral=True
         )
         return
@@ -38,27 +58,38 @@ async def handle_upload_kb(
     try:
         dest, summary = validate_upload(data, filename=fname, kb_path=None, subfolder=subfolder)
     except ValueError as exc:
-        await interaction.response.send_message(f"Upload rejected: **{exc}**", ephemeral=True)
+        await interaction.followup.send(f"Upload rejected: **{exc}**", ephemeral=True)
         return
     except FileNotFoundError as exc:
-        await interaction.response.send_message(f"KB storage not found: **{exc}**", ephemeral=True)
+        await interaction.followup.send(f"KB storage not found: **{exc}**", ephemeral=True)
         return
 
-    # --- step 4: reply with summary ---
-    chunk_hint = ""
+    # --- step 4: index the new document so RAG can find it immediately ---
+    indexed = False
+    try:
+        from kb.retrievers import update_kb_document
+        indexed = await update_kb_document(dest)
+    except Exception as exc:
+        log.warning("Auto-index after upload failed for %s: %s", dest.name, exc)
+
+    index_note = "Indexed for search." if indexed else "⚠️ Not auto-indexed — run `/reindex_kb` to make it searchable."
+
+    # --- step 5: reply with summary ---
+    approx_chunks_display = ""
     try:
         from config.settings import CHUNK_TARGET
         n = len(pathlib.Path(dest).read_text(encoding="utf-8", errors="replace"))
-        approx_chunks = n // CHUNK_TARGET if CHUNK_TARGET else "?"
-        approx_chunks_display = " (approx %d chunks)" % approx_chunks
+        if CHUNK_TARGET:
+            approx_chunks_display = f" (approx {n // CHUNK_TARGET} chunks)"
     except Exception:
-        approx_chunks_display = ""
+        pass
 
-    await interaction.response.send_message(
+    await interaction.followup.send(
         f"✅ **upload_kb** stored `{summary['name']}` ({summary['size']:,} bytes)\n"
         f"Location: ``{dest.name}``\n"
-        f"Hash SHA256 prefix: ``{summary['sha256']}...\\n``\n"
-        f"Auto-chunked.{approx_chunks_display}", ephemeral=True
+        f"Hash SHA256 prefix: ``{summary['sha256']}...``\n"
+        f"Auto-chunked.{approx_chunks_display}\n"
+        f"{index_note}", ephemeral=True
     )
 
 
@@ -115,7 +146,7 @@ async def handle_list_kb_docs(interaction, subfolder_path: str | None = None):
     lines.append("")
     lines.append(section_label)
     for doc in docs[:30]:  # cap at 30
-        size_kb = doc["size"] / 1024 or "0"
+        size_kb = doc["size"] / 1024  # float; never a string (0-byte files are valid)
         name = doc.get("name", doc.get("filename", "unknown"))
         sha8 = (doc.get("sha256", "?")[:8])
         date = doc.get("modified", "?")[:10]

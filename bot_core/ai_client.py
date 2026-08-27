@@ -297,7 +297,11 @@ async def ask_ai(
     log.info("RAW_AI_RESPONSE_START\n%s\nRAW_AI_RESPONSE_END", reply_text)
 
     # ── Update history ─────────────────────────────────────────────
-    history.append({"role": "user", "content": user_content})
+    # Store the *clean* user message, not `user_content` (which carries the
+    # RAG context blob + username decoration). Persisting the inflated form
+    # would re-inject stale KB context into every subsequent turn and bloat
+    # prompts by ~RAG_MAX_CHARS per past turn.
+    history.append({"role": "user", "content": user_message})
     history.append({"role": "assistant", "content": reply_text})
     max_entries = 2 * CONTEXT_WINDOW if CONTEXT_WINDOW else 50
     if len(history) > max_entries:
@@ -425,7 +429,8 @@ async def ask_ai_stream(
         log.info("STREAM_AI_RESPONSE len=%d chars", len(reply_text))
 
         # ── Update history after full stream ──────────────────────
-        history.append({"role": "user", "content": user_content})
+        # Clean message only — see the note in ask_ai() above.
+        history.append({"role": "user", "content": user_message})
         history.append({"role": "assistant", "content": reply_text})
         max_entries = 2 * CONTEXT_WINDOW if CONTEXT_WINDOW else 50
         if len(history) > max_entries:

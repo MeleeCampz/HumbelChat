@@ -6,6 +6,7 @@ import base64
 import logging
 
 import discord
+import httpx
 
 from config.settings import DEFAULT_MODEL, FALLBACK_MODELS
 from bot_core.history import get_active_char_key, get_history
@@ -17,7 +18,21 @@ log = logging.getLogger("bot.utility_commands")
 # OCR download guards (code review §1.9)
 OCR_DOWNLOAD_TIMEOUT = 30.0   # seconds
 OCR_MAX_DOWNLOAD_BYTES = 8 * 1024 * 1024
-OCR_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".heic", ".heif")
+# NOTE: .heic/.heif are intentionally NOT listed — Discord attachments arrive
+# without a usable MIME mapping for them and the vision backend rejects them.
+OCR_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif")
+
+# Extension → MIME type for the data-URI sent to the vision model.
+_OCR_MIME_MAP = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+    ".tiff": "image/tiff",
+    ".tif": "image/tiff",
+}
 OCR_TEXT_EXTS = (".txt", ".md", ".csv", ".json", ".log", ".xml", ".html", ".htm", ".ini", ".yaml", ".yml")
 
 
@@ -132,14 +147,8 @@ async def handle_ocr_command(
         )
         return
 
-    # MIME detection
-    mime = "image/png"
-    if fn.endswith((".jpg", ".jpeg")):
-        mime = "image/jpeg"
-    if fn.endswith(".gif"):
-        mime = "image/gif"
-    if fn.endswith(".webp"):
-        mime = "image/webp"
+    # MIME detection — map the real extension instead of defaulting to PNG.
+    mime = next((m for ext, m in _OCR_MIME_MAP.items() if fn.endswith(ext)), "image/png")
 
     b64 = base64.b64encode(img_data).decode("utf-8")
     data_uri = f"data:{mime};base64,{b64}"
@@ -148,29 +157,40 @@ async def handle_ocr_command(
         interaction.guild_id, interaction.channel_id
     )
     client = _make_client()
-    resp = await client.chat.completions.create(
-        model=model,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Extract all text from this image accurately."},
-                    {"type": "image_url", "image_url": {"url": data_uri}},
-                ],
-            }
-        ],
-        temperature=0,
-        max_tokens=4096,
-    )
+    try:
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Extract all text from this image accurately."},
+                        {"type": "image_url", "image_url": {"url": data_uri}},
+                    ],
+                }
+            ],
+            temperature=0,
+            max_tokens=4096,
+        )
+    except Exception as e:
+        log.error("OCR request failed: %s", e)
+        await interaction.followup.send(
+            f"⚠️ OCR failed: {e.__class__.__name__}. The AI backend may be down or the model may not support images.",
+            ephemeral=True,
+        )
+        return
     reply = resp.choices[0].message.content or "(no text found)"
 
     MAX_LEN = 1900
     if len(reply) <= MAX_LEN:
         await interaction.followup.send(f"🔍 Extracted text:\n\n{reply}", ephemeral=True)
     else:
-        for i in range(0, len(reply), MAX_LEN):
+        # Paragraph-aware split (avoids mid-word hard cuts).
+        from utils.response_splitter import _split_long_message
+        chunks = _split_long_message(reply, "")
+        for i, chunk in enumerate(chunks, start=1):
             await interaction.followup.send(
-                f"🔍 OCR (part {i // MAX_LEN + 1})\n\n{reply[i:i + MAX_LEN]}", ephemeral=True
+                f"🔍 OCR (part {i}/{len(chunks)})\n\n{chunk}", ephemeral=True
             )
 
 
@@ -283,18 +303,23 @@ async def handle_translate_command(
 
     model = await _validated_utility_model(interaction.guild_id, interaction.channel_id)
     client = _make_client()
-    resp = await client.chat.completions.create(
-        model=model,
-        messages=[
-            {
-                "role": "system",
-                "content": f"Translate{src_clause} text into {tgt}. Return ONLY translated text.",
-            },
-            {"role": "user", "content": text_to},
-        ],
-        temperature=0.3,
-        max_tokens=4096,
-    )
+    try:
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": f"Translate{src_clause} text into {tgt}. Return ONLY translated text.",
+                },
+                {"role": "user", "content": text_to},
+            ],
+            temperature=0.3,
+            max_tokens=4096,
+        )
+    except Exception as e:
+        log.error("Translate request failed: %s", e)
+        await interaction.followup.send(f"⚠️ Translation failed: {e.__class__.__name__}. Please try again.", ephemeral=True)
+        return
     translated = resp.choices[0].message.content or "(translation failed)"
 
     MAX_LEN = 1900
