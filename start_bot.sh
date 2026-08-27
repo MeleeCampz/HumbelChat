@@ -31,4 +31,9 @@ echo "  File logs:    $LOG_DIR/bot.log (INFO)"
 echo "                    $LOG_DIR/dev.log (DEBUG)"
 echo "─────────────────────────────────────"
 
-exec python -u "$SCRIPT_DIR/main.py" 2>&1 | tee "$LOG_DIR/start_output.log"
+# Run in the foreground so signals (Ctrl-C) reach the bot directly and its
+# exit code propagates. main.py already writes logs/bot.log + dev.log via
+# RotatingFileHandler, so no tee copy is needed. (The old `exec cmd | tee`
+# form didn't actually exec — the pipe kept a subshell in charge, which
+# mangled exit codes and signal handling.)
+exec python -u "$SCRIPT_DIR/main.py"

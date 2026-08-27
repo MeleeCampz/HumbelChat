@@ -12,8 +12,7 @@ class TestClearHistoryCommand:
     async def test_clear_history_clears_messages(self):
         """Test that clear history clears chat history."""
         from commands.clear_history_command import handle_clear_history_command
-        from bot_core.history import _chat_history
-        from bot_core.ai_client import get_current_message_count
+        from bot_core.history import _chat_history, get_message_count
 
         # Set up some history first
         guild_id = 123456
@@ -25,7 +24,7 @@ class TestClearHistoryCommand:
         ]
 
         # Verify history exists
-        assert get_current_message_count(guild_id, channel_id) == 2
+        assert get_message_count(guild_id, channel_id) == 2
 
         sent = []
 
@@ -44,7 +43,7 @@ class TestClearHistoryCommand:
         await handle_clear_history_command(ix)
 
         # History should be cleared
-        assert get_current_message_count(guild_id, channel_id) == 0
+        assert get_message_count(guild_id, channel_id) == 0
         assert len(sent) > 0
 
     @pytest.mark.asyncio

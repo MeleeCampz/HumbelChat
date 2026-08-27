@@ -19,11 +19,20 @@ import discord
 from discord.ext import commands
 import discord.app_commands as app_commands
 
-from config.settings import BOT_PREFIX, KB_PATH, CHARACTERS_FILE, INFER_URL, DEFAULT_MODEL, DISCORD_TOKEN
+from config.settings import (
+    BOT_PREFIX,
+    KB_PATH,
+    CHARACTERS_FILE,
+    INFER_URL,
+    DEFAULT_MODEL,
+    DISCORD_TOKEN,
+    CHAT_HISTORY_RESET,
+)
 from config.characters import load_characters, default_character, get_character_choices
 from bot_core.ai_client import ask_ai as core_ask_ai
 from bot_core.ai_client import RateLimitError
 from bot_core.health import start_backend_health_probe
+from bot_core.reminders import rearm_pending_reminders
 from utils.background_tasks import spawn_tracked_task
 from utils.kb_utils import log_top_kb_files
 from utils.response_splitter import send_long_response
@@ -95,9 +104,14 @@ INTENTS.message_content = True
 # ── Character loading ───────────────────────────────────────────────────
 load_characters(CHARACTERS_FILE)
 
-# Restore conversation history + active-character selections from disk
-from bot_core.history import load_persisted
+# Restore conversation history + active-character selections from disk.
+# §debt: CHAT_HISTORY_RESET ("clear"/1/true/yes) is now actually consumed —
+# it used to be parsed in settings but never read anywhere.
+from bot_core.history import load_persisted, reset_all_history
 load_persisted()
+if CHAT_HISTORY_RESET:
+    log.info("CHAT_HISTORY_RESET set — wiping all stored conversation history.")
+    reset_all_history()
 
 # Built *after* load_characters() so the choices reflect the actual registry.
 # Reading via get_character_choices() also avoids the import-by-value trap
@@ -293,8 +307,9 @@ async def on_ready() -> None:
     char_names = [c.name for c in _CHAR_CHOICES]
     log.info("Characters loaded: %s", ", ".join(char_names) or "(none)")
 
-    # Re-arm any persisted reminders that haven't fired yet (survives restarts)
-    from bot_core.reminders import rearm_pending_reminders
+    # Re-arm any persisted reminders that haven't fired yet (survives restarts).
+    # on_ready also fires on full gateway reconnects; rearm_pending_reminders()
+    # cancels existing live tasks before replacing them (no double-fires).
     n_rearmed = rearm_pending_reminders()
     if n_rearmed:
         log.info("Re-armed %d pending reminder(s)", n_rearmed)
@@ -329,6 +344,8 @@ async def on_message(message: discord.Message) -> None:
         typing_loop_task(message.channel),
         name=f"typing-{message.channel.id}",
     )
+    # Diagnostics list only — prune finished tasks so it can't grow unbounded.
+    bot.typing_tasks = [t for t in bot.typing_tasks if not t.done()]
     bot.typing_tasks.append(typing_task)
 
     sys_char = default_character()

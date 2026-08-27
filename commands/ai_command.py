@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import os
 
-from config.characters import get_character, default_character
+from config.characters import get_character
 from bot_core import ai_client
 from bot_core.history import get_active_char_key
 from utils.background_tasks import spawn_tracked_task
@@ -71,7 +71,10 @@ async def handle_ai_command(
                 if not isinstance(tasks, list):
                     tasks = []
                     setattr(bot_ref, "typing_tasks", tasks)
-                tasks.append(typing_task)
+                # Prune finished tasks so the diagnostics list can't grow
+                # unbounded on long uptimes.
+                bot_ref.typing_tasks = [t for t in tasks if not t.done()]
+                bot_ref.typing_tasks.append(typing_task)
         except Exception as e:
             log.warning("Typing loop error: %s", e)
 

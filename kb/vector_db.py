@@ -12,13 +12,12 @@ from __future__ import annotations
 
 import math
 import pathlib
-import re
 from dataclasses import dataclass, field
 
 
 # ──────────────────────────── Chunking provider ──────────────────────
 
-from kb.chunker import Chunker, _normalize_display_name
+from kb.chunker import Chunker
 from kb.reader import _extract_ext
 
 

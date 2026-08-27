@@ -83,7 +83,6 @@ CHARACTERS_FILE: pathlib.Path = pathlib.Path(
     _or_default(os.getenv("CHARACTERS_FILE"), str(_REPO_ROOT / "characters.json"))
 )
 
-DEFAULT_KB_NAME: str = os.getenv("KB_DEFAULT_KB", "humblewood").lower()
 CHUNK_TARGET: int = _safe_int(os.getenv("CHUNK_SIZE"), 2000)
 RAG_MAX_DOCS: int = _safe_int(os.getenv("RAG_MAX_DOCS"), 4)
 RAG_RETRIEVAL_METHOD: str = os.getenv("RAG_RETRIEVAL_METHOD", "vector").lower()
@@ -104,8 +103,4 @@ MAX_INPUT_CHARS: int = _safe_int(os.getenv("MAX_INPUT_CHARS"), 50_000)
 AI_RATE_LIMIT_MAX: int = _safe_int(os.getenv("AI_RATE_LIMIT_MAX"), 5)
 AI_RATE_LIMIT_WINDOW: int = _safe_int(os.getenv("AI_RATE_LIMIT_WINDOW"), 60)
 
-# ════════════════════════════════════
-#  LEGACY COMPAT (read but don't use in new code)
-# ════════════════════════════════════
-_OPENWEBUI_KEY: str = os.getenv("OPENWEBUI_API_KEY", "")
-_KB_KNOWLEDGE_BASE: str = os.getenv("KB_KNOWLEDGE_BASE", "HumbleWood")
+

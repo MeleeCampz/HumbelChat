@@ -44,8 +44,7 @@ A smaller baseline is usually better for Discord. Very large `max_tokens` values
 | Variable | Description | Default |
 |---|---|---|
 | `KB_PATH` | Path to knowledge base files | `./data/knowledge` |
-| `KB_DEFAULT_KB` | Default KB folder slug on startup | `humblewood` |
-| `CHUNK_SIZE` | Target chunk size used by legacy indexing | `2000` |
+| `CHUNK_SIZE` | Target chunk size used for auto-chunking | `2000` |
 | `RAG_MAX_DOCS` | Max documents attached per RAG query | `4` |
 | `RAG_MAX_CHARS` | Hard cap on RAG context characters sent to the LLM | `24000` |
 | `RAG_WINDOW_LINES` | Lines above/below each match anchor | `80` |

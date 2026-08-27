@@ -56,13 +56,20 @@ async def check_backend_health(timeout_sec: int | None = None) -> tuple[bool, st
 
 
 async def _health_monitor(interval_sec: int) -> None:
-    """Continuously probe the backend at the configured interval."""
+    """Continuously probe the backend at the configured interval.
+
+    Logs only on *state changes* (and once at start) so a long outage doesn't
+    spam dev.log every interval — see the module docstring.
+    """
+    last_state: bool | None = None
     while True:
         ok, detail = await check_backend_health()
-        if ok:
-            log.debug("AI backend health check: OK (%s)", detail)
-        else:
-            log.warning("AI backend health check: DOWN (%s)", detail)
+        if ok != last_state:
+            if ok:
+                log.info("AI backend health check: RECOVERED (%s)", detail)
+            else:
+                log.warning("AI backend health check: DOWN (%s)", detail)
+            last_state = ok
         await asyncio.sleep(interval_sec)
 
 

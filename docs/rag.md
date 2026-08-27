@@ -52,8 +52,7 @@ These are the expected file types for KB use. Storage itself does not strictly e
 | Variable | Purpose |
 |---|---|
 | `KB_PATH` | Where KB files are stored |
-| `KB_DEFAULT_KB` | Default KB folder on startup |
-| `CHUNK_SIZE` | Chunk size used by legacy indexing |
+| `CHUNK_SIZE` | Target chunk size for auto-chunking |
 | `RAG_MAX_DOCS` | Max documents attached per query |
 | `RAG_MAX_CHARS` | Max RAG context chars sent to the LLM |
 | `RAG_WINDOW_LINES` | Window around each match anchor |

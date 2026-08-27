@@ -6,25 +6,19 @@ from .chunker import Chunker, ChunkInfo
 from .vector_db import KBVectorIndex
 from .embedder import Embedder, EmbeddingError
 from .index import KBIndexStore
-from .query_rewriter import QueryRewriter, create_query_rewriter
-from .scorch import ChunkIndex, relevance_score
 
 __all__ = [
     "Chunker",
     "ChunkInfo",
-    "ChunkIndex",
     "KBIndexStore",
     "KBVectorIndex",
     "Embedder",
-    "QueryRewriter",
     "EmbeddingError",
     "get_relevant_chunks",
     "get_available_strategies",
     "is_vector_available",
     "list_kb_files",
     "read_kb_files",
-    "relevance_score",
     "retrieve_kb_documents",
     "validate_upload",
-    "create_query_rewriter",
 ]
