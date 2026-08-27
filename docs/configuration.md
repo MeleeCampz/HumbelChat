@@ -49,3 +49,15 @@ A smaller baseline is usually better for Discord. Very large `max_tokens` values
 | `RAG_MAX_CHARS` | Hard cap on RAG context characters sent to the LLM | `24000` |
 | `RAG_WINDOW_LINES` | Lines above/below each match anchor | `80` |
 | `RAG_RETRIEVAL_METHOD` | Retrieval strategy: `vector` or `keyword` | `vector` |
+
+## Streaming delivery
+
+| Variable | Description | Default |
+|---|---|---|
+| `STREAM_MIN_FLUSH_CHARS` | Minimum new characters before the next streamed edit | `100` |
+| `STREAM_MAX_FLUSH_INTERVAL` | Max seconds between edits while a reply streams in | `1.5` |
+
+Replies stream in via message edits; when a reply exceeds Discord's 2000-char
+message limit it splits into sections, each on its own message — and once a
+new section starts, the previous message is frozen (never edited again). See
+[Streaming delivery](./streaming.md) for details.

@@ -47,6 +47,10 @@ chat_response.txt
 nohup.out
 *.tmp
 *_temp.json
+logs/
+
+# Scratch/temp working files — local only, never push
+temp/
 
 # Dependencies (if vendored)
 dependencies/

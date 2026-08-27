@@ -13,14 +13,16 @@ cp .env.example .env
 python main.py
 ```
 
-Or use the startup script:
+Or use a startup script (the bot runs in a detached tmux session so it survives browser/terminal shutdowns):
 ```bash
-./start_bot.sh
+./botctl.sh start      # or: restart | stop | status | logs
 ```
+`./start_bot.sh` also works for a simple foreground-style start.
 
 ## Docs
 
 - [Configuration](./docs/configuration.md) — env vars, response-length/token defaults, and fallback behavior
+- [Streaming delivery](./docs/streaming.md) — how streamed replies grow via edits, and how long replies split into frozen sections
 - [Characters](./docs/characters.md) — `characters.json` format and per-character settings
 - [RAG / Knowledge Base](./docs/rag.md) — retrieval methods, smart chunking, supported file types
 - [Commands](./docs/commands.md) — slash command and prefix command reference
@@ -56,7 +58,9 @@ discord-ai-bot/
 │   └── characters.py
 ├── commands/
 ├── kb/
-└── utils/
+├── utils/
+├── botctl.sh          # tmux-based run/stop/restart helper
+└── docs/
 ```
 
 ## License
