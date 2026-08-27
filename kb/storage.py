@@ -147,6 +147,9 @@ def list_kb_files(
                    If given, files are listed relative to this subfolder.
         recursive: If True (default), scans all subdirectories.
                    If False and no *subfolder*, only returns root-level files.
+
+    Hidden entries (dot-prefixed files or directories, e.g. the vector
+    index cache) are always excluded — they are internal state, not docs.
     """
     kb_root = pathlib.Path(kb_path)
     docs: list[dict] = []
@@ -160,21 +163,33 @@ def list_kb_files(
     pattern = "**/*" if recursive else "*"
 
     for entry in sorted(scan_root.glob(pattern), key=lambda p: str(p)):
-        if entry.is_file() and "?" not in entry.name and not entry.name.endswith(".chunks.jsonl"):
-            stat = entry.stat()
-            try:
-                raw = entry.read_bytes()
-                sha = _compute_sha256(raw)
-            except OSError:
-                sha = "unreadable"
-            docs.append({
-                "name": str(entry.relative_to(scan_root)),
-                "filename": entry.name,
-                "size": stat.st_size,
-                "modified": datetime.fromtimestamp(
-                    stat.st_mtime, tz=timezone.utc
-                ).isoformat(),
-                "sha256": sha[:16],
-            })
+        if not entry.is_file():
+            continue
+        # Skip hidden files and anything inside hidden dirs (e.g.
+        # .vector_index_cache/vector_index.db) — they are internal state,
+        # not user documents.
+        try:
+            rel_parts = entry.relative_to(kb_root).parts
+        except ValueError:
+            rel_parts = entry.parts
+        if any(part.startswith(".") for part in rel_parts):
+            continue
+        if "?" in entry.name or entry.name.endswith(".chunks.jsonl"):
+            continue
+        stat = entry.stat()
+        try:
+            raw = entry.read_bytes()
+            sha = _compute_sha256(raw)
+        except OSError:
+            sha = "unreadable"
+        docs.append({
+            "name": str(entry.relative_to(scan_root)),
+            "filename": entry.name,
+            "size": stat.st_size,
+            "modified": datetime.fromtimestamp(
+                stat.st_mtime, tz=timezone.utc
+            ).isoformat(),
+            "sha256": sha[:16],
+        })
 
     return docs

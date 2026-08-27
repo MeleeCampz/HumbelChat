@@ -94,12 +94,16 @@ async def handle_upload_kb(
 
 
 def get_root_directories(kb_path: pathlib.Path) -> list[str]:
-    """Return sorted list of subdirectory names at the root level."""
+    """Return sorted list of subdirectory names at the root level.
+
+    Hidden directories (dot-prefixed, e.g. .vector_index_cache) are
+    internal state and never listed as KB folders.
+    """
     if not kb_path.exists():
         return []
     dirs = []
     for entry in kb_path.iterdir():
-        if entry.is_dir():
+        if entry.is_dir() and not entry.name.startswith("."):
             dirs.append(entry.name)
     return sorted(dirs)
 
