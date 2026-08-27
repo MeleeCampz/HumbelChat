@@ -60,6 +60,28 @@ def _disable_reminders_persistence(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_sessions(tmp_path, monkeypatch):
+    """Keep session tests from writing to the real sessions file / KB.
+
+    Points SESSIONS_PERSIST_FILE at a temp file and redirects the notes
+    directory (via ``sessions.notes_dir``) into a temp dir so per-session
+    markdown files never land in the real knowledge base.  config.settings
+    itself is left untouched — path-resolution tests rely on its constants.
+    """
+    kb = tmp_path / "kb_sessions_test"
+    kb.mkdir(exist_ok=True)
+    monkeypatch.setenv("SESSIONS_PERSIST_FILE", str(tmp_path / "sessions_test.json"))
+    from bot_core import sessions as _sess
+    monkeypatch.setattr(_sess, "notes_dir", lambda: kb, raising=False)
+    monkeypatch.setattr(_sess, "_store_path", None, raising=False)
+    _sess._state["session"] = None
+    _sess._state["last_ended"] = None
+    _sess._state["last_start_at"] = None
+    _sess._state["next_session_reminders"] = []
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _clear_model_list_cache():
     """ai_client caches the backend's model list (300 s TTL); keep tests
     hermetic by clearing it between tests."""
