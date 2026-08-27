@@ -20,8 +20,10 @@ async def handle_sync_command(interaction: discord.Interaction) -> None:
 
     # Clear guild-scoped commands first (if any)
     for guild in interaction.client.guilds or []:
+        # NOTE: clear_commands() is a *synchronous* cache-clear in discord.py —
+        # do not await it (it returns None, and awaiting None raises TypeError).
         try:
-            await interaction.client.tree.clear_commands(guild=guild)
+            interaction.client.tree.clear_commands(guild=guild)
         except discord.NotFound:
             pass
 

@@ -8,6 +8,10 @@ for the optional character header so header + body never exceeds that budget
 """
 from __future__ import annotations
 
+import logging
+
+log = logging.getLogger("bot.splitter")
+
 DISCORD_MSG_LIMIT: int = 2000
 # Leave room for the `[N/M] ` metadata prefix.  Ten characters covers a
 # realistic chunk count while still staying under Discord's 2000-char limit.
@@ -118,6 +122,11 @@ async def send_long_response(source, reply_text: str, char_name: str = "") -> No
         full_msg = f"{meta}{chunk}".strip()
 
         if hasattr(source, "followup"):
-            await source.followup.send(full_msg)
+            msg = await source.followup.send(full_msg)
         else:
-            await source.reply(full_msg)
+            msg = await source.reply(full_msg)
+        log.info(
+            "DELIVER chunk %d/%d: msg_id=%s len=%d first=%r",
+            idx, len(chunks), getattr(msg, "id", None),
+            len(full_msg), full_msg[:60],
+        )
