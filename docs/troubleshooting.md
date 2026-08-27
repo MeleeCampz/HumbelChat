@@ -25,9 +25,19 @@ Note: The bot now uses a one-time sync on first startup (tracked via `.commands_
 Likely cause: API timeout or backend issue.
 
 Fix:
+- Look for the startup health-check line in `bot.log`: `AI backend health check at startup: OK/DOWN`. A `DOWN` result means the bot cannot reach `INFER_URL` — fix connectivity before anything else.
 - Increase `AI_REQUEST_TIMEOUT` in `.env`
 - Check the inference backend logs
 - Verify `INFER_URL` and `INFER_API_KEY` if applicable
+
+The health probe performs a lightweight `GET /models` request. Any HTTP response counts as "reachable"; only timeouts and connection failures mark the backend as down. Set `AI_HEALTH_CHECK_INTERVAL=60` (seconds) to keep probing in the background so `bot.log` records when the backend drops and recovers.
+
+## Duplicate log lines
+
+Likely cause: logging handlers attached to both the `bot` logger and the root logger, or `discord.py`'s own logger propagating upward.
+
+Fix:
+- The bot now attaches all handlers directly to the `bot` logger with `propagate=False`, and gives the `discord` logger its own console-only handler (see `main.py`). If you add custom logging, keep the same pattern: one handler chain, no propagation to root.
 
 ## `characters.json not found` warning
 

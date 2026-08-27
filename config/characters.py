@@ -96,6 +96,18 @@ def load_characters(path: pathlib.Path) -> None:
     ]
 
 
+def get_character_choices() -> list[dict[str, str]]:
+    """Return the current ``[{name, value}]`` choices for UI/slash commands.
+
+    Reading through a function avoids the classic import-by-value trap where
+    callers bind the initial empty list before ``load_characters`` has run.
+    """
+    return [
+        {"name": c.display, "value": c.key}
+        for c in _CHARACTERS
+    ]
+
+
 def get_character(key_or_display: str | None) -> Character | None:
     """Look up by internal key OR display name. Returns None if not found."""
     if key_or_display is None:

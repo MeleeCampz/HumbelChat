@@ -1,6 +1,6 @@
 """Tests for response_splitter utility."""
 import pytest
-from utils.response_splitter import _split_long_message
+from utils.response_splitter import DISCORD_SAFE_CHUNK, _split_long_message
 
 
 class TestSplitLongMessage:
@@ -14,10 +14,11 @@ class TestSplitLongMessage:
 
     def test_exactly_at_limit(self):
         """Text exactly at limit should not be split."""
-        # 1900 chars without header — that's the Discord limit
-        text = "x" * 1895  # leave room for "--- Header ---\n"
+        # Leave room for the one-line header.
+        text = "x" * (DISCORD_SAFE_CHUNK - len("Header\n"))
         result = _split_long_message(text, "Header")
         assert len(result) == 1
+        assert len(result[0]) <= DISCORD_SAFE_CHUNK
 
     def test_long_text_splitted_by_paragraphs(self):
         """Long text should be split into multiple chunks."""
@@ -25,6 +26,8 @@ class TestSplitLongMessage:
         long_text = "\n\n".join(paragraphs)
         result = _split_long_message(long_text, "Character")
         assert len(result) > 1
+        for chunk in result:
+            assert len(chunk) <= DISCORD_SAFE_CHUNK
 
     def test_chunk_includes_header(self):
         """Every chunk should include the header."""
@@ -56,6 +59,22 @@ class TestSplitLongMessage:
         """Empty header string should work without errors."""
         result = _split_long_message("Some text", "")
         assert isinstance(result, list)
+
+    def test_long_single_line_url_is_split_safely(self):
+        """A token-less URL longer than the safe limit should not exceed it."""
+        url = "https://example.com/" + "a" * 4000
+        result = _split_long_message(url, "--- Character ---")
+        assert len(result) > 1
+        for chunk in result:
+            assert len(chunk) <= DISCORD_SAFE_CHUNK
+
+    def test_long_lines_preserve_paragraphs(self):
+        """Long line-based content should be split without exceeding the budget."""
+        long_lines = ["word " * 120 for _ in range(30)]
+        text = "\n".join(long_lines)
+        result = _split_long_message(text, "Header")
+        for chunk in result:
+            assert len(chunk) <= DISCORD_SAFE_CHUNK
 
 
 class TestSendLongResponseIntegration:

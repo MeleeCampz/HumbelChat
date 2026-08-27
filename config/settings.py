@@ -13,12 +13,18 @@ def _safe_int(value: str | None, default: int) -> int:
         return default
 
 
-def _or_clear(value: str | None):
-    """Return "clear" once if value equals that string, then None."""
+def _history_reset_flag(value: str | None) -> bool:
+    """Return True if *value* is the sentinel string "clear" (case-insensitive).
+
+    Used to read CHAT_HISTORY_RESET, which is a boolean-ish env var:
+    "clear" (or "1"/"true") means "clear history on startup", anything
+    else means "keep it". Previously this was a ``str | None`` helper whose
+    only meaningful return value was the string ``"clear"`` — confusing and
+    over-typed (see code review §3.6).
+    """
     if not value:
-        return None
-    val = value.strip().lower()
-    return "clear" if val == "clear" else None
+        return False
+    return value.strip().lower() in ("clear", "1", "true", "yes")
 
 
 # ════════════════════════════════════
@@ -39,6 +45,10 @@ DEFAULT_MODEL: str | None = os.getenv("MODEL_NAME")
 DEFAULT_SYSTEM_PROMPT: str = os.getenv("SYSTEM_PROMPT", "")
 CONTEXT_WINDOW: int = _safe_int(os.getenv("CONTEXT_WINDOW"), 10)
 REQUEST_TIMEOUT: int = _safe_int(os.getenv("AI_REQUEST_TIMEOUT"), 120)
+# §3.9: lightweight backend liveness probe. 0 = only probe once on startup;
+# a positive value starts a periodic background check at that interval.
+AI_HEALTH_CHECK_INTERVAL: int = _safe_int(os.getenv("AI_HEALTH_CHECK_INTERVAL"), 0)
+AI_HEALTH_CHECK_TIMEOUT: int = _safe_int(os.getenv("AI_HEALTH_CHECK_TIMEOUT"), 5)
 MAX_TOKENS: int = _safe_int(os.getenv("MAX_TOKENS"), 2000)
 MAX_TOKENS_HARD_CAP: int = _safe_int(os.getenv("MAX_TOKENS_HARD_CAP"), 4096)
 
@@ -52,7 +62,8 @@ FALLBACK_MODELS: list[str] = [
 #  BOT BEHAVIOUR
 # ════════════════════════════════════
 BOT_PREFIX: str = os.getenv("BOT_PREFIX", "!ai")
-CHAT_HISTORY_RESET: str | None = _or_clear(os.getenv("CHAT_HISTORY_RESET"))
+# §3.6: boolean flag instead of the old ``"clear" | None`` sentinel string.
+CHAT_HISTORY_RESET: bool = _history_reset_flag(os.getenv("CHAT_HISTORY_RESET"))
 
 def _or_default(value: str | None, default: str) -> str:
     """Return value if non-empty, else default (for optional path overrides)."""

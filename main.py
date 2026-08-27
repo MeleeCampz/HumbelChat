@@ -20,25 +20,38 @@ from discord.ext import commands
 import discord.app_commands as app_commands
 
 from config.settings import BOT_PREFIX, KB_PATH, CHARACTERS_FILE, INFER_URL, DEFAULT_MODEL, DISCORD_TOKEN
-from config.characters import load_characters, default_character, _CHARACTERS
+from config.characters import load_characters, default_character, get_character_choices
 from bot_core.ai_client import ask_ai as core_ask_ai
-from bot_core.history import get_history
+from bot_core.ai_client import RateLimitError
+from bot_core.health import start_backend_health_probe
+from utils.background_tasks import spawn_tracked_task
+from utils.kb_utils import log_top_kb_files
+from utils.response_splitter import send_long_response
+from utils.typing_loop import typing_loop_task
 
 # ── Logging setup ───────────────────────────────────────────────────────
+# Handlers are attached to the "bot" logger (not root) and the bot hierarchy
+# does not propagate, so every record is emitted exactly once. This fixes the
+# duplicate-line symptom where the console handler and discord's own logging
+# both bubbled records up to the root logger (see code review §2.6).
 _NO_FILE_LOGS = os.environ.get("BOT_NO_LOG_FILES") == "1"
 
+log = logging.getLogger("bot")
+log.propagate = False
+
 if _NO_FILE_LOGS:
-    log = logging.getLogger("bot")
+    # Tests / minimal environments: console-only output, no log files.
+    log.addHandler(logging.StreamHandler(sys.stdout))
+    log.setLevel(logging.INFO)
 else:
     LOG_DIR = pathlib.Path(__file__).resolve().parent / "logs"
     LOG_DIR.mkdir(exist_ok=True)
 
+    log_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
-    console_format = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-    console_handler.setFormatter(console_format)
-
-    file_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    console_handler.setFormatter(log_formatter)
 
     bot_log = RotatingFileHandler(
         LOG_DIR / "bot.log",
@@ -47,7 +60,7 @@ else:
         encoding="utf-8",
     )
     bot_log.setLevel(logging.INFO)
-    bot_log.setFormatter(file_formatter)
+    bot_log.setFormatter(log_formatter)
 
     dev_log = RotatingFileHandler(
         LOG_DIR / "dev.log",
@@ -56,16 +69,21 @@ else:
         encoding="utf-8",
     )
     dev_log.setLevel(logging.DEBUG)
-    dev_log.setFormatter(file_formatter)
+    dev_log.setFormatter(log_formatter)
 
-    root_logger = logging.getLogger()
-    root_logger.handlers.clear()
-    root_logger.addHandler(bot_log)
-    root_logger.addHandler(dev_log)
-    root_logger.addHandler(console_handler)
-    root_logger.setLevel(logging.INFO)
+    log.addHandler(console_handler)
+    log.addHandler(bot_log)
+    log.addHandler(dev_log)
+    log.setLevel(logging.INFO)
 
-    log = logging.getLogger("bot")
+    # discord.py logs through the "discord" logger; keep it console-only and
+    # stop it from propagating to root (root has no handlers anyway, so this
+    # prevents duplicate lines if a handler is ever added to root).
+    _discord_logger = logging.getLogger("discord")
+    _discord_logger.handlers.clear()
+    _discord_logger.addHandler(logging.StreamHandler(sys.stdout))
+    _discord_logger.setLevel(logging.INFO)
+    _discord_logger.propagate = False
 
 # ── Intents ─────────────────────────────────────────────────────────────
 INTENTS = discord.Intents.default()
@@ -81,9 +99,13 @@ load_characters(CHARACTERS_FILE)
 from bot_core.history import load_persisted
 load_persisted()
 
+# Built *after* load_characters() so the choices reflect the actual registry.
+# Reading via get_character_choices() also avoids the import-by-value trap
+# (``load_characters`` rebinds the module global instead of mutating the
+# originally-imported list in place).
 _CHAR_CHOICES: list[app_commands.Choice[str]] = [
-    app_commands.Choice(name=c.key, value=c.key)
-    for c in _CHARACTERS
+    app_commands.Choice(name=c["name"], value=c["value"])
+    for c in get_character_choices()
 ]
 
 # ── Bot setup ───────────────────────────────────────────────────────────
@@ -91,6 +113,9 @@ bot = commands.Bot(
     command_prefix=BOT_PREFIX,
     intents=INTENTS,
 )
+# §4.4: Strong references to background tasks live in utils/background_tasks.
+# This list exists only for diagnostics and direct cancellation if needed.
+bot.typing_tasks: list[asyncio.Task] = []
 
 # ── One-time command sync on first startup ──────────────────────────────
 # Track whether we've synced commands to avoid duplicate registrations.
@@ -259,7 +284,9 @@ async def on_ready() -> None:
     # Commands are registered once when the bot starts; if they need re-syncing,
     # use the /sync command (which is always available since it's registered at startup).
 
-    from utils.kb_utils import log_top_kb_files
+    # §3.9: fail fast if the AI backend is unreachable; optionally start the
+    # periodic liveness probe (AI_HEALTH_CHECK_INTERVAL).
+    start_backend_health_probe(bot)
 
     log_top_kb_files(KB_PATH)
 
@@ -296,16 +323,16 @@ async def on_message(message: discord.Message) -> None:
         prompt[:80],
     )
 
-    import asyncio
-    from utils.typing_loop import typing_loop_task
-    typing_task = asyncio.create_task(typing_loop_task(message.channel))
-    bot.typing_tasks = getattr(bot, "typing_tasks", [])
+    # §4.4: the tracking set in utils/background_tasks keeps the task alive
+    # even if no local references remain.
+    typing_task = spawn_tracked_task(
+        typing_loop_task(message.channel),
+        name=f"typing-{message.channel.id}",
+    )
     bot.typing_tasks.append(typing_task)
 
     sys_char = default_character()
     sys_model = sys_char.model if sys_char else DEFAULT_MODEL
-
-    from bot_core.ai_client import RateLimitError
 
     try:
         reply, _extra = await core_ask_ai(
@@ -327,8 +354,6 @@ async def on_message(message: discord.Message) -> None:
 
     typing_task.cancel()
 
-    from utils.response_splitter import send_long_response
-
     await send_long_response(message, reply, str(sys_char.display))
 
 
@@ -343,9 +368,8 @@ def _enforce_single_instance() -> None:
     if PIDFILE.exists():
         try:
             old_pid = int(PIDFILE.read_text().strip())
-            import os as _os
 
-            _os.kill(old_pid, 0)
+            os.kill(old_pid, 0)
             log.info("Another bot instance (PID %d) is already running. Exiting.", old_pid)
             sys.exit(0)
         except (ProcessLookupError, ValueError):
