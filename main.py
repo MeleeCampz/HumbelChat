@@ -125,6 +125,11 @@ if CHAT_HISTORY_RESET:
     log.info("CHAT_HISTORY_RESET set — wiping all stored conversation history.")
     reset_all_history()
 
+# Restore session state (active session + queued next-session reminders).
+# Nothing to re-arm — reminders fire from the /start_session handler.
+from bot_core.sessions import load_persisted as load_sessions
+load_sessions()
+
 # Built *after* load_characters() so the choices reflect the actual registry.
 # Reading via get_character_choices() also avoids the import-by-value trap
 # (``load_characters`` rebinds the module global instead of mutating the
@@ -291,6 +296,45 @@ async def sync_command(interaction: discord.Interaction) -> None:
     """Re-sync commands — delegated to commands/sync_command.py."""
     from commands.sync_command import handle_sync_command
     await handle_sync_command(interaction)
+
+
+@bot.tree.command(name="start_session", description="Start a new session (max one per hour).")
+@app_commands.describe(name="Optional custom name for the session")
+async def start_session_command(interaction: discord.Interaction, name: str | None = None) -> None:
+    """Start session — delegated to commands/session_commands.py."""
+    from commands.session_commands import handle_start_session
+    await handle_start_session(interaction, name=name)
+
+
+@bot.tree.command(name="end_session", description="End the current session and write its overview.")
+@app_commands.describe(name="Optional new name for the session (renames it in the notes file)")
+async def end_session_command(interaction: discord.Interaction, name: str | None = None) -> None:
+    """End session — delegated to commands/session_commands.py."""
+    from commands.session_commands import handle_end_session
+    await handle_end_session(interaction, name=name)
+
+
+@bot.tree.command(
+    name="remind_next_session",
+    description="Queue a reminder that is delivered when the next session starts.",
+)
+@app_commands.describe(message="What you want to be reminded about at the next session start")
+async def remind_next_session_command(interaction: discord.Interaction, message: str) -> None:
+    """Next-session reminder — delegated to commands/session_commands.py."""
+    from commands.session_commands import handle_remind_next_session
+    await handle_remind_next_session(interaction, message)
+
+
+@bot.tree.command(name="session_notes", description="Add notes to the current session or view them.")
+@app_commands.describe(action="add / view", note="The note text (required for action: add)")
+async def session_notes_command(
+    interaction: discord.Interaction,
+    action: str = "view",
+    note: str | None = None,
+) -> None:
+    """Session notes — delegated to commands/session_commands.py."""
+    from commands.session_commands import handle_session_notes
+    await handle_session_notes(interaction, action=action, note=note)
 
 
 # ════════════════════════════════════════════════════════════════════════

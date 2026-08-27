@@ -51,6 +51,7 @@ A smaller baseline is usually better for Discord. Very large `max_tokens` values
 | `CHARACTERS_FILE` | Path to `characters.json` | `<repo_root>/characters.json` |
 | `HISTORY_PERSIST_FILE` | Where chat history + active-character picks are stored; set empty to keep history in RAM only | `<repo_root>/data/chat_history.json` |
 | `REMINDERS_PERSIST_FILE` | Where `/remind` reminders are stored so they survive restarts; set empty to disable persistence | `<repo_root>/data/reminders.json` |
+| `SESSIONS_PERSIST_FILE` | Where session state (active session + queued next-session reminders) is stored so it survives restarts; set empty to disable persistence. Session notes files always live under `<KB_PATH>/session_notes/` | `<repo_root>/data/sessions.json` |
 
 ## Knowledge base and RAG
 

@@ -73,6 +73,51 @@ Translate text into the target language. Put the text to translate after a colon
 
 Schedule a one-time reminder (minimum 10 seconds ahead); the bot posts a `⏰ Reminder` message in this channel when it fires. Accepted units: seconds, minutes, hours. Reminders persist across restarts (see `REMINDERS_PERSIST_FILE`).
 
+### Sessions
+
+Sessions are a global (bot-wide) bookkeeping concept: at most one session is active at a time. Each session gets its own markdown notes file under `<KB_PATH>/session_notes/` — these files are part of the RAG-enabled knowledge base and can be edited on disk at any time.
+
+### `/start_session`
+
+```
+/start_session [name: <custom_name>]
+```
+
+Start a new session. Safety rules:
+
+- A new session can only be started **max once per hour** — otherwise the bot tells you how long to wait.
+- If a session is still active and younger than 12 h, you must end it first with `/end_session`.
+- If the active session is older than 12 h (stale), it is auto-ended (without an AI overview) and the new one starts.
+
+On success the bot also delivers: the AI overview of a previously ended session (if one was pending) and all queued next-session reminders to their channels. The optional `name` customizes the session name; the notes file always includes the date and an increasing per-day index, e.g. `2026-08-28_01_MyName.md`.
+
+### `/end_session`
+
+```
+/end_session [name: <custom_name>]
+```
+
+End the current session. The bot generates an AI overview from the session's notes plus recent chat in this channel (using the active character's model), appends it to the session file, and posts it here. The optional `name` renames the session in its file. If the AI backend is unavailable, a plain-text overview listing the notes is written instead.
+
+### `/remind_next_session`
+
+```
+/remind_next_session <message>
+```
+
+Queue a reminder that is delivered when the **next** session starts (in the channel where it was queued). If no session is active, a new one is started — but the reminder still waits for the *following* session. Queued reminders persist across restarts and are delivered by `/start_session`.
+
+### `/session_notes`
+
+```
+/session_notes [action: add|view] [note: <text>]
+```
+
+| Action | Description |
+|---|---|
+| `add` | Append a timestamped note to the current session (requires an active session; notes are stored in the session file and re-indexed for RAG) |
+| `view` | Show the current session's notes — or the most recent ended session's if none is active (reads the file from disk, so manual edits are picked up) |
+
 ### `/sync`
 
 Re-sync all slash commands with Discord. Use this if commands appear duplicated in the slash command menu or if newly added commands are not showing up.
