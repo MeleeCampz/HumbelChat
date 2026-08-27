@@ -86,6 +86,7 @@ data/
 
 # KB vector index cache — built locally, rebuildable, never track
 kb/.vector_index_cache/
+kb/.index_cache/   # legacy location (pre-rename); superseded by .vector_index_cache
 
 # Git
 .git/
