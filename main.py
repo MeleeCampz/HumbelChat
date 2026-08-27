@@ -34,6 +34,7 @@ from bot_core.ai_client import RateLimitError
 from bot_core.health import start_backend_health_probe
 from bot_core.reminders import rearm_pending_reminders
 from utils.background_tasks import spawn_tracked_task
+from utils.channel_queue import channel_slot
 from utils.kb_utils import log_top_kb_files
 from utils.response_splitter import send_long_response
 from utils.typing_loop import typing_loop_task
@@ -93,6 +94,17 @@ else:
     _discord_logger.addHandler(logging.StreamHandler(sys.stdout))
     _discord_logger.setLevel(logging.INFO)
     _discord_logger.propagate = False
+
+    # The knowledge-base modules log under their own top-level "kb" namespace
+    # (kb.index, kb.embedder, kb.retrievers, ...). Attach the same handlers so
+    # index-build / embedding failures land in bot.log and dev.log instead of
+    # only flashing past on the console via Python's last-resort handler.
+    _kb_logger = logging.getLogger("kb")
+    _kb_logger.handlers.clear()
+    _kb_logger.addHandler(console_handler)
+    _kb_logger.addHandler(bot_log)
+    _kb_logger.addHandler(dev_log)
+    _kb_logger.setLevel(logging.INFO)
 
 # ── Intents ─────────────────────────────────────────────────────────────
 INTENTS = discord.Intents.default()
@@ -351,27 +363,31 @@ async def on_message(message: discord.Message) -> None:
     sys_char = default_character()
     sys_model = sys_char.model if sys_char else DEFAULT_MODEL
 
-    try:
-        reply, _extra = await core_ask_ai(
-            prompt,
-            model_slug=sys_model or "",
-            guild_id=guild_id,
-            channel_id=message.channel.id,
-            username=message.author.display_name or "",
-            user_id=message.author.id,
-        )
-    except RateLimitError as e:
-        typing_task.cancel()
-        await message.channel.send(f"⏳ Rate limit reached — please try again in {e.retry_after}s.")
-        return
-    except ValueError as e:
-        typing_task.cancel()
-        await message.channel.send(f"⚠️ {e}")
-        return
+    # Hold this channel's reply slot for the ENTIRE request + delivery so a
+    # concurrent prefix command in the same channel can't interleave its
+    # messages with this one (see utils/channel_queue.py).
+    async with channel_slot(message.channel.id, name="prefix-command"):
+        try:
+            reply, _extra = await core_ask_ai(
+                prompt,
+                model_slug=sys_model or "",
+                guild_id=guild_id,
+                channel_id=message.channel.id,
+                username=message.author.display_name or "",
+                user_id=message.author.id,
+            )
+        except RateLimitError as e:
+            typing_task.cancel()
+            await message.channel.send(f"⏳ Rate limit reached — please try again in {e.retry_after}s.")
+            return
+        except ValueError as e:
+            typing_task.cancel()
+            await message.channel.send(f"⚠️ {e}")
+            return
 
-    typing_task.cancel()
+        typing_task.cancel()
 
-    await send_long_response(message, reply, str(sys_char.display))
+        await send_long_response(message, reply, str(sys_char.display))
 
 
 # ── Single-instance lock ────────────────────────────────────────────────

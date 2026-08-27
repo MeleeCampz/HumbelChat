@@ -425,8 +425,8 @@ async def ask_ai_stream(
     messages.append({"role": "user", "content": user_content})
 
     log.info(
-        "ask_ai_stream → model=%s messages=%d rag_docs=%d total_chars=%.1fK",
-        effective_model, len(messages), len(included_names),
+        "ask_ai_stream → model=%s channel=%s messages=%d rag_docs=%d total_chars=%.1fK",
+        effective_model, channel_id, len(messages), len(included_names),
         sum(len(m.get("content", "")) for m in messages) / 1024,
     )
 
@@ -454,7 +454,7 @@ async def ask_ai_stream(
                 yield delta
 
         reply_text = "".join(full_text_parts) or "(empty response)"
-        log.info("STREAM_AI_RESPONSE len=%d chars", len(reply_text))
+        log.info("STREAM_AI_RESPONSE channel=%s len=%d chars", channel_id, len(reply_text))
 
         # ── Update history after full stream ──────────────────────
         # Clean message only — see the note in ask_ai() above.
