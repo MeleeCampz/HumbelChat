@@ -147,10 +147,22 @@ async def stream_ai_response(interaction, chunk_iter, *, ephemeral: bool = False
     them to a Discord interaction via progressive edits.
 
     Returns the full accumulated text (useful for logging / history).
+
+    NOTE: ``close()`` must run in a ``finally`` so partial text is flushed on
+    error — but it must NOT be *returned* from inside the ``finally`` block:
+    a return there would swallow any exception raised by the chunk iterator
+    (e.g. rate-limit / timeout / input-too-long), leaving the user with no
+    feedback at all.
     """
     stream = StreamToDiscord(interaction, ephemeral=ephemeral)
     try:
         async for chunk in chunk_iter:
             await stream.feed(chunk)
     finally:
-        return await stream.close()
+        # Final flush (best effort) — exceptions from the iterator must still
+        # propagate to the caller after this runs.
+        try:
+            await stream.close()
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning("Stream final flush failed: %s", e)
+    return "".join(stream._buffer)

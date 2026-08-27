@@ -60,6 +60,21 @@ def _disable_reminders_persistence(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_auto_index_on_upload(monkeypatch):
+    """Keep /upload_kb tests from touching the real embedding backend.
+
+    The upload handler now auto-indexes new documents via
+    ``kb.retrievers.update_kb_document``; stub it out so tests stay fast and
+    hermetic (no network, no repo-local index cache writes).
+    """
+    try:
+        from kb import retrievers as _r
+        monkeypatch.setattr(_r, "update_kb_document", AsyncMock(return_value=True), raising=False)
+    except Exception:
+        pass
+
+
+@pytest.fixture(autouse=True)
 def _disable_backend_health_probe(monkeypatch):
     """Prevent tests from starting the background liveness probe."""
     monkeypatch.setenv("AI_HEALTH_CHECK_INTERVAL", "0")

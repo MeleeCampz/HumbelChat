@@ -25,9 +25,11 @@ class TestUploadKBCommand:
         await ix.followup.send("placeholder", ephemeral=True)  # initialize _sent
         sent = ix._sent
 
+        # NOTE: patch kb.storage.KB_PATH (the name validate_upload actually
+        # reads) — config.settings.KB_PATH is a separate binding.
         with patch("kb.storage._compute_sha256", return_value="abc123def456"):
             with patch.object(ChunkIndex, "from_text", return_value=[]):
-                with patch("config.settings.KB_PATH", temp_kb_dir):
+                with patch("kb.storage.KB_PATH", temp_kb_dir):
                     from commands.kb_commands import handle_upload_kb
 
                     await handle_upload_kb(ix, attachment=attachment, kb_name=None, url=None)
@@ -52,7 +54,7 @@ class TestUploadKBCommand:
 
         with patch("httpx.AsyncClient", return_value=mock_client):
             with patch.object(ChunkIndex, "from_text", return_value=[]):
-                with patch("config.settings.KB_PATH", temp_kb_dir):
+                with patch("kb.storage.KB_PATH", temp_kb_dir):
                     from commands.kb_commands import handle_upload_kb
 
                     await handle_upload_kb(ix, attachment=None, url="https://example.com/file.txt", kb_name=None)
@@ -110,6 +112,9 @@ class TestReindexKBCommand:
         mock_store = AsyncMock()
         mock_store.load = AsyncMock(return_value=mock_idx)
         mock_store.shutdown = AsyncMock()
+        # get_index is sync in the real class — keep it sync here too so the
+        # retrievers' `store.get_index()` calls don't create un-awaited coroutines.
+        mock_store.get_index = MagicMock(return_value=mock_idx)
 
         with patch("kb.index.KBIndexStore", return_value=mock_store):
             with patch("config.settings.KB_PATH", temp_kb_dir):

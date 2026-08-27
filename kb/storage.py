@@ -24,6 +24,10 @@ ALLOWED_MIMES: set[str] = {
 
 MAX_FILE_SIZE: int = 20 * 1024 * 1024  # 20 MB
 
+# File extensions accepted for KB storage (mirrors ALLOWED_MIMES). Anything
+# else is rejected before it touches disk.
+ALLOWED_EXTENSIONS: set[str] = {".txt", ".md", ".csv", ".html", ".xml", ".rtf"}
+
 
 def _infer_extension(raw_filename: str | None) -> str:
     """Return a safe file extension, defaulting to .txt."""
@@ -69,13 +73,27 @@ def validate_upload(
         )
 
     ext = _infer_extension(filename)
+
+    # Reject unsupported file types before anything touches disk.
+    if ext not in ALLOWED_EXTENSIONS:
+        allowed = ", ".join(sorted(ALLOWED_EXTENSIONS))
+        raise ValueError(
+            f"File type '{ext or 'unknown'}' is not supported for the KB. "
+            f"Allowed: {allowed}"
+        )
+
     display_name = _sanitize_filename(filename or "uploaded")
     stem_name = pathlib.Path(display_name).stem
 
-    kb_root = kb_path if kb_path else KB_PATH
+    kb_root = (kb_path if kb_path else KB_PATH).resolve()
 
     if subfolder:
-        kb_root = kb_root / subfolder
+        # Guard against path traversal (e.g. "../../etc"): the resolved
+        # subfolder must stay inside the KB root.
+        candidate = (kb_root / subfolder).resolve()
+        if not candidate.is_relative_to(kb_root):
+            raise ValueError(f"Invalid subfolder: {subfolder!r}")
+        kb_root = candidate
         try:
             kb_root.mkdir(parents=True, exist_ok=True)
         except Exception as e:

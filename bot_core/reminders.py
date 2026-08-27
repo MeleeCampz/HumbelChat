@@ -152,6 +152,10 @@ def rearm_pending_reminders() -> int:
 
     Call from ``on_ready`` (must be in a running event loop).
     Returns the number of reminders re-armed.
+
+    ``on_ready`` fires again on full gateway reconnects, so this may run more
+    than once: any existing live task for a reminder is cancelled before it is
+    replaced, otherwise both tasks would fire and the user would be pinged twice.
     """
     _load()
     now = time.time()
@@ -159,6 +163,9 @@ def rearm_pending_reminders() -> int:
     for rid, info in list(_reminders.items()):
         if info.get("fired"):
             continue
+        existing = _tasks.get(rid)
+        if existing is not None and not existing.done():
+            existing.cancel()
         delay = max(int(info["fires_at"] - now), 0)
         _start_task(rid, delay, info["channel_id"], info["message"])
         count += 1
