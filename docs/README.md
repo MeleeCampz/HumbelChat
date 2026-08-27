@@ -3,6 +3,7 @@
 This folder holds the in-depth docs. Start with the root [README](../README.md) for quick start, then use these:
 
 - [Configuration](./configuration.md)
+- [Streaming delivery](./streaming.md)
 - [Characters](./characters.md)
 - [RAG / Knowledge Base](./rag.md)
 - [Commands](./commands.md)
