@@ -18,7 +18,9 @@ Usage
 -----
     from kb.index import KBIndexStore
 
-    store = KBIndexStore("path/to/kb", persist_dir="kb/.index_cache")
+    # Default cache dir is <KB_PATH>/.vector_index_cache (pass persist_dir
+    # to override).
+    store = KBIndexStore("path/to/kb")
 
     # Load (uses disk cache when valid, else builds & saves)
     idx = await store.load()
