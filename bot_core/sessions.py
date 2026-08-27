@@ -381,20 +381,6 @@ def end_session(overview: str | None = None, name: str | None = None) -> dict | 
     return _end_session_internal(session, overview=overview)
 
 
-def rename_session(name: str | None) -> dict | None:
-    """Rename the current session (updates state + file header)."""
-    session = get_current_session()
-    if session is None or not name:
-        return None
-    safe = _sanitize_name(name)
-    if not safe:
-        return None
-    session["name"] = safe
-    _write_session_file(session)
-    _save()
-    return session
-
-
 # ── Public API — notes ───────────────────────────────────────────────────
 
 def add_note(text: str, author: str = "") -> dict | None:
