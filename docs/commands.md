@@ -14,6 +14,8 @@ All commands begin with `/`.
 
 Send a message to the active AI character. Uses per-channel conversation history and, if enabled, RAG context.
 
+The optional `character` option takes a **one-off** persona for that single reply — it does not change the channel's active character (use `/character set` for that).
+
 ### `/character`
 
 ```
@@ -33,7 +35,11 @@ Upload a document to the knowledge base. The expected file types are `.txt`, `.m
 
 ### `/list_kb_docs`
 
-List documents in the knowledge base, including name, size, and modification date.
+```
+/list_kb_docs [path: <subfolder>]
+```
+
+Without `path`, shows a root-level overview (top-level folders + files with name, size, and modification date). With `path`, lists everything inside that subfolder.
 
 ### `/reindex_kb`
 
@@ -54,10 +60,18 @@ Summarize recent chat history or content from a URL using AI.
 ### `/translate`
 
 ```
-/translate <target_language>: <text>
+/translate <target_language> [source_language: <language>]
 ```
 
-Translate text into the specified target language.
+Translate text into the target language. Put the text to translate after a colon in the first option — e.g. `/translate Spanish: Hello world`. If no text is given, the bot translates your most recent message in the channel. An optional source language can be given (default: auto-detect).
+
+### `/remind`
+
+```
+/remind <time_value> <time_unit: seconds|minutes|hours> <message>
+```
+
+Schedule a one-time reminder (minimum 10 seconds ahead); the bot posts a `⏰ Reminder` message in this channel when it fires. Accepted units: seconds, minutes, hours. Reminders persist across restarts (see `REMINDERS_PERSIST_FILE`).
 
 ### `/sync`
 

@@ -36,6 +36,7 @@ Characters are defined in `characters.json` and control AI persona, model, syste
 | `display` | Human-readable name shown in `/character show` |
 | `model` | Model slug used for the inference API |
 | `system_prompt` | Custom system prompt for the character |
+| `temperature` | Optional sampling temperature (e.g. `0.7`) sent with AI requests |
 | `max_tokens` | Optional per-character max tokens; overrides `MAX_TOKENS` |
 
 ## Per-character max_tokens

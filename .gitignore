@@ -85,7 +85,7 @@ data/
 .commands_synced
 
 # KB vector index cache — built locally, rebuildable, never track
-kb/.index_cache/
+kb/.vector_index_cache/
 
 # Git
 .git/
