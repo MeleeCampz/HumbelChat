@@ -71,7 +71,9 @@ def classify_ai_error(exc: BaseException, *, model: str = "", backend_url: str =
       5. HTTP 429 → ``RateLimitError`` (re-raised from bot_core)
       6. Anything else → generic :class:`AIError`
     """
-    # 1. Already classified (or the bot's own rate-limit exception)
+    # 1. Already classified (or the bot's own rate-limit exception).
+    # The classifier is a *pure* function: it never raises — callers decide
+    # how to handle a returned RateLimitError.
     if isinstance(exc, AIError):
         return exc
 
@@ -79,7 +81,7 @@ def classify_ai_error(exc: BaseException, *, model: str = "", backend_url: str =
         from bot_core.ai_client import RateLimitError
 
         if isinstance(exc, RateLimitError):
-            raise exc
+            return exc
     except ImportError:
         pass
 
@@ -111,10 +113,13 @@ def classify_ai_error(exc: BaseException, *, model: str = "", backend_url: str =
     ):
         return BackendDownError(str(exc), cause=exc)
 
-    # 5. Rate limit (429) — surface as RateLimitError for handler consistency
+    # 5. Rate limit (429) — return a RateLimitError so callers can handle it
+    # uniformly. (Previously this *raised* from inside the classifier, which
+    # made a pure classification function have a side effect; the hardcoded
+    # 30 s retry-after also ignored the backend's Retry-After header.)
     if status_code == 429:
         from bot_core.ai_client import RateLimitError
-        raise RateLimitError("ai", retry_after=30)
+        return RateLimitError("ai", retry_after=30)
 
     # 6. Fallback
     return AIError(str(exc), cause=exc)

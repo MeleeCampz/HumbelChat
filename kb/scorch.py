@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import math
 import re
-from collections import Counter
 from difflib import SequenceMatcher
 
 

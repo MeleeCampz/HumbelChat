@@ -34,7 +34,10 @@ import asyncio
 import logging
 import os
 import pathlib
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from kb.index import KBIndexStore
 
 logger = logging.getLogger("kb.retrievers")
 
@@ -47,27 +50,39 @@ DEFAULT_METHOD = os.getenv("RAG_RETRIEVAL_METHOD", "vector").lower()
 _RAG_TIMEOUT = int(os.getenv("RAG_TIMEOUT_SECONDS", "30"))
 
 # Singleton index store — lazily initialized
-_index_store: Optional["kb.index.KBIndexStore"] = None
+_index_store: Optional["KBIndexStore"] = None
 _kb_path_for_store: str | pathlib.Path | None = None
+# Serializes lazy init so two simultaneous first RAG requests can't each build
+# a KBIndexStore and race on the same SQLite temp-file swap.
+_index_init_lock: Optional[asyncio.Lock] = None
 
 
-async def _ensure_index_store(kb_path: str | pathlib.Path) -> Optional["kb.index.KBIndexStore"]:
+def _get_index_init_lock() -> asyncio.Lock:
+    global _index_init_lock
+    if _index_init_lock is None:
+        _index_init_lock = asyncio.Lock()
+    return _index_init_lock
+
+
+async def _ensure_index_store(kb_path: str | pathlib.Path) -> Optional["KBIndexStore"]:
     """Create or return the cached index store, loading/building the index."""
     global _index_store, _kb_path_for_store
 
     if _index_store is not None:
         return _index_store  # already built
 
-    if _kb_path_for_store == kb_path and os.path.exists(str(kb_path)):
-        return _index_store  # same path, reuse
+    async with _get_index_init_lock():
+        # Re-check inside the lock — another coroutine may have finished init.
+        if _index_store is not None:
+            return _index_store
 
-    from kb.index import KBIndexStore
+        from kb.index import KBIndexStore
 
-    store = KBIndexStore(kb_path)
-    await store.load()
-    _index_store = store
-    _kb_path_for_store = kb_path
-    logger.info("Vector index store ready (%d chunks)", store.get_index().count() if store.get_index() else 0)
+        store = KBIndexStore(kb_path)
+        await store.load()
+        _index_store = store
+        _kb_path_for_store = kb_path
+        logger.info("Vector index store ready (%d chunks)", store.get_index().count() if store.get_index() else 0)
     return _index_store
 
 
@@ -309,7 +324,7 @@ async def retrieve_kb_documents(
 
 async def update_kb_document(file_path: str | pathlib.Path) -> bool:
     """Re-index or add a single KB document. Use after ``!add_kb_file``."""
-    global _index_store
+    global _index_store, _kb_path_for_store
     if _index_store is not None and _index_store.get_index() is not None:
         return await _index_store.update_single_document(file_path)
 
@@ -328,7 +343,6 @@ async def update_kb_document(file_path: str | pathlib.Path) -> bool:
 
 async def remove_kb_document(file_path: str | pathlib.Path) -> bool:
     """Remove a KB document from the vector index."""
-    global _index_store
     if _index_store is None or _index_store.get_index() is None:
         return False
     return await _index_store.remove_document(file_path)
@@ -336,7 +350,6 @@ async def remove_kb_document(file_path: str | pathlib.Path) -> bool:
 
 async def shutdown_vector_store() -> None:
     """Persist index before bot shutdown."""
-    global _index_store
     if _index_store is not None:
         await _index_store.shutdown()
         logger.info("Vector index store shut down and persisted")

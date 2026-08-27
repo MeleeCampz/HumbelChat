@@ -49,11 +49,13 @@ class Character:
         return f"Character({self.display!r} → {self.model!r})"
 
 
-# Global state (populated on import and via load_characters)
+# Global state (populated on import and via load_characters).
+# NOTE: callers must read these through the accessor functions below
+# (get_character / default_character / get_character_choices) — importing the
+# raw lists binds them at import time, before load_characters() has run.
 _CHARACTERS: list[Character] = []
 _DEFAULT_KEY: str = "default"
 _CHAR_DISPLAY_MAP: dict[str, Character] = {}
-CHARACTER_CHOICES: list = []
 
 
 def _load_char_json(path: pathlib.Path) -> tuple[str, list[Character]]:
@@ -86,14 +88,16 @@ def _load_char_json(path: pathlib.Path) -> tuple[str, list[Character]]:
 
 def load_characters(path: pathlib.Path) -> None:
     """Load characters.json and populate globals."""
-    global _CHARACTERS, _DEFAULT_KEY, _CHAR_DISPLAY_MAP, CHARACTER_CHOICES
-    
+    global _CHARACTERS, _DEFAULT_KEY, _CHAR_DISPLAY_MAP
+
     _DEFAULT_KEY, _CHARACTERS = _load_char_json(path)
     _CHAR_DISPLAY_MAP = {c.display: c for c in _CHARACTERS}
-    CHARACTER_CHOICES = [
-        {"name": c.display, "value": c.key}
-        for c in _CHARACTERS
-    ]
+
+
+def all_characters() -> list[Character]:
+    """Return the currently loaded characters (read via accessor, not by
+    importing ``_CHARACTERS`` directly)."""
+    return list(_CHARACTERS)
 
 
 def get_character_choices() -> list[dict[str, str]]:

@@ -179,7 +179,7 @@ async def handle_reindex_kb(interaction):
         if idx is None or idx.is_empty():
             # Index didn't build — check why (no KB files? no embedding backend?)
             docs = list_kb_files(kb_path, recursive=True)
-            msg_parts.append(f"❌ Vector index could not be built.")
+            msg_parts.append("❌ Vector index could not be built.")
             msg_parts.append(f"KB has {len(docs)} file(s) but 0 chunks.")
         else:
             doc_count = idx.count()
@@ -194,7 +194,7 @@ async def handle_reindex_kb(interaction):
                 if results:
                     msg_parts.append(f"   • Retrieval test: {len(results)} document(s) found")
                 else:
-                    msg_parts.append(f"   • ⚠️ Retrieval returned 0 documents for a sample query")
+                    msg_parts.append("   • ⚠️ Retrieval returned 0 documents for a sample query")
             except Exception as re:
                 msg_parts.append(f"   • ⚠️ Retrieval sanity check failed: {re}")
 

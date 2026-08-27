@@ -16,14 +16,10 @@ Usage
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import httpx
-
-if TYPE_CHECKING:
-    from config.settings import Settings  # noqa: F401
 
 logger = logging.getLogger("kb.embedder")
 
@@ -102,16 +98,11 @@ class Embedder:
 
         # Determine what suffix to append so the /embeddings endpoint is correct.
         # Users may set INFER_URL already ending in /api/v1 or /v1, or none of those.
-        if base_url.endswith("/api/v1"):
-            api_v1_base = base_url
-            remaining_suffixes = ["/embeddings"]
-        elif base_url.endswith("/v1"):
-            api_v1_base = base_url
+        if base_url.endswith(("/api/v1", "/v1")):
             remaining_suffixes = ["/embeddings"]
         else:
-            api_v1_base = base_url + "/api/v1"
             # For generic URLs (e.g. http://host:port), try both conventions
-            remaining_suffixes = ["/embeddings", "/v1/embeddings"]
+            remaining_suffixes = ["/api/v1/embeddings", "/v1/embeddings"]
 
         from config.settings import INFER_API_KEY
         api_key = INFER_API_KEY or ""

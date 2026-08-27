@@ -115,6 +115,17 @@ def clear_history(guild_id: int, channel_id: int) -> None:
     _save_to_disk()
 
 
+def reset_all_history() -> None:
+    """Wipe every channel's history and active-character selection.
+
+    Called at startup when ``CHAT_HISTORY_RESET`` is set (see main.py).
+    Persists the emptied state so the wipe survives subsequent restarts.
+    """
+    _chat_history.clear()
+    _active_characters.clear()
+    _save_to_disk()
+
+
 def get_message_count(guild_id: int, channel_id: int) -> int:
     return len(_chat_history.get(guild_id, {}).get(channel_id, []))
 

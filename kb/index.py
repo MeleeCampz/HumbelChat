@@ -112,11 +112,20 @@ class KBIndexStore:
         self,
         kb_path: str | pathlib.Path,
         *,
-        persist_dir: str = "kb/.index_cache",
+        persist_dir: str | pathlib.Path | None = None,
         model_name: str = "nomic-embed-text:latest",
     ) -> None:
         self.kb_path = pathlib.Path(kb_path)
-        self.persist_dir = pathlib.Path(persist_dir)
+        # Default cache lives next to the KB itself (absolute) so the bot
+        # works no matter which directory it is launched from. The old
+        # CWD-relative "kb/.index_cache" default broke when the bot was
+        # started from anywhere other than the repo root.
+        if persist_dir is None:
+            self.persist_dir = self.kb_path / ".vector_index_cache"
+        else:
+            self.persist_dir = pathlib.Path(persist_dir)
+            if not self.persist_dir.is_absolute():
+                self.persist_dir = (pathlib.Path(__file__).resolve().parent.parent / persist_dir)
         self.model_name = model_name
 
         self._db_path = self.persist_dir / "vector_index.db"

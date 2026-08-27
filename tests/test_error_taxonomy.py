@@ -40,13 +40,14 @@ class TestClassifyAIError:
         assert isinstance(classified, BackendDownError)
         assert classified.category == "backend_down"
 
-    def test_rate_limit_exception_is_re_raised(self):
+    def test_rate_limit_exception_is_returned(self):
+        """A bot RateLimitError must be returned (not raised) — the classifier
+        is a pure function; callers handle RateLimitError uniformly."""
         from bot_core.ai_client import RateLimitError
 
         exc = RateLimitError("user-1", retry_after=12)
-        with pytest.raises(RateLimitError) as exc_info:
-            classify_ai_error(exc)
-        assert exc_info.value is exc
+        classified = classify_ai_error(exc)
+        assert classified is exc
 
     def test_generic_error_is_preserved(self):
         exc = ValueError("unexpected provider behaviour")

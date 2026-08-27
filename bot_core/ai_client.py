@@ -97,18 +97,42 @@ def check_rate_limit(user_id: str) -> None:
 #  Internal helpers
 # ─────────────────────────────────────────────────────────────────────────
 
+# Cache of the backend's model list. _validate_model used to call
+# ``models.list()`` on *every single request* — one extra round-trip per
+# message. The list is cached for a short TTL instead; backends rarely add or
+# remove models mid-session, and a stale cache entry only costs one fallback.
+_MODEL_LIST_TTL_SEC = 300.0
+_model_list_cache: dict[str, tuple[float, set[str]]] = {}
+
+
+def _clear_model_list_cache() -> None:
+    """Drop cached model lists (used by tests)."""
+    _model_list_cache.clear()
+
+
 async def _validate_model(client: AsyncOpenAI, effective_model: str) -> str:
-    """Guard against stale character models: fall back to the .env default."""
+    """Guard against stale character models: fall back to the .env default.
+
+    The backend's model list is cached for ``_MODEL_LIST_TTL_SEC`` seconds so
+    each request doesn't pay an extra ``models.list()`` round-trip.
+    """
     if not effective_model:
         return DEFAULT_MODEL or ""
-    try:
-        models_resp = await client.models.list()
-        available = {m.id for m in models_resp.data}
-        if available and effective_model not in available and effective_model != DEFAULT_MODEL:
-            log.warning("Model '%s' not found on backend; falling back to '%s'", effective_model, DEFAULT_MODEL)
-            return DEFAULT_MODEL
-    except Exception as e:
-        log.warning("Could not list backend models at %s: %s", INFER_URL, e)
+    now = time.monotonic()
+    available: set[str] | None = None
+    cached = _model_list_cache.get(INFER_URL)
+    if cached is not None and now - cached[0] < _MODEL_LIST_TTL_SEC:
+        available = cached[1]
+    else:
+        try:
+            models_resp = await client.models.list()
+            available = {m.id for m in models_resp.data}
+            _model_list_cache[INFER_URL] = (now, available)
+        except Exception as e:
+            log.warning("Could not list backend models at %s: %s", INFER_URL, e)
+    if available and effective_model not in available and effective_model != DEFAULT_MODEL:
+        log.warning("Model '%s' not found on backend; falling back to '%s'", effective_model, DEFAULT_MODEL)
+        return DEFAULT_MODEL
     return effective_model
 
 
@@ -288,8 +312,12 @@ async def ask_ai(
         # instead of a raw SDK traceback.
         from bot_core.errors import classify_ai_error
         classified = classify_ai_error(e, model=effective_model, backend_url=INFER_URL)
-        log.error("AI request failed (%s): %s", classified.category, e)
-        if isinstance(classified, ValueError) or classified.category in ("timeout", "model_not_found", "backend_down"):
+        log.error("AI request failed (%s): %s", getattr(classified, "category", "unknown"), e)
+        if isinstance(classified, RateLimitError):
+            # Classifier is pure (returns, never raises) — re-raise the
+            # classified error so handlers can show the retry-after message.
+            raise classified from e
+        if isinstance(classified, ValueError) or getattr(classified, "category", "") in ("timeout", "model_not_found", "backend_down"):
             raise ValueError(classified.user_message) from e
         raise
 
@@ -439,11 +467,10 @@ async def ask_ai_stream(
     except Exception as e:
         from bot_core.errors import classify_ai_error
         classified = classify_ai_error(e, model=effective_model, backend_url=INFER_URL)
-        log.error("AI stream failed (%s): %s", classified.category, e)
-        if classified.category in ("timeout", "model_not_found", "backend_down"):
+        log.error("AI stream failed (%s): %s", getattr(classified, "category", "unknown"), e)
+        if isinstance(classified, RateLimitError):
+            raise classified from e
+        if getattr(classified, "category", "") in ("timeout", "model_not_found", "backend_down"):
             raise ValueError(classified.user_message) from e
         raise
 
-
-def get_current_message_count(guild_id: int, channel_id: int) -> int:
-    return len(get_history(guild_id, channel_id))

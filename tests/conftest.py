@@ -60,6 +60,18 @@ def _disable_reminders_persistence(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _clear_model_list_cache():
+    """ai_client caches the backend's model list (300 s TTL); keep tests
+    hermetic by clearing it between tests."""
+    try:
+        from bot_core import ai_client
+        ai_client._clear_model_list_cache()
+    except Exception:
+        pass
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _no_auto_index_on_upload(monkeypatch):
     """Keep /upload_kb tests from touching the real embedding backend.
 

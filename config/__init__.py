@@ -4,7 +4,6 @@ from .settings import (
     CHAT_HISTORY_RESET,
     CHUNK_TARGET,
     CONTEXT_WINDOW,
-    DEFAULT_KB_NAME,
     DEFAULT_MODEL,
     DEFAULT_SYSTEM_PROMPT,
     DISCORD_TOKEN,
@@ -19,14 +18,16 @@ from .settings import (
     RAG_WINDOW_LINES,
     REQUEST_TIMEOUT,
 )
-from .characters import load_characters, get_character, default_character, _CHARACTERS
+# NOTE: the character registry is exposed through accessor functions only.
+# Re-exporting the private ``_CHARACTERS`` list here used to invite the
+# import-by-value trap (callers binding the pre-load empty list).
+from .characters import load_characters, get_character, default_character, get_character_choices
 
 __all__ = [
     "BOT_PREFIX",
     "CHAT_HISTORY_RESET",
     "CHUNK_TARGET",
     "CONTEXT_WINDOW",
-    "DEFAULT_KB_NAME",
     "DEFAULT_MODEL",
     "DEFAULT_SYSTEM_PROMPT",
     "DISCORD_TOKEN",
@@ -43,5 +44,5 @@ __all__ = [
     "load_characters",
     "get_character",
     "default_character",
-    "_CHARACTERS",
+    "get_character_choices",
 ]

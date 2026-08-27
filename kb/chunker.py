@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import pathlib
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 logger = logging.getLogger("kb.chunker")
 
