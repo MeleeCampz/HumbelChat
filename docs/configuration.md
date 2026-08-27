@@ -16,6 +16,8 @@ All environment variables are loaded from `.env` at the project root. Copy `.env
 |---|---|---|
 | `MODEL_NAME` | Default model slug for AI requests | *(empty — uses character config)* |
 | `AI_REQUEST_TIMEOUT` | HTTP timeout in seconds | `120` |
+| `AI_HEALTH_CHECK_INTERVAL` | `0` probes once at startup; positive integer repeats liveness checks every N seconds | `0` |
+| `AI_HEALTH_CHECK_TIMEOUT` | Timeout for each liveness probe | `5` |
 | `MAX_TOKENS` | Baseline max tokens per response | `2000` |
 | `MAX_TOKENS_HARD_CAP` | Absolute upper bound applied after character/global value is chosen | `4096` |
 
@@ -35,7 +37,7 @@ A smaller baseline is usually better for Discord. Very large `max_tokens` values
 |---|---|---|
 | `CONTEXT_WINDOW` | Number of message rounds retained per channel | `10` |
 | `BOT_PREFIX` | Prefix for non-slash commands | `!ai` |
-| `CHAT_HISTORY_RESET` | Set to `clear` once to wipe all chat history | *(empty)* |
+| `CHAT_HISTORY_RESET` | Set to `clear`, `1`, `true`, or `yes` to wipe chat history on startup | *(empty)* |
 
 ## Knowledge base and RAG
 

@@ -59,6 +59,25 @@ def _disable_reminders_persistence(tmp_path, monkeypatch):
     _r._tasks.clear()
 
 
+@pytest.fixture(autouse=True)
+def _disable_backend_health_probe(monkeypatch):
+    """Prevent tests from starting the background liveness probe."""
+    monkeypatch.setenv("AI_HEALTH_CHECK_INTERVAL", "0")
+
+    try:
+        from bot_core import health
+        monkeypatch.setattr(health, "AI_HEALTH_CHECK_INTERVAL", 0)
+    except Exception:
+        pass
+
+    try:
+        import main
+        monkeypatch.setattr(main, "start_backend_health_probe", lambda bot=None: None)
+    except Exception:
+        pass
+
+
+
 def _build_ix(**attrs) -> MagicMock:
     """Return a mock Interaction where followup.send / response.send_message are real async."""
     sent = []

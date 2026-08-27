@@ -1,6 +1,6 @@
 # Discord AI Bot — Code Review Findings
 *Review date: 2026-08-20 · Bot: HumbleChat · Repo: /home/user/discord-ai-bot*
-*Status updated: 2026-08-22 — items marked ✅ have been fixed and covered by tests (124 passing).*
+*Status updated: 2026-08-27 — items marked ✅ have been fixed and covered by tests (142 passing).*
 
 **Status legend:** ✅ fixed · ⏳ partially addressed · ❌ open
 
@@ -116,13 +116,15 @@ The cache key / invalidation logic appears to be triggering full rebuilds. Each 
 Observed errors: `400 Bad Request`, `405 Method Not Allowed`, `500 Internal Server Error`, `501 Not Implemented`.
 The keyword-search fallback works but degrades answer quality significantly (see §2.1).
 
-### 2.3 Frequent AI request timeouts (120 s+) — ⏳ open (backend-dependent; see §3.7 for structured taxonomy)
+### 2.3 Frequent AI request timeouts (120 s+) — ✅ fixed (`_scaled_timeout` in `bot_core/ai_client.py`, applied to both streaming and non-streaming paths)
 
 With RAG context of 240 K+ chars (~60 K tokens), the backend model often times out:
 ```
 ERROR bot.commands.ai_command: AI request failed: Request timed out.
 ```
-The timeout is set to 120 s (`REQUEST_TIMEOUT`). For large contexts, this may be too short, or the model is too slow.
+The timeout was a flat 120 s (`REQUEST_TIMEOUT`) even for 60 K+ token prompts.
+
+**Fix:** `_scaled_timeout()` adds 0.5 s per 1000 chars of prompt (≈250 tokens), capped at `REQUEST_TIMEOUT * 4`. Applied to both `ask_ai` and `ask_ai_stream`.
 
 ### 2.4 Model-not-found errors (repeated) — ✅ mitigated (`3ff2167` — stale-model guard on both chat and utility paths)
 
@@ -141,8 +143,10 @@ The model name in `characters.json` or `.env` doesn't match what the backend has
 ```
 Suggests `characters.json` was temporarily empty or the relative path `characters.json` failed when the working directory changed. The `load_characters(pathlib.Path("characters.json"))` call uses a **relative** path, which breaks if the bot is started from a different CWD.
 
-### 2.6 Duplicate log lines
-Every log message appears twice (e.g. `2026-07-19 05:23:53,940 [INFO] bot: ...` followed by the same line with ANSI colors). This is because the console handler and the `discord` library's own logging both propagate to the root logger.
+### 2.6 Duplicate log lines — ✅ fixed (handlers on `bot` logger only, `propagate=False`, discord logger isolated)
+Every log message appeared twice (e.g. `2026-07-19 05:23:53,940 [INFO] bot: ...` followed by the same line with ANSI colors). This is because the console handler and the `discord` library's own logging both propagate to the root logger.
+
+**Fix:** `main.py` attaches all handlers directly to the `bot` logger (never root) with `propagate=False`, and gives the `discord` logger its own console-only handler with propagation disabled.
 
 ---
 
@@ -168,17 +172,25 @@ The 24-285 K chars of KB context is stuffed into the system message. This is tok
 
 `on_message` in `main.py` passes the raw prompt to `ask_ai` with no length check. A user could paste 100 K chars of text, which combined with RAG context would exceed any reasonable context window.
 
-### 3.6 `_or_clear` helper is misleading
-`config/settings.py`: the function name `_or_clear` and its docstring don't clearly convey that it returns the string `"clear"` if the env var equals "clear", else `None`. The resulting variable `CHAT_HISTORY_RESET` is of type `str | None` but its only meaningful value is `"clear"`.
+### 3.6 `_or_clear` helper is misleading — ✅ fixed (renamed to `_history_reset_flag`, returns `bool`)
+`config/settings.py`: the function name `_or_clear` and its docstring didn't clearly convey that it returns the string `"clear"` if the env var equals "clear", else `None`. The resulting variable `CHAT_HISTORY_RESET` was of type `str | None` but its only meaningful value was `"clear"`.
 
-### 3.7 No structured error taxonomy
-All AI errors are caught as generic `Exception` and string-formatted into Discord messages. Distinguishing timeout vs. model-not-found vs. backend-down vs. rate-limit would allow more specific user-facing messages and better retry logic.
+**Fix:** `_history_reset_flag()` now returns a proper `bool`; accepts `clear`/`1`/`true`/`yes` (case-insensitive). Docs and `.env.example` updated.
 
-### 3.8 `response_splitter` uses a fixed 1900-char chunk
-Discord's actual limit is 2000 chars, but markdown formatting (code blocks, links) can make a 1900-char chunk render as >2000 in some edge cases. The splitter doesn't account for markdown expansion.
+### 3.7 No structured error taxonomy — ✅ fixed (`bot_core/errors.py`, wired into both chat paths)
+All AI errors were caught as generic `Exception` and string-formatted into Discord messages.
 
-### 3.9 No health-check endpoint or liveness probe
-If the AI backend (`192.168.178.96:3000`) goes down, every user request fails with a timeout after 120 s. A lightweight health check at startup (and periodic) would fail fast.
+**Fix:** `bot_core/errors.py` defines `AIError` subclasses (`TimeoutError`, `ModelNotFoundError`, `BackendDownError`) plus `classify_ai_error()`. Both `ask_ai` and `ask_ai_stream` classify failures and surface a user-friendly message; `handle_ai_command` has a dedicated `ValueError` branch. Covered by `tests/test_error_taxonomy.py`.
+
+### 3.8 `response_splitter` uses a fixed 1900-char chunk — ✅ fixed (`DISCORD_SAFE_CHUNK`, header-aware budget, line-level fallback)
+Discord's actual limit is 2000 chars, but the old splitter could emit chunks whose *header + body* exceeded the safe budget, and it had no handling for single lines longer than a whole chunk (long URLs).
+
+**Fix:** `utils/response_splitter.py` now uses an explicit `DISCORD_SAFE_CHUNK = 1990` budget that accounts for the `[N/M]` metadata prefix, subtracts the header length from the per-chunk body budget, and falls back to line-level (then hard) splitting for oversized paragraphs. Covered by extended `tests/test_response_splitter.py`.
+
+### 3.9 No health-check endpoint or liveness probe — ✅ fixed (`bot_core/health.py`, `AI_HEALTH_CHECK_INTERVAL`)
+If the AI backend goes down, every user request used to fail with a timeout after 120 s.
+
+**Fix:** `bot_core/health.py` performs a lightweight `GET /models` probe at startup (any HTTP response = reachable; only timeouts/connection errors = down) and logs OK/DOWN. Setting `AI_HEALTH_CHECK_INTERVAL=N` starts a periodic background monitor that logs state changes. Covered by `tests/test_health_probe.py`.
 
 ### 3.10 `requirements.txt` is minimal (139 bytes) — ✅ fixed (`39b76bc` — all deps pinned)
 
@@ -190,10 +202,10 @@ Only 3-4 packages listed. The actual dependency tree (openai, httpx, discord.py,
 
 | # | Location | Note |
 |---|----------|------|
-| 4.1 | `main.py` | `_enforce_single_instance` re-imports `socket` and `os` inside the function despite having them at module level. |
-| 4.2 | `main.py` | `log_top_kb_files` is imported inside `on_ready` but the function is trivially importable at top level. |
-| 4.3 | `ai_client.py` | `approx_tokens = len(reply_text.split())` is a very rough estimate (word count ≠ tokens). |
-| 4.4 | `ai_command.py` | `asyncio.create_task(typing_loop_task(...))` — the returned Task is not stored, so it can be GC'd before completion (CPython CPython refcounting quirk; use `asyncio.Task` in a set). |
+| 4.1 ✅ | `main.py` | `_enforce_single_instance` re-imports `socket` and `os` inside the function despite having them at module level. Fixed: uses module-level `os`. |
+| 4.2 ✅ | `main.py` | `log_top_kb_files` is imported inside `on_ready` but the function is trivially importable at top level. Fixed: top-level import (also `typing_loop_task`, `send_long_response`, `RateLimitError`). |
+| 4.3 ✅ | `ai_client.py` | `approx_tokens = len(reply_text.split())` is a very rough estimate (word count ≠ tokens). Fixed: char-based estimate (`len // 4`). |
+| 4.4 ✅ | `ai_command.py` / `main.py` | Typing tasks were created with bare `asyncio.create_task`. Fixed: `utils/background_tasks.spawn_tracked_task()` keeps a strong reference in a set until completion and logs unhandled exceptions; covered by `tests/test_background_tasks.py`. |
 | 4.5 | `characters.json` | `"temperature"` field present but never read (see §1.2). |
 | 4.6 | `docs/` | Documentation (6 files) is good but doesn't mention the RAG budget bug (§1.1) or the streaming limitation. |
 
@@ -224,6 +236,13 @@ Only 3-4 packages listed. The actual dependency tree (openai, httpx, discord.py,
 | **P3** | 1.11 — Circular import | Fragile | ✅ `03d4734` |
 | **P3** | 2.5 / 3.4 — Relative paths | Breaks on CWD change | ✅ `03d4734` |
 | **P3** | 3.10 — Unpinned deps | Env drift | ✅ `39b76bc` |
-| **P3** | Various minor | Code quality | ❌ open (see §4) |
+| **P3** | 2.6 — Duplicate log lines | Ops confusion | ✅ handlers on `bot` logger only |
+| **P3** | 3.6 — `_or_clear` naming | Readability | ✅ `_history_reset_flag() -> bool` |
+| **P3** | 3.7 — Error taxonomy | UX / retry logic | ✅ `bot_core/errors.py` |
+| **P3** | 3.8 — Splitter edge cases | Discord limit | ✅ header-aware safe chunk budget |
+| **P3** | 3.9 — Health check | Fail-fast | ✅ `bot_core/health.py` |
+| **P3** | Various minor (§4) | Code quality | ✅ imports, token estimate, task retention |
 
-**Still open:** §2.2 (embedding endpoint instability — backend-side), §2.3 (AI request timeouts — backend-dependent), §2.6 (duplicate log lines), §3.6 (naming nit), §3.7 (structured error taxonomy), §3.8 (splitter edge cases), §3.9 (health-check endpoint), §4.* cosmetic items.
+**Still open:** §2.2 (embedding endpoint instability — backend-side only; keyword fallback works).
+
+*Note:* while verifying the fixes above, a latent bug was found and fixed: `main.py` imported `_CHARACTERS` by value *before* `load_characters()` ran, so slash-command character choices were silently empty after every restart. Character choices are now built via `config.characters.get_character_choices()` after loading.

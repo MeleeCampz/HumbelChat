@@ -149,6 +149,17 @@ def _build_rag_context(kb_docs: list[tuple[str, str]]) -> tuple[str, list[str]]:
     return rag_context, included_names
 
 
+def _scaled_timeout(total_chars: int) -> float:
+    """§2.3: derive a request timeout that scales with prompt size.
+
+    Base timeout (``REQUEST_TIMEOUT``) covers a small prompt. For every
+    additional 1000 chars of prompt (≈250 tokens) we allow 0.5 s more,
+    capped at ``REQUEST_TIMEOUT * 4`` to avoid unbounded waits.
+    """
+    extra = (total_chars / 1000) * 0.5
+    return min(REQUEST_TIMEOUT + extra, REQUEST_TIMEOUT * 4)
+
+
 def _resolve_request_params(char_obj) -> tuple[int, float]:
     """Resolve max_tokens and temperature from character config."""
     _char_max = char_obj.max_tokens if (char_obj and char_obj.max_tokens) else None
@@ -258,6 +269,11 @@ async def ask_ai(
     timeout_sec = REQUEST_TIMEOUT
     _request_max_tokens, _request_temp = _resolve_request_params(char_obj)
 
+    # §2.3: scale the timeout with prompt size — large RAG contexts take the
+    # backend much longer, and a flat 120 s cap caused frequent timeouts on
+    # 60 K+ token prompts. Add 0.5 s per 1000 chars of prompt (capped).
+    timeout_sec = _scaled_timeout(_total_chars)
+
     try:
         resp = await client.chat.completions.create(
             model=effective_model,
@@ -268,14 +284,13 @@ async def ask_ai(
             timeout=timeout_sec,
         )
     except Exception as e:
-        error_msg = str(e)
-        status_code = getattr(getattr(e, "response", None), "status_code", None) or getattr(e, "status_code", None)
-        if status_code == 400 or "model not found" in error_msg.lower():
-            raise ValueError(
-                f"Model '{effective_model}' not found on the AI backend at {INFER_URL}. "
-                f"Requested character model: '{model_slug}'. Make sure this model exists and is available.\n"
-                f"Full error: {error_msg}"
-            ) from e
+        # §3.7: structured error taxonomy — surface a user-friendly message
+        # instead of a raw SDK traceback.
+        from bot_core.errors import classify_ai_error
+        classified = classify_ai_error(e, model=effective_model, backend_url=INFER_URL)
+        log.error("AI request failed (%s): %s", classified.category, e)
+        if isinstance(classified, ValueError) or classified.category in ("timeout", "model_not_found", "backend_down"):
+            raise ValueError(classified.user_message) from e
         raise
 
     reply_text = resp.choices[0].message.content or "(empty response)"
@@ -288,7 +303,7 @@ async def ask_ai(
     if len(history) > max_entries:
         set_history(guild_id, channel_id, history[-max_entries:])
 
-    approx_tokens = len(reply_text.split())
+    approx_tokens = max(1, len(reply_text) // 4)  # §4.3: char-based estimate, not word count
     return reply_text, {"model_used": effective_model, "tokens_approx": approx_tokens}
 
 
@@ -384,6 +399,9 @@ async def ask_ai_stream(
     )
 
     _request_max_tokens, _request_temp = _resolve_request_params(char_obj)
+    # §2.3: apply the same prompt-size-aware timeout to the stream setup path.
+    _stream_total_chars = sum(len(m.get("content", "")) for m in messages)
+    _stream_timeout_sec = _scaled_timeout(_stream_total_chars)
 
     # ── Stream ─────────────────────────────────────────────────────
     try:
@@ -393,7 +411,7 @@ async def ask_ai_stream(
             temperature=_request_temp,
             max_tokens=_request_max_tokens,
             stream=True,
-            timeout=REQUEST_TIMEOUT,
+            timeout=_stream_timeout_sec,
         )
 
         full_text_parts: list[str] = []
@@ -414,13 +432,11 @@ async def ask_ai_stream(
             set_history(guild_id, channel_id, history[-max_entries:])
 
     except Exception as e:
-        error_msg = str(e)
-        status_code = getattr(getattr(e, "response", None), "status_code", None) or getattr(e, "status_code", None)
-        if status_code == 400 or "model not found" in error_msg.lower():
-            raise ValueError(
-                f"Model '{effective_model}' not found on the AI backend at {INFER_URL}. "
-                f"Full error: {error_msg}"
-            ) from e
+        from bot_core.errors import classify_ai_error
+        classified = classify_ai_error(e, model=effective_model, backend_url=INFER_URL)
+        log.error("AI stream failed (%s): %s", classified.category, e)
+        if classified.category in ("timeout", "model_not_found", "backend_down"):
+            raise ValueError(classified.user_message) from e
         raise
 
 

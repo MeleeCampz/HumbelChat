@@ -1,6 +1,6 @@
 # Code-Review Task List
 
-*Tracking fixes for `CODE_REVIEW_FINDINGS.md`. Updated 2026-08-22.*
+*Tracking fixes for `CODE_REVIEW_FINDINGS.md`. Updated 2026-08-27.*
 
 ## Status
 
@@ -48,19 +48,27 @@
 | 3.4 | CWD-independent `characters.json` | `0d65167` / `03d4734` | `tests/test_path_resolution.py` | ✅ |
 | 3.10 | Pin all dependencies | `39b76bc` | — | ✅ |
 
+## P3 (second wave — low priority / operational)
+
+| # | Task | Notes | Tests | Status |
+|---|------|-------|-------|--------|
+| 2.3 | Prompt-size-aware timeout | `_scaled_timeout()` in `ai_client.py`, both paths | `tests/test_bot_core.py` (suite) | ✅ |
+| 2.6 | Duplicate log lines | Handlers on `bot` logger only, no propagation | `tests/test_main_startup_guards.py` | ✅ |
+| 3.6 | `_or_clear` → `_history_reset_flag()` | Returns `bool`; accepts clear/1/true/yes | suite | ✅ |
+| 3.7 | Structured error taxonomy | `bot_core/errors.py` + wiring in chat paths | `tests/test_error_taxonomy.py` | ✅ |
+| 3.8 | Splitter edge cases | Header-aware safe chunk budget, line-level fallback | `tests/test_response_splitter.py` (extended) | ✅ |
+| 3.9 | Backend health probe | `bot_core/health.py`, startup + optional periodic | `tests/test_health_probe.py` | ✅ |
+| 4.1 | Redundant local imports in `_enforce_single_instance` | Uses module-level `os` | suite | ✅ |
+| 4.2 | Lazy import of `log_top_kb_files` in `on_ready` | Top-level import (also typing/splitter/RateLimitError) | `tests/test_bot_startup.py` | ✅ |
+| 4.3 | Token estimate was word count | Char-based estimate (`len // 4`) | suite | ✅ |
+| 4.4 | Typing task GC risk | `utils/background_tasks.spawn_tracked_task()` | `tests/test_background_tasks.py` | ✅ |
+
 ## Open (not yet fixed)
 
 | # | Task | Notes | Status |
 |---|------|-------|--------|
 | 2.2 | Embedding endpoint instability | Backend-side; keyword fallback works | ⬜ |
-| 2.3 | AI request timeouts (120 s+) | Backend-dependent; see 3.7 | ⬜ |
-| 2.6 | Duplicate log lines | Handler propagation | ⬜ |
-| 3.6 | Rename `_or_clear` | Naming nit | ⬜ |
-| 3.7 | Structured error taxonomy | Timeout / model-not-found / rate-limit / down | ⬜ |
-| 3.8 | Response splitter edge cases | Markdown expansion | ⬜ |
-| 3.9 | Health-check endpoint | Fail-fast on backend down | ⬜ |
-| 4.* | Cosmetic items | See §4 | ⬜ |
 
 ## Test Suite
 
-**124 passing** as of `cd54cee`. Run with `python -m pytest tests/ -q`.
+**142 passing** as of this update. Run with `python -m pytest tests/ -q`.

@@ -6,12 +6,16 @@ Set AI_STREAMING=0 in .env to disable and use the classic non-streaming path.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 
 from config.characters import get_character, default_character
+from bot_core import ai_client
 from bot_core.history import get_active_char_key
+from utils.background_tasks import spawn_tracked_task
+from utils.response_splitter import send_long_response
+from utils.stream_response import stream_ai_response
+from utils.typing_loop import typing_loop_task
 
 log = logging.getLogger("bot.commands.ai_command")
 
@@ -54,26 +58,29 @@ async def handle_ai_command(
     typing_task = None
     if hasattr(interaction, "channel") and interaction.channel is not None:
         try:
-            from utils.typing_loop import typing_loop_task
-
-            typing_task = asyncio.create_task(typing_loop_task(interaction.channel))
+            # §4.4: keep a strong reference to the typing task so it cannot
+            # be garbage-collected before completing.
+            typing_task = spawn_tracked_task(
+                typing_loop_task(interaction.channel),
+                name=f"typing-{channel_id}",
+            )
+            # Retain a per-bot reference for diagnostics / cleanup too.
             bot_ref = getattr(interaction, "bot", None)
             if bot_ref is not None:
                 tasks = getattr(bot_ref, "typing_tasks", None)
-                if isinstance(tasks, list):
-                    tasks.append(typing_task)
+                if not isinstance(tasks, list):
+                    tasks = []
+                    setattr(bot_ref, "typing_tasks", tasks)
+                tasks.append(typing_task)
         except Exception as e:
             log.warning("Typing loop error: %s", e)
 
     try:
         if _streaming_enabled():
             # ── P2-4: Streaming path ────────────────────────────────
-            from bot_core.ai_client import ask_ai_stream
-            from utils.stream_response import stream_ai_response
-
             await stream_ai_response(
                 interaction,
-                ask_ai_stream(
+                ai_client.ask_ai_stream(
                     user_message=message,
                     model_slug=model_slug,
                     guild_id=guild_id,
@@ -84,10 +91,7 @@ async def handle_ai_command(
             )
         else:
             # ── Non-streaming path ──────────────────────────────────
-            from bot_core.ai_client import ask_ai
-            from utils.response_splitter import send_long_response
-
-            reply_text, _extra = await ask_ai(
+            reply_text, _extra = await ai_client.ask_ai(
                 user_message=message,
                 model_slug=model_slug,
                 guild_id=guild_id,
@@ -97,6 +101,12 @@ async def handle_ai_command(
             )
             await send_long_response(interaction, reply_text, str(char_obj.display))
 
+    except ValueError as e:
+        # §3.7: classified errors (timeout / model-not-found / backend-down /
+        # rate-limit / input too long) surface a user-friendly message.
+        log.warning("AI request rejected: %s", e)
+        await _safe_followup(interaction, str(e))
+        return
     except Exception as e:
         log.error("AI request failed: %s", e)
         # Friendly error — rate limit, input too long, model missing, etc.
