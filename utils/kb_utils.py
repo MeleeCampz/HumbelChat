@@ -10,7 +10,11 @@ def log_top_kb_files(kb_path: pathlib.Path, top_n: int = 5):
 
     files = []
     for p in kb_path.rglob("*"):
-        if p.is_file() and not p.name.endswith(".chunks.jsonl") and not p.name.startswith("."):
+        # Skip hidden files AND anything inside hidden dirs (e.g.
+        # .vector_index_cache/vector_index.db) — internal state, not docs.
+        if any(part.startswith(".") for part in p.relative_to(kb_path).parts):
+            continue
+        if p.is_file() and not p.name.endswith(".chunks.jsonl"):
             try:
                 files.append((p.name, p.stat().st_size))
             except OSError:

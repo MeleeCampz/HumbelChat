@@ -16,6 +16,7 @@ Usage
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -27,6 +28,8 @@ logger = logging.getLogger("kb.embedder")
 
 _DEFAULT_MODEL = "nomic-embed-text:latest"
 _BATCH_SIZE = 8  # documents per batch (conservative for shared inference backends)
+_RETRY_ATTEMPTS = 3          # per endpoint — transient 5xx / connection errors are common
+_RETRY_BACKOFF_SECONDS = 1.5 # base delay; multiplied by the attempt number
 
 
 class Embedder:
@@ -116,34 +119,50 @@ class Embedder:
         last_exc: Exception | None = None
         for suffix in endpoints_to_try:
             url = base_url + suffix
-            try:
-                async with httpx.AsyncClient(timeout=30) as client:
-                    resp = await client.post(url, json=payload, headers=headers)
-                    resp.raise_for_status()
-                    data = resp.json()
+            for attempt in range(1, _RETRY_ATTEMPTS + 1):
+                try:
+                    async with httpx.AsyncClient(timeout=30) as client:
+                        resp = await client.post(url, json=payload, headers=headers)
+                        resp.raise_for_status()
+                        data = resp.json()
 
-                    # OpenAI-compatible response format: {"data": [...], "model": ...}
-                    if isinstance(data, dict) and "data" in data:
-                        embeddings = [d["embedding"] for d in data["data"]]  # type: ignore[index]
-                    else:
-                        raise ValueError(f"Unexpected response shape: {data}")
+                        # OpenAI-compatible response format: {"data": [...], "model": ...}
+                        if isinstance(data, dict) and "data" in data:
+                            embeddings = [d["embedding"] for d in data["data"]]  # type: ignore[index]
+                        else:
+                            raise ValueError(f"Unexpected response shape: {data}")
 
-                    logger.debug(
-                        "Embedded %d texts via %s (model=%s)",
-                        len(texts),
-                        url,
-                        self.model_name,
+                        logger.debug(
+                            "Embedded %d texts via %s (model=%s)",
+                            len(texts),
+                            url,
+                            self.model_name,
+                        )
+                        return embeddings
+
+                except httpx.HTTPStatusError as exc:
+                    last_exc = exc
+                    status = exc.response.status_code if exc.response is not None else 0
+                    # 4xx (except 429) means this endpoint is wrong or rejects the
+                    # request — retrying won't help, move on to the next one.
+                    if 400 <= status < 500 and status != 429:
+                        logger.warning(
+                            "Embeddings endpoint %s returned %d — trying next", url, status
+                        )
+                        break
+                    logger.warning(
+                        "Embeddings endpoint %s attempt %d/%d failed (HTTP %d)",
+                        url, attempt, _RETRY_ATTEMPTS, status,
                     )
-                    return embeddings
+                except Exception as exc:
+                    last_exc = exc
+                    logger.warning(
+                        "Embeddings endpoint %s attempt %d/%d error: %s",
+                        url, attempt, _RETRY_ATTEMPTS, exc,
+                    )
 
-            except httpx.HTTPStatusError as exc:
-                last_exc = exc
-                logger.warning("Embeddings endpoint %s returned %d — trying next", url, resp.status_code if "resp" in dir() else 0)
-                continue
-            except Exception as exc:
-                last_exc = exc
-                logger.warning("Embeddings endpoint %s error: %s", url, exc)
-                continue
+                if attempt < _RETRY_ATTEMPTS:
+                    await asyncio.sleep(_RETRY_BACKOFF_SECONDS * attempt)
 
         # All endpoints failed
         raise EmbeddingError(
