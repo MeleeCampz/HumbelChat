@@ -41,7 +41,7 @@ Or use a startup script (the bot runs in a detached tmux session so it survives 
 - `/ocr` — extract text from an image
 - `/summarize` — summarize chat history or a URL
 - `/translate` — translate text into a target language
-- `/start_session` — start a work session (max once per hour)
+- `/start_session` — start a work session
 - `/end_session` — end the session and generate an AI overview
 - `/remind_next_session` — queue a reminder for the next session start
 - `/session_notes` — add/view notes for the current or last session

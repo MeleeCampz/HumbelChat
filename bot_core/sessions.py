@@ -15,8 +15,6 @@ Sessions are a global (bot-wide) bookkeeping concept used by the
 
 Safety rules enforced by :func:`start_session`:
 
-* a new session can only be started **max once per hour** (measured from the
-  last start, regardless of whether the previous session was ended);
 * while an active session is younger than 12 h, the user must end it first;
 * an active session older than 12 h is considered stale and is auto-ended.
 """
@@ -35,8 +33,6 @@ log = logging.getLogger("bot.sessions")
 
 # ── Defaults / limits ────────────────────────────────────────────────────
 
-#: Max one new session per this many seconds (safety rule, see module doc).
-MIN_START_INTERVAL_SEC: int = 3600
 #: An active session older than this is auto-ended by /start_session.
 STALE_SESSION_SEC: int = 12 * 3600
 #: Max length of a user-supplied session name (also used for filenames).
@@ -296,15 +292,7 @@ def start_session(name: str | None = None) -> tuple[dict, dict | None]:
             state is left unchanged.
     """
     now = time.time()
-    last_start = _state.get("last_start_at") or 0
     current = get_current_session()
-
-    if last_start and (now - last_start) < MIN_START_INTERVAL_SEC:
-        wait_min = max(1, int((MIN_START_INTERVAL_SEC - (now - last_start)) / 60))
-        msg = (f"A new session can only be started once per hour — please try again in "
-               f"about {wait_min} minute(s).")
-        log.info("start_session refused: %s", msg)
-        raise ValueError(msg)
 
     closed_info: dict | None = None
     if current is not None:

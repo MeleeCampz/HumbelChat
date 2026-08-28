@@ -298,7 +298,7 @@ async def sync_command(interaction: discord.Interaction) -> None:
     await handle_sync_command(interaction)
 
 
-@bot.tree.command(name="start_session", description="Start a new session (max one per hour).")
+@bot.tree.command(name="start_session", description="Start a new work session.")
 @app_commands.describe(name="Optional custom name for the session")
 async def start_session_command(interaction: discord.Interaction, name: str | None = None) -> None:
     """Start session — delegated to commands/session_commands.py."""
