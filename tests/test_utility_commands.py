@@ -209,16 +209,20 @@ class TestUtilityActiveCharacter:
         assert max_tok == 512
 
     def test_resolve_falls_back_to_default_model(self, monkeypatch):
+        """A character without a model must fall back to the configured
+        default model. We pin uc.DEFAULT_MODEL explicitly so the assertion is
+        order-independent (settings bakes env values at import time; the bound
+        constant may differ across test-file ordering — see conftest note)."""
         from commands import utility_commands as uc
         from config import characters as cfg
 
         char = cfg.Character("plain", "Plain", "", temperature=None, max_tokens=None)
         monkeypatch.setattr(cfg, "_CHARACTERS", [char])
         monkeypatch.setattr(cfg, "_DEFAULT_KEY", "plain")
+        monkeypatch.setattr(uc, "DEFAULT_MODEL", "pinned-default-model")
 
-        from config.settings import DEFAULT_MODEL
         model, temp, max_tok = uc._resolve_utility_model(111, 222)
-        assert model == DEFAULT_MODEL
+        assert model == "pinned-default-model"
 
 
 class TestOcrGuards:

@@ -453,26 +453,69 @@ async def deliver_queued_reminders(bot) -> int:
 
     Called by the /start_session handler right after a new session started.
     Returns the number of reminders that were sent (and removed from the
-    queue).  Unresolvable channels are dropped with a warning.
+    queue).
+
+    Delivery uses :func:`bot_core.channel_delivery.send_to_channel` (cache,
+    then REST fallback).  Reminders whose channel cannot be reached are NOT
+    silently dropped: they stay queued with an attempt counter and are
+    retried at the next /start_session — until they fail
+    ``MAX_DELIVERY_ATTEMPTS`` times, after which they are dropped with a
+    loud error log.
     """
+    from bot_core.channel_delivery import ChannelNotDeliverableError, send_to_channel
+    from bot_core.reminders import MAX_DELIVERY_ATTEMPTS
+
     queued = list(_state.get("next_session_reminders", []))
     if not queued:
         return 0
     sent = 0
     delivered: list[dict] = []
+    failed: list[dict] = []
     for r in queued:
         try:
-            chan = bot.get_channel(r["channel_id"])
-            if chan is None:
-                log.warning("Next-session reminder channel %s not found — dropping",
-                            r["channel_id"])
-                continue
-            await chan.send(f"⏰ **Next-session reminder:** {r['message']}")
+            # send_to_channel uses the local cache first, then falls back to a
+            # REST fetch — so channels missing from the gateway cache (e.g. a
+            # private channel with View Channel denied on @everyone) are still
+            # attempted instead of being silently skipped.
+            await send_to_channel(
+                bot, r["channel_id"],
+                f"⏰ **Next-session reminder:** {r['message']}",
+            )
             sent += 1
             delivered.append(r)
+        except ChannelNotDeliverableError as e:
+            log.error(
+                "Could not deliver next-session reminder to channel %s: %s — "
+                "leaving it queued; fix the channel permissions and it will be "
+                "retried at the next /start_session.",
+                r["channel_id"], e.reason)
+            failed.append(r)
         except Exception as e:
             log.error("Failed to deliver next-session reminder in channel %s: %s",
                       r["channel_id"], e)
+            failed.append(r)
+
+    if failed:
+        # Count attempts per entry; drop ones that keep failing so a
+        # permanently undeliverable reminder cannot retry forever.
+        q = _state.get("next_session_reminders", [])
+        drop_ids: set[int] = set()
+        for r in failed:
+            key = (r["channel_id"], r["message"], r.get("created_at"))
+            entry = next((x for x in q if (x["channel_id"], x["message"],
+                                           x.get("created_at")) == key), None)
+            if entry is None:
+                continue
+            entry["attempts"] = int(entry.get("attempts", 0)) + 1
+            if entry["attempts"] >= MAX_DELIVERY_ATTEMPTS:
+                log.error(
+                    "DROPPED next-session reminder after %d failed attempts — "
+                    "channel: %s, message: %.60s. Re-issue it in a channel the "
+                    "bot can post to.", entry["attempts"], r["channel_id"],
+                    r["message"])
+                drop_ids.add(id(entry))
+        if drop_ids:
+            _state["next_session_reminders"] = [x for x in q if id(x) not in drop_ids]
     if delivered:
         # Remove exactly the reminders that were delivered (by identity),
         # so failed/unresolvable ones stay queued for the next start.
@@ -481,6 +524,9 @@ async def deliver_queued_reminders(bot) -> int:
             r for r in _state.get("next_session_reminders", [])
             if (r["channel_id"], r["message"], r.get("created_at")) not in keys
         ]
+    if delivered or failed:
+        # Persist: delivered entries are removed above; failed ones keep their
+        # incremented attempt counter so retries are bounded.
         _save()
     return sent
 

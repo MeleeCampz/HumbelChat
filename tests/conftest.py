@@ -17,6 +17,15 @@ import pytest
 # Prevent main.py from attaching production log-file handlers when the test
 # suite imports it (code review §1.10). Must be set before `import main`.
 os.environ["BOT_NO_LOG_FILES"] = "1"
+#
+# NOTE: .env is intentionally NOT loaded here (a full load_dotenv() would
+# leak KB_PATH/CHUNK_SIZE/etc. into every test and break the assumptions of
+# tests that monkeypatch env explicitly).  A few modules bake env values at
+# import time (config.settings.DEFAULT_MODEL from MODEL_NAME, mirroring
+# production where main.py runs load_dotenv() first); tests must therefore
+# read such constants as module attributes (``settings.DEFAULT_MODEL``) rather
+# than binding them with ``from config.settings import DEFAULT_MODEL``, or
+# results depend on test-file ordering.
 
 
 @pytest.fixture(autouse=True)

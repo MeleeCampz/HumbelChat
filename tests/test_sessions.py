@@ -210,19 +210,42 @@ class TestNextSessionReminders:
         assert S.list_queued_reminders() == []
 
     @pytest.mark.asyncio
-    async def test_deliver_drops_unresolvable_channels(self):
+    async def test_deliver_keeps_unresolvable_channels_queued(self):
+        import discord
         S.queue_next_session_reminder(111, "ok")
         S.queue_next_session_reminder(999, "gone channel")
         chan = MagicMock()
         chan.send = AsyncMock()
         bot = MagicMock()
         bot.get_channel.side_effect = lambda cid: chan if cid == 111 else None
+        # REST fallback must report NotFound (the cache missed on purpose).
+        async def http_get(cid):
+            raise discord.NotFound("no such channel", response=None)
+        bot.http.get_channel = AsyncMock(side_effect=http_get)
 
         sent = await S.deliver_queued_reminders(bot)
         assert sent == 1
         remaining = S.list_queued_reminders()
-        # The unresolvable one stays queued (its channel may come back).
+        # The unresolvable one stays queued (its channel may come back) and
+        # its attempt counter is recorded so retries are bounded.
         assert len(remaining) == 1 and remaining[0]["message"] == "gone channel"
+        assert remaining[0].get("attempts") == 1
+
+    @pytest.mark.asyncio
+    async def test_deliver_drops_after_repeated_failures(self):
+        import discord
+        S.queue_next_session_reminder(999, "always broken")
+        bot = MagicMock()
+        bot.get_channel.return_value = None
+        async def http_get(cid):
+            raise discord.NotFound("no such channel", response=None)
+        bot.http.get_channel = AsyncMock(side_effect=http_get)
+
+        from bot_core.reminders import MAX_DELIVERY_ATTEMPTS
+        for _ in range(MAX_DELIVERY_ATTEMPTS):
+            assert await S.deliver_queued_reminders(bot) == 0
+        # After enough failures the entry is dropped instead of retrying forever.
+        assert S.list_queued_reminders() == []
 
     @pytest.mark.asyncio
     async def test_deliver_empty_queue(self):
