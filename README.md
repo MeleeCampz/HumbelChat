@@ -26,6 +26,7 @@ Or use a startup script (the bot runs in a detached tmux session so it survives 
 - [Characters](./docs/characters.md) — `characters.json` format and per-character settings
 - [RAG / Knowledge Base](./docs/rag.md) — retrieval methods, smart chunking, supported file types
 - [Commands](./docs/commands.md) — slash command and prefix command reference
+- [Permissions](./docs/permissions.md) — Discord permissions the bot needs, where to set them, and per-channel override traps
 - [Troubleshooting](./docs/troubleshooting.md) — common symptoms and fixes
 
 ## Commands (brief)
