@@ -49,19 +49,21 @@ class TestStartSession:
         assert session["name"] == ""
         assert "(no notes)" in pathlib.Path(session["file"]).read_text(encoding="utf-8")
 
-    def test_second_start_within_hour_refused(self):
+    def test_start_while_active_refused(self):
+        """Only one session at a time — an active (young) session blocks a new start."""
         S.start_session(name="A")
-        with pytest.raises(ValueError, match="once per hour"):
+        with pytest.raises(ValueError, match="end it first"):
             S.start_session(name="B")
         # State unchanged — still the first session.
         assert S.get_current_session()["name"] == "A"
 
-    def test_start_after_ended_still_within_hour_refused(self):
-        """The 1h rule is measured from the last START, even after a clean end."""
+    def test_start_right_after_end_allowed(self):
+        """No cooldown: a new session can start immediately after a clean end."""
         S.start_session(name="A")
         S.end_session(overview="done")
-        with pytest.raises(ValueError, match="once per hour"):
-            S.start_session(name="B")
+        new, _ = S.start_session(name="B")
+        assert S.get_current_session() is new
+        assert new["name"] == "B"
 
     def test_active_young_session_requires_end_first(self):
         S.start_session(name="A")
