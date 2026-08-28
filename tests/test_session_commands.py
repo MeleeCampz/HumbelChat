@@ -169,6 +169,26 @@ class TestRemindNextSessionCommand:
         assert len(S.list_queued_reminders()) == 1
         assert any("starting one failed" in m for m in ix._sent)
 
+    @pytest.mark.asyncio
+    async def test_refused_when_bot_cannot_post_here(self, ix):
+        """Regression: a next-session reminder destined for a channel the bot
+        cannot post to must be refused up front (it could never be delivered).
+        """
+        from commands.session_commands import handle_remind_next_session
+
+        channel = MagicMock()
+        perm = MagicMock()
+        perm.view_channel = False
+        perm.send_messages = True
+        channel.permissions_for.return_value = perm
+        ix.channel = channel
+        ix.guild_id = 1
+        ix.guild.me = MagicMock()
+
+        await handle_remind_next_session(ix, "never delivered")
+        assert any("can't send messages" in m for m in ix._sent)
+        assert S.list_queued_reminders() == []
+
 
 class TestSessionNotesCommand:
 

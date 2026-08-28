@@ -86,6 +86,20 @@ async def handle_remind_command(
         return
 
     channel_id = interaction.channel.id
+
+    # Fail fast: refuse to schedule into a channel we cannot actually write
+    # to (e.g. private channels with View Channel denied on @everyone) —
+    # such a reminder could never be delivered.
+    from bot_core.channel_delivery import can_post_in_channel
+    if not await can_post_in_channel(interaction):
+        await interaction.response.send_message(
+            "⚠️ I can't send messages in this channel — I'm missing **View Channel** "
+            "and/or **Send Messages** permission (check the @everyone / role "
+            "overwrites). Set the reminder in a channel I can post to, or give "
+            "me access first.", ephemeral=True,
+        )
+        return
+
     await interaction.response.defer(ephemeral=True)
 
     # Persist + schedule via the reminder store (survives restarts)

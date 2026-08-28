@@ -29,12 +29,17 @@ _OVERVIEW_HISTORY_MESSAGES = 30
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 def _get_bot():
-    """Lazy bot reference (avoids the main ↔ commands circular import)."""
-    try:
-        from main import bot
-        return bot
-    except Exception:
-        return None
+    """Running bot reference with side-effect-free resolution.
+
+    Delegates to :func:`bot_core.channel_delivery.get_bot`, which reads the
+    already-loaded ``__main__``/``main`` module from ``sys.modules`` and logs
+    a real reason when no logged-in bot is found.  (A lazy ``from main
+    import bot`` here was dangerous: if run inside a script process it would
+    re-execute main.py's module level and return a fresh, never-logged-in
+    duplicate — see the get_bot docstring.)
+    """
+    from bot_core.channel_delivery import get_bot
+    return get_bot()
 
 
 def _resolve_overview_model(guild_id: int | None, channel_id: int) -> str:
@@ -214,6 +219,18 @@ async def handle_end_session(interaction: discord.Interaction, name: str | None 
 async def handle_remind_next_session(interaction: discord.Interaction, message: str) -> None:
     """Queue a reminder for the NEXT session start; starts one if none is active."""
     from bot_core import sessions as S
+
+    # Fail fast: this reminder would be delivered to THIS channel at the next
+    # session start — refuse up front if we cannot post here.
+    from bot_core.channel_delivery import can_post_in_channel
+    if not await can_post_in_channel(interaction):
+        await interaction.response.send_message(
+            "⚠️ I can't send messages in this channel (missing **View Channel** / "
+            "**Send Messages**) — the reminder could never be delivered here. "
+            "Queue it in a channel I can post to, or give me access first.",
+            ephemeral=True,
+        )
+        return
 
     entry = S.queue_next_session_reminder(interaction.channel.id, message)
     queued = len(S.list_queued_reminders())
