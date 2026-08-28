@@ -81,3 +81,11 @@ Fix:
 - Run `/sync` to force a re-registration of all commands
 - Wait up to an hour if the sync command itself doesn't appear immediately
 - Alternatively, delete the `.commands_synced` marker file and restart the bot to trigger a fresh sync on startup
+
+## Bot works in some channels but not others (or reminder never arrives)
+
+Likely cause: per-channel Role Permissions override is denying View Channel or Send Messages for the bot's role. Server-wide grants do not carry into channels with custom overrides — the bot's own membership does NOT count, it needs an explicit allow on that channel.
+
+Fix:
+- Right-click the affected channel → Edit Channel → Role Permissions → ensure the bot's role has **View Channel** and **Send Messages** allowed
+- See [Permissions](./permissions.md) for the full permission matrix and symptom table
