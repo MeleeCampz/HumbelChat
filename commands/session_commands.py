@@ -16,7 +16,11 @@ import discord
 from bot_core.ai_client import _make_client, _validate_model
 from bot_core.history import get_active_char_key, get_history
 from config.characters import get_character
-from config.settings import DEFAULT_MODEL
+from config.settings import (
+    DEFAULT_MODEL,
+    DEFAULT_SESSION_SUMMARY_PROMPT,
+    SESSION_SUMMARY_PROMPT,
+)
 
 log = logging.getLogger("bot.session_commands")
 
@@ -24,6 +28,15 @@ log = logging.getLogger("bot.session_commands")
 _OVERVIEW_POST_LIMIT = 1800
 # How many recent chat messages feed the AI overview.
 _OVERVIEW_HISTORY_MESSAGES = 30
+
+
+def _summary_prompt() -> str:
+    """System prompt for the /end_session AI overview.
+
+    Customizable via SESSION_SUMMARY_PROMPT in .env (see config/settings.py);
+    falls back to the built-in default when unset/empty.
+    """
+    return SESSION_SUMMARY_PROMPT.strip() or DEFAULT_SESSION_SUMMARY_PROMPT
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -96,12 +109,7 @@ async def _generate_overview(session: dict, guild_id: int | None, channel_id: in
             messages=[
                 {
                     "role": "system",
-                    "content": (
-                        "You write concise session overviews. Given the notes and recent chat "
-                        "of a work session, produce a short overview (max ~250 words) with: "
-                        "what was done, key points/decisions, and open items or follow-ups for "
-                        "the next session. Use markdown bullet points. Return ONLY the overview."
-                    ),
+                    "content": _summary_prompt(),
                 },
                 {
                     "role": "user",

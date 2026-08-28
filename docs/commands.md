@@ -85,8 +85,7 @@ Sessions are a global (bot-wide) bookkeeping concept: at most one session is act
 
 Start a new session. Safety rules:
 
-- A new session can only be started **max once per hour** — otherwise the bot tells you how long to wait.
-- If a session is still active and younger than 12 h, you must end it first with `/end_session`.
+- Only one session can be active at a time — if a session is still active and younger than 12 h, you must end it first with `/end_session`.
 - If the active session is older than 12 h (stale), it is auto-ended (without an AI overview) and the new one starts.
 
 On success the bot also delivers: the AI overview of a previously ended session (if one was pending) and all queued next-session reminders to their channels. The optional `name` customizes the session name; the notes file always includes the date and an increasing per-day index, e.g. `2026-08-28_01_MyName.md`.
@@ -98,6 +97,8 @@ On success the bot also delivers: the AI overview of a previously ended session 
 ```
 
 End the current session. The bot generates an AI overview from the session's notes plus recent chat in this channel (using the active character's model), appends it to the session file, and posts it here. The optional `name` renames the session in its file. If the AI backend is unavailable, a plain-text overview listing the notes is written instead.
+
+The system prompt that drives the overview is customizable via `SESSION_SUMMARY_PROMPT` in `.env` (see [Configuration](./configuration.md)) — leave it empty to use the built-in default.
 
 ### `/remind_next_session`
 

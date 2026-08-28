@@ -58,6 +58,19 @@ FALLBACK_MODELS: list[str] = [
     m.strip() for m in os.getenv("FALLBACK_MODELS", "").split(",") if m.strip()
 ]
 
+# ── Session overview prompt (customizable) ───────────────────────────────
+#: Default system prompt used by /end_session to write the session overview.
+DEFAULT_SESSION_SUMMARY_PROMPT: str = (
+    "You write concise session overviews. Given the notes and recent chat "
+    "of a work session, produce a short overview (max ~250 words) with: "
+    "what was done, key points/decisions, and open items or follow-ups for "
+    "the next session. Use markdown bullet points. Return ONLY the overview."
+)
+
+#: Override for SESSION_SUMMARY_PROMPT — set in .env to customize how the
+#: /end_session AI overview is written. Empty = use DEFAULT_SESSION_SUMMARY_PROMPT.
+SESSION_SUMMARY_PROMPT: str = os.getenv("SESSION_SUMMARY_PROMPT", "")
+
 # ════════════════════════════════════
 #  BOT BEHAVIOUR
 # ════════════════════════════════════

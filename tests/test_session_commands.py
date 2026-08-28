@@ -46,11 +46,11 @@ class TestStartSessionCommand:
         assert S.get_current_session() is not None
 
     @pytest.mark.asyncio
-    async def test_start_refused_within_hour(self, ix):
+    async def test_start_while_active_refused(self, ix):
         from commands.session_commands import handle_start_session
         S.start_session(name="A")
         await handle_start_session(ix, name="B")
-        assert any("once per hour" in m for m in ix._sent)
+        assert any("end it first" in m for m in ix._sent)
         assert S.get_current_session()["name"] == "A"
 
     @pytest.mark.asyncio
@@ -133,6 +133,45 @@ class TestEndSessionCommand:
         assert "note that survives" in ended["overview"]
 
     @pytest.mark.asyncio
+    async def test_end_uses_custom_summary_prompt(self, ix, monkeypatch):
+        """SESSION_SUMMARY_PROMPT from settings is used as the system prompt."""
+        import commands.session_commands as sc
+        from commands.session_commands import handle_end_session
+        S.start_session(name="Custom")
+        inst = MagicMock()
+        resp = MagicMock()
+        resp.choices = [MagicMock(message=MagicMock(content="ok"))]
+        inst.chat.completions.create = AsyncMock(return_value=resp)
+        monkeypatch.setattr(sc, "_make_client", lambda: inst)
+        monkeypatch.setattr(sc, "_validate_model", AsyncMock(return_value="test-model"))
+        monkeypatch.setattr(sc, "SESSION_SUMMARY_PROMPT", "MY CUSTOM PROMPT")
+
+        await handle_end_session(ix)
+
+        sys_msg = inst.chat.completions.create.await_args.kwargs["messages"][0]
+        assert sys_msg["role"] == "system"
+        assert sys_msg["content"] == "MY CUSTOM PROMPT"
+
+    @pytest.mark.asyncio
+    async def test_end_falls_back_to_default_prompt(self, ix, monkeypatch):
+        """Empty SESSION_SUMMARY_PROMPT → built-in default prompt is used."""
+        import commands.session_commands as sc
+        from commands.session_commands import handle_end_session
+        S.start_session(name="Default")
+        inst = MagicMock()
+        resp = MagicMock()
+        resp.choices = [MagicMock(message=MagicMock(content="ok"))]
+        inst.chat.completions.create = AsyncMock(return_value=resp)
+        monkeypatch.setattr(sc, "_make_client", lambda: inst)
+        monkeypatch.setattr(sc, "_validate_model", AsyncMock(return_value="test-model"))
+        monkeypatch.setattr(sc, "SESSION_SUMMARY_PROMPT", "")
+
+        await handle_end_session(ix)
+
+        sys_msg = inst.chat.completions.create.await_args.kwargs["messages"][0]
+        assert "session overviews" in sys_msg["content"]
+
+    @pytest.mark.asyncio
     async def test_end_renames(self, ix):
         from commands.session_commands import handle_end_session
         S.start_session(name="Old")
@@ -161,13 +200,15 @@ class TestRemindNextSessionCommand:
         assert any("waits for the NEXT session" in m for m in ix._sent)
 
     @pytest.mark.asyncio
-    async def test_reminder_when_start_refused_still_queues(self, ix):
+    async def test_reminder_after_ended_session_starts_new_one(self, ix):
+        """No cooldown: after a session ends, /remind_next_session starts a fresh one."""
         from commands.session_commands import handle_remind_next_session
         S.start_session(name="A")
-        S.end_session(overview=None)  # within the 1h cooldown now
+        S.end_session(overview=None)
         await handle_remind_next_session(ix, "queued anyway")
         assert len(S.list_queued_reminders()) == 1
-        assert any("starting one failed" in m for m in ix._sent)
+        assert S.get_current_session() is not None
+        assert any("a new one has been started" in m for m in ix._sent)
 
     @pytest.mark.asyncio
     async def test_refused_when_bot_cannot_post_here(self, ix):
