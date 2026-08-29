@@ -6,6 +6,8 @@ The bot uses Discord slash commands by default, plus a legacy prefix command for
 
 All commands begin with `/`.
 
+**Visibility:** every command's output (confirmations, results, and error messages) is posted **publicly** in the channel — all 15 commands were reviewed and set to public on 2026-08-29. There are no private/ephemeral responses.
+
 ### `/ai`
 
 ```

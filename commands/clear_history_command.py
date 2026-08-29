@@ -10,4 +10,4 @@ async def handle_clear_history_command(interaction: discord.Interaction) -> None
     guild_id = interaction.guild_id or 0
     cid = interaction.channel_id
     clear_history(guild_id, cid)
-    await interaction.response.send_message("Conversation history cleared.", ephemeral=True)
+    await interaction.response.send_message("Conversation history cleared.")

@@ -46,7 +46,7 @@ async def handle_ai_command(
 
     char_obj = get_character(char_key)
     if char_obj is None:
-        await interaction.followup.send(f"Character `{character_name}` not found.", ephemeral=True)
+        await interaction.followup.send(f"Character `{character_name}` not found.")
         return
 
     model_slug = char_obj.model or ""
@@ -131,8 +131,8 @@ async def _safe_followup(interaction, text: str) -> None:
     """Send a followup, tolerating already-responded interactions."""
     try:
         if hasattr(interaction, "followup") and not interaction.response.is_done():
-            await interaction.response.send_message(text, ephemeral=True)
+            await interaction.response.send_message(text)
         else:
-            await interaction.followup.send(text, ephemeral=True)
+            await interaction.followup.send(text)
     except Exception as e:
         log.warning("Follow-up send failed: %s", e)
