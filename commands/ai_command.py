@@ -3,18 +3,24 @@
 P2-4: Uses streaming responses when available so the user sees text
 appear progressively instead of waiting for the full reply.
 Set AI_STREAMING=0 in .env to disable and use the classic non-streaming path.
+
+Beyond20-style embeds: on the NON-STREAMING path, replies are rendered as
+Discord embeds (title + description + inline fields) when EMBED_FORMAT is
+enabled.  Streaming stays plain text by design — a frozen embed cannot grow
+via edits, and live typing is the better UX for streamed replies.
 """
 from __future__ import annotations
 
 import logging
 import os
 
+import config.settings as _settings
 from config.characters import get_character
 from bot_core import ai_client
 from bot_core.history import get_active_char_key
 from utils.background_tasks import spawn_tracked_task
 from utils.channel_queue import channel_slot
-from utils.response_splitter import send_long_response
+from utils.response_splitter import send_long_response, send_long_response_embedded
 from utils.stream_response import stream_ai_response
 from utils.typing_loop import typing_loop_task
 
@@ -109,7 +115,19 @@ async def handle_ai_command(
                     username=username,
                     user_id=user_id,
                 )
-                await send_long_response(interaction, reply_text, str(char_obj.display))
+                if _settings.EMBED_FORMAT:
+                    # Beyond20-style embed delivery.  Returns False (having
+                    # sent nothing) when the reply is too small to benefit
+                    # from an embed or a Discord API error occurs — in both
+                    # cases fall back to the classic plain-text chunks so the
+                    # user always gets an answer.
+                    delivered = await send_long_response_embedded(
+                        interaction, reply_text, str(char_obj.display)
+                    )
+                    if not delivered:
+                        await send_long_response(interaction, reply_text, str(char_obj.display))
+                else:
+                    await send_long_response(interaction, reply_text, str(char_obj.display))
 
         except ValueError as e:
             # §3.7: classified errors (timeout / model-not-found / backend-down /

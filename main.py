@@ -28,6 +28,7 @@ from config.settings import (
     DISCORD_TOKEN,
     CHAT_HISTORY_RESET,
 )
+import config.settings as _settings  # dynamic reads (EMBED_FORMAT) for testability
 from config.characters import load_characters, default_character, get_character_choices
 from bot_core.ai_client import ask_ai as core_ask_ai
 from bot_core.ai_client import RateLimitError
@@ -36,7 +37,7 @@ from bot_core.reminders import rearm_pending_reminders
 from utils.background_tasks import spawn_tracked_task
 from utils.channel_queue import channel_slot
 from utils.kb_utils import log_top_kb_files
-from utils.response_splitter import send_long_response
+from utils.response_splitter import send_long_response, send_long_response_embedded
 from utils.typing_loop import typing_loop_task
 
 # ── Logging setup ───────────────────────────────────────────────────────
@@ -431,7 +432,17 @@ async def on_message(message: discord.Message) -> None:
 
         typing_task.cancel()
 
-        await send_long_response(message, reply, str(sys_char.display))
+        if _settings.EMBED_FORMAT:
+            # Beyond20-style embed delivery (see commands/ai_command.py for the
+            # rationale); fall back to plain-text chunks when no embed is
+            # produced or a Discord API error occurs.
+            delivered = await send_long_response_embedded(
+                message, reply, str(sys_char.display)
+            )
+            if not delivered:
+                await send_long_response(message, reply, str(sys_char.display))
+        else:
+            await send_long_response(message, reply, str(sys_char.display))
 
 
 # ── Single-instance lock ────────────────────────────────────────────────
