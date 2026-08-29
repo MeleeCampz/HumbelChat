@@ -293,11 +293,14 @@ def get_relevant_chunks(
         # for other relevant documents. Always use targeted line-windows instead.
         
         # Step 4: Build windows around each anchor and merge overlapping ones.
-        # Windows are clamped to section boundaries (markdown headers): a
-        # window must never bleed into the previous or next section.  Without
-        # this, an 80-line window on the last table of one class section would
-        # pull in the *next* class's spell tables and the model would mix them
-        # together (e.g. inventing spell slots for a non-spellcasting Rogue).
+        # A window must never contain lines from *another* section (markdown
+        # header-delimited).  Without this, an 80-line window on the last table
+        # of one class section would pull in the next class's spell tables and
+        # the model would mix them together (e.g. inventing spell slots for a
+        # non-spellcasting Rogue).  We therefore split each window at header
+        # boundaries: the piece containing the anchor is kept, plus any adjacent
+        # pieces that stay inside the anchor's own section.  Content inside the
+        # same section (e.g. the table right under its heading) is preserved.
         def _section_top(idx: int) -> int:
             """Index of the nearest header line at or above *idx*."""
             for j in range(idx, -1, -1):
@@ -305,26 +308,32 @@ def get_relevant_chunks(
                     return j
             return 0
 
-        def _section_bottom(idx: int) -> int:
-            """Index of the line just before the nearest header below *idx*."""
-            for j in range(idx + 1, len(all_lines)):
-                if all_lines[j].lstrip().startswith("#"):
-                    return j - 1
-            return len(all_lines) - 1
-
         matched_windows: list[tuple[int, int]] = []
         for line_idx in sorted(final_anchors):
             start = max(0, line_idx - window_lines)
             end = min(len(all_lines) - 1, line_idx + window_lines)
-            # Clamp to the section containing the anchor.
-            start = max(start, _section_top(line_idx))
-            end = min(end, _section_bottom(line_idx))
-            if matched_windows and start <= matched_windows[-1][1] + 1:
-                # Merge with previous window
-                new_end = max(matched_windows[-1][1], end)
-                matched_windows[-1] = (matched_windows[-1][0], new_end)
+            top = _section_top(line_idx)
+            # Split [start, end] at every header; keep only the pieces that
+            # belong to the anchor's own section (same nearest header above).
+            piece_start = start
+            for j in range(start, end + 1):
+                if all_lines[j].lstrip().startswith("#") and j > start:
+                    if _section_top(piece_start) == top:
+                        matched_windows.append((piece_start, j - 1))
+                    piece_start = j
+            if _section_top(piece_start) == top:
+                matched_windows.append((piece_start, end))
+
+        # Merge overlapping/adjacent pieces so shared lines aren't duplicated
+        # in the context (several anchors can cover the same region).
+        matched_windows.sort()
+        merged: list[tuple[int, int]] = []
+        for start, end in matched_windows:
+            if merged and start <= merged[-1][1] + 1:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
             else:
-                matched_windows.append((start, end))
+                merged.append((start, end))
+        matched_windows = merged
 
         if not matched_windows:
             continue
