@@ -147,11 +147,11 @@ async def handle_start_session(interaction: discord.Interaction, name: str | Non
     try:
         session, closed_info = S.start_session(name=name)
     except ValueError as e:
-        await interaction.response.send_message(f"⚠️ {e}", ephemeral=True)
+        await interaction.response.send_message(f"⚠️ {e}")
         return
 
     # Defer before any AI/network work; all output goes through followup.
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer()
 
     parts = [
         f"✅ **Session started:** {session.get('name') or '(untitled)'}",
@@ -168,7 +168,6 @@ async def handle_start_session(interaction: discord.Interaction, name: str | Non
             await interaction.followup.send(
                 f"📄 **Overview of previous session** ({prev.get('name') or 'untitled'}):\n\n"
                 f"{_truncate(prev['overview'])}",
-                ephemeral=True,
             )
 
     # Deliver queued next-session reminders to their channels.
@@ -181,7 +180,7 @@ async def handle_start_session(interaction: discord.Interaction, name: str | Non
         except Exception as e:
             log.error("Next-session reminder delivery failed: %s", e)
 
-    await interaction.followup.send("\n".join(parts), ephemeral=True)
+    await interaction.followup.send("\n".join(parts))
 
 
 # ── /end_session ─────────────────────────────────────────────────────────
@@ -194,12 +193,12 @@ async def handle_end_session(interaction: discord.Interaction, name: str | None 
     if session is None:
         await interaction.response.send_message(
             "⚠️ There is no active session to end. Start one with `/start_session`.",
-            ephemeral=True,
+            
         )
         return
 
     # Defer first — the AI overview call can exceed Discord's 15 s window.
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer()
 
     guild_id = interaction.guild_id or 0
     channel_id = interaction.channel_id
@@ -210,7 +209,7 @@ async def handle_end_session(interaction: discord.Interaction, name: str | None 
     overview = await _generate_overview(session, interaction.guild_id, channel_id)
     ended = S.end_session(overview=overview, name=name)
     if ended is None:  # defensive — should not happen
-        await interaction.followup.send("⚠️ Could not end the session.", ephemeral=True)
+        await interaction.followup.send("⚠️ Could not end the session.")
         return
 
     fname = pathlib.Path(ended["file"]).name
@@ -218,7 +217,6 @@ async def handle_end_session(interaction: discord.Interaction, name: str | None 
         f"🔚 **Session ended:** {ended.get('name') or '(untitled)'}\n"
         f"📄 Overview saved to `{fname}`.\n\n"
         f"{_truncate(overview)}",
-        ephemeral=True,
     )
 
 
@@ -236,7 +234,7 @@ async def handle_remind_next_session(interaction: discord.Interaction, message: 
             "⚠️ I can't send messages in this channel (missing **View Channel** / "
             "**Send Messages**) — the reminder could never be delivered here. "
             "Queue it in a channel I can post to, or give me access first.",
-            ephemeral=True,
+            
         )
         return
 
@@ -258,7 +256,7 @@ async def handle_remind_next_session(interaction: discord.Interaction, message: 
         f"“{entry['message']}”\n"
         f"{start_note}\n"
         f"It will be delivered here when the next session starts.",
-        ephemeral=True,
+        
     )
 
 
@@ -278,32 +276,31 @@ async def handle_session_notes(
         if not note or not note.strip():
             await interaction.response.send_message(
                 "⚠️ Please provide a note, e.g. `/session_notes action: add note: \"remember the API key\"`.",
-                ephemeral=True,
+                
             )
             return
         session = S.get_current_session()
         if session is None:
             await interaction.response.send_message(
                 "⚠️ There is no active session to add notes to. Start one with `/start_session` first.",
-                ephemeral=True,
+                
             )
             return
         author = (interaction.user.display_name or "").strip() if interaction.user else ""
         updated = S.add_note(note, author=author)
         if updated is None:
-            await interaction.response.send_message("⚠️ Could not add the note.", ephemeral=True)
+            await interaction.response.send_message("⚠️ Could not add the note.")
             return
         n = len(updated.get("notes", []))
         await interaction.response.send_message(
             f"📝 Note added to session **{updated.get('name') or '(untitled)'}** ({n} note(s) total).\n"
             f"📄 `{pathlib.Path(updated['file']).name}`",
-            ephemeral=True,
         )
         return
 
     if act != "view":
         await interaction.response.send_message(
-            f"⚠️ Unknown action ``{action}``. Use `add` or `view`.", ephemeral=True
+            f"⚠️ Unknown action ``{action}``. Use `add` or `view`."
         )
         return
 
@@ -311,7 +308,7 @@ async def handle_session_notes(
     session = S.get_current_session() or S.get_last_session()
     if session is None:
         await interaction.response.send_message(
-            "ℹ️ No sessions yet. Start one with `/start_session`.", ephemeral=True
+            "ℹ️ No sessions yet. Start one with `/start_session`."
         )
         return
 
@@ -334,4 +331,4 @@ async def handle_session_notes(
     body = "\n".join(lines)
     if len(body) > 1900:
         body = body[:1900].rstrip() + "\n…(truncated — see the file for the full notes)"
-    await interaction.response.send_message(body, ephemeral=True)
+    await interaction.response.send_message(body)

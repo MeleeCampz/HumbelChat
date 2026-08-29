@@ -25,7 +25,7 @@ async def handle_upload_kb(
 ) -> None:
     """Upload a file directly to the local KB storage directory."""
     # Defer first — URL downloads can exceed Discord's 15 s interaction window.
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer()
 
     # --- step 1: get bytes ---
     if attachment is not None:
@@ -39,18 +39,18 @@ async def handle_upload_kb(
                 data = resp.content
         except (httpx.HTTPError, asyncio.TimeoutError) as exc:
             await interaction.followup.send(
-                f"⚠️ Failed to download `{url[:120]}`: {exc.__class__.__name__}", ephemeral=True
+                f"⚠️ Failed to download `{url[:120]}`: {exc.__class__.__name__}"
             )
             return
         if len(data) > UPLOAD_MAX_DOWNLOAD_BYTES:
             await interaction.followup.send(
-                f"⚠️ Remote file too large (> {UPLOAD_MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB).", ephemeral=True
+                f"⚠️ Remote file too large (> {UPLOAD_MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB)."
             )
             return
         fname = url.split("?")[0].split("/")[-1] or "remote_file"
     else:
         await interaction.followup.send(
-            "Please provide either a URL or file attachment for /upload_kb.", ephemeral=True
+            "Please provide either a URL or file attachment for /upload_kb."
         )
         return
 
@@ -58,10 +58,10 @@ async def handle_upload_kb(
     try:
         dest, summary = validate_upload(data, filename=fname, kb_path=None, subfolder=subfolder)
     except ValueError as exc:
-        await interaction.followup.send(f"Upload rejected: **{exc}**", ephemeral=True)
+        await interaction.followup.send(f"Upload rejected: **{exc}**")
         return
     except FileNotFoundError as exc:
-        await interaction.followup.send(f"KB storage not found: **{exc}**", ephemeral=True)
+        await interaction.followup.send(f"KB storage not found: **{exc}**")
         return
 
     # --- step 4: index the new document so RAG can find it immediately ---
@@ -89,7 +89,7 @@ async def handle_upload_kb(
         f"Location: ``{dest.name}``\n"
         f"Hash SHA256 prefix: ``{summary['sha256']}...``\n"
         f"Auto-chunked.{approx_chunks_display}\n"
-        f"{index_note}", ephemeral=True
+        f"{index_note}"
     )
 
 
@@ -142,7 +142,7 @@ async def handle_list_kb_docs(interaction, subfolder_path: str | None = None):
     if not docs:
         lines.append("")
         lines.append("(no files found)")
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+        await interaction.response.send_message("\n".join(lines))
         return
 
     # --- unified file listing (same format for both views) ---
@@ -159,7 +159,7 @@ async def handle_list_kb_docs(interaction, subfolder_path: str | None = None):
     if len(docs) > 30:
         lines.append(f"\n… and {len(docs) - 30} more documents.")
 
-    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+    await interaction.response.send_message("\n".join(lines))
 
 
 async def handle_reindex_kb(interaction):
@@ -167,7 +167,7 @@ async def handle_reindex_kb(interaction):
     from config.settings import KB_PATH
 
     kb_path = pathlib.Path(KB_PATH)
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer()
 
     # --- Phase 2: use persistent vector index (KBIndexStore) ---
     from kb.index import KBIndexStore
@@ -208,4 +208,4 @@ async def handle_reindex_kb(interaction):
         log.error("Reindexing failed: %s", e, exc_info=True)
         msg_parts = [f"❌ Failed to reindex KB: **{e}**"]
 
-    await interaction.followup.send("\n".join(msg_parts), ephemeral=True)
+    await interaction.followup.send("\n".join(msg_parts))

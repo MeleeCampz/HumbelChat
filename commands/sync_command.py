@@ -16,7 +16,7 @@ async def handle_sync_command(interaction: discord.Interaction) -> None:
     re-registers the current set. This is the fix for duplicated command
     listings in the slash command menu.
     """
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer()
 
     # Clear guild-scoped commands first (if any)
     for guild in interaction.client.guilds or []:
@@ -46,4 +46,4 @@ async def handle_sync_command(interaction: discord.Interaction) -> None:
         log.error("Command sync failed: %s", e)
         msg = f"❌ **Sync failed:** {e}"
 
-    await interaction.followup.send(msg, ephemeral=True)
+    await interaction.followup.send(msg)

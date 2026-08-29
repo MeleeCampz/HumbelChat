@@ -74,14 +74,14 @@ async def handle_remind_command(
     unit_lower = time_unit.lower()
     if unit_lower not in multipliers:
         await interaction.response.send_message(
-            f"Unknown unit ``{time_unit}``. Use: seconds, minutes, hours.", ephemeral=True
+            f"Unknown unit ``{time_unit}``. Use: seconds, minutes, hours."
         )
         return
 
     delay = time_value * multipliers[unit_lower]
     if delay < 10:
         await interaction.response.send_message(
-            "Reminder must be at least 10 seconds in the future.", ephemeral=True
+            "Reminder must be at least 10 seconds in the future."
         )
         return
 
@@ -96,11 +96,11 @@ async def handle_remind_command(
             "⚠️ I can't send messages in this channel — I'm missing **View Channel** "
             "and/or **Send Messages** permission (check the @everyone / role "
             "overwrites). Set the reminder in a channel I can post to, or give "
-            "me access first.", ephemeral=True,
+            "me access first.",
         )
         return
 
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer()
 
     # Persist + schedule via the reminder store (survives restarts)
     from bot_core.reminders import schedule_reminder
@@ -109,7 +109,7 @@ async def handle_remind_command(
     unit_singular = time_unit.rstrip("s") if time_value != 1 else time_unit
     prompt_text = "✅ Reminder set for **" + str(time_value) + " " + unit_singular + "** from now!"
     confirmation = prompt_text + f'\n📝 I\'ll ping you with: "{message}"'
-    await interaction.followup.send(confirmation, ephemeral=True)
+    await interaction.followup.send(confirmation)
 
 
 # ── OCR ──────────────────────────────────────────────────────────────────
@@ -119,10 +119,10 @@ async def handle_ocr_command(
     image: discord.Attachment | None = None,
 ) -> None:
     """Vision-based OCR."""
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer()
 
     if not image:
-        await interaction.followup.send("⚠️ Please attach an image.", ephemeral=True)
+        await interaction.followup.send("⚠️ Please attach an image.")
         return
 
     # Non-image guards (code review §1.9): refuse text/unknown extensions
@@ -132,14 +132,12 @@ async def handle_ocr_command(
         await interaction.followup.send(
             f"⚠️ `{image.filename}` looks like a text file — no OCR needed. "
             "Attach an actual image (PNG/JPG/GIF/WebP).",
-            ephemeral=True,
         )
         return
     if fn and not fn.endswith(OCR_IMAGE_EXTS):
         await interaction.followup.send(
             f"⚠️ `{image.filename}` doesn't look like an image. "
             f"Supported: {', '.join(sorted(set(OCR_IMAGE_EXTS)))}.",
-            ephemeral=True,
         )
         return
 
@@ -149,15 +147,14 @@ async def handle_ocr_command(
     try:
         img_data = await asyncio.wait_for(image.read(), timeout=OCR_DOWNLOAD_TIMEOUT)
     except asyncio.TimeoutError:
-        await interaction.followup.send("⚠️ Timed out downloading the image.", ephemeral=True)
+        await interaction.followup.send("⚠️ Timed out downloading the image.")
         return
     if not img_data:
-        await interaction.followup.send("⚠️ Could not download the image.", ephemeral=True)
+        await interaction.followup.send("⚠️ Could not download the image.")
         return
     if len(img_data) > OCR_MAX_DOWNLOAD_BYTES:
         await interaction.followup.send(
             f"⚠️ Image too large to process (> {OCR_MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB).",
-            ephemeral=True,
         )
         return
 
@@ -190,21 +187,21 @@ async def handle_ocr_command(
         log.error("OCR request failed: %s", e)
         await interaction.followup.send(
             f"⚠️ OCR failed: {e.__class__.__name__}. The AI backend may be down or the model may not support images.",
-            ephemeral=True,
+            
         )
         return
     reply = resp.choices[0].message.content or "(no text found)"
 
     MAX_LEN = 1900
     if len(reply) <= MAX_LEN:
-        await interaction.followup.send(f"🔍 Extracted text:\n\n{reply}", ephemeral=True)
+        await interaction.followup.send(f"🔍 Extracted text:\n\n{reply}")
     else:
         # Paragraph-aware split (avoids mid-word hard cuts).
         from utils.response_splitter import _split_long_message
         chunks = _split_long_message(reply, "")
         for i, chunk in enumerate(chunks, start=1):
             await interaction.followup.send(
-                f"🔍 OCR (part {i}/{len(chunks)})\n\n{chunk}", ephemeral=True
+                f"🔍 OCR (part {i}/{len(chunks)})\n\n{chunk}"
             )
 
 
@@ -215,7 +212,7 @@ async def handle_summarize_command(
     file_url: str | None = None,
 ) -> None:
     """Summarize recent chat history or a file from a URL."""
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer()
 
     text = ""
     src = ""
@@ -228,7 +225,7 @@ async def handle_summarize_command(
                 src = f"file from `{file_url[:80]}...`"
         except Exception as e:
             log.error("Failed to fetch file_url: %s", e)
-            await interaction.followup.send(f"⚠️ Error fetching URL: {e}", ephemeral=True)
+            await interaction.followup.send(f"⚠️ Error fetching URL: {e}")
             return
     else:
         guild_id = interaction.guild_id or 0
@@ -241,7 +238,7 @@ async def handle_summarize_command(
         src = "recent conversation"
 
     if not text.strip() or text == "(no history)":
-        await interaction.followup.send("⚠️ Nothing to summarize.", ephemeral=True)
+        await interaction.followup.send("⚠️ Nothing to summarize.")
         return
 
     guild_id = interaction.guild_id or 0
@@ -274,17 +271,16 @@ async def handle_summarize_command(
 
     if summary is None:
         await interaction.followup.send(
-            "⚠️ Failed to generate summary after trying multiple models.", ephemeral=True
+            "⚠️ Failed to generate summary after trying multiple models."
         )
     else:
         MAX_LEN = 1900
         if len(summary) <= MAX_LEN:
-            await interaction.followup.send(f"📄 **Summary** ({src}):\n\n{summary}", ephemeral=True)
+            await interaction.followup.send(f"📄 **Summary** ({src}):\n\n{summary}")
         else:
             for i in range(0, len(summary), MAX_LEN):
                 await interaction.followup.send(
                     f"📄 **Summary** ({src}) (part {i // MAX_LEN + 1}):\n\n{summary[i:i + MAX_LEN]}",
-                    ephemeral=True,
                 )
 
 
@@ -309,7 +305,7 @@ async def handle_translate_command(
     if not text_to:
         await interaction.followup.send(
             "⚠️ No text to translate.  Provide text as ``/translate Spanish: Hello world``.",
-            ephemeral=True,
+            
         )
         return
 
@@ -332,16 +328,15 @@ async def handle_translate_command(
         )
     except Exception as e:
         log.error("Translate request failed: %s", e)
-        await interaction.followup.send(f"⚠️ Translation failed: {e.__class__.__name__}. Please try again.", ephemeral=True)
+        await interaction.followup.send(f"⚠️ Translation failed: {e.__class__.__name__}. Please try again.")
         return
     translated = resp.choices[0].message.content or "(translation failed)"
 
     MAX_LEN = 1900
     if len(translated) <= MAX_LEN:
-        await interaction.followup.send(f"🌐 Translated to **{tgt}**:\n\n{translated}", ephemeral=True)
+        await interaction.followup.send(f"🌐 Translated to **{tgt}**:\n\n{translated}")
     else:
         for i in range(0, len(translated), MAX_LEN):
             await interaction.followup.send(
                 f"🌐 Translated to **{tgt}** (part {i // MAX_LEN + 1})\n\n{translated[i:i + MAX_LEN]}",
-                ephemeral=True,
             )
