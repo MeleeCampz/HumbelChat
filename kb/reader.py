@@ -252,17 +252,55 @@ def get_relevant_chunks(
         # Sort by hit count descending (most relevant first), then by line.
         any_hits.sort(key=lambda x: (-x[0], x[1]))
 
+        def _header_depth(line: str) -> int | None:
+            """Markdown header depth of *line* (e.g. '## Rogue' → 2), else None."""
+            stripped = line.lstrip()
+            if not stripped.startswith("#"):
+                return None
+            depth = len(stripped) - len(stripped.lstrip("#"))
+            # Must be a real ATX header: '#' run followed by whitespace/EOL.
+            if depth >= len(stripped) or stripped[depth] not in (" ", "\t"):
+                return None
+            return depth
+
         # ---- Step 2a: Guarantee each query term gets a dedicated anchor ----
+        # Prefer MARKDOWN HEADERS containing the term over plain body lines.
+        # A header anchors the actual section (e.g. "## Rogue"), so its window
+        # covers the section's tables; a body line with the same hit count might
+        # sit deep in a subclass paragraph and miss them.  Among matching
+        # headers, prefer the SHALLOWEST (top-most level) one: it anchors the
+        # whole section tree (class features + subclasses), which is what a
+        # "what are the X class features" question needs.
+        #
+        # Two guards keep generic terms from hijacking anchors:
+        #  * Depth-1 headers (e.g. "# Classes") are skipped — anchoring on a
+        #    file's root heading would pull in unrelated sibling sections.
+        #  * Terms present on >15% of the file's lines are treated as noise
+        #    ("class", "table", "level"...) and get no guaranteed anchor.
         guaranteed_anchors: list[int] = []
+        n_lines = max(len(all_lines), 1)
 
         for target_term in query_terms:
-            best_li = None
+            term_line_count = sum(1 for li, _hc in any_hits if target_term in all_lines[li].strip().lower())
+            if term_line_count > 0.15 * n_lines:
+                continue  # too common to be a useful anchor
+            header_li: int | None = None
+            best_header_depth: int | None = None
+            best_body_li = None
             best_hc = -1
             for hc, li in any_hits:
                 cleaned = all_lines[li].strip().lower()
-                if target_term in cleaned and hc > best_hc:
-                    best_li = li
+                if target_term not in cleaned:
+                    continue
+                depth = _header_depth(all_lines[li])
+                if depth is not None and depth >= 2:
+                    if header_li is None or depth < best_header_depth:
+                        header_li = li
+                        best_header_depth = depth
+                elif hc > best_hc:
+                    best_body_li = li
                     best_hc = hc
+            best_li = header_li if header_li is not None else best_body_li
             if best_li is None:
                 continue
             # Only add if not too close to an existing guaranteed anchor
@@ -293,36 +331,49 @@ def get_relevant_chunks(
         # for other relevant documents. Always use targeted line-windows instead.
         
         # Step 4: Build windows around each anchor and merge overlapping ones.
-        # A window must never contain lines from *another* section (markdown
-        # header-delimited).  Without this, an 80-line window on the last table
-        # of one class section would pull in the next class's spell tables and
-        # the model would mix them together (e.g. inventing spell slots for a
-        # non-spellcasting Rogue).  We therefore split each window at header
-        # boundaries: the piece containing the anchor is kept, plus any adjacent
-        # pieces that stay inside the anchor's own section.  Content inside the
-        # same section (e.g. the table right under its heading) is preserved.
+        # A window must never bleed into a *sibling* section.  Without this,
+        # an 80-line window on the last table of one class section would pull
+        # in the next class's spell tables and the model would mix them
+        # together (e.g. inventing spell slots for a non-spellcasting Rogue).
+        # Boundaries are defined by header DEPTH: content above the anchor
+        # stops at the nearest header of the same or higher level (the top of
+        # the anchor's section tree), and content below stops at the next
+        # header of the same or higher level.  Sub-sections inside the anchor's
+        # own tree (e.g. "#### Level 1: Expertise" under "### Rogue Class
+        # Features") are kept — that is where the tables live.
         def _section_top(idx: int) -> int:
             """Index of the nearest header line at or above *idx*."""
             for j in range(idx, -1, -1):
-                if all_lines[j].lstrip().startswith("#"):
+                if _header_depth(all_lines[j]) is not None:
                     return j
             return 0
 
+        def _section_bottom(idx: int) -> int:
+            """Index of the line just before the next header at or above the
+            same level as the anchor's own section (i.e. end of its tree)."""
+            top = _section_top(idx)
+            top_depth = _header_depth(all_lines[top]) or 1
+            for j in range(idx + 1, len(all_lines)):
+                d = _header_depth(all_lines[j])
+                if d is not None and d <= top_depth:
+                    return j - 1
+            return len(all_lines) - 1
+
         matched_windows: list[tuple[int, int]] = []
         for line_idx in sorted(final_anchors):
-            start = max(0, line_idx - window_lines)
-            end = min(len(all_lines) - 1, line_idx + window_lines)
-            top = _section_top(line_idx)
-            # Split [start, end] at every header; keep only the pieces that
-            # belong to the anchor's own section (same nearest header above).
-            piece_start = start
-            for j in range(start, end + 1):
-                if all_lines[j].lstrip().startswith("#") and j > start:
-                    if _section_top(piece_start) == top:
-                        matched_windows.append((piece_start, j - 1))
-                    piece_start = j
-            if _section_top(piece_start) == top:
-                matched_windows.append((piece_start, end))
+            # Anchors that ARE markdown headers get an asymmetric window: a
+            # little context above and more below, because the table/feature
+            # list usually follows the heading.
+            if _header_depth(all_lines[line_idx]) is not None:
+                start = max(0, line_idx - min(window_lines // 4, 12))
+                end = min(len(all_lines) - 1, line_idx + window_lines * 3)
+            else:
+                start = max(0, line_idx - window_lines)
+                end = min(len(all_lines) - 1, line_idx + window_lines)
+            # Clamp to the anchor's own section tree.
+            start = max(start, _section_top(line_idx))
+            end = min(end, _section_bottom(line_idx))
+            matched_windows.append((start, end))
 
         # Merge overlapping/adjacent pieces so shared lines aren't duplicated
         # in the context (several anchors can cover the same region).
