@@ -108,6 +108,62 @@ async def _keyword_fallback(
     return chunks
 
 
+# ────────────────── Ranked-chunk selection (vector path) ──────────────────
+
+# Keep several semantically-matched chunks per file so a query can include
+# both an overview section and the detail sections it references, while still
+# capping how much any single file may dominate the prompt.
+MAX_CHUNKS_PER_FILE = 5
+# Per-file char cap so one large file cannot consume the whole RAG budget.
+MAX_CHARS_PER_FILE = 24_000
+
+
+def select_ranked_chunks(
+    ranked: list[tuple[str, str, float]],
+    top_n: int = 5,
+    max_chunks_per_file: int = MAX_CHUNKS_PER_FILE,
+    max_chars_per_file: int = MAX_CHARS_PER_FILE,
+) -> list[tuple[str, str]]:
+    """Collapse ranked index chunks into per-file document entries.
+
+    ``ranked`` is ``(display_name, content, similarity)`` sorted by relevance
+    descending, where *display_name* is ``"<file> [<section path>]"``.  Each
+    file contributes at most *max_chunks_per_file* of its highest-ranked
+    chunks (subject to a per-file character cap); the selected chunks are
+    joined in rank order into one entry per file so downstream per-file
+    budgets (``RAG_MAX_DOCS``) still apply.
+
+    Works for any chunk shape — header-split sections as well as unstructured
+    "Full Document" chunks (e.g. player session logs) — because it consumes
+    the index content directly instead of re-deriving windows from disk.
+    """
+    if not ranked:
+        return []
+
+    per_file: dict[str, list[str]] = {}
+    seen_names: set[str] = set()
+    total_chunks = 0
+    for name, content, _score in ranked:
+        if total_chunks >= top_n * max_chunks_per_file:
+            break
+        stem = name.split(" [")[0] if " [" in name else name
+        # Don't start new files once top_n distinct files are covered.
+        if stem not in per_file and len(per_file) >= top_n:
+            continue
+        bucket = per_file.setdefault(stem, [])
+        if len(bucket) >= max_chunks_per_file:
+            continue
+        if sum(len(c) for c in bucket) + len(content) > max_chars_per_file and bucket:
+            continue  # file budget exhausted — try the next ranked chunk
+        if name in seen_names:
+            continue
+        seen_names.add(name)
+        bucket.append(content)
+        total_chunks += 1
+
+    return [(stem, "\n\n".join(chunks)) for stem, chunks in per_file.items()]
+
+
 # ───────────────────── Adaptive-k Retrieval ─────────────────────
 
 def _adaptive_k_threshold(scores: list[float]) -> int:
@@ -240,9 +296,6 @@ async def _retrieve_vector(
     keyword-only if the vector index is unavailable or the query returns
     no hits.  Only **one** embedding API call is made per query.
     """
-    from kb.reader import get_relevant_chunks
-    from config.settings import RAG_WINDOW_LINES
-
     store = await _ensure_index_store(kb_path)
     idx = store.get_index() if store is not None else None
     if idx is None or idx.is_empty():
@@ -255,27 +308,14 @@ async def _retrieve_vector(
         logger.warning("Vector query returned no hits for '%s'; falling back to keyword", kb_path)
         return await _keyword_fallback(query, kb_path, top_n, window_lines)
 
-    # Deduplicate by source file, preserving rank order, cap at top_n files.
-    doc_stems: list[str] = []
-    seen: set[str] = set()
-    for name, _content, _score in ranked:
-        stem = name.split(" [")[0] if " [" in name else name
-        if stem not in seen:
-            seen.add(stem)
-            doc_stems.append(stem)
-    doc_stems = doc_stems[:top_n]
-
-    ranked_list = get_relevant_chunks(kb_path, doc_stems, query=query, window_lines=RAG_WINDOW_LINES)
-    if not ranked_list:
-        # Disk extraction failed (e.g. files moved) — serve chunk content directly.
-        ranked_list = [(name, content) for name, content, _ in ranked[:top_n]]
+    docs = select_ranked_chunks(ranked, top_n=top_n)
 
     logger.info(
-        "Vector retrieval: %d ranked chunk(s) → %d file(s) → %d relevant chunk(s) with ~%.0f chars",
-        len(ranked), len(doc_stems), len(ranked_list),
-        sum(len(c) for _, c in ranked_list) if ranked_list else 0,
+        "Vector retrieval: %d ranked chunk(s) → %d file(s) with ~%.0f chars",
+        len(ranked), len(docs),
+        sum(len(c) for _, c in docs) if docs else 0,
     )
-    return ranked_list
+    return docs
 
 
 # ───────────────────────────── Public API ──────────────────────────────
