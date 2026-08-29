@@ -115,7 +115,7 @@ class KBIndexStore:
         kb_path: str | pathlib.Path,
         *,
         persist_dir: str | pathlib.Path | None = None,
-        model_name: str = "nomic-embed-text:latest",
+        model_name: str = "",  # defaults to EMBEDDING_MODEL env var when empty
     ) -> None:
         self.kb_path = pathlib.Path(kb_path)
         # Default cache lives next to the KB itself (absolute) so the bot
@@ -128,6 +128,10 @@ class KBIndexStore:
             self.persist_dir = pathlib.Path(persist_dir)
             if not self.persist_dir.is_absolute():
                 self.persist_dir = (pathlib.Path(__file__).resolve().parent.parent / persist_dir)
+        # Fall back to the configured embedding model (env var) when none given.
+        if not model_name:
+            from config.settings import EMBEDDING_MODEL
+            model_name = EMBEDDING_MODEL
         self.model_name = model_name
 
         self._db_path = self.persist_dir / "vector_index.db"

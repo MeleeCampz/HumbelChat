@@ -84,6 +84,11 @@ def _or_default(value: str | None, default: str) -> str:
 
 
 # ════════════════════════════════════
+#  EMBEDDING MODEL
+# ════════════════════════════════════
+EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "nomic-embed-text:latest")
+
+# ════════════════════════════════════
 #  KNOWLEDGE BASE
 # ════════════════════════════════════
 # Repo root, resolved from this file so all paths work regardless of CWD.

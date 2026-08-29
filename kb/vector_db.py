@@ -6,7 +6,7 @@ before embedding so that queries for specific topics (e.g., "time system")
 hit only relevant sections — not drowned out by unrelated content.
 
 Uses ``kb.embedder.Embedder`` powered by the configured INFER_URL
-(OpenAI-compatible) backend with model ``nomic-embed-text:latest``.
+(OpenAI-compatible) backend with model from ``EMBEDDING_MODEL`` env var (default: ``nomic-embed-text:latest``).
 """
 from __future__ import annotations
 
@@ -61,7 +61,8 @@ class KBVectorIndex:
 
     def __init__(self) -> None:
         self._docs: list[_DocEntry] = []
-        self._embedder = Embedder()
+        from config.settings import EMBEDDING_MODEL
+        self._embedder = Embedder(model_name=EMBEDDING_MODEL)
 
     # ── Construction ────────────────────────────────────────────────
 
@@ -122,7 +123,8 @@ class KBVectorIndex:
     ) -> KBVectorIndex:
         """Build an index from pre-embedded entries (no API calls)."""
         index = cls.__new__(cls)
-        index._embedder = Embedder()
+        from config.settings import EMBEDDING_MODEL
+        index._embedder = Embedder(model_name=EMBEDDING_MODEL)
         index._docs = [
             _DocEntry(display_name=n, content=c, embedding=e, source_file=s)
             for (n, c, s), e in zip(entries, embeddings)

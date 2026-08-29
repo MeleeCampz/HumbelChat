@@ -10,7 +10,7 @@ keyword — heuristic scoring of filenames, headers, and body overlap
           (existing engine in kb.reader).
 
 vector  — cosine-similarity embedding search via the configured inference backend
-          using model ``nomic-embed-text:latest``.  Documents are chunked
+          using model from ``EMBEDDING_MODEL`` env var (default: ``nomic-embed-text:latest``).  Documents are chunked
           semantically before embedding and indexed on first use with
           SQLite persistence for fast bot restarts.
 
