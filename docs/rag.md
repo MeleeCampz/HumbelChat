@@ -57,3 +57,4 @@ These are the expected file types for KB use. Storage itself does not strictly e
 | `RAG_MAX_CHARS` | Max RAG context chars sent to the LLM |
 | `RAG_WINDOW_LINES` | Window around each match anchor |
 | `RAG_RETRIEVAL_METHOD` | `vector` or `keyword` |
+| `EMBEDDING_MODEL` | Embedding model used for vector search (set to match your inference backend's model) |
