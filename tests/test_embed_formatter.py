@@ -256,11 +256,12 @@ class TestBuildEmbed:
         _assert_within_limits(e)
         # H1 becomes the title
         assert "Trixy Smoldersome" in e.title
-        # section headings become field names
+        # section headings are folded into the field name of the block they
+        # introduce (heading + table/list share one field)
         names = [f.name for f in e.fields]
-        assert "Attributes" in names
-        assert "Equipment" in names
-        assert "Notes" in names
+        assert any(n.startswith("Attributes") for n in names), names
+        assert any(n.startswith("Equipment") for n in names), names
+        assert any(n.startswith("Notes") for n in names), names
         # table rendered as self-contained fenced monospace block(s)
         table_fields = [f for f in e.fields if "STR" in f.value]
         assert table_fields, "no table field found"
@@ -416,16 +417,11 @@ class TestMultiEmbed:
         desc = " ".join(e.description or "" for e in embeds)
         assert "Birdfolk Species" not in desc
         assert "Humblefolk Species" not in desc
-        # Each list sits in the field right after its label, with all 5 entries
+        # Each label is folded into the field name of its own list, and all 5
+        # entries sit in that same field's value.
         fields = [f for e in embeds for f in e.fields]
-        bird_val = next(
-            fields[i + 1].value for i, f in enumerate(fields)
-            if "Birdfolk Species" in f.name and i + 1 < len(fields)
-        )
-        humble_val = next(
-            fields[i + 1].value for i, f in enumerate(fields)
-            if "Humblefolk Species" in f.name and i + 1 < len(fields)
-        )
+        bird_val = next(f.value for f in fields if f.name.startswith("Birdfolk Species"))
+        humble_val = next(f.value for f in fields if f.name.startswith("Humblefolk Species"))
         for sp in ("Corvum", "Gallus", "Luma", "Raptor", "Strig"):
             assert sp in bird_val, f"{sp} missing from birdfolk field"
         for sp in ("Cervan", "Jerbeen", "Hedge", "Vulpin", "Mapach"):
@@ -456,6 +452,46 @@ class TestMultiEmbed:
         for armor in ("Padded Armor", "Studded Leather Armor", "Half Plate Armor",
                       "Ring Mail", "Splint Armor", "Plate Armor", "Shield"):
             assert armor in joined, f"lost row: {armor}"
+
+    ROGUE_TABLE_REPLY = (
+        "MASTER!\n\n"
+        "Here is the **Rogue Features** table from the character creation rules:\n\n"
+        "**Rogue Features**\n\n"
+        "| Level | Proficiency Bonus | Class Features | Thieves' Cant (Levels) | Cantrips | Prepared Spells | Spell Slots per Spell Level | | | | | | | |\n"
+        "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n"
+        "| **1** | +2 | Cunning Action, Thief, Roguish Archetype, Sneak Attack | 0 | 2 | 3 | — | — | — | — | — | — |\n"
+        "| **5** | +3 | Fast Rogues, Thieves' Cant (2) | 2 | 2 | 6 | 2 | 2 | 2 | — | — | — |\n"
+        "| **12** | +4 | Ability Score Improvement | 3 | 2 | 13 | 2 | 2 | 2 | 1 | 1 | 1 |\n"
+        "| **20** | +6 | Master of Shadows | 5 | 2 | 22 | 2 | 2 | 2 | 1 | 1 | 1 |"
+    )
+
+    def test_rogue_table_junk_columns_stripped(self):
+        """Regression: the Rogue reply's table had 8 trailing padding columns
+        (empty header, dash cells) that made it unreadable.  Junk columns must
+        be dropped; real data preserved; and the repeated bold label must fold
+        into the field name instead of duplicating above it.
+        """
+        embeds = build_embeds_for_channel(self.ROGUE_TABLE_REPLY, title_override="System")
+        assert embeds, "no embed produced for the rogue table reply"
+        for e in embeds:
+            _assert_within_limits(e)
+        joined = _all_embed_text(embeds)
+        # real content survives
+        for token in ("Cunning Action", "Master of Shadows", "+2", "+6"):
+            assert token in joined, f"lost data: {token}"
+        # the junk padding columns are gone — a rendered table row should not
+        # end with a run of empty cells or lone dashes
+        for e in embeds:
+            for f in e.fields:
+                if not (f.value.startswith("```") and "|" in f.value):
+                    continue
+                for line in f.value.strip().splitlines()[1:-1]:
+                    assert not line.rstrip().endswith("|  |"), f"junk column: {line!r}"
+        # the bold label is folded into the table field name, not repeated as
+        # a separate anonymous label field
+        names = [f.name for e in embeds for f in e.fields]
+        assert any(n.startswith("Rogue Features") and "Level" in n for n in names), names
+        assert not any(f.value.strip() == " " for e in embeds for f in e.fields)
 
     def test_pathological_single_line_preserved(self):
         """A 20k-char line with no breaks at all must not lose data."""

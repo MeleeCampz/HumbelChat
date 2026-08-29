@@ -142,6 +142,22 @@ def _render_table(header: list[str], rows: list[list[str]]) -> tuple[str, list[s
     header = _norm(header)
     rows = [_norm(r) for r in rows]
 
+    # Drop junk columns: every cell empty or a dash/placeholder.  LLMs
+    # sometimes emit trailing padding columns (``| ... | | | |``) or labelled
+    # but contentless columns (e.g. ``Spell Slots`` full of ``—`` for a
+    # non-spellcaster); on Discord those make tables unreadable, so we strip
+    # them before layout.  A table that is *entirely* junk keeps its shape.
+    _PLACEHOLDERS = {"", "—", "–", "-", "N/A", "n/a", "/"}
+
+    def _has_data(idx: int) -> bool:
+        return any(row[idx].strip() not in _PLACEHOLDERS for row in rows)
+
+    keep = [i for i in range(ncols) if _has_data(i)]
+    if 0 < len(keep) < ncols:
+        header = [header[i] for i in keep]
+        rows = [[row[i] for i in keep] for row in rows]
+        ncols = len(header)
+
     # Natural column widths, capped at 40 so no single cell dominates.
     natural = [min(max(len(c) for c in col), 40) for col in zip(*([header] + rows))]
 
@@ -563,6 +579,29 @@ def _build_embed_impl(
             embed.add_field(name=name[:MAX_FIELD_NAME], value=piece, inline=inline)
             field_count += 1
 
+    # A section heading (h2/h3) is *pending* until the block it introduces
+    # arrives; then it's folded into that field's name instead of rendering as
+    # a separate "label" field above an anonymous content field.  This removes
+    # one round-trip of vertical space per section and keeps the label glued
+    # to its content even when fields get split.
+    pending_heading: list[str] = []
+
+    def _fold_name(name: str) -> str:
+        """Merge any pending heading into *name* (or use it as the name)."""
+        if not pending_heading:
+            return name
+        h = pending_heading.pop(0)
+        # Strip Markdown bold markers from the content name so the combined
+        # label reads as one clean string instead of ``Heading — **bold**``.
+        clean = name.replace("**", "").strip()
+        if not clean or clean in {" ", "(continued)", "(cont.)"}:
+            return h[:MAX_FIELD_NAME]
+        combined = f"{h} — {clean}"
+        if len(combined) > MAX_FIELD_NAME:
+            # Keep the section heading — it identifies the block.
+            return h[:MAX_FIELD_NAME]
+        return combined
+
     def _append_desc(piece: str) -> None:
         nonlocal desc_len, degraded
         if not piece.strip():
@@ -585,10 +624,13 @@ def _build_embed_impl(
     for kind, payload in blocks:
         if kind == "h1":
             continue  # already consumed as the title
-        if kind == "h2":
-            add_field(str(payload)[:MAX_FIELD_NAME], " ", False)
-        elif kind == "h3":
-            add_field(str(payload)[:MAX_FIELD_NAME], " ", True)
+        if kind in ("h2", "h3"):
+            # A heading directly after a heading can't be folded — flush the
+            # earlier one as its own label field first.
+            while pending_heading:
+                add_field(pending_heading.pop(0), " ", False)
+            pending_heading.append(str(payload)[:MAX_FIELD_NAME])
+            continue
         elif kind == "code":
             code = str(payload)
             # Preserve the verbatim block as self-contained fenced piece(s);
@@ -597,24 +639,33 @@ def _build_embed_impl(
             for idx, piece in enumerate(_split_code_block(code)):
                 if len(piece) > MAX_FIELD_VALUE:
                     degraded = True  # defensive — splitter already bounds it
-                add_field("" if idx == 0 else "(continued)", piece, False)
+                nm = _fold_name("" if idx == 0 else "(continued)")
+                add_field(nm, piece, False)
         elif kind == "table":
             header, rows = payload  # type: ignore[misc]
             name, pieces = _render_table(list(header), [list(r) for r in rows])
             for idx, value in enumerate(pieces):
                 if len(value) > MAX_FIELD_VALUE:
                     degraded = True  # defensive — splitter already bounds it
-                add_field(name if idx == 0 else f"{name} (cont.)", value, False)
+                nm = _fold_name(name if idx == 0 else f"{name} (cont.)")
+                add_field(nm, value, False)
         elif kind == "list":
             lines = list(payload)  # type: ignore[arg-type]
-            for group in _group_lines(lines):
-                # Empty name → the bullets *are* the content (cleaner look).
-                add_field("", "\n".join(group), len(group) <= 4)
+            for gi, group in enumerate(_group_lines(lines)):
+                # First group takes the pending heading as its field name so
+                # the label sits with its bullets; later groups stay unnamed.
+                nm = _fold_name("") if gi == 0 else ""
+                add_field(nm, "\n".join(group), len(group) <= 4)
         else:  # para
             if structured and desc_parts:
-                add_field("", str(payload), False)
+                add_field(_fold_name(""), str(payload), False)
             else:
                 _append_desc(str(payload))
+
+    # A heading with nothing after it (trailing label) still renders — as a
+    # plain field, so the text is never lost.
+    for h in pending_heading:
+        add_field(h, " ", False)
 
     if desc_parts:
         embed.description = "\n\n".join(desc_parts)[:MAX_DESCRIPTION]
