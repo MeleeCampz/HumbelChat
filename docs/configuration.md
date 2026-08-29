@@ -64,6 +64,7 @@ A smaller baseline is usually better for Discord. Very large `max_tokens` values
 | `RAG_MAX_CHARS` | Hard cap on RAG context characters sent to the LLM | `24000` |
 | `RAG_WINDOW_LINES` | Lines above/below each match anchor | `80` |
 | `RAG_RETRIEVAL_METHOD` | Retrieval strategy: `vector` or `keyword` | `vector` |
+| `EMBEDDING_MODEL` | Embedding model name for vector search (OpenAI-compatible /embeddings endpoint) | `nomic-embed-text:latest` |
 
 ## Streaming delivery
 
