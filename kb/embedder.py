@@ -1,7 +1,7 @@
 """Async embedding engine for an OpenAI-compatible /embeddings backend.
 
 Uses ``INFER_URL`` + ``INFER_API_KEY`` from settings plus the model name
-configured for embeddings (defaults to ``nomic-embed-text:latest``).
+configured for embeddings (defaults to ``EMBEDDING_MODEL`` env var, "nomic-embed-text:latest").
 
 This module provides both single-doc and batch encoding with automatic
 retries and fallback logging if the backend is unreachable.
@@ -26,7 +26,7 @@ logger = logging.getLogger("kb.embedder")
 
 # ──────────────── Constants ───────────────────────────────────────────────
 
-_DEFAULT_MODEL = "nomic-embed-text:latest"
+from config.settings import EMBEDDING_MODEL as _DEFAULT_MODEL
 _BATCH_SIZE = 8  # documents per batch (conservative for shared inference backends)
 _RETRY_ATTEMPTS = 3          # per endpoint — transient 5xx / connection errors are common
 _RETRY_BACKOFF_SECONDS = 1.5 # base delay; multiplied by the attempt number
