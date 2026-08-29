@@ -130,3 +130,55 @@ async def send_long_response(source, reply_text: str, char_name: str = "") -> No
             idx, len(chunks), getattr(msg, "id", None),
             len(full_msg), full_msg[:60],
         )
+
+
+async def send_long_response_embedded(
+    source,
+    reply_text: str,
+    char_name: str = "",
+) -> bool:
+    """Deliver *reply_text* as Beyond20-style Discord embed(s).
+
+    The reply is parsed into one or more ``discord.Embed`` objects (title +
+    description + inline fields; tables become aligned monospace blocks —
+    see :mod:`utils.embed_formatter`).  Works with both Slash Commands
+    (``followup.send``) and prefix commands (``reply``), mirroring
+    :func:`send_long_response`.
+
+    Returns ``True`` when the reply was fully delivered as embeds.  Returns
+    ``False`` — without sending anything — when the reply is too small to
+    benefit from embed formatting or an API error occurs, so callers can fall
+    back to plain-text delivery.  The function never raises.
+    """
+    try:
+        from utils.embed_formatter import build_embeds_for_channel
+
+        embeds = build_embeds_for_channel(reply_text, title_override=char_name)
+        if not embeds:
+            log.debug("DELIVER embedded: no embed produced — plain-text fallback")
+            return False
+
+        # Discord allows at most 10 embeds per message.  Batch the embeds so
+        # a long reply becomes ONE compact message (Beyond20 style) instead of
+        # a flood of single-embed messages; only pathologically long replies
+        # (>10 sections) spill into a second message.
+        _MAX_EMBEDS_PER_MSG = 10
+        for i in range(0, len(embeds), _MAX_EMBEDS_PER_MSG):
+            batch = embeds[i : i + _MAX_EMBEDS_PER_MSG]
+            kw: dict = {"embeds": batch} if len(batch) > 1 else {"embed": batch[0]}
+
+            if hasattr(source, "followup"):
+                msg = await source.followup.send(content=None, **kw)
+            else:
+                msg = await source.reply(content=None, **kw)
+            log.info(
+                "DELIVER embeds %d-%d/%d: msg_id=%s total_fields=%d",
+                i + 1, i + len(batch), len(embeds), getattr(msg, "id", None),
+                sum(len(e.fields) for e in batch),
+            )
+        return True
+    except Exception as e:
+        # A formatting/API hiccup must never leave the user with NO answer —
+        # signal the caller to fall back to plain text.
+        log.warning("DELIVER embedded failed (%s) — falling back to plain text", e)
+        return False
