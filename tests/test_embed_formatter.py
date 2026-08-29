@@ -427,6 +427,60 @@ class TestMultiEmbed:
         for sp in ("Cervan", "Jerbeen", "Hedge", "Vulpin", "Mapach"):
             assert sp in humble_val, f"{sp} missing from humblefolk field"
 
+    # The 01:05 reply used a bold label WITH a trailing parenthetical
+    # annotation — the whole line is not bold-only, so the earlier fix did not
+    # catch it.  Both labels collapsed into the description and the two lists
+    # became anonymous fields (the "wrong order" / mismatched headline bug).
+    ANNOTATED_SPECIES_REPLY = (
+        "MASTER, here are the two major folk groups in Humblewood and their "
+        "respective species:\n\n"
+        "**Birdfolk** (Avian features, live in settlements called perches)\n"
+        "*   **Corvum**\n"
+        "*   **Gallus**\n"
+        "*   **Luma**\n"
+        "*   **Raptor**\n"
+        "*   **Strig**\n\n"
+        "**Humblefolk** (Furred forms, live close to the forest floor; no "
+        "shared languages/history like Birdfolk)\n"
+        "*   **Cervan**\n"
+        "*   **Jerbeen**\n"
+        "*   **Hedge**\n"
+        "*   **Vulpin**\n"
+        "*   **Mapach**"
+    )
+
+    def test_annotated_bold_labels_stay_with_their_lists(self):
+        """A bold label followed by a parenthetical annotation must still be a
+        section heading so its list is attached to it — not dumped into the
+        description while the list becomes an anonymous field."""
+        embeds = build_embeds_for_channel(self.ANNOTATED_SPECIES_REPLY, title_override="System")
+        assert embeds, "no embed produced"
+        for e in embeds:
+            _assert_within_limits(e)
+        all_names = [f.name for e in embeds for f in e.fields]
+        assert any(n.startswith("Birdfolk") for n in all_names), all_names
+        assert any(n.startswith("Humblefolk") for n in all_names), all_names
+        # The annotation is preserved in the heading, not dropped.
+        bird_name = next(n for n in all_names if n.startswith("Birdfolk"))
+        assert "Avian features" in bird_name, bird_name
+        desc = " ".join(e.description or "" for e in embeds)
+        assert "Birdfolk" not in desc
+        assert "Humblefolk" not in desc
+        # Each list sits under its own labelled field.
+        fields = [f for e in embeds for f in e.fields]
+        bird_val = next(f.value for f in fields if f.name.startswith("Birdfolk"))
+        humble_val = next(f.value for f in fields if f.name.startswith("Humblefolk"))
+        for sp in ("Corvum", "Gallus", "Luma", "Raptor", "Strig"):
+            assert sp in bird_val, f"{sp} missing from birdfolk field"
+        for sp in ("Cervan", "Jerbeen", "Hedge", "Vulpin", "Mapach"):
+            assert sp in humble_val, f"{sp} missing from humblefolk field"
+
+    def test_bold_with_prose_after_stays_paragraph(self):
+        """A bold label followed by ordinary prose (no parens) is NOT a heading,
+        so we don't over-capture real sentences as section dividers."""
+        blocks = _extract_blocks("**Note:** see the rules below for details.")
+        assert [k for k, _ in blocks] == ["para"]
+
     def test_armor_table_reply_renders_cleanly(self):
         """Regression: the real armor-price reply used to produce an
         unterminated fence (piece 1) and a header-less misaligned block

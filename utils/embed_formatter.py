@@ -70,10 +70,11 @@ FALLBACK_COLOR: int = 0x5865F2  # Discord blurple, used when parsing degrades
 _H1_RE = re.compile(r"^#\s+(.+?)\s*#*\s*$")
 _H2_RE = re.compile(r"^##\s+(.+?)\s*#*\s*$")
 _H3_RE = re.compile(r"^#{3,}\s+(.+?)\s*#*\s*$")
-# A line that is *entirely* one bold segment (``**Label**``) — LLMs use these
-# as sub-headings.  Only whole-line matches count; ``He is **strong** today``
-# stays a normal paragraph.
-_BOLD_HEADING_RE = re.compile(r"^\*\*(.+?)\*\*$")
+# A line that is one bold segment optionally followed by a parenthetical
+# annotation (``**Birdfolk** (Avian features)``).  LLMs use these as
+# sub-headings.  Only whole-line matches count; ``He is **strong** today``
+# and ``**Note:** see below`` (trailing prose, no parens) stay paragraphs.
+_BOLD_HEADING_RE = re.compile(r"^\*\*(.+?)\*\*(?P<ann>(?:\s*\([^()]*\))*)\s*$")
 _FENCE_OPEN_RE = re.compile(r"^```(\w*)\s*$")
 _BULLET_RE = re.compile(r"^\s*[-*+]\s+")
 _NUMBERED_RE = re.compile(r"^\s*\d+[.)]\s+")
@@ -409,13 +410,18 @@ def _extract_blocks(text: str) -> list[tuple[str, object]]:
             i += 1
             continue
 
-        # ── Bold-only line → section heading (same treatment as H2) ──────
+        # ── Bold label (optionally + parenthetical) → section heading ──────
         # Without this, ``**Birdfolk Species**`` would be swallowed into the
         # description while its list became a separate unnamed field — the
-        # label and its content ended up in different places.
+        # label and its content ended up in different places.  A trailing
+        # parenthetical annotation (``**Birdfolk** (Avian features)``) is kept
+        # as part of the heading so the label stays descriptive.
         m = _BOLD_HEADING_RE.match(stripped)
         if m:
-            blocks.append(("h2", m.group(1).strip()))
+            label = m.group(1).strip().replace("**", "").strip()
+            ann = (m.group("ann") or "").strip()
+            heading = f"{label} {ann}".strip() if ann else label
+            blocks.append(("h2", heading))
             i += 1
             continue
 
