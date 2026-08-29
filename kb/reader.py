@@ -293,10 +293,32 @@ def get_relevant_chunks(
         # for other relevant documents. Always use targeted line-windows instead.
         
         # Step 4: Build windows around each anchor and merge overlapping ones.
+        # Windows are clamped to section boundaries (markdown headers): a
+        # window must never bleed into the previous or next section.  Without
+        # this, an 80-line window on the last table of one class section would
+        # pull in the *next* class's spell tables and the model would mix them
+        # together (e.g. inventing spell slots for a non-spellcasting Rogue).
+        def _section_top(idx: int) -> int:
+            """Index of the nearest header line at or above *idx*."""
+            for j in range(idx, -1, -1):
+                if all_lines[j].lstrip().startswith("#"):
+                    return j
+            return 0
+
+        def _section_bottom(idx: int) -> int:
+            """Index of the line just before the nearest header below *idx*."""
+            for j in range(idx + 1, len(all_lines)):
+                if all_lines[j].lstrip().startswith("#"):
+                    return j - 1
+            return len(all_lines) - 1
+
         matched_windows: list[tuple[int, int]] = []
         for line_idx in sorted(final_anchors):
             start = max(0, line_idx - window_lines)
             end = min(len(all_lines) - 1, line_idx + window_lines)
+            # Clamp to the section containing the anchor.
+            start = max(start, _section_top(line_idx))
+            end = min(end, _section_bottom(line_idx))
             if matched_windows and start <= matched_windows[-1][1] + 1:
                 # Merge with previous window
                 new_end = max(matched_windows[-1][1], end)
