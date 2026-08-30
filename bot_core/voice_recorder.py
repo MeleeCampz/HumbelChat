@@ -64,6 +64,7 @@ log = logging.getLogger("bot.voice_recorder")
 SAMPLE_RATE = 48_000          # Discord voice is always 48 kHz
 CHANNELS = 1                  # we record mono (one file per speaker)
 SAMPLE_WIDTH = 2              # 16-bit PCM
+FRAME_SAMPLES = SAMPLE_RATE // 50   # one nominal voice frame == 20 ms of audio
 FRAME_MS = 20                 # one Opus frame == 20 ms at 48 kHz
 BYTES_PER_FRAME = SAMPLE_RATE * CHANNELS * SAMPLE_WIDTH * FRAME_MS // 1000
 
@@ -191,9 +192,10 @@ class VoiceRecorder:
             for sp in self._speakers.values():
                 if not sp.frames:
                     continue
-                first_ts, _ = sp.frames[0]
-                last_ts, last_pcm = sp.frames[-1]
-                end_ts = last_ts + len(last_pcm) / (SAMPLE_RATE * CHANNELS * SAMPLE_WIDTH)
+                first_ts = sp.frames[0][0]
+                # Nominal duration (frames x 20 ms), not wall-clock span, so
+                # network jitter doesn't inflate the file length.
+                end_ts = first_ts + len(sp.frames) * FRAME_SAMPLES / SAMPLE_RATE
                 max_end = max(max_end, end_ts)
 
         total_duration = max(0.0, max_end - self._started_at)
@@ -204,14 +206,14 @@ class VoiceRecorder:
                 if not sp.frames:
                     continue
                 wav_path = self.out_dir / _wav_filename(user_id, sp.display_name)
-                _write_timeline_wav(
+                gap_frames, overlap_frames = _write_timeline_wav(
                     path=wav_path,
                     frames=sp.frames,
                     origin=self._started_at,
                     total_samples=total_samples,
                 )
-                first_ts, _ = sp.frames[0]
-                last_ts, last_pcm = sp.frames[-1]
+                first_ts = sp.frames[0][0]
+                last_end_ts = first_ts + len(sp.frames) * FRAME_SAMPLES / SAMPLE_RATE
                 speakers_out.append({
                     "user_id": user_id,
                     "display_name": sp.display_name,
@@ -219,14 +221,13 @@ class VoiceRecorder:
                     "wav_file": wav_path.name,
                     "wav_path": str(wav_path),
                     "first_speech_offset_s": round(first_ts - self._started_at, 3),
-                    "last_speech_offset_s": round(
-                        (last_ts + len(last_pcm) / (SAMPLE_RATE * CHANNELS * SAMPLE_WIDTH))
-                        - self._started_at, 3
-                    ),
+                    "last_speech_offset_s": round(last_end_ts - self._started_at, 3),
                     "spoken_duration_s": round(sp.duration_s, 3),
                     "frames_captured": len(sp.frames),
                     "decode_failures": sp.decode_failures,
                     "decrypt_failures": sp.decrypt_failures,
+                    "jitter_gap_frames": gap_frames,
+                    "jitter_overlap_frames": overlap_frames,
                 })
 
         manifest = {
@@ -798,20 +799,41 @@ def _write_timeline_wav(
     frames: list[tuple[float, bytes]],
     origin: float,
     total_samples: int,
-) -> None:
-    """Write a speaker's frames onto a shared timeline (silence in the gaps).
+) -> tuple[int, int]:
+    """Write a speaker's frames onto the shared timeline.
 
-    Each frame is placed at ``frame_ts - origin`` seconds so that all speakers'
-    WAVs share the same time base and can be interleaved for reconstruction.
+    Frames are placed on a *nominal* grid: the first frame is anchored at its
+    wall-clock offset from ``origin``, and every subsequent frame starts
+    exactly one nominal frame (``FRAME_SAMPLES`` = 20 ms) after the previous
+    one. Placing by raw arrival time would corrupt the audio because voice
+    packets arrive with network jitter — intervals anywhere from ~15 ms to
+    ~40 ms for frames that each hold a fixed 20 ms of audio: arrivals >20 ms
+    apart punch silence holes in the middle of speech, and bursts <20 ms apart
+    make one frame overwrite part of the previous one.
+
+    All speakers share the same time base (``origin``), so their WAVs can be
+    interleaved for reconstruction. Returns ``(gap_frames, overlap_frames)`` —
+    how often consecutive arrivals deviated more than ±50% from the nominal
+    20 ms interval — for manifest diagnostics.
     """
     samples = bytearray(total_samples * SAMPLE_WIDTH)  # zero-filled silence
+    cursor = int(max(0.0, frames[0][0] - origin) * SAMPLE_RATE) if frames else 0
+    gap_frames = overlap_frames = 0
+    prev_arr: Optional[int] = None
     for ts, pcm in frames:
-        offset_s = max(0.0, ts - origin)
-        sample_idx = int(offset_s * SAMPLE_RATE)
-        byte_idx = sample_idx * SAMPLE_WIDTH
+        arr = int(max(0.0, ts - origin) * SAMPLE_RATE)
+        if prev_arr is not None:
+            delta = arr - prev_arr
+            if delta > FRAME_SAMPLES + FRAME_SAMPLES // 2:
+                gap_frames += 1      # arrival >30 ms late -> jitter hole
+            elif delta < FRAME_SAMPLES - FRAME_SAMPLES // 2:
+                overlap_frames += 1  # arrival <10 ms early -> burst
+        prev_arr = arr
+        byte_idx = cursor * SAMPLE_WIDTH
         end_byte = min(len(samples), byte_idx + len(pcm))
         if byte_idx < len(samples):
             samples[byte_idx:end_byte] = pcm[:end_byte - byte_idx]
+        cursor += FRAME_SAMPLES
 
     path.parent.mkdir(parents=True, exist_ok=True)
     with wave.open(str(path), "wb") as wf:
@@ -819,3 +841,4 @@ def _write_timeline_wav(
         wf.setsampwidth(SAMPLE_WIDTH)
         wf.setframerate(SAMPLE_RATE)
         wf.writeframes(bytes(samples))
+    return gap_frames, overlap_frames

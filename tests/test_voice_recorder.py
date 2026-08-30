@@ -32,7 +32,9 @@ from bot_core.voice_recorder import (
     _decode_opus,
     _downmix_to_mono,
     _extract_passthrough_opus,
+    _write_timeline_wav,
     _wav_filename,
+    FRAME_SAMPLES,
     _wire_voice_client,
     attach_to_bot,
     recorder_voice_cls,
@@ -398,3 +400,55 @@ class TestWavFilename:
     def test_falls_back_to_user_id_when_blank(self):
         name = _wav_filename(555, "")
         assert name.startswith("user-555") and name.endswith("_555.wav")
+
+
+# ── Timeline WAV placement (jitter fix) ──────────────────────────────────────
+class TestWriteTimelineWav:
+    def test_frames_laid_out_on_nominal_grid(self, tmp_path):
+        """Consecutive frames must be exactly 20 ms apart regardless of the
+        jittery wall-clock arrival times they were tagged with."""
+        origin = 1000.0
+        # arrivals jitter by +/-8 ms around the nominal 20 ms interval
+        ts = origin + 2.5
+        frames = []
+        for i in range(10):
+            frames.append((ts, b"\x01\x02" * (FRAME_SAMPLES // 2)))
+            ts += 0.02 + (0.008 if i % 2 else -0.008)
+        total = int((frames[0][0] - origin) * SAMPLE_RATE) + len(frames) * FRAME_SAMPLES
+        out = tmp_path / "s.wav"
+        gaps, overlaps = _write_timeline_wav(path=out, frames=frames, origin=origin, total_samples=total)
+        import wave, struct as st
+        w = wave.open(str(out))
+        s = list(st.unpack(f"<{w.getnframes()}h", w.readframes(w.getnframes())))
+        first = int((frames[0][0] - origin) * SAMPLE_RATE)
+        # every frame boundary must contain a non-silence sample exactly on grid
+        for i in range(10):
+            assert s[first + i * FRAME_SAMPLES] != 0, f"frame {i} not at nominal position"
+        # file length == anchor + N*20ms (no jitter inflation)
+        assert w.getnframes() == total
+
+    def test_no_overlap_when_arrivals_burst(self, tmp_path):
+        """Bursty arrivals (<20 ms apart) must not overwrite previous frames."""
+        origin = 1000.0
+        # little-endian 16-bit samples so each sample is unambiguous
+        frames = [(origin + 1.0, struct.pack(f"<{FRAME_SAMPLES}h", *[700] * FRAME_SAMPLES)),
+                  (origin + 1.0 + 0.005, struct.pack(f"<{FRAME_SAMPLES}h", *[900] * FRAME_SAMPLES))]
+        total = int((frames[0][0] - origin) * SAMPLE_RATE) + len(frames) * FRAME_SAMPLES
+        out = tmp_path / "s.wav"
+        _write_timeline_wav(path=out, frames=frames, origin=origin, total_samples=total)
+        import wave, struct as st
+        w = wave.open(str(out))
+        s = list(st.unpack(f"<{w.getnframes()}h", w.readframes(w.getnframes())))
+        first = int((frames[0][0] - origin) * SAMPLE_RATE)
+        # second frame starts exactly one nominal frame later, with its own data
+        assert s[first + FRAME_SAMPLES] == 900
+
+    def test_returns_jitter_diagnostics(self, tmp_path):
+        origin = 1000.0
+        frames = [(origin + 1.0, b"\x01\x02" * (FRAME_SAMPLES // 2))]
+        # one late arrival (>30 ms) and one early (<10 ms)
+        frames.append((frames[-1][0] + 0.040, b"\x03\x04" * (FRAME_SAMPLES // 2)))
+        frames.append((frames[-1][0] + 0.005, b"\x05\x06" * (FRAME_SAMPLES // 2)))
+        total = int((frames[0][0] - origin) * SAMPLE_RATE) + len(frames) * FRAME_SAMPLES
+        gaps, overlaps = _write_timeline_wav(path=tmp_path / "s.wav", frames=frames, origin=origin, total_samples=total)
+        assert gaps == 1 and overlaps == 1
