@@ -9,8 +9,8 @@ newer request's first message — so the user sees responses interleaved:
 
     [req 1 part 1]   [req 2 reply]   [req 1 part 2]     ← wrong order
 
-Every AI reply path (streaming and non-streaming, slash and prefix) must
-therefore hold this channel's slot for the *entire* duration of its request
+Every AI reply path (slash and prefix) must therefore hold this channel's
+slot for the *entire* duration of its request
 + delivery. Requests are served strictly FIFO: a new request never cuts in
 front of an in-flight one.
 
@@ -59,7 +59,7 @@ async def channel_slot(channel_id: int | None, *, name: str = "") -> AsyncIterat
 
     Usage::
 
-        async with channel_slot(channel_id, name="stream"):
+        async with channel_slot(channel_id, name="ai-command"):
             ... do the AI request AND deliver every message of the reply ...
     """
     started = time.monotonic()

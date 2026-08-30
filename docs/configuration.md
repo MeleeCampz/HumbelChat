@@ -66,14 +66,13 @@ A smaller baseline is usually better for Discord. Very large `max_tokens` values
 | `RAG_RETRIEVAL_METHOD` | Retrieval strategy: `vector` or `keyword` | `vector` |
 | `EMBEDDING_MODEL` | Embedding model name for vector search (OpenAI-compatible /embeddings endpoint) | `nomic-embed-text:latest` |
 
-## Streaming delivery
+## Embed formatting
 
 | Variable | Description | Default |
 |---|---|---|
-| `STREAM_MIN_FLUSH_CHARS` | Minimum new characters before the next streamed edit | `100` |
-| `STREAM_MAX_FLUSH_INTERVAL` | Max seconds between edits while a reply streams in | `1.5` |
+| `EMBED_FORMAT` | Render /ai replies as Beyond20-style Discord embeds; set to 0/false/no for classic plain text | `1` |
 
-Replies stream in via message edits; when a reply exceeds Discord's 2000-char
-message limit it splits into sections, each on its own message — and once a
-new section starts, the previous message is frozen (never edited again). See
-[Streaming delivery](./streaming.md) for details.
+Replies are requested non-streaming and delivered as embeds (title +
+description + inline fields); long structured replies become multiple embed
+messages, and tiny/unstructured replies fall back to plain text. See
+[Embeds](./embeds.md) for details.

@@ -1,5 +1,6 @@
 # Discord AI Bot — Code Review Findings
 *Review date: 2026-08-20 · Bot: HumbleChat · Repo: /home/user/discord-ai-bot*
+*Status updated: 2026-08-30 — the streaming delivery path (`ask_ai_stream`, `utils/stream_response.py`, `AI_STREAMING`) has been **removed**; /ai now always uses the non-streaming + Beyond20-style embed path. Mentions of streaming below are historical.*
 *Status updated: 2026-08-27 — items marked ✅ have been fixed and covered by tests (142 passing).*
 
 **Status legend:** ✅ fixed · ⏳ partially addressed · ❌ open
