@@ -11,6 +11,7 @@ All tests use a deterministic fake embedder (no network).
 """
 from __future__ import annotations
 
+import asyncio
 import math
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -231,6 +232,166 @@ class TestLowConfidenceRewrite:
         assert rw.expand.await_count == 0
         assert len(idx._embedder.encode_calls) == 1
         assert docs[0][0] == "b.md"
+
+
+# ─────────── same-model + global serialization (local backend) ────────────
+
+class TestSameModelRewrite:
+    @pytest.mark.asyncio
+    async def test_rewriter_uses_the_request_model(self, monkeypatch):
+        """The rewrite call must use the SAME model as the completion call —
+        a single-model local backend cannot serve two slugs."""
+        idx = build_index()
+        store = MagicMock()
+        store.get_index = MagicMock(return_value=idx)
+        monkeypatch.setattr("kb.retrievers._index_store", store)
+        monkeypatch.setattr("config.settings.RAG_REWRITE_MIN_SCORE", 0.9)
+
+        captured = {}
+
+        async def fake_expand(query):
+            return [query, "humblewood menu food ingredients"]
+
+        rw = MagicMock()
+        rw.expand = AsyncMock(side_effect=fake_expand)
+
+        def factory(**kwargs):
+            captured.update(kwargs)
+            return rw
+
+        with patch("kb.query_rewriter.create_query_rewriter", side_effect=factory):
+            await _retrieve_vector(
+                "xyzzy dungeon", "kb", top_n=4, rewrite_model="qwen3:8b"
+            )
+        assert captured["model_slug"] == "qwen3:8b"
+
+    @pytest.mark.asyncio
+    async def test_ask_ai_passes_its_effective_model_to_rag(self, monkeypatch):
+        """End-to-end: ask_ai must forward the validated model into retrieval."""
+        from bot_core import ai_client as ac
+
+        captured = {}
+
+        async def fake_retrieve(query, kb_path, **kwargs):
+            captured["rewrite_model"] = kwargs.get("rewrite_model")
+            return []  # no RAG docs — we only care about the kwarg
+
+        monkeypatch.setattr(ac, "_validate_model", AsyncMock(return_value="char-model:latest"))
+        # ask_ai imports retrieve_kb_documents locally from kb.retrievers —
+        # patch it at the source.
+        monkeypatch.setattr("kb.retrievers.retrieve_kb_documents", fake_retrieve)
+        monkeypatch.setattr(
+            ac, "KB_PATH", type("P", (), {"__fspath__": lambda self: "/tmp/kb"})()
+        )
+
+        resp = MagicMock()
+        resp.choices = [MagicMock(message=MagicMock(content="hi"))]
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(return_value=resp)
+        monkeypatch.setattr(ac, "_make_client", lambda: client)
+
+        await ac.ask_ai(
+            user_message="hello",
+            model_slug="char-model:latest",
+            guild_id=1,
+            channel_id=2,
+        )
+        assert captured["rewrite_model"] == "char-model:latest"
+
+
+class TestGlobalAISlot:
+    @pytest.fixture(autouse=True)
+    def _fresh_ai_lock(self):
+        """pytest-asyncio runs each test on a fresh event loop; the
+        process-wide lock singleton must be recreated per loop.  (In
+        production there is exactly one loop — the bot's main loop.)"""
+        from bot_core import ai_client as ac
+
+        ac._global_ai_lock = None
+        yield
+        ac._global_ai_lock = None
+
+    @pytest.mark.asyncio
+    async def test_two_requests_are_serialized(self):
+        """Concurrent ask_ai calls must never overlap inside the slot — a
+        single-model local backend cannot serve parallel LLM calls."""
+        from bot_core import ai_client as ac
+
+        in_flight = 0
+        peak = 0
+
+        async def fake_completion(**kwargs):
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            await asyncio.sleep(0.02)  # simulate backend latency
+            in_flight -= 1
+            resp = MagicMock()
+            resp.choices = [MagicMock(message=MagicMock(content="ok"))]
+            return resp
+
+        async def fake_retrieve(query, kb_path, **kwargs):
+            await asyncio.sleep(0.01)
+            return []
+
+        monkeypatched = [
+            patch.object(ac, "_validate_model", AsyncMock(return_value="m:latest")),
+            patch("kb.retrievers.retrieve_kb_documents", fake_retrieve),
+            patch.object(
+                ac,
+                "KB_PATH",
+                type("P", (), {"__fspath__": lambda self: "/tmp/kb"})(),
+            ),
+        ]
+        for p in monkeypatched:
+            p.start()
+        try:
+            client = MagicMock()
+            client.chat.completions.create = fake_completion
+            with patch.object(ac, "_make_client", lambda: client):
+                await asyncio.gather(
+                    ac.ask_ai("q1", "m:latest", 1, 10),
+                    ac.ask_ai("q2", "m:latest", 1, 20),
+                    ac.ask_ai("q3", "m:latest", 1, 30),
+                )
+        finally:
+            for p in monkeypatched:
+                p.stop()
+
+        assert peak == 1, f"{peak} AI requests ran concurrently"
+
+    @pytest.mark.asyncio
+    async def test_slot_is_fifo(self):
+        """Waiters must be served in arrival order (asyncio.Lock fairness).
+
+        Both waiters arrive (staggered) while the first holder still owns
+        the slot, so both queue up; only then is it released.
+        """
+        from bot_core import ai_client as ac
+
+        order = []
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def hold_first():
+            async with ac._ai_slot():
+                order.append("first")
+                started.set()
+                await release.wait()  # keep the slot while waiters queue up
+
+        async def waiter(n, delay):
+            await asyncio.sleep(delay)  # deterministic arrival order
+            async with ac._ai_slot():
+                order.append(n)
+
+        t1 = asyncio.create_task(hold_first())
+        await started.wait()          # t1 now owns the slot
+        t2 = asyncio.create_task(waiter("second", 0.01))
+        t3 = asyncio.create_task(waiter("third", 0.02))
+        await asyncio.sleep(0.03)     # both are now queued on the held lock
+        release.set()
+        await asyncio.gather(t1, t2, t3)
+        assert order == ["first", "second", "third"]
 
 
 if __name__ == "__main__":

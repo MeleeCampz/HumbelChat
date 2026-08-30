@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 import time
 
+import asyncio
+from contextlib import asynccontextmanager
 from openai import AsyncOpenAI
 
 from bot_core.history import ensure_history, get_history, set_history
@@ -199,6 +201,31 @@ def _resolve_request_params(char_obj) -> tuple[int, float]:
 #  Public API
 # ─────────────────────────────────────────────────────────────────────────
 
+# ── Global AI serialization (single local backend) ────────────────────────
+# The bot runs against one local inference backend that serves a single model.
+# Two concurrent /ai requests from *different* channels would issue parallel
+# LLM calls, which a single-model local server cannot serve within the time
+# budget.  Requests are already serialized per channel (utils.channel_queue)
+# for message ordering; this process-wide slot extends that so at most ONE AI
+# request (RAG retrieval + completion) is in flight at any time.  asyncio.Lock
+# wakes waiters FIFO, matching the per-channel queue's fairness.
+_global_ai_lock: asyncio.Lock | None = None
+
+
+def _get_global_ai_lock() -> asyncio.Lock:
+    global _global_ai_lock
+    if _global_ai_lock is None:
+        _global_ai_lock = asyncio.Lock()
+    return _global_ai_lock
+
+
+@asynccontextmanager
+async def _ai_slot():
+    """Hold the process-wide AI slot for the duration of one request."""
+    async with _get_global_ai_lock():
+        yield
+
+
 async def ask_ai(
     user_message: str,
     model_slug: str,
@@ -211,129 +238,131 @@ async def ask_ai(
 
     Returns (reply_text, extra_info_dict).
     """
-    # ── P2-1: Input length cap ──────────────────────────────────────
-    if len(user_message) > MAX_INPUT_CHARS:
-        raise ValueError(
-            f"Input too long: {len(user_message)} chars exceeds the "
-            f"{MAX_INPUT_CHARS}-character limit. Please shorten your message."
+    async with _ai_slot():
+        # ── P2-1: Input length cap ──────────────────────────────────────
+        if len(user_message) > MAX_INPUT_CHARS:
+            raise ValueError(
+                f"Input too long: {len(user_message)} chars exceeds the "
+                f"{MAX_INPUT_CHARS}-character limit. Please shorten your message."
+            )
+
+        # ── P2-2: Rate limiting ─────────────────────────────────────────
+        if user_id is not None:
+            check_rate_limit(str(user_id))
+
+        effective_model = (model_slug or "").strip() or DEFAULT_MODEL
+        if not effective_model:
+            raise ValueError(
+                f"No model configured for this request. Character model='{model_slug}' is empty "
+                f"and DEFAULT_MODEL is not set. Set MODEL_NAME in .env or add a model to the character."
+            )
+        log.debug("Using model '%s' for this request.", effective_model)
+
+        client = _make_client()
+        effective_model = await _validate_model(client, effective_model)
+
+        ensure_history(guild_id, channel_id)
+        history = get_history(guild_id, channel_id)
+        max_messages = CONTEXT_WINDOW
+
+        from config.characters import get_character, default_character
+        from bot_core.history import get_active_char_key
+
+        active_key = get_active_char_key(guild_id, channel_id)
+        char_obj = get_character(active_key) or default_character()
+        system_p = getattr(char_obj, "system_prompt", None) or DEFAULT_SYSTEM_PROMPT or "You are a helpful AI assistant."
+
+        # ── RAG context ────────────────────────────────────────────────
+        rag_context = ""
+        included_names: list[str] = []
+        from kb.retrievers import retrieve_kb_documents
+        kb_docs = await retrieve_kb_documents(
+            query=user_message,
+            kb_path=KB_PATH,
+            strategy=RAG_RETRIEVAL_METHOD,
+            top_n=RAG_MAX_DOCS,
+            window_lines=RAG_WINDOW_LINES,
+            rewrite_model=effective_model,  # same model as the completion call
         )
+        if kb_docs:
+            rag_context, included_names = _build_rag_context(kb_docs)
 
-    # ── P2-2: Rate limiting ─────────────────────────────────────────
-    if user_id is not None:
-        check_rate_limit(str(user_id))
+        # ── Build messages ─────────────────────────────────────────────
+        messages: list[dict] = []
+        # P2-3: system prompt is persona-only (no RAG)
+        if system_p:
+            messages.append({"role": "system", "content": system_p})
 
-    effective_model = (model_slug or "").strip() or DEFAULT_MODEL
-    if not effective_model:
-        raise ValueError(
-            f"No model configured for this request. Character model='{model_slug}' is empty "
-            f"and DEFAULT_MODEL is not set. Set MODEL_NAME in .env or add a model to the character."
+        recent_history = history[-(2 * max_messages):] if max_messages else []
+        messages.extend(recent_history)
+
+        # P2-3: RAG context injected into the user message, right before the question
+        user_content = f"**{username}:** {user_message}" if username else user_message
+        if rag_context:
+            user_content = (
+                f"[Relevant knowledge-base context]\n{rag_context}\n\n"
+                f"---\n\n"
+                f"{user_content}"
+            )
+        messages.append({"role": "user", "content": user_content})
+
+        _total_chars = sum(len(m.get("content", "")) for m in messages)
+        _approx_tokens = int(_total_chars / 4)
+        log.info(
+            "ask_ai → model=%s messages_in_prompt=%d KB_files=%d system_chars=%d rag_chars=%d history_msgs=%d total_chars=%.1fK estimated_tokens=%d",
+            effective_model, len(messages), len(included_names),
+            len(system_p), len(rag_context) if rag_context else 0,
+            len(recent_history), _total_chars / 1024, _approx_tokens,
         )
-    log.debug("Using model '%s' for this request.", effective_model)
+        if included_names:
+            for display_name in included_names:
+                log.debug("RAG doc included: %s", display_name)
 
-    client = _make_client()
-    effective_model = await _validate_model(client, effective_model)
+        timeout_sec = REQUEST_TIMEOUT
+        _request_max_tokens, _request_temp = _resolve_request_params(char_obj)
 
-    ensure_history(guild_id, channel_id)
-    history = get_history(guild_id, channel_id)
-    max_messages = CONTEXT_WINDOW
+        # §2.3: scale the timeout with prompt size — large RAG contexts take the
+        # backend much longer, and a flat 120 s cap caused frequent timeouts on
+        # 60 K+ token prompts. Add 0.5 s per 1000 chars of prompt (capped).
+        timeout_sec = _scaled_timeout(_total_chars)
 
-    from config.characters import get_character, default_character
-    from bot_core.history import get_active_char_key
+        try:
+            resp = await client.chat.completions.create(
+                model=effective_model,
+                messages=messages,
+                temperature=_request_temp,
+                max_tokens=_request_max_tokens,
+                stream=False,
+                timeout=timeout_sec,
+            )
+        except Exception as e:
+            # §3.7: structured error taxonomy — surface a user-friendly message
+            # instead of a raw SDK traceback.
+            from bot_core.errors import classify_ai_error
+            classified = classify_ai_error(e, model=effective_model, backend_url=INFER_URL)
+            log.error("AI request failed (%s): %s", getattr(classified, "category", "unknown"), e)
+            if isinstance(classified, RateLimitError):
+                # Classifier is pure (returns, never raises) — re-raise the
+                # classified error so handlers can show the retry-after message.
+                raise classified from e
+            if isinstance(classified, ValueError) or getattr(classified, "category", "") in ("timeout", "model_not_found", "backend_down"):
+                raise ValueError(classified.user_message) from e
+            raise
 
-    active_key = get_active_char_key(guild_id, channel_id)
-    char_obj = get_character(active_key) or default_character()
-    system_p = getattr(char_obj, "system_prompt", None) or DEFAULT_SYSTEM_PROMPT or "You are a helpful AI assistant."
+        reply_text = resp.choices[0].message.content or "(empty response)"
+        log.info("RAW_AI_RESPONSE_START\n%s\nRAW_AI_RESPONSE_END", reply_text)
 
-    # ── RAG context ────────────────────────────────────────────────
-    rag_context = ""
-    included_names: list[str] = []
-    from kb.retrievers import retrieve_kb_documents
-    kb_docs = await retrieve_kb_documents(
-        query=user_message,
-        kb_path=KB_PATH,
-        strategy=RAG_RETRIEVAL_METHOD,
-        top_n=RAG_MAX_DOCS,
-        window_lines=RAG_WINDOW_LINES,
-    )
-    if kb_docs:
-        rag_context, included_names = _build_rag_context(kb_docs)
+        # ── Update history ─────────────────────────────────────────────
+        # Store the *clean* user message, not `user_content` (which carries the
+        # RAG context blob + username decoration). Persisting the inflated form
+        # would re-inject stale KB context into every subsequent turn and bloat
+        # prompts by ~RAG_MAX_CHARS per past turn.
+        history.append({"role": "user", "content": user_message})
+        history.append({"role": "assistant", "content": reply_text})
+        max_entries = 2 * CONTEXT_WINDOW if CONTEXT_WINDOW else 50
+        if len(history) > max_entries:
+            set_history(guild_id, channel_id, history[-max_entries:])
 
-    # ── Build messages ─────────────────────────────────────────────
-    messages: list[dict] = []
-    # P2-3: system prompt is persona-only (no RAG)
-    if system_p:
-        messages.append({"role": "system", "content": system_p})
-
-    recent_history = history[-(2 * max_messages):] if max_messages else []
-    messages.extend(recent_history)
-
-    # P2-3: RAG context injected into the user message, right before the question
-    user_content = f"**{username}:** {user_message}" if username else user_message
-    if rag_context:
-        user_content = (
-            f"[Relevant knowledge-base context]\n{rag_context}\n\n"
-            f"---\n\n"
-            f"{user_content}"
-        )
-    messages.append({"role": "user", "content": user_content})
-
-    _total_chars = sum(len(m.get("content", "")) for m in messages)
-    _approx_tokens = int(_total_chars / 4)
-    log.info(
-        "ask_ai → model=%s messages_in_prompt=%d KB_files=%d system_chars=%d rag_chars=%d history_msgs=%d total_chars=%.1fK estimated_tokens=%d",
-        effective_model, len(messages), len(included_names),
-        len(system_p), len(rag_context) if rag_context else 0,
-        len(recent_history), _total_chars / 1024, _approx_tokens,
-    )
-    if included_names:
-        for display_name in included_names:
-            log.debug("RAG doc included: %s", display_name)
-
-    timeout_sec = REQUEST_TIMEOUT
-    _request_max_tokens, _request_temp = _resolve_request_params(char_obj)
-
-    # §2.3: scale the timeout with prompt size — large RAG contexts take the
-    # backend much longer, and a flat 120 s cap caused frequent timeouts on
-    # 60 K+ token prompts. Add 0.5 s per 1000 chars of prompt (capped).
-    timeout_sec = _scaled_timeout(_total_chars)
-
-    try:
-        resp = await client.chat.completions.create(
-            model=effective_model,
-            messages=messages,
-            temperature=_request_temp,
-            max_tokens=_request_max_tokens,
-            stream=False,
-            timeout=timeout_sec,
-        )
-    except Exception as e:
-        # §3.7: structured error taxonomy — surface a user-friendly message
-        # instead of a raw SDK traceback.
-        from bot_core.errors import classify_ai_error
-        classified = classify_ai_error(e, model=effective_model, backend_url=INFER_URL)
-        log.error("AI request failed (%s): %s", getattr(classified, "category", "unknown"), e)
-        if isinstance(classified, RateLimitError):
-            # Classifier is pure (returns, never raises) — re-raise the
-            # classified error so handlers can show the retry-after message.
-            raise classified from e
-        if isinstance(classified, ValueError) or getattr(classified, "category", "") in ("timeout", "model_not_found", "backend_down"):
-            raise ValueError(classified.user_message) from e
-        raise
-
-    reply_text = resp.choices[0].message.content or "(empty response)"
-    log.info("RAW_AI_RESPONSE_START\n%s\nRAW_AI_RESPONSE_END", reply_text)
-
-    # ── Update history ─────────────────────────────────────────────
-    # Store the *clean* user message, not `user_content` (which carries the
-    # RAG context blob + username decoration). Persisting the inflated form
-    # would re-inject stale KB context into every subsequent turn and bloat
-    # prompts by ~RAG_MAX_CHARS per past turn.
-    history.append({"role": "user", "content": user_message})
-    history.append({"role": "assistant", "content": reply_text})
-    max_entries = 2 * CONTEXT_WINDOW if CONTEXT_WINDOW else 50
-    if len(history) > max_entries:
-        set_history(guild_id, channel_id, history[-max_entries:])
-
-    approx_tokens = max(1, len(reply_text) // 4)  # §4.3: char-based estimate, not word count
-    return reply_text, {"model_used": effective_model, "tokens_approx": approx_tokens}
+        approx_tokens = max(1, len(reply_text) // 4)  # §4.3: char-based estimate, not word count
+        return reply_text, {"model_used": effective_model, "tokens_approx": approx_tokens}
 

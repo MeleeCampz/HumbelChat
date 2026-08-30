@@ -40,6 +40,17 @@ so you can tune `RAG_REWRITE_MIN_SCORE` from real traffic — raise it if the
 rewriter triggers too often, lower it if answers still miss on unusual
 phrasing. Set `RAG_QUERY_REWRITER=0` to disable the feature entirely.
 
+The rewrite always uses **the same model as the main completion call** for
+that request (a per-character model override is forwarded into the rewriter),
+so a single-model local backend never has to load a second set of weights.
+
+## Request serialization (single local backend)
+The bot assumes one inference backend serving one model. AI requests are
+therefore serialized **process-wide**: at most one request (RAG retrieval +
+completion) is in flight at any time, served FIFO. Requests from different
+channels queue up rather than running in parallel — a second `/ai` while the
+first is still generating simply waits its turn.
+
 ## Smart chunking
 
 The chunker uses a few strategies depending on file size and structure:
