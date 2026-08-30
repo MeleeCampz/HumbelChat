@@ -1,10 +1,7 @@
 """Tests for knowledge base commands: /upload_kb, /list_kb_docs, /reindex_kb."""
-import pathlib
-import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
-from kb.scorch import ChunkIndex
-from tests._shared import Interaction, Followup
+from tests._shared import Interaction
 
 
 class TestUploadKBCommand:
@@ -13,9 +10,6 @@ class TestUploadKBCommand:
     @pytest.mark.asyncio
     async def test_upload_kb_with_attachment(self, temp_kb_dir):
         """Test uploading a file via attachment."""
-        from kb.storage import validate_upload
-        from kb.scorch import ChunkIndex
-
         # Create a mock attachment
         attachment = MagicMock()
         attachment.filename = "test_document.txt"
@@ -28,11 +22,10 @@ class TestUploadKBCommand:
         # NOTE: patch kb.storage.KB_PATH (the name validate_upload actually
         # reads) — config.settings.KB_PATH is a separate binding.
         with patch("kb.storage._compute_sha256", return_value="abc123def456"):
-            with patch.object(ChunkIndex, "from_text", return_value=[]):
-                with patch("kb.storage.KB_PATH", temp_kb_dir):
-                    from commands.kb_commands import handle_upload_kb
+            with patch("kb.storage.KB_PATH", temp_kb_dir):
+                from commands.kb_commands import handle_upload_kb
 
-                    await handle_upload_kb(ix, attachment=attachment, kb_name=None, url=None)
+                await handle_upload_kb(ix, attachment=attachment, kb_name=None, url=None)
 
         assert any("test_document" in s or "uploaded_doc" in s for s in sent)
 
@@ -53,11 +46,10 @@ class TestUploadKBCommand:
         mock_client.get = AsyncMock(return_value=mock_resp)
 
         with patch("httpx.AsyncClient", return_value=mock_client):
-            with patch.object(ChunkIndex, "from_text", return_value=[]):
-                with patch("kb.storage.KB_PATH", temp_kb_dir):
-                    from commands.kb_commands import handle_upload_kb
+            with patch("kb.storage.KB_PATH", temp_kb_dir):
+                from commands.kb_commands import handle_upload_kb
 
-                    await handle_upload_kb(ix, attachment=None, url="https://example.com/file.txt", kb_name=None)
+                await handle_upload_kb(ix, attachment=None, url="https://example.com/file.txt", kb_name=None)
 
         assert any("file.txt" in s or "upload_kb" in s for s in sent)
 

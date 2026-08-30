@@ -12,20 +12,10 @@ from config.settings import KB_PATH
 
 log = logging.getLogger("bot.kb.storage")
 
-# Allowed content types (mirrors what the bot's KB reader supports)
-ALLOWED_MIMES: set[str] = {
-    "text/plain",
-    "text/markdown",
-    "text/csv",
-    "text/html",
-    "text/xml",
-    "application/rtf",
-}
-
 MAX_FILE_SIZE: int = 20 * 1024 * 1024  # 20 MB
 
-# File extensions accepted for KB storage (mirrors ALLOWED_MIMES). Anything
-# else is rejected before it touches disk.
+# File extensions accepted for KB storage (mirrors what the KB reader
+# indexes). Anything else is rejected before it touches disk.
 ALLOWED_EXTENSIONS: set[str] = {".txt", ".md", ".csv", ".html", ".xml", ".rtf"}
 
 

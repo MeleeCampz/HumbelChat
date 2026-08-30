@@ -1,22 +1,27 @@
+import tempfile
 import unittest
 import pathlib
 from kb.reader import read_kb_files, get_relevant_chunks
 
 class TestKBReader(unittest.TestCase):
     def test_subfolder_reading(self):
-        # The path is the root of our KB (from settings.py or default)
-        # We'll use 'kb' as it contains our test subfolder
-        kb_path = "kb"
-        files = read_kb_files(kb_path)
-        
-        # Check if any file from the subfolder was found
-        found = False
-        for display_name, content in files:
-            if "Subfolder content" in content:
-                found = True
-                break
-        
-        self.assertTrue(found, f"Failed to find file in subfolder. Found files: {files}")
+        # Hermetic: build a temp KB root with a nested subfolder instead of
+        # relying on a fixture directory inside the repo's kb/ package.
+        with tempfile.TemporaryDirectory() as tmp:
+            sub = pathlib.Path(tmp) / "nested" / "deeper"
+            sub.mkdir(parents=True)
+            (sub / "note.txt").write_text("Subfolder content", encoding="utf-8")
+
+            files = read_kb_files(tmp)
+
+            # Check if any file from the subfolder was found
+            found = False
+            for display_name, content in files:
+                if "Subfolder content" in content:
+                    found = True
+                    break
+
+            self.assertTrue(found, f"Failed to find file in subfolder. Found files: {files}")
 
     def test_window_clamped_to_section(self):
         """Regression: line windows used to bleed across markdown headers,

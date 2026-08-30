@@ -1,7 +1,7 @@
 """Knowledge base & RAG modules."""
 from .reader import read_kb_files, get_relevant_chunks
 from .storage import validate_upload, list_kb_files
-from .retrievers import retrieve_kb_documents, get_available_strategies, is_vector_available
+from .retrievers import retrieve_kb_documents
 from .chunker import Chunker, ChunkInfo
 from .vector_db import KBVectorIndex
 from .embedder import Embedder, EmbeddingError
@@ -15,8 +15,6 @@ __all__ = [
     "Embedder",
     "EmbeddingError",
     "get_relevant_chunks",
-    "get_available_strategies",
-    "is_vector_available",
     "list_kb_files",
     "read_kb_files",
     "retrieve_kb_documents",
