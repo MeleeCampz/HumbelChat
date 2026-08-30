@@ -2,17 +2,15 @@
 
 Each test pins down a specific bug that was found, reproduced, and fixed:
 
-1. stream_ai_response must NOT swallow exceptions from the chunk iterator
-   (a ``return`` inside ``finally`` used to discard them silently).
-2. Conversation history must store the *clean* user message — not the
+1. Conversation history must store the *clean* user message — not the
    RAG-inflated / username-decorated ``user_content``.
-3. validate_upload must reject path-traversal subfolders and unsupported
+2. validate_upload must reject path-traversal subfolders and unsupported
    file types.
-4. /upload_kb URL path: defers, caps download size, reports failures.
-5. /list_kb_docs must not crash on 0-byte files.
-6. /summarize <url> must actually fetch (httpx was never imported).
-7. /ocr and /translate must surface backend errors instead of dying silently.
-8. rearm_pending_reminders must cancel the previous task (no double-fire).
+3. /upload_kb URL path: defers, caps download size, reports failures.
+4. /list_kb_docs must not crash on 0-byte files.
+5. /summarize <url> must actually fetch (httpx was never imported).
+6. /ocr and /translate must surface backend errors instead of dying silently.
+7. rearm_pending_reminders must cancel the previous task (no double-fire).
 """
 from __future__ import annotations
 
@@ -23,44 +21,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
-# ─────────────────────────────── 1. Streaming errors ─────────────────────────
-
-class TestStreamErrorPropagation:
-
-    @pytest.mark.asyncio
-    async def test_exception_from_chunk_iterator_propagates(self):
-        """A ValueError raised mid-stream must reach the caller (bug #1)."""
-        from utils.stream_response import stream_ai_response
-
-        async def failing_chunks():
-            yield "partial text here, definitely long enough to flush"
-            raise ValueError("input too long")
-
-        ix = MagicMock()
-        ix.followup.send = AsyncMock(return_value=MagicMock())
-
-        with pytest.raises(ValueError, match="input too long"):
-            await stream_ai_response(ix, failing_chunks())
-
-        # Partial text was still flushed before the error surfaced.
-        assert ix.followup.send.called
-
-    @pytest.mark.asyncio
-    async def test_successful_stream_returns_full_text(self):
-        from utils.stream_response import stream_ai_response
-
-        async def chunks():
-            yield "hello "
-            yield "world"
-
-        ix = MagicMock()
-        ix.followup.send = AsyncMock(return_value=MagicMock())
-
-        result = await stream_ai_response(ix, chunks())
-        assert result == "hello world"
-
-
-# ─────────────────────── 2. History not polluted by RAG ──────────────────────
+# ─────────────────────── 1. History not polluted by RAG ──────────────────────
 
 class TestHistoryCleanliness:
 
@@ -101,56 +62,7 @@ class TestHistoryCleanliness:
             assert marker not in m["content"], "RAG context leaked into history"
             assert "Alice" not in m["content"], "username decoration leaked into history"
 
-    @pytest.mark.asyncio
-    async def test_ask_ai_stream_stores_clean_user_message(self):
-        from bot_core import ai_client
-        from bot_core.history import get_history
-
-        g, c = 333, 444
-        marker = "UNIQUE_KB_MARKER_STREAM"
-
-        stream_chunk = MagicMock()
-        stream_chunk.choices = [MagicMock(delta=MagicMock(content="streamed reply"))]
-        stream_chunk2 = MagicMock()
-        stream_chunk2.choices = []
-
-        client = MagicMock()
-        client.chat.completions.create = AsyncMock(
-            return_value=async_iter([stream_chunk, stream_chunk2])
-        )
-        client.models.list = AsyncMock(return_value=MagicMock(data=[]))
-
-        with patch.object(ai_client, "_make_client", return_value=client), \
-             patch("kb.retrievers.retrieve_kb_documents",
-                   new=AsyncMock(return_value=[("doc.md", marker)])):
-            collected = []
-            async for chunk in ai_client.ask_ai_stream(
-                user_message="streaming hello",
-                model_slug="test-model",
-                guild_id=g,
-                channel_id=c,
-                username="Bob",
-                user_id=None,
-            ):
-                collected.append(chunk)
-
-        assert "".join(collected) == "streamed reply"
-        history = get_history(g, c)
-        user_msgs = [m for m in history if m["role"] == "user"]
-        assert user_msgs[-1]["content"] == "streaming hello"
-        for m in history:
-            assert marker not in m["content"]
-
-
-def async_iter(items):
-    """Minimal async iterator helper for mocked streams."""
-    async def _gen():
-        for it in items:
-            yield it
-    return _gen()
-
-
-# ─────────────────────── 3. Upload validation hardening ──────────────────────
+# ─────────────────────── 2. Upload validation hardening ──────────────────────
 
 class TestUploadValidation:
 
@@ -192,7 +104,7 @@ class TestUploadValidation:
         assert summary["name"] == "notes.md"
 
 
-# ─────────────────────── 4. /upload_kb URL hardening ─────────────────────────
+# ─────────────────────── 3. /upload_kb URL hardening ─────────────────────────
 
 class TestUploadKBUrl:
 
@@ -251,7 +163,7 @@ class TestUploadKBUrl:
         assert any("Failed to download" in s for s in ix._sent)
 
 
-# ─────────────────────── 5. /list_kb_docs 0-byte files ───────────────────────
+# ─────────────────────── 4. /list_kb_docs 0-byte files ───────────────────────
 
 class TestListKBDocsZeroByte:
 
@@ -273,7 +185,7 @@ class TestListKBDocsZeroByte:
         assert "0.0 KB" in listing
 
 
-# ─────────────────────── 6. /summarize URL fetch ─────────────────────────────
+# ─────────────────────── 5. /summarize URL fetch ─────────────────────────────
 
 class TestSummarizeUrl:
 
@@ -303,7 +215,7 @@ class TestSummarizeUrl:
         assert any("SUMMARY_TEXT" in s for s in ix._sent)
 
 
-# ─────────────── 7. OCR / translate error surfacing ──────────────────────────
+# ─────────────── 6. OCR / translate error surfacing ──────────────────────────
 
 class TestUtilityErrorSurfacing:
 
@@ -340,7 +252,7 @@ class TestUtilityErrorSurfacing:
         assert any("Translation failed" in s for s in ix._sent)
 
 
-# ─────────────── 8. Reminder re-arm cancels old task ─────────────────────────
+# ─────────────── 7. Reminder re-arm cancels old task ─────────────────────────
 
 class TestReminderRearm:
 

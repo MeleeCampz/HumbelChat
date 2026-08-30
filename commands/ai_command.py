@@ -1,18 +1,13 @@
 """AI chat slash command handler.
 
-P2-4: Uses streaming responses when available so the user sees text
-appear progressively instead of waiting for the full reply.
-Set AI_STREAMING=0 in .env to disable and use the classic non-streaming path.
-
-Beyond20-style embeds: on the NON-STREAMING path, replies are rendered as
-Discord embeds (title + description + inline fields) when EMBED_FORMAT is
-enabled.  Streaming stays plain text by design — a frozen embed cannot grow
-via edits, and live typing is the better UX for streamed replies.
+Replies are requested non-streaming and delivered as Beyond20-style Discord
+embeds (title + description + inline fields) when EMBED_FORMAT is enabled.
+Plain prose still works; tiny/empty replies fall back to plain-text chunks so
+the user always gets an answer.
 """
 from __future__ import annotations
 
 import logging
-import os
 
 import config.settings as _settings
 from config.characters import get_character
@@ -21,14 +16,9 @@ from bot_core.history import get_active_char_key
 from utils.background_tasks import spawn_tracked_task
 from utils.channel_queue import channel_slot
 from utils.response_splitter import send_long_response, send_long_response_embedded
-from utils.stream_response import stream_ai_response
 from utils.typing_loop import typing_loop_task
 
 log = logging.getLogger("bot.commands.ai_command")
-
-def _streaming_enabled() -> bool:
-    """Check if streaming is enabled (read at call time for testability)."""
-    return os.getenv("AI_STREAMING", "1") not in ("0", "false", "no")
 
 
 async def handle_ai_command(
@@ -61,7 +51,7 @@ async def handle_ai_command(
     guild_id = interaction.guild_id or 0
     channel_id = interaction.channel_id
 
-    # 3. Start typing indicator (visible while waiting for the first chunk)
+    # 3. Start typing indicator (visible while waiting for the reply)
     typing_task = None
     if hasattr(interaction, "channel") and interaction.channel is not None:
         try:
@@ -92,42 +82,28 @@ async def handle_ai_command(
     # user's request. See utils/channel_queue.py.
     async with channel_slot(channel_id, name="ai-command"):
         try:
-            if _streaming_enabled():
-                # ── P2-4: Streaming path ────────────────────────────────
-                await stream_ai_response(
-                    interaction,
-                    ai_client.ask_ai_stream(
-                        user_message=message,
-                        model_slug=model_slug,
-                        guild_id=guild_id,
-                        channel_id=channel_id,
-                        username=username,
-                        user_id=user_id,
-                    ),
+            # ── Non-streaming request + embed delivery ──────────────────
+            reply_text, _extra = await ai_client.ask_ai(
+                user_message=message,
+                model_slug=model_slug,
+                guild_id=guild_id,
+                channel_id=channel_id,
+                username=username,
+                user_id=user_id,
+            )
+            if _settings.EMBED_FORMAT:
+                # Beyond20-style embed delivery.  Returns False (having sent
+                # nothing) when the reply is too small to benefit from an
+                # embed or a Discord API error occurs — in both cases fall
+                # back to the classic plain-text chunks so the user always
+                # gets an answer.
+                delivered = await send_long_response_embedded(
+                    interaction, reply_text, str(char_obj.display)
                 )
-            else:
-                # ── Non-streaming path ──────────────────────────────────
-                reply_text, _extra = await ai_client.ask_ai(
-                    user_message=message,
-                    model_slug=model_slug,
-                    guild_id=guild_id,
-                    channel_id=channel_id,
-                    username=username,
-                    user_id=user_id,
-                )
-                if _settings.EMBED_FORMAT:
-                    # Beyond20-style embed delivery.  Returns False (having
-                    # sent nothing) when the reply is too small to benefit
-                    # from an embed or a Discord API error occurs — in both
-                    # cases fall back to the classic plain-text chunks so the
-                    # user always gets an answer.
-                    delivered = await send_long_response_embedded(
-                        interaction, reply_text, str(char_obj.display)
-                    )
-                    if not delivered:
-                        await send_long_response(interaction, reply_text, str(char_obj.display))
-                else:
+                if not delivered:
                     await send_long_response(interaction, reply_text, str(char_obj.display))
+            else:
+                await send_long_response(interaction, reply_text, str(char_obj.display))
 
         except ValueError as e:
             # §3.7: classified errors (timeout / model-not-found / backend-down /

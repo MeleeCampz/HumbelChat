@@ -4,7 +4,6 @@ P2 additions:
   - Input length cap (MAX_INPUT_CHARS)
   - Per-user sliding-window rate limiting
   - RAG context injected into user message (not system prompt)
-  - Streaming responses (ask_ai_stream)
 """
 from __future__ import annotations
 
@@ -208,7 +207,7 @@ async def ask_ai(
     username: str = "",
     user_id: str | int | None = None,
 ) -> tuple[str, dict]:
-    """Non-streaming AI request with RAG, rate limiting, and input validation.
+    """AI request with RAG, rate limiting, and input validation.
 
     Returns (reply_text, extra_info_dict).
     """
@@ -337,140 +336,4 @@ async def ask_ai(
 
     approx_tokens = max(1, len(reply_text) // 4)  # §4.3: char-based estimate, not word count
     return reply_text, {"model_used": effective_model, "tokens_approx": approx_tokens}
-
-
-async def ask_ai_stream(
-    user_message: str,
-    model_slug: str,
-    guild_id: int,
-    channel_id: int,
-    username: str = "",
-    user_id: str | int | None = None,
-):
-    """Streaming AI request. Yields text chunks as they arrive.
-
-    Same validation, rate limiting, RAG, and history handling as ask_ai,
-    but uses ``stream=True`` and yields chunks one at a time.
-
-    Usage::
-
-        chunks: list[str] = []
-        async for chunk in ask_ai_stream(...):
-            chunks.append(chunk)
-        full_text = "".join(chunks)
-
-    After iteration completes, conversation history is updated.
-    """
-    # ── P2-1: Input length cap ──────────────────────────────────────
-    if len(user_message) > MAX_INPUT_CHARS:
-        raise ValueError(
-            f"Input too long: {len(user_message)} chars exceeds the "
-            f"{MAX_INPUT_CHARS}-character limit. Please shorten your message."
-        )
-
-    # ── P2-2: Rate limiting ─────────────────────────────────────────
-    if user_id is not None:
-        check_rate_limit(str(user_id))
-
-    effective_model = (model_slug or "").strip() or DEFAULT_MODEL
-    if not effective_model:
-        raise ValueError(
-            f"No model configured for this request. Character model='{model_slug}' is empty "
-            f"and DEFAULT_MODEL is not set. Set MODEL_NAME in .env or add a model to the character."
-        )
-
-    client = _make_client()
-    effective_model = await _validate_model(client, effective_model)
-
-    ensure_history(guild_id, channel_id)
-    history = get_history(guild_id, channel_id)
-    max_messages = CONTEXT_WINDOW
-
-    from config.characters import get_character, default_character
-    from bot_core.history import get_active_char_key
-
-    active_key = get_active_char_key(guild_id, channel_id)
-    char_obj = get_character(active_key) or default_character()
-    system_p = getattr(char_obj, "system_prompt", None) or DEFAULT_SYSTEM_PROMPT or "You are a helpful AI assistant."
-
-    # ── RAG context ────────────────────────────────────────────────
-    rag_context = ""
-    included_names: list[str] = []
-    from kb.retrievers import retrieve_kb_documents
-    kb_docs = await retrieve_kb_documents(
-        query=user_message,
-        kb_path=KB_PATH,
-        strategy=RAG_RETRIEVAL_METHOD,
-        top_n=RAG_MAX_DOCS,
-        window_lines=RAG_WINDOW_LINES,
-    )
-    if kb_docs:
-        rag_context, included_names = _build_rag_context(kb_docs)
-
-    # ── Build messages ─────────────────────────────────────────────
-    messages: list[dict] = []
-    if system_p:
-        messages.append({"role": "system", "content": system_p})
-
-    recent_history = history[-(2 * max_messages):] if max_messages else []
-    messages.extend(recent_history)
-
-    user_content = f"**{username}:** {user_message}" if username else user_message
-    if rag_context:
-        user_content = (
-            f"[Relevant knowledge-base context]\n{rag_context}\n\n"
-            f"---\n\n"
-            f"{user_content}"
-        )
-    messages.append({"role": "user", "content": user_content})
-
-    log.info(
-        "ask_ai_stream → model=%s channel=%s messages=%d rag_docs=%d total_chars=%.1fK",
-        effective_model, channel_id, len(messages), len(included_names),
-        sum(len(m.get("content", "")) for m in messages) / 1024,
-    )
-
-    _request_max_tokens, _request_temp = _resolve_request_params(char_obj)
-    # §2.3: apply the same prompt-size-aware timeout to the stream setup path.
-    _stream_total_chars = sum(len(m.get("content", "")) for m in messages)
-    _stream_timeout_sec = _scaled_timeout(_stream_total_chars)
-
-    # ── Stream ─────────────────────────────────────────────────────
-    try:
-        stream = await client.chat.completions.create(
-            model=effective_model,
-            messages=messages,
-            temperature=_request_temp,
-            max_tokens=_request_max_tokens,
-            stream=True,
-            timeout=_stream_timeout_sec,
-        )
-
-        full_text_parts: list[str] = []
-        async for chunk in stream:
-            delta = chunk.choices[0].delta.content if chunk.choices else None
-            if delta is not None:
-                full_text_parts.append(delta)
-                yield delta
-
-        reply_text = "".join(full_text_parts) or "(empty response)"
-        log.info("STREAM_AI_RESPONSE channel=%s len=%d chars", channel_id, len(reply_text))
-
-        # ── Update history after full stream ──────────────────────
-        # Clean message only — see the note in ask_ai() above.
-        history.append({"role": "user", "content": user_message})
-        history.append({"role": "assistant", "content": reply_text})
-        max_entries = 2 * CONTEXT_WINDOW if CONTEXT_WINDOW else 50
-        if len(history) > max_entries:
-            set_history(guild_id, channel_id, history[-max_entries:])
-
-    except Exception as e:
-        from bot_core.errors import classify_ai_error
-        classified = classify_ai_error(e, model=effective_model, backend_url=INFER_URL)
-        log.error("AI stream failed (%s): %s", getattr(classified, "category", "unknown"), e)
-        if isinstance(classified, RateLimitError):
-            raise classified from e
-        if getattr(classified, "category", "") in ("timeout", "model_not_found", "backend_down"):
-            raise ValueError(classified.user_message) from e
-        raise
 

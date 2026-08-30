@@ -22,7 +22,7 @@ Or use a startup script (the bot runs in a detached tmux session so it survives 
 ## Docs
 
 - [Configuration](./docs/configuration.md) — env vars, response-length/token defaults, and fallback behavior
-- [Streaming delivery](./docs/streaming.md) — how streamed replies grow via edits, and how long replies split into frozen sections
+- [Embeds](./docs/embeds.md) — Beyond20-style embed rendering for /ai replies
 - [Characters](./docs/characters.md) — `characters.json` format and per-character settings
 - [RAG / Knowledge Base](./docs/rag.md) — retrieval methods, smart chunking, supported file types
 - [Commands](./docs/commands.md) — slash command and prefix command reference

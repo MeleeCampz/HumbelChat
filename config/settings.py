@@ -78,7 +78,7 @@ BOT_PREFIX: str = os.getenv("BOT_PREFIX", "!ai")
 # §3.6: boolean flag instead of the old ``"clear" | None`` sentinel string.
 CHAT_HISTORY_RESET: bool = _history_reset_flag(os.getenv("CHAT_HISTORY_RESET"))
 
-# Beyond20-style embed rendering for /ai replies (non-streaming path only).
+# Beyond20-style embed rendering for /ai replies.
 # Structured replies (headings, tables, lists) become a discord.Embed with a
 # title, description and inline fields — the way the Beyond20 bot formats
 # rolls. Plain prose still works; tiny/empty replies fall back to text.

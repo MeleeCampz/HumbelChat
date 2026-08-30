@@ -1,7 +1,6 @@
 """Bot core — AI client + conversation history."""
 from .ai_client import (
     ask_ai,
-    ask_ai_stream,
     RateLimitError,
 )
 from .history import (
@@ -16,7 +15,6 @@ from .history import (
 
 __all__ = [
     "ask_ai",
-    "ask_ai_stream",
     "clear_history",
     "ensure_history",
     "get_active_char_key",
