@@ -114,6 +114,17 @@ RAG_RETRIEVAL_METHOD: str = os.getenv("RAG_RETRIEVAL_METHOD", "vector").lower()
 RAG_MAX_CHARS: int = _safe_int(os.getenv("RAG_MAX_CHARS"), 24000)
 RAG_WINDOW_LINES: int = _safe_int(os.getenv("RAG_WINDOW_LINES"), 80)
 
+# ── Low-confidence query rewriting (vector path only) ─────────────────────
+# When the top vector similarity score for a query is below RAG_REWRITE_MIN_SCORE,
+# the rewriter asks the LLM for up to RAG_QUERY_MAX_EXPANSIONS alternative phrasings,
+# embeds them in one batch, and merges the rankings (reciprocal rank fusion).
+# Confident queries pay nothing extra.  Set RAG_QUERY_REWRITER=0 to disable entirely.
+RAG_QUERY_REWRITER: bool = os.getenv("RAG_QUERY_REWRITER", "1") not in ("0", "false", "no")
+RAG_REWRITE_MIN_SCORE: float = float(os.getenv("RAG_REWRITE_MIN_SCORE", "0.35") or 0.35)
+RAG_QUERY_MAX_EXPANSIONS: int = _safe_int(os.getenv("RAG_QUERY_MAX_EXPANSIONS"), 3)
+# Wall-clock budget (seconds) for the LLM rewrite call itself.
+RAG_REWRITE_BUDGET_SECONDS: int = _safe_int(os.getenv("RAG_REWRITE_BUDGET_SECONDS"), 10)
+
 # ════════════════════════════════════
 #  INPUT VALIDATION
 # ════════════════════════════════════
