@@ -134,11 +134,15 @@ Expansions:
 
 # ── Module-level convenience ───────────────────────────────────────────
 
-def create_query_rewriter() -> QueryRewriter:
+def create_query_rewriter(model_slug: str = "") -> QueryRewriter:
     """Factory for a configured query rewriter instance.
 
     Reuses the bot's shared ``AsyncOpenAI`` client (connection reuse, no
     per-call construction) and reads the live settings so env overrides apply.
+
+    *model_slug* should be the SAME model as the main completion call — on a
+    single-model local backend any other slug would either 404 or evict the
+    loaded weights.  Empty = fall back to ``DEFAULT_MODEL``.
     """
     from config.settings import (
         DEFAULT_MODEL,
@@ -153,5 +157,5 @@ def create_query_rewriter() -> QueryRewriter:
         kb_domain="Humblewood fantasy worldbuilding",
         max_expansions=RAG_QUERY_MAX_EXPANSIONS,
         enabled=RAG_QUERY_REWRITER,
-        model_slug=DEFAULT_MODEL or "",
+        model_slug=model_slug or (DEFAULT_MODEL or ""),
     )

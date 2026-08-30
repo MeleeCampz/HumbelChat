@@ -213,6 +213,7 @@ async def _expand_low_confidence_query(
     idx: "KBVectorIndex",
     query: str,
     top_n: int,
+    rewrite_model: str = "",
 ) -> tuple[list[list[tuple[str, str, float]]], float]:
     """Generate expansion rankings for a low-confidence query.
 
@@ -235,7 +236,12 @@ async def _expand_low_confidence_query(
     try:
         from kb.query_rewriter import create_query_rewriter
 
-        rewriter = create_query_rewriter(max_expansions=RAG_QUERY_MAX_EXPANSIONS)
+        # Use the SAME model as the main completion call — on a single-model
+        # local backend a different slug would either fail or evict the loaded
+        # weights.  Empty string = rewriter falls back to DEFAULT_MODEL.
+        rewriter = create_query_rewriter(
+            max_expansions=RAG_QUERY_MAX_EXPANSIONS, model_slug=rewrite_model
+        )
         expanded = await asyncio.wait_for(
             rewriter.expand(query), timeout=RAG_REWRITE_BUDGET_SECONDS
         )
@@ -297,6 +303,7 @@ async def _retrieve_vector(
     kb_path: str | pathlib.Path,
     top_n: int,
     window_lines: int = 80,
+    rewrite_model: str = "",
 ) -> list[tuple[str, str]]:
     """Vector-based retrieval using the persist-backed index.
 
@@ -330,7 +337,9 @@ async def _retrieve_vector(
     from config.settings import RAG_REWRITE_MIN_SCORE
 
     if ranked[0][2] < RAG_REWRITE_MIN_SCORE:
-        expansion_rankings, elapsed = await _expand_low_confidence_query(idx, query, top_n)
+        expansion_rankings, elapsed = await _expand_low_confidence_query(
+            idx, query, top_n, rewrite_model=rewrite_model
+        )
         if expansion_rankings:
             merged = reciprocal_rank_fusion([ranked] + expansion_rankings)
             logger.info(
@@ -358,6 +367,7 @@ async def retrieve_kb_documents(
     strategy: str = DEFAULT_METHOD,
     top_n: int = 5,
     window_lines: int = 80,
+    rewrite_model: str = "",
 ) -> list[tuple[str, str]]:
     """Retrieve relevant KB documents for *query* using the selected strategy.
 
@@ -384,7 +394,10 @@ async def retrieve_kb_documents(
         return _retrieve_keyword(query, kb_path, top_n)
 
     if method == "vector":
-        return await _retrieve_vector(query, kb_path, top_n, window_lines=window_lines)
+        return await _retrieve_vector(
+            query, kb_path, top_n,
+            window_lines=window_lines, rewrite_model=rewrite_model,
+        )
 
     # Unknown strategy — fall back to keyword with a warning
     logger.warning(
