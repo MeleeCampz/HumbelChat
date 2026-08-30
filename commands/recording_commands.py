@@ -19,7 +19,12 @@ from datetime import datetime
 import discord
 
 from bot_core.channel_delivery import get_bot
-from bot_core.voice_recorder import VoiceRecorder, attach_to_bot
+from bot_core.voice_recorder import (
+    VoiceRecorder,
+    _wire_voice_client,
+    attach_to_bot,
+    recorder_voice_cls,
+)
 from config.settings import RECORDINGS_DIR
 
 log = logging.getLogger("bot.recording_commands")
@@ -41,26 +46,43 @@ def _user_voice_channel(interaction: discord.Interaction):
     return None
 
 
-def _bot_voice_client(bot: discord.Client, guild_id: int):
+def _guild_voice_client(bot: discord.Client, guild_id: int):
     """Return the bot's VoiceClient for this guild (or ``None``)."""
     try:
-        return bot.get_voice_client(guild_id)
+        guild = bot.get_guild(guild_id)
     except Exception:  # pragma: no cover - defensive
         return None
+    if guild is None:
+        return None
+    return getattr(guild, "voice_client", None)
 
 
 async def _ensure_bot_in_channel(bot: discord.Client, guild_id: int, channel) -> None:
-    """Join (or move) the bot into ``channel``. No-op if already there."""
-    vc = _bot_voice_client(bot, guild_id)
-    if vc is not None and getattr(vc, "channel", None) is not None:
-        if vc.channel.id == channel.id:
-            return  # already in the right channel
+    """Join (or move) the bot into ``channel``. No-op if already there.
+
+    New joins go through ``channel.connect(cls=recorder_voice_cls(bot))`` so
+    the recording voice client is instantiated *by discord.py itself* with the
+    op-5 hook and UDP listener installed before the handshake begins.
+    """
+    vc = _guild_voice_client(bot, guild_id)
+    if vc is not None:
+        if getattr(vc, "channel", None) is not None and vc.channel.id == channel.id:
+            # Already in the right channel. Make sure it's recording-wired —
+            # e.g. if the bot was already in voice for another reason.
+            if not getattr(vc, "_recorder_wired", False):
+                rec = getattr(bot, "_voice_recorder", None)
+                if rec is not None:
+                    try:
+                        _wire_voice_client(vc, rec)
+                    except Exception as e:  # pragma: no cover - defensive
+                        log.warning("Could not retrofit recorder onto existing voice client: %s", e)
+            return
         log.info("Moving bot from #%s to #%s for recording", vc.channel.name, channel.name)
         await vc.move_to(channel)
         return
 
     log.info("Joining voice channel #%s (id=%s) for recording", channel.name, channel.id)
-    await bot.join_voice_channel(channel)
+    await channel.connect(cls=recorder_voice_cls(bot), timeout=30.0)
 
 
 def _new_recording_dir() -> pathlib.Path:
@@ -164,7 +186,7 @@ async def handle_stop_recording(
 
     # Optionally leave the voice channel so we don't keep occupying a slot.
     if leave_channel and interaction.guild_id is not None:
-        vc = _bot_voice_client(bot, interaction.guild_id)
+        vc = _guild_voice_client(bot, interaction.guild_id)
         if vc is not None:
             try:
                 await vc.disconnect()
