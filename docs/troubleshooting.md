@@ -89,3 +89,14 @@ Likely cause: per-channel Role Permissions override is denying View Channel or S
 Fix:
 - Right-click the affected channel → Edit Channel → Role Permissions → ensure the bot's role has **View Channel** and **Send Messages** allowed
 - See [Permissions](./permissions.md) for the full permission matrix and symptom table
+
+## Voice recording: no WAV files / bad audio quality
+
+The `manifest.json` in each recording directory plus `logs/bot.log` are designed to diagnose any bad recording without re-running it — key fields: `stage_failures`, `first_stage_error`, `unknown_ssrc_packets_dropped`, `unmapped_ssrcs_seen`, and per-speaker `decrypt_failures` / `decode_failures`.
+
+- **No WAVs at all** → SSRC→user mapping never resolved (`unmapped_ssrcs_seen` non-empty); check the `voice ws op-5` lines in `bot.log`
+- **Gappy/rough audio mid-word** → should not happen (frames are written on a nominal 20 ms grid); if it does, see [Voice Recording — Troubleshooting](./voice-recording.md)
+- **Constant silence for one speaker** → DAVE/MLS decryption failing for that user (`first_stage_error.dave` set)
+- **Occasional dropouts/clicks** → packet loss or unparseable passthrough frames; each costs one 20 ms of silence
+
+Full pipeline explanation and manifest schema: [Voice Recording](./voice-recording.md)

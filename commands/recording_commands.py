@@ -142,7 +142,7 @@ async def handle_start_recording(interaction: discord.Interaction) -> None:
         await interaction.followup.send(f"⚠️ Failed to start recording: {e}", ephemeral=True)
         return
 
-    snap = recorder.snapshot()
+    log.info("Recording started: %s", recorder.snapshot())
     await interaction.followup.send(
         f"🎙️ **Recording started** in #{getattr(channel, 'name', '?')}.\n"
         f"Each participant's audio is captured separately with timestamps.\n"
