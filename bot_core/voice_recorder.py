@@ -122,6 +122,10 @@ class VoiceRecorder:
         # and replay them once _note_speaker() learns their SSRC.
         self._pending_packets: dict[int, list[tuple[bytes, str, bytes, Any]]] = {}
         self._pending_flushed = 0
+        # Pipeline stage diagnostics (transport / dave / decode).
+        self._stage_failures: dict[str, int] = {"transport": 0, "dave": 0, "decode": 0}
+        self._first_stage_error: dict[str, str] = {}
+        self._dave_state: dict[str, Any] = {}
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     @property
@@ -154,6 +158,9 @@ class VoiceRecorder:
             self._hexdumped_ssrcs.clear()
             self._pending_packets.clear()
             self._pending_flushed = 0
+            self._stage_failures = {"transport": 0, "dave": 0, "decode": 0}
+            self._first_stage_error = {}
+            self._dave_state = {}
         log.info(
             "Voice recording started (guild=%s channel=%s#%s)",
             guild_id, channel_id, channel_name,
@@ -229,6 +236,9 @@ class VoiceRecorder:
             "ssrc_to_user_at_stop": {str(k): v for k, v in self._ssrc_to_user.items()},
             "ssrc_packet_counts": {str(k): v for k, v in sorted(self._ssrc_packet_counts.items())},
             "pending_packets_replayed": self._pending_flushed,
+            "stage_failures": dict(self._stage_failures),
+            "first_stage_error": dict(self._first_stage_error),
+            "dave_state": self._dave_state,
             "speakers": speakers_out,
         }
 
@@ -328,25 +338,66 @@ class VoiceRecorder:
         resolve_name: Callable[[int], str],
     ) -> None:
         """Steps 2-4 of the capture pipeline for a packet whose SSRC is mapped."""
+        # Record the negotiated mode + DAVE session state (diagnostics).
+        with self._lock:
+            if not self._dave_state:
+                try:
+                    ready = bool(getattr(dave_session, "ready", False))
+                except Exception:
+                    ready = None
+                self._dave_state = {
+                    "mode": mode,
+                    "dave_present": dave_session is not None,
+                    "dave_ready": ready,
+                }
+
         # 2) Transport-layer decryption -> E2EE-encrypted Opus frame.
         try:
             inner = _decrypt_transport(raw, mode, secret_key)
         except Exception as e:  # bad auth tag / unsupported mode
             self._bump_failure(user_id, "decrypt")
-            log.debug("Transport decrypt failed (ssrc=%s user=%s): %s", ssrc, user_id, e)
+            self._record_stage_error("transport", f"{type(e).__name__}: {e}", raw[:24].hex())
             return
 
         # 3) E2EE (DAVE) layer -> raw Opus frame.
-        opus_frame = _decrypt_dave(inner, user_id, dave_session)
+        #    The transport-decrypted payload may carry a short DAVE framing
+        #    prefix that davey expects stripped. Pycord's proven live pipeline
+        #    strips the first 8 bytes for the xchacha rtpsize mode before calling
+        #    dave.decrypt. We try the full payload first, then the 8-byte-stripped
+        #    variant (xchacha rtpsize only), so we work regardless of which framing
+        #    Discord used this run; the winning variant + any real error text are
+        #    recorded for diagnosis.
+        # For the xchacha rtpsize mode pycord's proven pipeline always strips
+        # the first 8 bytes before dave.decrypt, so try that variant first; keep
+        # the full payload as a fallback for any other framing.
+        candidates: list[tuple[str, bytes]] = []
+        if mode == "aead_xchacha20_poly1305_rtpsize" and len(inner) > 8:
+            candidates.append(("strip8", inner[8:]))
+        candidates.append(("full", inner))
+
+        opus_frame: Optional[bytes] = None
+        winning = ""
+        dave_errors: list[str] = []
+        for label, cand in candidates:
+            err_box: list[str] = []
+            frame = _decrypt_dave(cand, user_id, dave_session, on_error=err_box.append)
+            if frame is not None:
+                opus_frame = frame
+                winning = label
+                break
+            dave_errors.append(f"{label}: {err_box[0] if err_box else 'returned None'}")
         if opus_frame is None:
             self._bump_failure(user_id, "decrypt")
-            log.debug("DAVE decrypt failed (user=%s)", user_id)
+            self._record_stage_error("dave", "; ".join(dave_errors), inner[:24].hex())
             return
+        if winning != "full":
+            log.info("DAVE decrypt succeeded with %s framing (ssrc=%s)", winning, ssrc)
 
         # 4) Opus -> PCM.
         pcm = _decode_opus(opus_frame, self._decoder_for(user_id))
         if pcm is None:
             self._bump_failure(user_id, "decode")
+            self._record_stage_error("decode", "opus decode returned None / raised", opus_frame[:24].hex())
             return
 
         now = time.time()
@@ -363,6 +414,17 @@ class VoiceRecorder:
             sp.frames.append((now, pcm))
             sp.total_pcm_bytes += len(pcm)
             self._total_packets += 1
+
+    def _record_stage_error(self, stage: str, detail: str, hexdump: str) -> None:
+        """Count a pipeline-stage failure and log the first one loudly."""
+        with self._lock:
+            self._stage_failures[stage] = self._stage_failures.get(stage, 0) + 1
+            if stage not in self._first_stage_error:
+                self._first_stage_error[stage] = detail
+                log.warning(
+                    "PIPELINE %s FAILED (first): %s | input_head=%s",
+                    stage, detail, hexdump,
+                )
 
     def _ensure_speaker(self, user_id: int) -> None:
         with self._lock:
@@ -601,12 +663,18 @@ def _decrypt_transport(raw: bytes, mode: str, secret_key: bytes) -> bytes:
     raise ValueError(f"unsupported transport encryption mode: {mode!r}")
 
 
-def _decrypt_dave(inner: bytes, user_id: int, dave_session: Any) -> Optional[bytes]:
+def _decrypt_dave(
+    inner: bytes,
+    user_id: int,
+    dave_session: Any,
+    on_error: Optional[Callable[[str], None]] = None,
+) -> Optional[bytes]:
     """Strip the DAVE E2EE layer from a transport-decrypted Opus frame.
 
     Returns the raw Opus frame, or ``None`` when decryption fails. When no
     DAVE session exists (call downgraded to plaintext / pre-E2EE) the frame is
-    already plaintext and is returned unchanged.
+    already plaintext and is returned unchanged. If ``on_error`` is supplied it
+    is called with the real exception text on failure so callers can surface it.
     """
     if dave_session is None:
         return inner
@@ -614,6 +682,12 @@ def _decrypt_dave(inner: bytes, user_id: int, dave_session: Any) -> Optional[byt
         import davey  # local import keeps module import-light
         return dave_session.decrypt(user_id, davey.MediaType.audio, inner)
     except Exception as e:  # pragma: no cover - depends on live MLS state
+        msg = f"{type(e).__name__}: {e}"
+        if on_error is not None:
+            try:
+                on_error(msg)
+            except Exception:
+                pass
         log.debug("DAVE decrypt raised (user=%s): %s", user_id, e)
         return None
 
