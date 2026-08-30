@@ -114,6 +114,14 @@ class VoiceRecorder:
         self._total_packets = 0
         self._unknown_ssrc_packets = 0
         self._seen_unknown_ssrcs: dict[int, bool] = {}  # ssrc -> True (diagnostics)
+        # Diagnostics: per-SSRC arrival counts + hexdumps of first frames.
+        self._ssrc_packet_counts: dict[int, int] = {}
+        self._hexdumped_ssrcs: set[int] = set()
+        # Race fix: voice packets can arrive before the op-5 mapping is recorded
+        # (observed 1ms early in live testing). Buffer unmapped frames briefly
+        # and replay them once _note_speaker() learns their SSRC.
+        self._pending_packets: dict[int, list[tuple[bytes, str, bytes, Any]]] = {}
+        self._pending_flushed = 0
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     @property
@@ -142,6 +150,10 @@ class VoiceRecorder:
             self._total_packets = 0
             self._unknown_ssrc_packets = 0
             self._seen_unknown_ssrcs.clear()
+            self._ssrc_packet_counts.clear()
+            self._hexdumped_ssrcs.clear()
+            self._pending_packets.clear()
+            self._pending_flushed = 0
         log.info(
             "Voice recording started (guild=%s channel=%s#%s)",
             guild_id, channel_id, channel_name,
@@ -215,6 +227,8 @@ class VoiceRecorder:
             "unknown_ssrc_packets_dropped": self._unknown_ssrc_packets,
             "unmapped_ssrcs_seen": sorted(self._seen_unknown_ssrcs),
             "ssrc_to_user_at_stop": {str(k): v for k, v in self._ssrc_to_user.items()},
+            "ssrc_packet_counts": {str(k): v for k, v in sorted(self._ssrc_packet_counts.items())},
+            "pending_packets_replayed": self._pending_flushed,
             "speakers": speakers_out,
         }
 
@@ -293,6 +307,62 @@ class VoiceRecorder:
                 self._speakers[user_id] = sp
             else:
                 sp.ssrc = ssrc
+            # Replay frames that arrived before this mapping existed.
+            pending = self._pending_packets.pop(ssrc, None)
+        if pending:
+            log.info("Replaying %d buffered packet(s) for ssrc=%d (user=%s)", len(pending), ssrc, user_id)
+            for raw, mode, key, dave in pending:
+                self._process_mapped_packet(raw, ssrc, user_id, mode=mode, secret_key=key, dave_session=dave, resolve_name=lambda uid: "")
+            with self._lock:
+                self._pending_flushed += len(pending)
+
+    def _process_mapped_packet(
+        self,
+        raw: bytes,
+        ssrc: int,
+        user_id: int,
+        *,
+        mode: str,
+        secret_key: bytes,
+        dave_session: Any,
+        resolve_name: Callable[[int], str],
+    ) -> None:
+        """Steps 2-4 of the capture pipeline for a packet whose SSRC is mapped."""
+        # 2) Transport-layer decryption -> E2EE-encrypted Opus frame.
+        try:
+            inner = _decrypt_transport(raw, mode, secret_key)
+        except Exception as e:  # bad auth tag / unsupported mode
+            self._bump_failure(user_id, "decrypt")
+            log.debug("Transport decrypt failed (ssrc=%s user=%s): %s", ssrc, user_id, e)
+            return
+
+        # 3) E2EE (DAVE) layer -> raw Opus frame.
+        opus_frame = _decrypt_dave(inner, user_id, dave_session)
+        if opus_frame is None:
+            self._bump_failure(user_id, "decrypt")
+            log.debug("DAVE decrypt failed (user=%s)", user_id)
+            return
+
+        # 4) Opus -> PCM.
+        pcm = _decode_opus(opus_frame, self._decoder_for(user_id))
+        if pcm is None:
+            self._bump_failure(user_id, "decode")
+            return
+
+        now = time.time()
+        with self._lock:
+            sp = self._speakers.get(user_id)
+            if sp is None:  # op-5 for this SSRC may not have arrived yet
+                sp = _Speaker(user_id=user_id, ssrc=ssrc)
+                self._speakers[user_id] = sp
+            if not sp.display_name:
+                try:
+                    sp.display_name = resolve_name(user_id) or ""
+                except Exception:
+                    sp.display_name = ""
+            sp.frames.append((now, pcm))
+            sp.total_pcm_bytes += len(pcm)
+            self._total_packets += 1
 
     def _ensure_speaker(self, user_id: int) -> None:
         with self._lock:
@@ -317,6 +387,15 @@ class VoiceRecorder:
         ssrc = struct.unpack_from(">I", raw, 8)[0]
 
         with self._lock:
+            self._ssrc_packet_counts[ssrc] = self._ssrc_packet_counts.get(ssrc, 0) + 1
+            # Hexdump the first two frames per SSRC so we can see exactly what
+            # is on the wire (RTP? IP-discovery? something else?).
+            if ssrc not in self._hexdumped_ssrcs and len(self._hexdumped_ssrcs) < 64:
+                self._hexdumped_ssrcs.add(ssrc)
+                log.warning(
+                    "UDP frame first-seen (ssrc=%d len=%d first_byte=0x%02x): %s",
+                    ssrc, len(raw), raw[0], raw[:64].hex(),
+                )
             user_id = self._ssrc_to_user.get(ssrc)
             if user_id is None:
                 self._unknown_ssrc_packets += 1
@@ -328,50 +407,18 @@ class VoiceRecorder:
                         ssrc, dict(self._ssrc_to_user),
                     )
                     self._seen_unknown_ssrcs[ssrc] = True
+                # Buffer briefly: the op-5 mapping may arrive a few ms later.
+                pending = self._pending_packets.setdefault(ssrc, [])
+                if len(pending) < 20:
+                    pending.append((raw, mode, secret_key, dave_session))
                 return
-        if user_id is None:
-            return
 
-        # 2) Transport-layer decryption -> E2EE-encrypted Opus frame.
-        try:
-            inner = _decrypt_transport(raw, mode, secret_key)
-        except Exception as e:  # bad auth tag / unsupported mode
-            self._bump_failure(user_id, "decrypt")
-            log.debug("Transport decrypt failed (ssrc=%s user=%s): %s", ssrc, user_id, e)
-            return
-
-        # 3) E2EE (DAVE) layer -> raw Opus frame. Since 2026-03-01 all Discord
-        #    voice is end-to-end encrypted; the davey session that discord.py
-        #    maintains knows each sender's ratcheted key. During a downgrade or
-        #    transition the call may be in *passthrough* (plaintext), which
-        #    ``DaveSession.decrypt`` handles by returning the frame unchanged.
-        opus_frame = _decrypt_dave(inner, user_id, dave_session)
-        if opus_frame is None:
-            self._bump_failure(user_id, "decrypt")
-            log.debug("DAVE decrypt failed (user=%s)", user_id)
-            return
-
-        # 4) Opus -> PCM. Each speaker gets their own stateful decoder so
-        #    interleaved multi-speaker audio decodes correctly.
-        pcm = _decode_opus(opus_frame, self._decoder_for(user_id))
-        if pcm is None:
-            self._bump_failure(user_id, "decode")
-            return
-
-        now = time.time()
-        with self._lock:
-            sp = self._speakers.get(user_id)
-            if sp is None:  # op-5 for this SSRC may not have arrived yet
-                sp = _Speaker(user_id=user_id, ssrc=ssrc)
-                self._speakers[user_id] = sp
-            if not sp.display_name:
-                try:
-                    sp.display_name = resolve_name(user_id) or ""
-                except Exception:
-                    sp.display_name = ""
-            sp.frames.append((now, pcm))
-            sp.total_pcm_bytes += len(pcm)
-            self._total_packets += 1
+        # Steps 2-4 (decrypt -> decode -> buffer).
+        self._process_mapped_packet(
+            raw, ssrc, user_id,
+            mode=mode, secret_key=secret_key, dave_session=dave_session,
+            resolve_name=resolve_name,
+        )
 
     # Per-speaker stateful Opus decoders (one per speaker, keyed by user id).
     def _decoder_for(self, user_id: int) -> Any:

@@ -93,7 +93,10 @@ else:
     _discord_logger = logging.getLogger("discord")
     _discord_logger.handlers.clear()
     _discord_logger.addHandler(logging.StreamHandler(sys.stdout))
-    _discord_logger.setLevel(logging.INFO)
+    _discord_console_level = os.environ.get("BOT_DISCORD_LOG_LEVEL", "INFO")
+    _discord_logger.setLevel(getattr(logging, _discord_console_level.upper(), logging.INFO))
+    # Voice debugging: voice-gateway + DAVE/MLS debug lines go to dev.log only.
+    _discord_logger.addHandler(dev_log)
     _discord_logger.propagate = False
 
     # The knowledge-base modules log under their own top-level "kb" namespace
