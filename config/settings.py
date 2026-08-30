@@ -108,6 +108,14 @@ CHARACTERS_FILE: pathlib.Path = pathlib.Path(
     _or_default(os.getenv("CHARACTERS_FILE"), str(_REPO_ROOT / "characters.json"))
 )
 
+# ── Voice recording (per-speaker capture for STT) ───────────────────────────
+# Where /start_recording writes its per-recording subdirectories (one WAV per
+# speaker + a manifest.json with absolute timestamps). Defaults to
+# <repo_root>/data/recordings.
+RECORDINGS_DIR: pathlib.Path = pathlib.Path(
+    _or_default(os.getenv("RECORDINGS_DIR"), str(_REPO_ROOT / "data" / "recordings"))
+)
+
 CHUNK_TARGET: int = _safe_int(os.getenv("CHUNK_SIZE"), 2000)
 RAG_MAX_DOCS: int = _safe_int(os.getenv("RAG_MAX_DOCS"), 4)
 RAG_RETRIEVAL_METHOD: str = os.getenv("RAG_RETRIEVAL_METHOD", "vector").lower()

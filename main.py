@@ -113,6 +113,9 @@ INTENTS.messages = True
 INTENTS.guilds = True
 INTENTS.guild_messages = True
 INTENTS.message_content = True
+# Voice recording: we need voice-state updates (to see who is in a channel and
+# to resolve speaker display names) for /start_recording & /stop_recording.
+INTENTS.voice_states = True
 
 # ── Character loading ───────────────────────────────────────────────────
 load_characters(CHARACTERS_FILE)
@@ -336,6 +339,30 @@ async def session_notes_command(
     """Session notes — delegated to commands/session_commands.py."""
     from commands.session_commands import handle_session_notes
     await handle_session_notes(interaction, action=action, note=note)
+
+
+@bot.tree.command(
+    name="start_recording",
+    description="Join your voice channel and record each participant's audio separately (for STT).",
+)
+async def start_recording_command(interaction: discord.Interaction) -> None:
+    """Start voice recording — delegated to commands/recording_commands.py."""
+    from commands.recording_commands import handle_start_recording
+    await handle_start_recording(interaction)
+
+
+@bot.tree.command(
+    name="stop_recording",
+    description="Stop the active voice recording and save per-speaker WAV files + a timestamped manifest.",
+)
+@app_commands.describe(leave_channel="Whether the bot should leave the voice channel afterwards (default true)")
+async def stop_recording_command(
+    interaction: discord.Interaction,
+    leave_channel: bool = True,
+) -> None:
+    """Stop voice recording — delegated to commands/recording_commands.py."""
+    from commands.recording_commands import handle_stop_recording
+    await handle_stop_recording(interaction, leave_channel=leave_channel)
 
 
 # ════════════════════════════════════════════════════════════════════════
