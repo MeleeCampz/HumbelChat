@@ -113,6 +113,7 @@ class VoiceRecorder:
         self._encryption_mode: str = ""
         self._total_packets = 0
         self._unknown_ssrc_packets = 0
+        self._seen_unknown_ssrcs: dict[int, bool] = {}  # ssrc -> True (diagnostics)
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     @property
@@ -140,6 +141,7 @@ class VoiceRecorder:
             self._encryption_mode = ""
             self._total_packets = 0
             self._unknown_ssrc_packets = 0
+            self._seen_unknown_ssrcs.clear()
         log.info(
             "Voice recording started (guild=%s channel=%s#%s)",
             guild_id, channel_id, channel_name,
@@ -211,6 +213,8 @@ class VoiceRecorder:
             "encryption_mode": self._encryption_mode,
             "total_packets_seen": self._total_packets,
             "unknown_ssrc_packets_dropped": self._unknown_ssrc_packets,
+            "unmapped_ssrcs_seen": sorted(self._seen_unknown_ssrcs),
+            "ssrc_to_user_at_stop": {str(k): v for k, v in self._ssrc_to_user.items()},
             "speakers": speakers_out,
         }
 
@@ -241,11 +245,19 @@ class VoiceRecorder:
         except AttributeError:  # pragma: no cover - defensive
             return
 
+        # Diagnostics: see exactly what the voice gateway sends us. Op-5/11/13
+        # are logged at INFO so they're visible in bot.log without DEBUG.
+        if op in (5, 11, 13):
+            log.info("voice ws op-%s: %r", op, data)
+        else:
+            log.debug("voice ws op-%s: %r", op, msg)
+
         if op == 5:  # Speaking — carries {speaking, delay, ssrc} (+ user_id in v8)
             ssrc = _as_int(data.get("ssrc"))
             user_id = _as_int(data.get("user_id"))
             speaking = _as_int(data.get("speaking"))  # None if the field is absent
             if ssrc is None:
+                log.warning("op-5 received without ssrc: %r", data)
                 return
             # The voice-gateway op-5 *receive* payload includes the sender's
             # user_id (voice gateway v8). Map it, but ignore "stopped speaking"
@@ -253,7 +265,10 @@ class VoiceRecorder:
             if user_id is not None and speaking != 0:
                 self._note_speaker(ssrc, user_id)
             elif ssrc not in self._ssrc_to_user:
-                log.debug("op-5 without resolvable user_id (ssrc=%s)", ssrc)
+                log.warning(
+                    "op-5 without resolvable user_id (ssrc=%s) — keys=%r",
+                    ssrc, sorted(data.keys()),
+                )
 
         elif op == 11:  # ClientsConnect — {user_ids: [...]} (no SSRC yet)
             for uid in data.get("user_ids") or []:
@@ -303,9 +318,18 @@ class VoiceRecorder:
 
         with self._lock:
             user_id = self._ssrc_to_user.get(ssrc)
-        if user_id is None:
-            with self._lock:
+            if user_id is None:
                 self._unknown_ssrc_packets += 1
+                # Track which SSRCs are actually arriving (diagnostics).
+                if ssrc not in self._seen_unknown_ssrcs:
+                    log.warning(
+                        "Unknown SSRC %d arriving on UDP (first packet) — "
+                        "no op-5 mapping yet; ssrc_map=%r",
+                        ssrc, dict(self._ssrc_to_user),
+                    )
+                    self._seen_unknown_ssrcs[ssrc] = True
+                return
+        if user_id is None:
             return
 
         # 2) Transport-layer decryption -> E2EE-encrypted Opus frame.
