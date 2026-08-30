@@ -31,6 +31,7 @@ from bot_core.voice_recorder import (
     _decrypt_transport,
     _decode_opus,
     _downmix_to_mono,
+    _extract_passthrough_opus,
     _wav_filename,
     _wire_voice_client,
     attach_to_bot,
@@ -136,6 +137,40 @@ class TestDecryptDave:
             def decrypt(self, *a, **k):
                 raise RuntimeError("no MLS state")
         assert _decrypt_dave(SILENCE_PACKET, 42, _Boom()) is None
+
+
+# ── DAVE passthrough-frame recovery ───────────────────────────────────────────
+def _passthrough_frame(opus: bytes, payload_len: int = 9, with_pad: bool = True) -> bytes:
+    """Build a Discord passthrough frame: [opus][supp_block][rtp_padding].
+
+    The supp block is ``[payload (s-3 bytes)][size=s][0xFA][0xFA]`` where the
+    size byte counts the whole block; RTP padding is RFC 3550 (pad bytes then a
+    trailing length byte).
+    """
+    s = payload_len + 3
+    block = bytes(range(1, payload_len + 1)) + bytes([s, 0xFA, 0xFA])
+    assert len(block) == s
+    frame = opus + block
+    if with_pad:
+        n = 4
+        frame += b"\x00" * n + bytes([n])
+    return frame
+
+
+class TestPassthroughExtraction:
+    def test_recovers_opus_with_rtp_padding(self):
+        assert _extract_passthrough_opus(_passthrough_frame(SILENCE_PACKET)) == SILENCE_PACKET
+
+    def test_recovers_opus_without_rtp_padding(self):
+        f = _passthrough_frame(SILENCE_PACKET, with_pad=False)
+        assert _extract_passthrough_opus(f) == SILENCE_PACKET
+
+    def test_recovers_larger_opus_payload(self):
+        opus = bytes([0x78, 1, 2, 3, 4, 5, 6, 7, 8])
+        assert _extract_passthrough_opus(_passthrough_frame(opus)) == opus
+
+    def test_garbage_returns_none(self):
+        assert _extract_passthrough_opus(b"\x01\x02\x03") is None
 
 
 # ── SSRC -> user mapping from voice WS events ────────────────────────────────
