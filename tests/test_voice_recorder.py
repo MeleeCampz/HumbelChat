@@ -21,14 +21,20 @@ from pathlib import Path
 import nacl.secret
 import pytest
 
+import discord
+
 from bot_core.voice_recorder import (
     SAMPLE_RATE,
     VoiceRecorder,
+    VoiceRecorderError,
     _decrypt_dave,
     _decrypt_transport,
     _decode_opus,
     _downmix_to_mono,
     _wav_filename,
+    _wire_voice_client,
+    attach_to_bot,
+    recorder_voice_cls,
 )
 
 # A valid Opus "comfort noise" / silence packet — always decodes cleanly.
@@ -256,6 +262,95 @@ class TestStopOutput:
         r = VoiceRecorder(tmp_path / "rec")  # never start()
         assert r.is_recording is False
         assert r.stop() is None  # not recording -> no-op
+
+
+# ── bot wiring (recorder_voice_cls / _wire_voice_client) ─────────────────────
+class _FakeVoiceState:
+    """Just enough of VoiceConnectionState to exercise the wiring."""
+
+    def __init__(self) -> None:
+        self.hook = None
+        self.mode = None  # not a str until handshake completes
+        self.secret_key: list = []
+        self.dave_session = None
+        self.listeners: list = []
+
+    def add_socket_listener(self, callback) -> None:
+        self.listeners.append(callback)
+
+
+class TestBotWiring:
+    def _bot(self):
+        class _Bot:
+            pass
+        return _Bot()
+
+    def test_recorder_voice_cls_requires_attach(self):
+        with pytest.raises(VoiceRecorderError):
+            recorder_voice_cls(self._bot())  # type: ignore[arg-type]
+
+    def test_attach_is_idempotent_and_repoints_out_dir(self, tmp_path):
+        bot = self._bot()
+        r1 = attach_to_bot(bot, tmp_path / "a")  # type: ignore[arg-type]
+        r2 = attach_to_bot(bot, tmp_path / "b")  # type: ignore[arg-type]
+        assert r1 is r2
+        assert str(r2.out_dir) == str(tmp_path / "b")
+
+    def test_recording_voice_client_init_wires_state(self, tmp_path, monkeypatch):
+        bot = self._bot()
+        rec = attach_to_bot(bot, tmp_path)  # type: ignore[arg-type]
+        cls = recorder_voice_cls(bot)
+        assert issubclass(cls, discord.VoiceClient)
+
+        state = _FakeVoiceState()
+        created = {}
+
+        def fake_super_init(self, client, channel):
+            created["client"] = client
+            created["channel"] = channel
+            self._connection = state
+
+        monkeypatch.setattr(discord.VoiceClient, "__init__", fake_super_init)
+        vc = cls(bot, "fake-channel")  # type: ignore[arg-type]
+
+        assert created["client"] is bot
+        assert created["channel"] == "fake-channel"
+        # (bound methods compare by __self__/__func__, not identity)
+        assert state.hook == rec.on_voice_ws
+        assert len(state.listeners) == 1
+        assert getattr(vc, "_recorder_wired", False) is True
+
+    def test_listener_skips_packets_before_handshake(self, tmp_path):
+        bot = self._bot()
+        rec = attach_to_bot(bot, tmp_path)  # type: ignore[arg-type]
+        state = _FakeVoiceState()
+        vc = object.__new__(recorder_voice_cls(bot))
+        vc._connection = state
+        _wire_voice_client(vc, rec)
+        # mode/secret_key not set yet -> listener must be a silent no-op.
+        state.listeners[0](b"\x80\x78" + b"\x00" * 20)  # type: ignore[index]
+        assert rec._total_packets == 0
+
+    def test_listener_buffers_packet_after_handshake(self, tmp_path):
+        bot = self._bot()
+        rec = attach_to_bot(bot, tmp_path)  # type: ignore[arg-type]
+        rec.start(guild_id=1, channel_id=2)
+        state = _FakeVoiceState()
+        vc = object.__new__(recorder_voice_cls(bot))
+        vc._connection = state
+        _wire_voice_client(vc, rec)
+
+        key = nacl.utils.random(32)
+        ssrc = 0x3333
+        rec._note_speaker(ssrc, 777)
+        # Simulate a completed handshake.
+        state.mode = "aead_xchacha20_poly1305_rtpsize"
+        state.secret_key = list(key)
+        pkt = _make_xchacha_packet(SILENCE_PACKET, key, ssrc=ssrc)
+        state.listeners[0](pkt)  # type: ignore[index]
+
+        assert rec._total_packets == 1
+        assert len(rec._speakers[777].frames) == 1
 
 
 # ── filename sanitisation ────────────────────────────────────────────────────

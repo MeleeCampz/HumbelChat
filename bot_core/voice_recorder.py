@@ -389,9 +389,12 @@ def attach_to_bot(bot: discord.Client, out_dir: Path) -> VoiceRecorder:
     """Wire the recorder into ``bot`` so every voice connection is captured.
 
     This is idempotent: calling it again reuses the same singleton and simply
-    re-points it at the (possibly new) output directory. It wraps
-    ``bot.create_voice_client`` so that, for each :class:`discord.VoiceClient`,
-    we install (a) a voice-WebSocket hook for op-5 SSRC mapping and (b) a UDP
+    re-points it at the (possibly new) output directory.
+
+    discord.py 2.x has no per-connection hook on the client, so joining must go
+    through :func:`recorder_voice_cls`: ``channel.connect(cls=recorder_voice_cls(bot))``
+    instantiates a :class:`discord.VoiceClient` subclass whose ``__init__``
+    installs (a) a voice-WebSocket hook for op-5 SSRC mapping and (b) a UDP
     socket listener for audio packets — both before the client connects.
     """
     global _attached
@@ -403,25 +406,41 @@ def attach_to_bot(bot: discord.Client, out_dir: Path) -> VoiceRecorder:
     recorder.out_dir = Path(out_dir)
 
     if not _attached:
-        original_create = bot.create_voice_client
-
-        def create_voice_client(guild):
-            vc = original_create(guild)
-            _wire_voice_client(vc, recorder)
-            return vc
-
-        bot.create_voice_client = create_voice_client  # type: ignore[method-assign]
         _attached = True
         log.info("Voice recorder attached to bot (out_dir=%s)", out_dir)
 
     return recorder
 
 
+def recorder_voice_cls(bot: discord.Client) -> type[discord.VoiceClient]:
+    """Build a :class:`discord.VoiceClient` subclass wired for recording.
+
+    Pass it as ``cls=`` to :meth:`discord.VoiceChannel.connect`. The returned
+    class wires itself up in ``__init__`` (i.e. before any handshake), so the
+    op-5 hook and UDP listener are live from the very first packet.
+    """
+    recorder = getattr(bot, "_voice_recorder", None)
+    if recorder is None:
+        raise VoiceRecorderError("attach_to_bot() must be called before joining voice")
+
+    class RecordingVoiceClient(discord.VoiceClient):
+        def __init__(self, client: discord.Client, channel: Any) -> None:
+            super().__init__(client, channel)
+            _wire_voice_client(self, recorder)
+
+    return RecordingVoiceClient
+
+
 def _wire_voice_client(vc: discord.VoiceClient, recorder: VoiceRecorder) -> None:
-    """Install the WS hook + UDP listener on a freshly created voice client."""
+    """Install the WS hook + UDP listener on a voice client.
+
+    Called from :class:`RecordingVoiceClient.__init__` (before connect), or as
+    a best-effort retrofit when the bot is already in voice for another reason.
+    """
     state = vc._connection  # VoiceConnectionState
 
-    # (a) op-5 / op-12 / op-13 hook — must be set before the WS is created.
+    # (a) op-5 / op-12 / op-13 hook — read by VoiceConnectionState whenever it
+    #     (re)creates the voice WebSocket, so setting it here is safe.
     state.hook = recorder.on_voice_ws
 
     # (b) raw UDP audio packets.
@@ -442,6 +461,10 @@ def _wire_voice_client(vc: discord.VoiceClient, recorder: VoiceRecorder) -> None
             log.debug("voice recorder packet error: %s", e)
 
     state.add_socket_listener(_on_udp)
+    try:
+        vc._recorder_wired = True  # type: ignore[attr-defined]
+    except Exception:  # pragma: no cover - some fakes don't allow attrs
+        pass
 
 
 def _make_name_resolver(vc: discord.VoiceClient) -> Callable[[int], str]:
