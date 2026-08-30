@@ -31,6 +31,7 @@ Both strategies return ``list[tuple[str, str]]`` of ``(display_name, content)``.
 from __future__ import annotations
 
 import asyncio
+import time
 import logging
 import os
 import pathlib
@@ -38,6 +39,7 @@ from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from kb.index import KBIndexStore
+    from kb.vector_db import KBVectorIndex
 
 logger = logging.getLogger("kb.retrievers")
 
@@ -45,9 +47,6 @@ logger = logging.getLogger("kb.retrievers")
 
 KB_STRATEGIES = frozenset({"keyword", "vector"})
 DEFAULT_METHOD = os.getenv("RAG_RETRIEVAL_METHOD", "vector").lower()
-
-# Hard timeout on RAG retrieval (in seconds) — prevents blocking the entire request
-_RAG_TIMEOUT = int(os.getenv("RAG_TIMEOUT_SECONDS", "30"))
 
 # Singleton index store — lazily initialized
 _index_store: Optional["KBIndexStore"] = None
@@ -164,89 +163,99 @@ def select_ranked_chunks(
     return [(stem, "\n\n".join(chunks)) for stem, chunks in per_file.items()]
 
 
-# ───────────────────── Adaptive-k Retrieval ─────────────────────
+# ─────────── Low-confidence query rewriting (option A) ───────────
+#
+# Vector search alone can miss the right chunk when the player's phrasing
+# differs from the KB's vocabulary.  Instead of paying for an LLM rewrite on
+# *every* query, we only trigger it when the top cosine similarity score is
+# below ``RAG_REWRITE_MIN_SCORE`` — i.e. the index itself says "I'm guessing".
+# Confident queries keep their single-embedding-call latency.
+#
+# When triggered: the rewriter produces up to N alternative phrasings, all
+# expansions are embedded in ONE batched call, and every query's ranking is
+# merged with reciprocal rank fusion (RRF).  RRF needs no score calibration —
+# it only uses each list's ordering, which makes the merge robust across
+# differently-scored queries.
 
-def _adaptive_k_threshold(scores: list[float]) -> int:
-    """Determine optimal k using the largest gap in sorted similarity scores.
+_RRF_K = 60  # standard RRF constant (Cormack et al. 2009)
 
-    Implements the Adaptive-k method: finds the position of the steepest drop
-    in similarity scores, which corresponds to the boundary between relevant
-    and irrelevant documents. Returns the count of chunks to retrieve (k).
 
-    A small buffer (5) is added after the threshold to avoid missing marginal docs.
+def reciprocal_rank_fusion(
+    rankings: list[list[tuple[str, str, float]]],
+) -> list[tuple[str, str, float]]:
+    """Merge several ranked chunk lists via reciprocal rank fusion.
+
+    Each ranking is ``[(display_name, content, similarity), ...]`` sorted by
+    relevance descending.  A chunk's fused score is the sum of
+    ``1 / (RRF_K + rank)`` over every list it appears in; ties are broken by
+    best (lowest) rank seen.
+
+    Returns ``[(display_name, content, fused_score), ...]`` sorted by fused
+    score descending.  Empty/missing lists are ignored; an empty input yields
+    an empty result.
     """
-    if len(scores) <= 1:
-        return len(scores)
+    scores: dict[str, float] = {}
+    best_rank: dict[str, int] = {}
+    contents: dict[str, str] = {}
 
-    # Sort descending (should already be, but ensure it)
-    sorted_scores = sorted(scores, reverse=True)
+    for ranking in rankings:
+        for rank, (name, content, _sim) in enumerate(ranking, start=1):
+            scores[name] = scores.get(name, 0.0) + 1.0 / (_RRF_K + rank)
+            if name not in best_rank or rank < best_rank[name]:
+                best_rank[name] = rank
+            contents.setdefault(name, content)
 
-    # Find gaps between consecutive scores
-    max_gap = -1.0
-    gap_idx = 0
-
-    for i in range(len(sorted_scores) - 1):
-        gap = sorted_scores[i] - sorted_scores[i + 1]
-        if gap > max_gap:
-            max_gap = gap
-            gap_idx = i
-
-    # The optimal k is the index at the largest gap, with a small buffer
-    k = gap_idx + 1  # index to count conversion (1-based)
-    k += 5  # buffer to capture nearby candidates
-    return min(k, len(sorted_scores))
+    merged = sorted(scores, key=lambda n: (-scores[n], best_rank[n]))
+    return [(name, contents[name], scores[name]) for name in merged]
 
 
-# ───────────── FlashRank Marginal Utility Reranking ─────────────
+async def _expand_low_confidence_query(
+    idx: "KBVectorIndex",
+    query: str,
+    top_n: int,
+) -> tuple[list[list[tuple[str, str, float]]], float]:
+    """Generate expansion rankings for a low-confidence query.
 
-def _flashrank_reorder(
-    results: list[tuple[float, str, str]],
-    top_n: int = 5,
-) -> list[tuple[str, str]]:
-    """Select chunks using marginal utility (FlashRank-style).
-
-    Greedily selects documents that maximize information gain per token while
-    avoiding redundancy. Similar/contributing documents are deprioritized in
-    favor of novel, complementary evidence.
-
-    Parameters
-    ----------
-    results : list of (score, name, content) sorted by relevance descending
-    top_n : maximum number of chunks to return
-
-    Returns
-    -------
-    Reordered list of (name, content) tuples representing the optimal selection.
+    Runs the LLM rewriter (bounded by ``RAG_REWRITE_BUDGET_SECONDS``), embeds
+    all expansions in one batched call via ``idx.rank_texts()``, and returns
+    ``(expansion_rankings, elapsed_seconds)`` — one ranked list per expansion.
+    Returns ``([], 0.0)`` when rewriting is disabled or produces nothing.
+    Never raises: callers fall back to the original ranking alone.
     """
-    if not results:
-        return []
+    from config.settings import (
+        RAG_QUERY_MAX_EXPANSIONS,
+        RAG_QUERY_REWRITER,
+        RAG_REWRITE_BUDGET_SECONDS,
+    )
 
-    # Track what we've already seen for redundancy checking
-    seen_stems: set[str] = set()  # document stems to avoid near-duplicate files
+    if not RAG_QUERY_REWRITER:
+        return [], 0.0
 
-    selected: list[tuple[str, str]] = []
+    t0 = time.monotonic()
+    try:
+        from kb.query_rewriter import create_query_rewriter
 
-    # First pass: compute per-document utility scores and deduplicate file stems
-    doc_entries: list[tuple[float, str, str]] = []  # (utility, name, content)
-    for score, name, content in results:
-        stem = name.split(" [")[0] if " [" in name else name
-        if stem not in seen_stems:
-            seen_stems.add(stem)
-            # Utility = relevance score × information density (chars per token ratio)
-            char_len = len(content)
-            token_est = max(1, char_len // 4)  # rough token estimate
-            info_density = min(char_len / token_est, 2.0) if token_est > 0 else 1.0
-            marginal_util = score * info_density
-            doc_entries.append((marginal_util, name, content))
+        rewriter = create_query_rewriter(max_expansions=RAG_QUERY_MAX_EXPANSIONS)
+        expanded = await asyncio.wait_for(
+            rewriter.expand(query), timeout=RAG_REWRITE_BUDGET_SECONDS
+        )
+        # expand() returns [original, *expansions]; the original's ranking is
+        # already known — drop it so its chunks are not double-weighted.
+        extra = [e for e in expanded[1:] if e and e.strip()]
+    except Exception as exc:
+        logger.warning("Low-confidence rewrite failed (%s); using original ranking only", exc)
+        return [], time.monotonic() - t0
 
-    # Sort by marginal utility descending
-    doc_entries.sort(key=lambda x: -x[0])
+    if not extra:
+        return [], 0.0
 
-    # Second pass: greedy selection
-    for util, name, content in doc_entries[:top_n]:
-        selected.append((name, content))
+    try:
+        rankings = await idx.rank_texts(extra, top_n=min(top_n * 4, 32))
+    except Exception as exc:
+        logger.warning("Expansion embedding failed (%s); using original ranking only", exc)
+        return [], time.monotonic() - t0
 
-    return selected
+    return [r for r in rankings if r], time.monotonic() - t0
 
 
 # ───────────────────────────── Strategies ─────────────────────────────
@@ -294,7 +303,9 @@ async def _retrieve_vector(
     Pure cosine-similarity ranking over the in-memory index (which the
     disk-backed store keeps fully hydrated at load time).  Falls back to
     keyword-only if the vector index is unavailable or the query returns
-    no hits.  Only **one** embedding API call is made per query.
+    no hits.  Confident queries cost exactly one embedding call; when the
+    top score is below ``RAG_REWRITE_MIN_SCORE`` a bounded LLM rewrite adds
+    expansion rankings merged via RRF (see ``_expand_low_confidence_query``).
     """
     store = await _ensure_index_store(kb_path)
     idx = store.get_index() if store is not None else None
@@ -307,6 +318,26 @@ async def _retrieve_vector(
     if not ranked:
         logger.warning("Vector query returned no hits for '%s'; falling back to keyword", kb_path)
         return await _keyword_fallback(query, kb_path, top_n, window_lines)
+
+    # Log the score distribution so RAG_REWRITE_MIN_SCORE can be tuned from
+    # real traffic (option A: rewrite only when the index is "guessing").
+    top_scores = [s for _, _, s in ranked[:8]]
+    logger.info(
+        "Vector scores for %r: top=%.3f median=%.3f min=%.3f (%d chunks)",
+        query, top_scores[0], top_scores[len(top_scores) // 2], top_scores[-1], len(ranked),
+    )
+
+    from config.settings import RAG_REWRITE_MIN_SCORE
+
+    if ranked[0][2] < RAG_REWRITE_MIN_SCORE:
+        expansion_rankings, elapsed = await _expand_low_confidence_query(idx, query, top_n)
+        if expansion_rankings:
+            merged = reciprocal_rank_fusion([ranked] + expansion_rankings)
+            logger.info(
+                "Low-confidence query (top=%.3f < %.2f): rewrite added %d expansion list(s) in %.1fs; RRF-merged to %d chunks",
+                ranked[0][2], RAG_REWRITE_MIN_SCORE, len(expansion_rankings), elapsed, len(merged),
+            )
+            ranked = merged
 
     docs = select_ranked_chunks(ranked, top_n=top_n)
 
@@ -393,21 +424,3 @@ async def shutdown_vector_store() -> None:
     if _index_store is not None:
         await _index_store.shutdown()
         logger.info("Vector index store shut down and persisted")
-
-
-def get_available_strategies() -> list[str]:
-    """Return the list of available retrieval strategies."""
-    from config.settings import INFER_URL, INFER_API_KEY
-
-    has_vector = bool(INFER_URL and INFER_API_KEY)
-    strategies = ["keyword"]
-    if has_vector:
-        strategies.append("vector")
-    return strategies
-
-
-def is_vector_available() -> bool:
-    """Quick check whether the vector retrieval backend is configured."""
-    from config.settings import INFER_URL, INFER_API_KEY
-
-    return bool(INFER_URL and INFER_API_KEY)

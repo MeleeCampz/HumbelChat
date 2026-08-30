@@ -56,6 +56,20 @@ Automatic LLM-powered query expansion for enhanced retrieval coverage.
 - Example: `"What do they eat in Humblewood?"` → `["Humblewood food sources", "diet menu ingredients"]`
 - Fallback to original query if rewrite fails or is disabled
 
+### Low-confidence trigger (current wiring)
+The rewriter does **not** run on every query. `kb.retrievers._retrieve_vector`
+checks the top cosine similarity score first:
+
+- top score ≥ `RAG_REWRITE_MIN_SCORE` (default 0.35) → original ranking only
+  (one embedding call, no added latency)
+- top score < threshold → LLM rewrite (budget: `RAG_REWRITE_BUDGET_SECONDS`,
+  default 10 s), expansions embedded in one batched call, rankings merged via
+  reciprocal rank fusion (`reciprocal_rank_fusion`)
+
+Per-query score distributions are logged (`Vector scores for ...`) so the
+threshold can be tuned from real traffic. Disable entirely with
+`RAG_QUERY_REWRITER=0`.
+
 ---
 
 ## Phase 4: Unified Retrieval Layer ✅
@@ -116,7 +130,7 @@ User Query
 │ Injection    │
 └──────────────┘
 
-Fallback: If vector unavailable → Keyword/TF-IDF (kb.scorch)
+Fallback: If vector unavailable → keyword heuristic (kb.reader)
 ```
 
 ---

@@ -56,7 +56,7 @@ class KBVectorIndex:
 
     Uses the configured inference backend (see ``kb.embedder``).
     Returns an empty index when the embedding backend is unreachable — caller
-    should fall back to keyword search via ``kb.retrievers.is_vector_available()``.
+    should fall back to keyword search (see ``kb.retrievers._keyword_fallback``).
     """
 
     def __init__(self) -> None:
@@ -203,6 +203,38 @@ class KBVectorIndex:
         scored.sort(key=lambda t: -t[2])
         return scored[:top_n], q_emb
 
+    async def rank_texts(
+        self,
+        texts: list[str],
+        top_n: int = 5,
+    ) -> list[list[tuple[str, str, float]]]:
+        """Embed multiple queries in one batched call and rank the index against each.
+
+        Returns one ranked ``[(display_name, content, similarity), ...]`` list
+        per input text (same order as *texts*).  Used by the low-confidence
+        query-rewrite path to merge several query rankings via RRF without
+        paying for a separate embedding call per expansion.  Raises whatever
+        the embedder raises when the backend is unreachable.
+        """
+        if self.is_empty():
+            return [[] for _ in texts]
+
+        embeddings = await self._embedder.encode(texts)  # one batched call (dedups inside)
+
+        results: list[list[tuple[str, str, float]]] = []
+        for emb in embeddings:
+            scored: list[tuple[str, str, float]] = []
+            if emb:
+                for doc in self._docs:
+                    d_emb = doc.embedding
+                    if d_emb is None:
+                        continue
+                    sim = _cosine_similarity(emb, d_emb)
+                    if sim > 0:
+                        scored.append((doc.display_name, doc.content, sim))
+            scored.sort(key=lambda t: -t[2])
+            results.append(scored[:top_n])
+        return results
 
     @staticmethod
     def _log_error(msg: str) -> None:

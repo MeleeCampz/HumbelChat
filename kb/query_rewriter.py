@@ -1,24 +1,27 @@
 """Automatic query rewriting for enhanced RAG retrieval.
 
 Uses a lightweight LLM call to dynamically expand user queries based on the
-KB domain context — no hardcoded synonym lists.
+KB domain context — no hardcoded synonym lists.  The rewriter is invoked by
+``kb.retrievers`` **only for low-confidence vector queries** (top similarity
+below ``RAG_REWRITE_MIN_SCORE``), so confident queries pay nothing extra.
 
 Example flow:
     User: "What do they eat in Humblewood?"
     LLM Rewrites: "Humblewood food sources, diet, menu, ingredients"
-    Search uses both original + rewritten terms for best coverage.
+    Retrieval merges the original + expansion rankings via RRF.
 
 Configuration
 -------------
-RAG_QUERY_EXPANSION_ENABLED (bool, default true) — Toggle query rewriting on/off
-RAG_QUERY_REWRITER_MODEL (str, optional) — Model to use for rewriting (defaults to configured model)
+RAG_QUERY_REWRITER (bool, default 1) — Toggle query rewriting on/off
+RAG_REWRITE_MIN_SCORE (float, default 0.35) — Trigger threshold (retrievers)
 RAG_QUERY_MAX_EXPANSIONS (int, default 3) — Maximum number of expanded terms
+RAG_REWRITE_BUDGET_SECONDS (int, default 10) — Wall-clock budget for the call
 
 Usage
 -----
-    from kb.query_rewriter import QueryRewriter
+    from kb.query_rewriter import create_query_rewriter
 
-    rewriter = QueryRewriter()
+    rewriter = create_query_rewriter()
     expanded_queries = await rewriter.expand("What's the time system in Humblewood?")
     # Returns: ["original query", "Humblewood time mechanics", ...]
 """
@@ -31,7 +34,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from openai import AsyncOpenAI  # type: ignore[import-untyped]
 
-
 logger = logging.getLogger("kb.query_rewriter")
 
 
@@ -39,7 +41,7 @@ class QueryRewriter:
     """Dynamically expand queries using the configured LLM backend."""
 
     MAX_EXPANSIONS = 3
-    REWRITE_TIMEOUT_SEC = 5
+    REWRITE_TIMEOUT_SEC = 10
     REWRITE_PROMPT_TEMPLATE = """\
 You are a search query expansion assistant. Your task is to generate additional search terms that capture related concepts, synonyms, and contextual meanings of the user's original query — all within the domain of {kb_domain}.
 
@@ -66,7 +68,7 @@ Expansions:
     ) -> None:
         self._client = client
         self.kb_domain = kb_domain
-        self.max_expansions = max(max(1, max_expansions), 1)
+        self.max_expansions = max(1, max_expansions)
         self.enabled = enabled
         self.model_slug = model_slug or ""
 
@@ -93,13 +95,6 @@ Expansions:
 
         # Limit total expansions (keep original + N terms)
         return results[: self.max_expansions + 1]
-
-    def get_available_strategies(self) -> list[str]:
-        """Return retrieval strategies available given rewrite capability."""
-        strategies = ["keyword"]
-        if self.enabled:
-            strategies.append("vector")
-        return strategies
 
     # ── Rewrite Logic ──────────────────────────────────────────────────
 
@@ -137,37 +132,26 @@ Expansions:
             return []
 
 
-class QueryExpansionError(RuntimeError):
-    """Raised when query rewriting fails unexpectedly."""
-
-
 # ── Module-level convenience ───────────────────────────────────────────
 
-def _get_default_client() -> AsyncOpenAI | None:
-    """Lazily create an OpenAI client for query rewriting if needed."""
-    try:
-        from config.settings import INFER_API_KEY, INFER_URL
-        from openai import AsyncOpenAI  # type: ignore[import-untyped]
-
-        return AsyncOpenAI(
-            api_key=INFER_API_KEY,
-            base_url=INFER_URL,
-        )
-    except Exception:
-        return None
-
-
 def create_query_rewriter() -> QueryRewriter:
-    """Factory to create a configured query rewriter instance."""
-    from config.settings import DEFAULT_MODEL
+    """Factory for a configured query rewriter instance.
 
-    enabled = True  # RAG_QUERY_EXPANSION_ENABLED — not currently configurable via env
-    client = _get_default_client()
+    Reuses the bot's shared ``AsyncOpenAI`` client (connection reuse, no
+    per-call construction) and reads the live settings so env overrides apply.
+    """
+    from config.settings import (
+        DEFAULT_MODEL,
+        RAG_QUERY_MAX_EXPANSIONS,
+        RAG_QUERY_REWRITER,
+    )
+
+    from bot_core.ai_client import _make_client
 
     return QueryRewriter(
-        client=client,
+        client=_make_client(),
         kb_domain="Humblewood fantasy worldbuilding",
-        max_expansions=3,  # RAG_QUERY_MAX_EXPANSIONS
-        enabled=enabled,
+        max_expansions=RAG_QUERY_MAX_EXPANSIONS,
+        enabled=RAG_QUERY_REWRITER,
         model_slug=DEFAULT_MODEL or "",
     )
