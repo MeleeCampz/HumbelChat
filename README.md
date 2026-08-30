@@ -25,6 +25,7 @@ Or use a startup script (the bot runs in a detached tmux session so it survives 
 - [Embeds](./docs/embeds.md) — Beyond20-style embed rendering for /ai replies
 - [Characters](./docs/characters.md) — `characters.json` format and per-character settings
 - [RAG / Knowledge Base](./docs/rag.md) — retrieval methods, smart chunking, supported file types
+- [Voice Recording](./docs/voice-recording.md) — per-speaker voice capture for STT (pipeline, manifest format, troubleshooting)
 - [Commands](./docs/commands.md) — slash command and prefix command reference
 - [Permissions](./docs/permissions.md) — Discord permissions the bot needs, where to set them, and per-channel override traps
 - [Troubleshooting](./docs/troubleshooting.md) — common symptoms and fixes
@@ -45,6 +46,7 @@ Or use a startup script (the bot runs in a detached tmux session so it survives 
 - `/end_session` — end the session and generate an AI overview
 - `/remind_next_session` — queue a reminder for the next session start
 - `/session_notes` — add/view notes for the current or last session
+- `/start_recording` / `/stop_recording` — capture voice channel audio per speaker (WAV + timestamped manifest) for STT
 
 Prefix command: `<BOT_PREFIX><message>` (example: `!ai hello`)
 
@@ -57,7 +59,8 @@ discord-ai-bot/
 ├── main.py
 ├── bot_core/
 │   ├── ai_client.py
-│   └── history.py
+│   ├── history.py
+│   └── voice_recorder.py
 ├── config/
 │   ├── settings.py
 │   └── characters.py

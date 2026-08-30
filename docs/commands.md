@@ -6,7 +6,7 @@ The bot uses Discord slash commands by default, plus a legacy prefix command for
 
 All commands begin with `/`.
 
-**Visibility:** every command's output (confirmations, results, and error messages) is posted **publicly** in the channel — all 15 commands were reviewed and set to public on 2026-08-29. There are no private/ephemeral responses.
+**Visibility:** most commands post their output **publicly** in the channel (all 13 non-recording commands were reviewed and set to public on 2026-08-29). The two voice-recording commands (`/start_recording`, `/stop_recording`) respond **ephemerally** — only the invoker sees the confirmation and results.
 
 ### `/ai`
 
@@ -120,6 +120,22 @@ Queue a reminder that is delivered when the **next** session starts (in the chan
 |---|---|
 | `add` | Append a timestamped note to the current session (requires an active session; notes are stored in the session file and re-indexed for RAG) |
 | `view` | Show the current session's notes — or the most recent ended session's if none is active (reads the file from disk, so manual edits are picked up) |
+
+### Voice recording
+
+Full pipeline, output format, manifest schema, and troubleshooting: [Voice Recording](./voice-recording.md).
+
+### `/start_recording`
+
+Joins the voice channel you're currently in and starts capturing each participant's audio separately (per-speaker STT). You must be in a guild voice channel, and the bot needs **Connect** + **Speak** there. Each recording is written to its own `recordings/recording_YYYYMMDD-HHMMSS/` directory when you stop.
+
+### `/stop_recording`
+
+```
+/stop_recording [leave_channel: true]
+```
+
+Stops capturing, writes one WAV per speaker plus a `manifest.json`, and replies (ephemerally) with a per-speaker summary and the attached manifest. By default the bot leaves the voice channel afterwards.
 
 ### `/sync`
 

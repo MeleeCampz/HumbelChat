@@ -26,10 +26,12 @@ client connect/disconnect). We therefore:
   4. Decode the Opus frame to 48 kHz mono PCM and append it to that speaker's
      buffer, tagged with an absolute wall-clock timestamp.
 
-On stop, each speaker's buffered frames are laid out on a shared timeline
-(silence in the gaps) and written to ``<speaker>.wav``; a ``manifest.json``
-records guild/channel, start/stop times, per-speaker SSRC + user id + display
-name, and decode statistics.
+On stop, each speaker's buffered frames are laid out on a shared timeline —
+anchored at the first frame's arrival offset, then exactly one nominal 20 ms
+frame apart (never by raw arrival time, which would smear jitter into silence
+holes and overwrites) — and written to ``<speaker>.wav``; a
+``manifest.json`` records guild/channel, start/stop times, per-speaker SSRC +
+user id + display name, decode statistics, and jitter diagnostics.
 
 Threading note: the UDP listener callback runs on discord.py's voice socket
 reader thread (not the event loop), while the op-5 hook runs on the event
@@ -43,10 +45,8 @@ are called.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-import os
 import struct
 import threading
 import time
@@ -65,8 +65,6 @@ SAMPLE_RATE = 48_000          # Discord voice is always 48 kHz
 CHANNELS = 1                  # we record mono (one file per speaker)
 SAMPLE_WIDTH = 2              # 16-bit PCM
 FRAME_SAMPLES = SAMPLE_RATE // 50   # one nominal voice frame == 20 ms of audio
-FRAME_MS = 20                 # one Opus frame == 20 ms at 48 kHz
-BYTES_PER_FRAME = SAMPLE_RATE * CHANNELS * SAMPLE_WIDTH * FRAME_MS // 1000
 
 # RTP "rtpsize" transport layout constants.
 _RTP_HEADER_SIZE = 12
