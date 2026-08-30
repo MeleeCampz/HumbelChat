@@ -124,6 +124,13 @@ class VoiceRecorder:
         self._pending_flushed = 0
         # Pipeline stage diagnostics (transport / dave / decode).
         self._stage_failures: dict[str, int] = {"transport": 0, "dave": 0, "decode": 0}
+        # Passthrough-frame accounting (Discord sends ~5% of frames unencrypted
+        # even when DAVE is active; davey rejects them with
+        # UnencryptedWhenPassthroughDisabled).
+        self._passthrough_recovered = 0
+        self._passthrough_silence_fallbacks = 0
+        # Log the winning DAVE framing variant only once per SSRC.
+        self._framing_logged: set[int] = set()
         self._first_stage_error: dict[str, str] = {}
         self._dave_state: dict[str, Any] = {}
 
@@ -159,6 +166,9 @@ class VoiceRecorder:
             self._pending_packets.clear()
             self._pending_flushed = 0
             self._stage_failures = {"transport": 0, "dave": 0, "decode": 0}
+            self._passthrough_recovered = 0
+            self._passthrough_silence_fallbacks = 0
+            self._framing_logged.clear()
             self._first_stage_error = {}
             self._dave_state = {}
         log.info(
@@ -239,6 +249,8 @@ class VoiceRecorder:
             "stage_failures": dict(self._stage_failures),
             "first_stage_error": dict(self._first_stage_error),
             "dave_state": self._dave_state,
+            "passthrough_frames_recovered": self._passthrough_recovered,
+            "passthrough_silence_fallbacks": self._passthrough_silence_fallbacks,
             "speakers": speakers_out,
         }
 
@@ -387,10 +399,27 @@ class VoiceRecorder:
                 break
             dave_errors.append(f"{label}: {err_box[0] if err_box else 'returned None'}")
         if opus_frame is None:
-            self._bump_failure(user_id, "decrypt")
-            self._record_stage_error("dave", "; ".join(dave_errors), inner[:24].hex())
-            return
-        if winning != "full":
+            # Passthrough frames: Discord sends ~5% of frames unencrypted even
+            # when DAVE is active. Their layout is
+            #   [raw_opus][dave_supp_block][rtp_padding]
+            # where the supp block ends with <size_byte> 0xFA 0xFA and the RTP
+            # padding length is the final byte (RFC 3550). Recover the Opus
+            # directly; if that fails, substitute a DTX silence frame so the
+            # stateful decoder stays in sync (pycord does the same).
+            pt = _extract_passthrough_opus(inner) or _extract_passthrough_opus(candidates[0][1])
+            if pt is not None:
+                opus_frame = pt
+                with self._lock:
+                    self._passthrough_recovered += 1
+            else:
+                opus_frame = b"\xf8\xff\xfe"  # Opus DTX silence (20 ms)
+                self._bump_failure(user_id, "decrypt")
+                with self._lock:
+                    self._passthrough_silence_fallbacks += 1
+                self._record_stage_error("dave", "; ".join(dave_errors), inner[:24].hex())
+        elif winning != "full" and ssrc not in self._framing_logged:
+            with self._lock:
+                self._framing_logged.add(ssrc)
             log.info("DAVE decrypt succeeded with %s framing (ssrc=%s)", winning, ssrc)
 
         # 4) Opus -> PCM.
@@ -661,6 +690,32 @@ def _decrypt_transport(raw: bytes, mode: str, secret_key: bytes) -> bytes:
         return aes.decrypt(nonce, ciphertext + auth_tag, header)
 
     raise ValueError(f"unsupported transport encryption mode: {mode!r}")
+
+
+def _extract_passthrough_opus(inner: bytes) -> Optional[bytes]:
+    """Recover the raw Opus frame from a DAVE *passthrough* (unencrypted) frame.
+
+    Passthrough layout (reverse-engineered, matches pycord's live traffic):
+        [raw_opus][dave_supp_block][rtp_padding]
+    where the supp block ends with ``<size_byte> 0xFA 0xFA`` (size counts the
+    whole block) and the RTP padding length is the final byte (RFC 3550).
+    Returns ``None`` when the layout doesn't parse cleanly.
+    """
+    data = inner
+    # Strip RFC 3550 RTP padding: last byte = number of pad bytes.
+    if len(data) >= 4 and 0 < data[-1] <= 64 and len(data) > data[-1] + 4:
+        candidate = data[: -data[-1]]
+        # Only trust it if the FAFA marker lands inside the trimmed payload.
+        if b"\xfa\xfa" in candidate:
+            data = candidate
+    idx = data.rfind(b"\xfa\xfa")
+    if idx >= 2 and idx + 2 <= len(data):
+        supp_size = data[idx - 1]
+        start = idx + 2 - supp_size
+        # Plausible Opus frame: at least a couple of bytes, sane total size.
+        if 3 <= supp_size <= 64 and 2 <= start <= 1500:
+            return data[:start]
+    return None
 
 
 def _decrypt_dave(
