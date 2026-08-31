@@ -116,6 +116,20 @@ RECORDINGS_DIR: pathlib.Path = pathlib.Path(
     _or_default(os.getenv("RECORDINGS_DIR"), str(_REPO_ROOT / "data" / "recordings"))
 )
 
+# ── Speech-to-text (runs on the same OpenAI-compatible backend) ────────────
+# Transcribe each speaker's WAV automatically after /stop_recording via the
+# backend's /v1/audio/transcriptions endpoint. Set STT_ENABLED=0 to keep
+# recording without transcribing.
+STT_ENABLED: bool = os.getenv("STT_ENABLED", "1") not in ("0", "false", "no")
+# STT model slug as accepted by the backend's /v1/audio/transcriptions route.
+# unsloth-studio defaults: tiny, base, small, large-v3-turbo, large-v3,
+# qwen3-asr-0.6b, qwen3-asr-1.7b (or any HF repo in owner/model form).
+STT_MODEL: str = os.getenv("STT_MODEL", "qwen3-asr-1.7b")
+# Force a language for transcription (e.g. "en", "de"); empty = auto-detect.
+STT_LANGUAGE: str = os.getenv("STT_LANGUAGE", "")
+# Per-file HTTP timeout in seconds (long recordings + cold model load).
+STT_TIMEOUT: int = _safe_int(os.getenv("STT_TIMEOUT"), 300)
+
 CHUNK_TARGET: int = _safe_int(os.getenv("CHUNK_SIZE"), 2000)
 RAG_MAX_DOCS: int = _safe_int(os.getenv("RAG_MAX_DOCS"), 4)
 RAG_RETRIEVAL_METHOD: str = os.getenv("RAG_RETRIEVAL_METHOD", "vector").lower()

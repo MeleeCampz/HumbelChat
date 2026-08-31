@@ -54,6 +54,18 @@ A smaller baseline is usually better for Discord. Very large `max_tokens` values
 | `REMINDERS_PERSIST_FILE` | Where `/remind` reminders are stored so they survive restarts; set empty to disable persistence | `<repo_root>/data/reminders.json` |
 | `SESSIONS_PERSIST_FILE` | Where session state (active session + queued next-session reminders) is stored so it survives restarts; set empty to disable persistence. Session notes files always live under `<KB_PATH>/session_notes/` | `<repo_root>/data/sessions.json` |
 
+## Voice recording and STT
+
+| Variable | Description | Default |
+|---|---|---|
+| `RECORDINGS_DIR` | Where `/start_recording` writes per-recording subdirectories (one WAV per speaker + `manifest.json`) | `<repo_root>/data/recordings` |
+| `STT_ENABLED` | Transcribe each speaker's WAV automatically after `/stop_recording`; set `0` to record only | `1` |
+| `STT_MODEL` | Model slug for the backend's `/v1/audio/transcriptions` endpoint (unsloth-studio: `tiny`, `base`, `small`, `large-v3-turbo`, `large-v3`, `qwen3-asr-0.6b`, `qwen3-asr-1.7b`, or any HF `owner/model`) | `qwen3-asr-1.7b` |
+| `STT_LANGUAGE` | Force a transcription language (e.g. `en`, `de`); empty = auto-detect | *(empty)* |
+| `STT_TIMEOUT` | Per-file HTTP timeout in seconds (long recordings + cold model load) | `300` |
+
+STT runs on the same OpenAI-compatible backend as chat (`INFER_URL` / `INFER_API_KEY`) — see [Voice Recording — Speech-to-text](./voice-recording.md#speech-to-text).
+
 ## Knowledge base and RAG
 
 | Variable | Description | Default |

@@ -359,13 +359,15 @@ async def start_recording_command(interaction: discord.Interaction) -> None:
     description="Stop the active voice recording and save per-speaker WAV files + a timestamped manifest.",
 )
 @app_commands.describe(leave_channel="Whether the bot should leave the voice channel afterwards (default true)")
+@app_commands.describe(transcribe="Transcribe each speaker's audio with STT after stopping (default true; requires STT_ENABLED)")
 async def stop_recording_command(
     interaction: discord.Interaction,
     leave_channel: bool = True,
+    transcribe: bool = True,
 ) -> None:
     """Stop voice recording — delegated to commands/recording_commands.py."""
     from commands.recording_commands import handle_stop_recording
-    await handle_stop_recording(interaction, leave_channel=leave_channel)
+    await handle_stop_recording(interaction, leave_channel=leave_channel, transcribe=transcribe)
 
 
 # ════════════════════════════════════════════════════════════════════════

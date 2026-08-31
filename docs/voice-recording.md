@@ -15,9 +15,11 @@ Joins the voice channel **you** are currently in and starts capturing. Requireme
 
 The bot joins automatically; if it was already in a different voice channel of the same server, it moves to yours. Each recording goes into its own subdirectory: `recordings/recording_YYYYMMDD-HHMMSS/`.
 
-### `/stop_recording [leave_channel: true]`
+### `/stop_recording [leave_channel: true] [transcribe: true]`
 
 Stops capturing, writes the WAV files + `manifest.json`, and replies with a per-speaker summary (and attaches the manifest). By default the bot then leaves the voice channel so it doesn't occupy a slot.
+
+When `STT_ENABLED` is on (default) and `transcribe` isn't set to `false`, each speaker's WAV is additionally **transcribed in the background** (see [Speech-to-text](#speech-to-text)) and a second message with the transcript is posted when done.
 
 > **Note:** recordings are written to disk on stop — nothing is saved if you never stop. Long recordings can take a moment to write (the command defers to stay under Discord's 15 s response window).
 
@@ -28,6 +30,7 @@ Each recording directory contains:
 ```
 recordings/recording_20260831-014251/
 ├── manifest.json          # session + per-speaker metadata (see below)
+├── transcript.json        # STT results (written after /stop_recording, if enabled)
 ├── MeleeChan_268856797626892288.wav
 └── ...                    # one WAV per speaker who produced audio
 ```
@@ -97,6 +100,62 @@ Consequences:
 
 `jitter_*` fields describe the *network*, not the output: frames are always written on the nominal grid, so these numbers never affect audio quality — they just tell you how rough the connection was.
 
+## Speech-to-text
+
+Implemented in [`bot_core/transcriber.py`](../bot_core/transcriber.py). STT runs on the **same OpenAI-compatible backend** as chat (same `INFER_URL` / `INFER_API_KEY`) via its `/v1/audio/transcriptions` endpoint — no extra service to run.
+
+Flow after `/stop_recording`:
+
+```
+per-speaker WAV ──► downmix/resample to 16 kHz mono WAV (numpy)
+                 ──► POST /v1/audio/transcriptions (multipart, model=STT_MODEL)
+                 ──► transcript.json next to manifest.json
+                 ──► follow-up Discord message with per-speaker preview + file
+```
+
+Key details:
+
+- **16 kHz resampling.** The backend caps uploads at ~25 MB (a 48 kHz WAV hits that in ~4 min of audio) and Whisper-class models want 16 kHz anyway, so each WAV is resampled to 16 kHz mono before upload — a ~3x size reduction.
+- **Per-speaker attribution comes free.** Each file is one person, so no diarization is needed; `transcript.json` maps text back to speaker by `user_id`/`display_name` from the manifest.
+- **Sequential processing.** One local backend = one inference slot, so speakers are transcribed one at a time (same reasoning as the global AI lock).
+- **Per-speaker error isolation.** A failing file (e.g. model not downloaded) is reported in `transcript.json` and the Discord message; the other speakers still get transcribed.
+
+### Configuration
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `STT_ENABLED` | `1` | `0` = record only, never transcribe |
+| `STT_MODEL` | `qwen3-asr-1.7b` | slug accepted by the backend's `/v1/audio/transcriptions` (unsloth-studio: `tiny`, `base`, `small`, `large-v3-turbo`, `large-v3`, `qwen3-asr-0.6b`, `qwen3-asr-1.7b`, or any HF `owner/model`) |
+| `STT_LANGUAGE` | *(empty)* | force a language (e.g. `en`, `de`); empty = auto-detect |
+| `STT_TIMEOUT` | `300` | per-file HTTP timeout in seconds |
+
+> **Model must be downloaded first** (unsloth-studio: Settings → Voice). A missing model surfaces as a per-speaker error like `STT model 'small' is not downloaded.` — the recording itself is always safe on disk.
+
+### `transcript.json` schema
+
+```jsonc
+{
+  "model": "qwen3-asr-1.7b",
+  "language_requested": null,        // STT_LANGUAGE, or null when auto
+  "started_at": 1788133050.123,
+  "finished_at": 1788133055.4,
+  "elapsed_s": 5.3,
+  "speakers": [
+    {
+      "user_id": 268856797626892288,
+      "display_name": "MeleeChan",
+      "wav_file": "MeleeChan_268856797626892288.wav",
+      "text": "So, Test, Test, wieder Recorden. ...",
+      "language": null,              // backend-reported (null when not provided)
+      "elapsed_s": 5.3,
+      "error": null                  // set instead of text on failure
+    }
+  ]
+}
+```
+
+The on-disk `manifest.json` also gains `"transcript": "transcript.json"` and `"stt_model"` once transcription completes.
+
 ## How it works
 
 Discord voice audio arrives over UDP as RTP packets. The SSRC in each packet header doesn't say *who* is speaking; that mapping is published by the voice WebSocket:
@@ -132,6 +191,9 @@ Key implementation details:
 | Occasional clicks/dropouts | small `decode_failures`, or `passthrough_silence_fallbacks` > 0 | packet loss / unparseable passthrough frame; each costs one 20 ms silence |
 | WAV longer than expected | — | shouldn't happen (nominal grid); if it does, compare `duration_s` vs. `spoken_duration_s` |
 | Wrong speaker name in filename | `display_name` empty → `user-<id>` fallback | member object wasn't cached at capture time; the user_id in the manifest is authoritative |
+| No transcript message after stop | `STT_ENABLED=0`, or `transcribe=false`, or nobody spoke (`frames_captured=0`) | expected — check the stop message, which says whether transcription was queued |
+| Transcript error: `STT model '...' is not downloaded` | per-speaker `error` in `transcript.json` | download it in unsloth-studio Settings → Voice (or fix `STT_MODEL`) |
+| Transcript error: `Audio is too large` | per-speaker `error` in `transcript.json` | recording outgrew the backend's ~25 MB cap even after 16 kHz resampling — split into shorter recordings |
 
 The first frame per SSRC is hexdumped to the log (`UDP frame first-seen`) and the first failure per pipeline stage is logged loudly (`PIPELINE <stage> FAILED (first): ...`), so `logs/bot.log` plus the manifest are usually enough to diagnose any bad recording without re-running it.
 
@@ -144,3 +206,11 @@ python3 -m pytest tests/test_voice_recorder.py -q
 ```
 
 Covers transport decryption (both modes), stereo→mono downmix, Opus decode, SSRC mapping from op-5/11/13, passthrough recovery, the full packet-in → PCM-out path, timeline placement (nominal grid, no-overwrite, jitter diagnostics), and `stop()` WAV + manifest output.
+
+The STT layer is tested separately with a fake backend client:
+
+```bash
+python3 -m pytest tests/test_transcriber.py tests/test_stop_recording_stt.py -q
+```
+
+Covers 48 kHz→16 kHz conversion (resample, stereo downmix, size shrink), `transcribe_wav` success/error paths, per-speaker aggregation in `transcribe_recording`, `transcript.json` output + manifest pointer, and the `/stop_recording` wiring (spawn/skip logic, result delivery).
