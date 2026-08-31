@@ -1,12 +1,17 @@
-"""Tests for bot_core.transcriber (STT via /v1/audio/transcriptions).
+"""Tests for bot_core.transcriber (local faster-whisper + HTTP backends).
 
 Covers:
   * 48 kHz -> 16 kHz mono WAV conversion (downmix + resample),
-  * transcribe_wav() success / missing-file / backend-error paths,
-  * transcribe_recording() per-speaker aggregation, and
-  * write_transcript() output + manifest pointer.
+  * transcribe_wav() success / missing-file / backend-error paths on both
+    backends,
+  * transcribe_recording() per-speaker aggregation + model selection by
+    backend,
+  * build_interleaved_transcript() timeline merging, and
+  * write_transcript() output (json + interleaved txt) + manifest pointer.
 
-No network access: the AsyncOpenAI client is replaced with a fake.
+No network access: the AsyncOpenAI client and _local_transcribe are faked.
+The HTTP-path tests force STT_BACKEND=http; the local-path tests force it to
+"local" — each test is explicit about which engine it exercises.
 """
 from __future__ import annotations
 
@@ -20,6 +25,18 @@ from types import SimpleNamespace
 import pytest
 
 import bot_core.transcriber as T
+
+
+@pytest.fixture(autouse=True)
+def _http_backend(monkeypatch):
+    """Default these tests to the HTTP backend (they fake the OpenAI client).
+
+    Local-backend tests override this explicitly. Also clears any cached
+    local models so a real model can never leak into the suite.
+    """
+    from config import settings as S
+    monkeypatch.setattr(S, "STT_BACKEND", "http", raising=False)
+    T._local_models.clear()
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -176,6 +193,55 @@ class TestTranscribeWav:
         assert "could not read WAV" in r.error
 
 
+# ── transcribe_wav (local backend) ───────────────────────────────────────────
+class TestTranscribeWavLocal:
+    @pytest.mark.asyncio
+    async def test_success_returns_text_and_segments(self, tmp_path, monkeypatch):
+        from config import settings as S
+        monkeypatch.setattr(S, "STT_BACKEND", "local", raising=False)
+        p = tmp_path / "spk.wav"
+        _make_wav(p)
+
+        calls: list[tuple] = []
+
+        def fake_local(wav_path, model_name, language):
+            calls.append((wav_path.name, model_name, language))
+            return ("hallo welt", "de",
+                    [{"start": 0.5, "end": 2.1, "text": "hallo welt"}])
+
+        monkeypatch.setattr(T, "_local_transcribe", fake_local)
+        r = await T.transcribe_wav(p, model="large-v3-turbo", language="de")
+        assert r.ok
+        assert r.text == "hallo welt"
+        assert r.language == "de"
+        assert r.segments == [{"start": 0.5, "end": 2.1, "text": "hallo welt"}]
+        # the model name + language are forwarded to the local engine
+        assert calls == [("spk.wav", "large-v3-turbo", "de")]
+
+    @pytest.mark.asyncio
+    async def test_local_error_captured_not_raised(self, tmp_path, monkeypatch):
+        from config import settings as S
+        monkeypatch.setattr(S, "STT_BACKEND", "local", raising=False)
+        p = tmp_path / "spk.wav"
+        _make_wav(p)
+
+        def boom(wav_path, model_name, language):
+            raise RuntimeError("model download failed")
+
+        monkeypatch.setattr(T, "_local_transcribe", boom)
+        r = await T.transcribe_wav(p, model="m")
+        assert not r.ok
+        assert "local whisper" in r.error and "model download failed" in r.error
+
+    @pytest.mark.asyncio
+    async def test_missing_file_reports_error(self, tmp_path, monkeypatch):
+        from config import settings as S
+        monkeypatch.setattr(S, "STT_BACKEND", "local", raising=False)
+        r = await T.transcribe_wav(tmp_path / "nope.wav", model="m")
+        assert not r.ok
+        assert "not found" in r.error
+
+
 # ── transcribe_recording ─────────────────────────────────────────────────────
 class TestTranscribeRecording:
     def _manifest(self, tmp_path: Path) -> dict:
@@ -224,6 +290,37 @@ class TestTranscribeRecording:
         report = await T.transcribe_recording(manifest)
         assert report.ok_count == 0
         assert len(report.failed) == 2
+        assert report.backend == "http"
+
+    @pytest.mark.asyncio
+    async def test_local_backend_selects_local_model(self, tmp_path, monkeypatch):
+        from config import settings as S
+        manifest = self._manifest(tmp_path)
+        monkeypatch.setattr(S, "STT_BACKEND", "local", raising=False)
+        monkeypatch.setattr(S, "STT_LOCAL_MODEL", "large-v3-turbo", raising=False)
+
+        def fake_local(wav_path, model_name, language):
+            assert model_name == "large-v3-turbo"
+            return ("hi", None, [{"start": 0.0, "end": 1.0, "text": "hi"}])
+
+        monkeypatch.setattr(T, "_local_transcribe", fake_local)
+        report = await T.transcribe_recording(manifest)
+        assert report.backend == "local"
+        assert report.model == "large-v3-turbo"
+        a = report.speakers[0]
+        assert a.ok and a.segments
+
+
+class TestSttBackendSelection:
+    def test_invalid_backend_falls_back_to_local(self, monkeypatch):
+        from config import settings as S
+        monkeypatch.setattr(S, "STT_BACKEND", "carrier-pigeon", raising=False)
+        assert T._stt_backend() == "local"
+
+    def test_explicit_http(self, monkeypatch):
+        from config import settings as S
+        monkeypatch.setattr(S, "STT_BACKEND", "HTTP", raising=False)
+        assert T._stt_backend() == "http"
 
 
 # ── write_transcript ─────────────────────────────────────────────────────────
@@ -249,6 +346,63 @@ class TestResolveRecordingDir:
         from config import settings as S
         monkeypatch.setattr(S, "RECORDINGS_DIR", tmp_path / "nope", raising=False)
         assert T.resolve_recording_dir({"speakers": []}) is None
+
+
+# ── interleaved transcript ───────────────────────────────────────────────────
+def _spk(user_id, name, text="", segments=None, error=None):
+    return T.SpeakerResult(user_id=user_id, display_name=name, wav_file=f"{name}.wav",
+                           text=text, segments=segments or [], error=error)
+
+
+class TestBuildInterleavedTranscript:
+    def test_merges_speakers_chronologically(self):
+        report = T.TranscriptionReport(model="m", language_requested="de", started_at=0.0,
+                                       backend="local")
+        report.speakers.append(_spk(1, "Alice",
+                                    segments=[{"start": 2.0, "end": 4.0, "text": "hallo"},
+                                              {"start": 9.0, "end": 11.0, "text": "und tschüss"}]))
+        report.speakers.append(_spk(2, "Bob",
+                                    segments=[{"start": 5.0, "end": 8.0, "text": "servus"}]))
+
+        out = T.build_interleaved_transcript(report)
+        lines = [l for l in out.splitlines() if l.strip()]
+        assert lines == [
+            "[00:02.00] Alice: hallo",
+            "[00:05.00] Bob: servus",
+            "[00:09.00] Alice: und tschüss",
+        ]
+
+    def test_untimed_speakers_appended_at_end(self):
+        report = T.TranscriptionReport(model="m", language_requested="", started_at=0.0,
+                                       backend="http")
+        report.speakers.append(_spk(1, "Alice",
+                                    segments=[{"start": 1.0, "end": 2.0, "text": "hi"}]))
+        report.speakers.append(_spk(2, "Bob", text="plain text without timestamps"))
+
+        out = T.build_interleaved_transcript(report)
+        assert out.index("[00:01.00] Alice: hi") < out.index("[Bob]")
+        assert "plain text without timestamps" in out
+
+    def test_all_untimed_still_produces_blocks(self):
+        report = T.TranscriptionReport(model="m", language_requested="", started_at=0.0,
+                                       backend="http")
+        report.speakers.append(_spk(1, "Alice", text="hello"))
+        out = T.build_interleaved_transcript(report)
+        assert "[Alice]" in out and "hello" in out
+
+    def test_failed_and_empty_speakers_skipped(self):
+        report = T.TranscriptionReport(model="m", language_requested="", started_at=0.0,
+                                       backend="local")
+        report.speakers.append(_spk(1, "Alice", error="boom"))
+        report.speakers.append(_spk(2, "Bob"))  # no text
+        assert T.build_interleaved_transcript(report) == ""
+
+    def test_timestamp_format_minutes(self):
+        report = T.TranscriptionReport(model="m", language_requested="", started_at=0.0,
+                                       backend="local")
+        report.speakers.append(_spk(1, "Alice",
+                                    segments=[{"start": 65.25, "end": 70.0, "text": "x"}]))
+        assert "[01:05.25] Alice: x" in T.build_interleaved_transcript(report)
 
 
 class TestWriteTranscript:
@@ -278,3 +432,26 @@ class TestWriteTranscript:
         m = json.loads((d / "manifest.json").read_text())
         assert m["transcript"] == "transcript.json"
         assert m["stt_model"] == "m"
+
+    def test_local_report_writes_interleaved_txt_with_segments(self, tmp_path):
+        d = tmp_path / "rec"
+        d.mkdir()
+        (d / "manifest.json").write_text(json.dumps({"duration_s": 10.0}))
+        manifest = {"manifest_path": str(d / "manifest.json")}
+
+        report = T.TranscriptionReport(model="large-v3-turbo", language_requested="de",
+                                       started_at=1.0, backend="local")
+        report.speakers.append(_spk(1, "Alice",
+                                    segments=[{"start": 2.0, "end": 4.0, "text": "hallo"}]))
+        report.speakers.append(_spk(2, "Bob",
+                                    segments=[{"start": 5.0, "end": 8.0, "text": "servus"}]))
+        report.finished_at = 3.5
+
+        path = T.write_transcript(d, manifest, report)
+        data = json.loads(path.read_text())
+        assert data["backend"] == "local"
+        assert data["speakers"][0]["segments"][0]["start"] == 2.0
+
+        txt = (d / "transcript.txt").read_text(encoding="utf-8")
+        assert "[00:02.00] Alice: hallo" in txt
+        assert "[00:05.00] Bob: servus" in txt

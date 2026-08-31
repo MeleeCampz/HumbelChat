@@ -116,14 +116,23 @@ RECORDINGS_DIR: pathlib.Path = pathlib.Path(
     _or_default(os.getenv("RECORDINGS_DIR"), str(_REPO_ROOT / "data" / "recordings"))
 )
 
-# ── Speech-to-text (runs on the same OpenAI-compatible backend) ────────────
-# Transcribe each speaker's WAV automatically after /stop_recording via the
-# backend's /v1/audio/transcriptions endpoint. Set STT_ENABLED=0 to keep
-# recording without transcribing.
+# ── Speech-to-text ───────────────────────────────────────────────────────────
+# Transcribe each speaker's WAV automatically after /stop_recording.
+# Set STT_ENABLED=0 to keep recording without transcribing.
 STT_ENABLED: bool = os.getenv("STT_ENABLED", "1") not in ("0", "false", "no")
-# STT model slug as accepted by the backend's /v1/audio/transcriptions route.
-# unsloth-studio defaults: tiny, base, small, large-v3-turbo, large-v3,
-# qwen3-asr-0.6b, qwen3-asr-1.7b (or any HF repo in owner/model form).
+# Which engine performs the transcription:
+#   local — faster-whisper on this machine (default). Real per-segment
+#           timestamps -> interleaved chronological transcript, no upload cap.
+#   http  — the OpenAI-compatible /v1/audio/transcriptions endpoint of the AI
+#           backend (plain text only; ~25 MB upload cap).
+STT_BACKEND: str = os.getenv("STT_BACKEND", "local")
+# Model name for the local backend: any faster-whisper model id, e.g.
+# tiny / base / small / medium / large-v3 / large-v3-turbo (or an HF repo in
+# owner/model form). Downloaded on first use (~1.6 GB for large-v3-turbo).
+STT_LOCAL_MODEL: str = os.getenv("STT_LOCAL_MODEL", "large-v3-turbo")
+# STT model slug as accepted by the backend's /v1/audio/transcriptions route
+# (used only when STT_BACKEND=http). unsloth-studio defaults: tiny, base,
+# small, large-v3-turbo, large-v3, qwen3-asr-0.6b, qwen3-asr-1.7b.
 STT_MODEL: str = os.getenv("STT_MODEL", "qwen3-asr-1.7b")
 # Force a language for transcription (e.g. "en", "de"); empty = auto-detect.
 STT_LANGUAGE: str = os.getenv("STT_LANGUAGE", "")
