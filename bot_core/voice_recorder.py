@@ -8,6 +8,15 @@ can be reconstructed on a shared timeline.
 
 How it works
 ------------
+**Call :meth:`VoiceRecorder.start` *before* joining (or moving into) the
+voice channel.** Discord sends the initial ``op-11``/``op-5`` burst (which is
+the only place SSRC -> user ids are announced — op-5 otherwise only fires on
+speaking-state *changes*) as soon as the voice connection establishes, i.e.
+during ``channel.connect()``. If ``start()`` runs afterwards it would wipe the
+mappings and every audio packet would be dropped as "unknown SSRC" (observed
+live: worked for a solo speaker whose op-5 arrived post-start, captured
+nothing when two users' op-5 burst arrived during the join).
+
 Discord voice audio arrives over UDP as RTP packets. Each packet carries an
 ``SSRC`` (synchronisation source id) in its header, but the SSRC alone does
 not say *who* is speaking. The mapping ``SSRC -> user_id`` is published by the
@@ -132,6 +141,9 @@ class VoiceRecorder:
         self._framing_logged: set[int] = set()
         self._first_stage_error: dict[str, str] = {}
         self._dave_state: dict[str, Any] = {}
+        # The VoiceClient this recorder is wired to (set by _wire_voice_client).
+        # Used by start() to decide whether an existing SSRC map is still valid.
+        self._wired_vc: Optional[Any] = None
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     @property
@@ -144,12 +156,42 @@ class VoiceRecorder:
         guild_id: Optional[int],
         channel_id: int,
         channel_name: str = "",
+        out_dir: Optional[Path] = None,
     ) -> None:
-        """Begin a new capture session (resets all state)."""
+        """Begin a new capture session (resets all state).
+
+        Must be called *before* the voice join so the initial op-11/op-5
+        burst is not lost. ``out_dir`` points the recorder at the recording's
+        directory immediately, so any audio that starts arriving during the
+        handshake lands in the right place.
+        """
+        if out_dir is not None:
+            self.out_dir = Path(out_dir)
+
+        # If the bot is already connected to this exact channel (e.g. a new
+        # recording after /stop_recording with leave_channel=false), no fresh
+        # handshake happens and Discord will NOT re-send the initial op-11/op-5
+        # burst — but the SSRCs from the existing connection are still valid.
+        # Keep the map in that case; otherwise a new join/move is coming and
+        # old mappings must go (SSRCs are per-connection).
+        keep_map = False
+        with self._lock:
+            vc = self._wired_vc
+            if vc is not None:
+                ch = getattr(vc, "channel", None)
+                try:
+                    connected = bool(vc.is_connected())
+                except Exception:  # pragma: no cover - defensive
+                    connected = False
+                keep_map = connected and ch is not None and getattr(ch, "id", None) == channel_id
+
         with self._lock:
             self._speakers.clear()
-            self._ssrc_to_user.clear()
-            self._decoders.clear()
+            if not keep_map:
+                self._ssrc_to_user.clear()
+                # Opus decoders are stateful per stream; they're only
+                # reusable when the SSRCs (and thus the streams) survive.
+                self._decoders.clear()
             self._recording = True
             self._started_at = time.time()
             self._ended_at = None
@@ -174,6 +216,23 @@ class VoiceRecorder:
             "Voice recording started (guild=%s channel=%s#%s)",
             guild_id, channel_id, channel_name,
         )
+
+    def discard(self) -> None:
+        """Abort the current capture session without writing any files.
+
+        Used when the voice join fails after :meth:`start` has already run —
+        otherwise a half-started session (with its SSRC mappings) would stay
+        armed and leak into the next recording.
+        """
+        with self._lock:
+            if not self._recording:
+                return
+            self._recording = False
+            self._speakers.clear()
+            self._ssrc_to_user.clear()
+            self._decoders.clear()
+            self._pending_packets.clear()
+        log.info("Voice recording discarded (join failed)")
 
     def stop(self) -> Optional[dict]:
         """Stop capturing and write WAV files + manifest. Returns the manifest."""
@@ -599,6 +658,9 @@ def _wire_voice_client(vc: discord.VoiceClient, recorder: VoiceRecorder) -> None
     a best-effort retrofit when the bot is already in voice for another reason.
     """
     state = vc._connection  # VoiceConnectionState
+
+    with recorder._lock:
+        recorder._wired_vc = vc
 
     # (a) op-5 / op-12 / op-13 hook — read by VoiceConnectionState whenever it
     #     (re)creates the voice WebSocket, so setting it here is safe.

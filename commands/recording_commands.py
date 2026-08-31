@@ -5,9 +5,10 @@ The bot joins the voice channel the invoking user is currently in, captures each
 participant's audio separately (for per-speaker STT), and writes WAV files plus a
 timestamped manifest to disk on stop. When ``STT_ENABLED`` (and the optional
 per-command ``transcribe`` flag) are set, each speaker's WAV is then transcribed
-in the background via :mod:`bot_core.transcriber` against the same OpenAI-
-compatible backend used for chat, and a ``transcript.json`` is posted to the
-channel when done.
+in the background via :mod:`bot_core.transcriber` — locally with faster-whisper
+(``STT_BACKEND=local``, segment timestamps -> interleaved transcript) or against
+the OpenAI-compatible backend (``STT_BACKEND=http``) — and the results are
+posted to the channel when done.
 
 The heavy lifting lives in ``bot_core.voice_recorder`` / ``bot_core.transcriber``;
 this module only:
@@ -30,10 +31,21 @@ from bot_core.voice_recorder import (
     attach_to_bot,
     recorder_voice_cls,
 )
-from config.settings import RECORDINGS_DIR, STT_ENABLED, STT_MODEL
+from config.settings import (
+    RECORDINGS_DIR,
+    STT_BACKEND,
+    STT_ENABLED,
+    STT_LOCAL_MODEL,
+    STT_MODEL,
+)
 from utils.background_tasks import spawn_tracked_task
 
 log = logging.getLogger("bot.recording_commands")
+
+
+def _stt_model_name() -> str:
+    """The model name the configured STT backend will actually use."""
+    return STT_LOCAL_MODEL if (STT_BACKEND or "local").strip().lower() == "local" else STT_MODEL
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -128,16 +140,22 @@ async def handle_start_recording(interaction: discord.Interaction) -> None:
     try:
         recorder = _get_recorder(bot)
         out_dir = _new_recording_dir()
-        recorder.out_dir = out_dir
 
-        await _ensure_bot_in_channel(bot, interaction.guild_id, channel)
-
+        # Start BEFORE joining: Discord announces the initial SSRC -> user
+        # mapping (op-11/op-5) as soon as the voice connection establishes,
+        # which happens inside _ensure_bot_in_channel(). Starting afterwards
+        # would wipe those mappings and every audio packet would be dropped
+        # as "unknown SSRC" — silent failure, no WAVs written.
         recorder.start(
             guild_id=interaction.guild_id,
             channel_id=channel.id,
             channel_name=getattr(channel, "name", ""),
+            out_dir=out_dir,
         )
+
+        await _ensure_bot_in_channel(bot, interaction.guild_id, channel)
     except discord.Forbidden:
+        recorder.discard()
         await interaction.followup.send(
             "⚠️ I don't have permission to join that voice channel (need **Connect** and **Speak**).",
             ephemeral=True,
@@ -145,6 +163,7 @@ async def handle_start_recording(interaction: discord.Interaction) -> None:
         return
     except Exception as e:  # pragma: no cover - defensive
         log.exception("Failed to start voice recording")
+        recorder.discard()
         await interaction.followup.send(f"⚠️ Failed to start recording: {e}", ephemeral=True)
         return
 
@@ -223,8 +242,8 @@ async def handle_stop_recording(
     )
     if run_stt:
         body += (
-            f"\n\n🎧 Transcribing {len(stt_speakers)} speaker(s) with `{STT_MODEL}` "
-            f"in the background — I'll post the transcript here when it's done."
+            f"\n\n🎧 Transcribing {len(stt_speakers)} speaker(s) with `{_stt_model_name()}` "
+            f"({STT_BACKEND} backend) in the background — I'll post the transcript here when it's done."
         )
 
     # Attach the (small) manifest so it's easy to grab; WAVs stay on disk.
@@ -282,8 +301,10 @@ async def _run_transcription(interaction: discord.Interaction, manifest: dict) -
     )
 
     files: list = []
-    try:
-        files.append(discord.File(path, filename="transcript.json"))
-    except Exception:  # pragma: no cover - defensive
-        pass
+    for f in (path, path.with_name("transcript.txt")):
+        try:
+            if f.exists():
+                files.append(discord.File(f, filename=f.name))
+        except Exception:  # pragma: no cover - defensive
+            pass
     await _safe_followup(interaction, body, files=files)

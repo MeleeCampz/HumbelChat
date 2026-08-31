@@ -255,6 +255,104 @@ class TestCapturePath:
         assert len(r._speakers[2].frames) == 1
 
 
+# ── start() state reset & the pre-join op-5 burst ordering ───────────────────
+class _FakeVC:
+    """Just enough of VoiceClient for start()'s keep-map check."""
+
+    def __init__(self, channel_id=None, connected: bool = True) -> None:
+        from types import SimpleNamespace
+        self.channel = SimpleNamespace(id=channel_id) if channel_id is not None else None
+        self._connected = connected
+
+    def is_connected(self) -> bool:
+        return self._connected
+
+
+class TestStartOrdering:
+    """Regression tests for the two-person silent-capture bug.
+
+    Discord sends the initial op-11/op-5 burst (the only place SSRC -> user is
+    announced) *during* channel.connect(). The production ordering must be
+    start() -> connect(); these tests pin down what start() may and may not
+    wipe under each connection situation.
+    """
+
+    @pytest.mark.asyncio
+    async def test_start_before_op5_burst_captures_both_speakers(self):
+        """The fixed production order: start(), then the join's op-11/op-5
+        burst, then audio. Both speakers must end up captured."""
+        r = VoiceRecorder(Path("/tmp/unused"))
+        r.start(guild_id=1, channel_id=2)
+
+        # Burst arrives while the (subsequent) handshake completes:
+        await r.on_voice_ws(None, {"op": 11, "d": {"user_ids": [101, 202]}})
+        await r.on_voice_ws(None, {"op": 5, "d": {"speaking": 1, "ssrc": 0xA, "user_id": 101}})
+        await r.on_voice_ws(None, {"op": 5, "d": {"speaking": 1, "ssrc": 0xB, "user_id": 202}})
+
+        key = nacl.utils.random(32)
+        for ssrc in (0xA, 0xB):
+            r.handle_packet(_make_xchacha_packet(SILENCE_PACKET, key, ssrc=ssrc),
+                            mode="aead_xchacha20_poly1305_rtpsize", secret_key=key,
+                            dave_session=None, resolve_name=lambda uid: "x")
+        assert len(r._speakers[101].frames) == 1
+        assert len(r._speakers[202].frames) == 1
+
+    @pytest.mark.asyncio
+    async def test_start_after_burst_without_connection_clears_map(self):
+        """A fresh join is coming (no live voice client for this channel): old
+        SSRCs are per-connection and must be wiped."""
+        r = VoiceRecorder(Path("/tmp/unused"))
+        await r.on_voice_ws(None, {"op": 5, "d": {"speaking": 1, "ssrc": 0xA, "user_id": 101}})
+        assert r._ssrc_to_user[0xA] == 101
+
+        r.start(guild_id=1, channel_id=2)  # _wired_vc is None -> full reset
+        assert r._ssrc_to_user == {}
+
+    @pytest.mark.asyncio
+    async def test_start_keeps_map_when_already_in_same_channel(self):
+        """/stop_recording with leave_channel=false: no new handshake happens,
+        so Discord won't re-announce the SSRCs — the map must survive."""
+        r = VoiceRecorder(Path("/tmp/unused"))
+        await r.on_voice_ws(None, {"op": 5, "d": {"speaking": 1, "ssrc": 0xA, "user_id": 101}})
+
+        r._wired_vc = _FakeVC(channel_id=2)  # bot is already connected to ch 2
+        r.start(guild_id=1, channel_id=2)
+        assert r._ssrc_to_user[0xA] == 101
+
+    @pytest.mark.asyncio
+    async def test_start_clears_map_when_in_different_channel(self):
+        """Bot sits in another channel: a move is coming, SSRCs will change."""
+        r = VoiceRecorder(Path("/tmp/unused"))
+        await r.on_voice_ws(None, {"op": 5, "d": {"speaking": 1, "ssrc": 0xA, "user_id": 101}})
+
+        r._wired_vc = _FakeVC(channel_id=999)  # bot connected elsewhere
+        r.start(guild_id=1, channel_id=2)
+        assert r._ssrc_to_user == {}
+
+    @pytest.mark.asyncio
+    async def test_start_clears_map_when_connection_died(self):
+        r = VoiceRecorder(Path("/tmp/unused"))
+        await r.on_voice_ws(None, {"op": 5, "d": {"speaking": 1, "ssrc": 0xA, "user_id": 101}})
+
+        r._wired_vc = _FakeVC(channel_id=2, connected=False)  # e.g. bot was kicked
+        r.start(guild_id=1, channel_id=2)
+        assert r._ssrc_to_user == {}
+
+    def test_discard_resets_state_without_touching_wiring(self):
+        r = VoiceRecorder(Path("/tmp/unused"))
+        r.start(guild_id=1, channel_id=2)
+        vc = _FakeVC(channel_id=2)
+        r._wired_vc = vc
+
+        r.discard()
+        assert not r.is_recording
+        assert r._wired_vc is vc  # wiring stays valid for the next start()
+
+        # A discarded session can be cleanly restarted.
+        r.start(guild_id=1, channel_id=2)
+        assert r.is_recording
+
+
 # ── stop() output (WAV + manifest) ───────────────────────────────────────────
 class TestStopOutput:
     def _recorder(self, tmp_path: Path) -> VoiceRecorder:

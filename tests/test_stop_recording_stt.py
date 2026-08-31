@@ -127,6 +127,43 @@ class TestStopRecordingSttWiring:
         assert spawned == []
 
 
+class TestStartRecordingOrdering:
+    """Regression: /start_recording must arm the recorder BEFORE joining voice.
+
+    Discord announces SSRC -> user (op-11/op-5) during channel.connect();
+    calling start() afterwards wipes those mappings and the whole recording
+    comes out empty (silent failure, no WAVs).
+    """
+
+    @pytest.mark.asyncio
+    async def test_start_called_before_channel_connect(self, env, monkeypatch):
+        _, ix, bot, _ = env
+        order: list[str] = []
+
+        class _FakeRec:
+            is_recording = False
+
+            def start(self, **kw):
+                order.append("start")
+
+            def snapshot(self):
+                return {}
+
+        monkeypatch.setattr(rc, "_get_recorder", lambda b: _FakeRec())
+
+        async def fake_ensure(*a, **k):
+            order.append("connect")
+
+        monkeypatch.setattr(rc, "_ensure_bot_in_channel", fake_ensure)
+
+        # user is in a voice channel
+        from types import SimpleNamespace
+        ix.user = SimpleNamespace(voice=SimpleNamespace(channel=SimpleNamespace(id=7, name="vc")))
+
+        await rc.handle_start_recording(ix)
+        assert order == ["start", "connect"], f"recorder must arm before the voice join: {order}"
+
+
 class TestRunTranscriptionDelivery:
     @pytest.mark.asyncio
     async def test_posts_summary_and_attaches_transcript(self, env, tmp_path, monkeypatch):
