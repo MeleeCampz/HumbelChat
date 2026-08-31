@@ -132,10 +132,12 @@ Joins the voice channel you're currently in and starts capturing each participan
 ### `/stop_recording`
 
 ```
-/stop_recording [leave_channel: true]
+/stop_recording [leave_channel: true] [transcribe: true]
 ```
 
 Stops capturing, writes one WAV per speaker plus a `manifest.json`, and replies (ephemerally) with a per-speaker summary and the attached manifest. By default the bot leaves the voice channel afterwards.
+
+With `STT_ENABLED` on (default), each speaker's audio is then transcribed in the background via the backend's `/v1/audio/transcriptions` endpoint (`STT_MODEL`, e.g. `qwen3-asr-1.7b`) and a follow-up message with the transcript preview + attached `transcript.json` is posted when done. Set `transcribe: false` to skip STT for one recording, or `STT_ENABLED=0` in `.env` to disable it entirely.
 
 ### `/sync`
 

@@ -98,5 +98,7 @@ The `manifest.json` in each recording directory plus `logs/bot.log` are designed
 - **Gappy/rough audio mid-word** → should not happen (frames are written on a nominal 20 ms grid); if it does, see [Voice Recording — Troubleshooting](./voice-recording.md)
 - **Constant silence for one speaker** → DAVE/MLS decryption failing for that user (`first_stage_error.dave` set)
 - **Occasional dropouts/clicks** → packet loss or unparseable passthrough frames; each costs one 20 ms of silence
+- **No transcript after stop** → STT skipped (`STT_ENABLED=0` / `transcribe: false` / nobody spoke) — see the stop message
+- **Transcript error “STT model … is not downloaded”** → download it in unsloth-studio Settings → Voice, or fix `STT_MODEL`
 
 Full pipeline explanation and manifest schema: [Voice Recording](./voice-recording.md)
