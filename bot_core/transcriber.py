@@ -8,22 +8,31 @@ notes (see :func:`bot_core.sessions.add_transcript`).
 
 Two backends are supported, selected via ``STT_BACKEND``:
 
-  * ``local`` (default) — faster-whisper running on this machine. It returns
-    real per-segment timestamps, which is what makes the interleaved
-    chronological transcript possible (the HTTP endpoint below returns plain
-text only — verified: unsloth-studio's ``TranscribeRequest`` schema has no
-    timestamp/task fields and ignores them). No upload-size cap either.
-    The model (default ``large-v3-turbo``, int8 on CPU) is loaded lazily on
-    first use and cached for the process lifetime; transcription is
+  * ``local`` (default) — faster-whisper running on this machine. It runs
+    in-process (no upload), returns real per-segment timestamps, and has no
+    size cap. The model (default ``large-v3-turbo``, int8 on CPU) is loaded
+    lazily on first use and cached for the process lifetime; transcription is
     serialized through one lock so concurrent recordings share the slot.
-  * ``http`` — the backend's OpenAI-compatible ``/v1/audio/transcriptions``
-    endpoint (same base URL + API key the bot already uses for chat).
-    Valid model slugs are backend-specific — curated defaults on
-    unsloth-studio: ``tiny``, ``base``, ``small``, ``large-v3-turbo``,
-    ``large-v3``, ``qwen3-asr-0.6b``, ``qwen3-asr-1.7b`` (or any HF repo in
-    ``owner/model`` form). The slug is configurable via ``STT_MODEL``.
-    There is a ~25 MB per-request audio limit, so files are downsampled to
-    16 kHz mono before upload (Whisper-class models want 16 kHz anyway).
+    Configured with ``STT_LOCAL_MODEL``.
+  * ``http`` — an OpenAI-compatible ``/v1/audio/transcriptions`` endpoint
+    (e.g. a separate Whisper API container, addressed via ``STT_URL``; falls
+    back to ``INFER_URL`` when unset). It reuses ``INFER_API_KEY``. Model
+    slugs are backend-specific (curated defaults on unsloth-studio:
+    ``tiny``, ``base``, ``small``, ``large-v3-turbo``, ``large-v3``,
+    ``qwen3-asr-0.6b``, ``qwen3-asr-1.7b``, or any HF repo in ``owner/model``
+    form) and configurable via ``STT_MODEL``.
+
+The http pipeline prepares audio before uploading (see
+:func:`transcribe_wav`): it resamples to 16 kHz mono (Whisper-class models
+want 16 kHz anyway — a ~3x size reduction), trims leading/trailing silence
+(``STT_TRIM_SILENCE`` / ``STT_SILENCE_DBFS``), and splits into chunks that
+fit under ``STT_MAX_UPLOAD_MB`` / ``STT_CHUNK_SECONDS`` so arbitrarily long
+recordings transcribe instead of hitting a backend's per-request size cap.
+Each chunk is sent with ``response_format=verbose_json`` and segment
+granularity; the per-chunk segment timestamps are shifted back onto the
+shared timeline so the merged result is timing-accurate. (A backend that
+ignores ``verbose_json`` simply returns plain text — still transcribed,
+just without per-segment timing.)
 
 Timeline note: the recorder writes every speaker's WAV aligned to the shared
 recording timeline (file time 0 == recording start), so segment timestamps
