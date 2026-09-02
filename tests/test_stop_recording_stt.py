@@ -191,3 +191,137 @@ class TestRunTranscriptionDelivery:
 
         await rc._run_transcription(ix, manifest)
         assert any("Transcription failed" in m for m in ix._sent)
+
+
+class TestTranscriptSessionWiring:
+    """_run_transcription must fold the finished transcript into the active
+    session's notes (STT_ADD_TO_SESSION) and say so in the Discord message."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_sessions(self):
+        from bot_core import sessions as S
+        S._state["session"] = None
+        S._state["last_ended"] = None
+        yield
+        S._state["session"] = None
+        S._state["last_ended"] = None
+
+    def _report(self):
+        import bot_core.transcriber as T
+        report = T.TranscriptionReport(model="m", language_requested="", started_at=1.0)
+        report.speakers.append(T.SpeakerResult(user_id=1, display_name="Alice",
+                                               wav_file="Alice_1.wav", text="hello there"))
+        report.finished_at = 2.0
+        return report
+
+    @pytest.mark.asyncio
+    async def test_adds_transcript_to_active_session(self, env, tmp_path, monkeypatch):
+        from bot_core import sessions as S
+        _, ix, _, manifest = env
+        S.start_session(name="T")
+
+        import bot_core.transcriber as T
+        monkeypatch.setattr(T, "transcribe_recording", AsyncMock(return_value=self._report()))
+        monkeypatch.setattr(T, "write_transcript", lambda out_dir, m, r: (out_dir / "transcript.json"))
+        (Path(manifest["manifest_path"]).parent / "transcript.json").write_text("{}")
+
+        await rc._run_transcription(ix, manifest)
+
+        notes = S.get_notes()
+        assert any("hello there" in t for _ts, t in notes)
+        done_msgs = [m for m in ix._sent if "Transcription done" in m]
+        assert done_msgs and any("Added to the active session" in m for m in done_msgs)
+
+    @pytest.mark.asyncio
+    async def test_no_active_session_still_delivers(self, env, tmp_path, monkeypatch):
+        from bot_core import sessions as S
+        _, ix, _, manifest = env
+        assert S.get_current_session() is None
+
+        import bot_core.transcriber as T
+        monkeypatch.setattr(T, "transcribe_recording", AsyncMock(return_value=self._report()))
+        monkeypatch.setattr(T, "write_transcript", lambda out_dir, m, r: (out_dir / "transcript.json"))
+        (Path(manifest["manifest_path"]).parent / "transcript.json").write_text("{}")
+
+        await rc._run_transcription(ix, manifest)
+
+        done_msgs = [m for m in ix._sent if "Transcription done" in m]
+        assert done_msgs  # transcript still delivered to the channel...
+        assert not any("Added to the active session" in m for m in done_msgs)  # ...but no note added
+        assert S.get_notes() == []
+
+    @pytest.mark.asyncio
+    async def test_skipped_when_flag_disabled(self, env, tmp_path, monkeypatch):
+        from bot_core import sessions as S
+        _, ix, _, manifest = env
+        S.start_session(name="T")
+        monkeypatch.setattr(rc, "STT_ADD_TO_SESSION", False)
+
+        import bot_core.transcriber as T
+        monkeypatch.setattr(T, "transcribe_recording", AsyncMock(return_value=self._report()))
+        monkeypatch.setattr(T, "write_transcript", lambda out_dir, m, r: (out_dir / "transcript.json"))
+        (Path(manifest["manifest_path"]).parent / "transcript.json").write_text("{}")
+
+        await rc._run_transcription(ix, manifest)
+
+        assert S.get_notes() == []
+        done_msgs = [m for m in ix._sent if "Transcription done" in m]
+        assert not any("Added to the active session" in m for m in done_msgs)
+
+    @pytest.mark.asyncio
+    async def test_pins_to_session_active_at_stop_even_if_it_ends(self, env, tmp_path, monkeypatch):
+        """The transcript must land in the session that was active when the
+        recording stopped — even if it ends before STT finishes and a new
+        session is started meanwhile."""
+        from bot_core import sessions as S
+        _, ix, _, manifest = env
+        S.start_session(name="Old")
+        old = S.get_current_session()
+
+        # User ends the session and starts a new one while STT is running.
+        S.end_session(overview="done")
+        S._state["last_start_at"] -= 2 * 3600  # bypass start cooldown in start_session
+        S.start_session(name="New")
+        assert S.get_current_session() is not old
+
+        import bot_core.transcriber as T
+        monkeypatch.setattr(T, "transcribe_recording", AsyncMock(return_value=self._report()))
+        monkeypatch.setattr(T, "write_transcript", lambda out_dir, m, r: (out_dir / "transcript.json"))
+        (Path(manifest["manifest_path"]).parent / "transcript.json").write_text("{}")
+
+        await rc._run_transcription(ix, manifest, session_at_stop=old)
+
+        # transcript went to the OLD (ended) session's file...
+        old_file = Path(old["file"]).read_text(encoding="utf-8")
+        assert "hello there" in old_file
+        # ...and NOT into the new active session's notes
+        assert all("hello there" not in t for _ts, t in S.get_notes())
+        done_msgs = [m for m in ix._sent if "Transcription done" in m]
+        assert any("ended session" in m and "Old" in m for m in done_msgs)
+
+    @pytest.mark.asyncio
+    async def test_stop_recording_passes_session_at_stop(self, env, monkeypatch):
+        """handle_stop_recording must capture the active session at stop time
+        and hand it to the transcription task."""
+        from bot_core import sessions as S
+        _, ix, _, _ = env
+        S.start_session(name="AtStop")
+        captured: list = []
+
+        def fake_run(ix_arg, manifest_arg, session_at_stop=None):
+            # records the bound args at call time; returns an unawaited dummy
+            captured.append(session_at_stop)
+
+            async def _noop():
+                pass
+            return _noop()
+
+        monkeypatch.setattr(rc, "_run_transcription", fake_run)
+        monkeypatch.setattr(rc, "spawn_tracked_task",
+                            lambda coro, **k: (coro.close(), MagicMock())[1])
+        monkeypatch.setattr(rc, "STT_ENABLED", True)
+
+        await rc.handle_stop_recording(ix, leave_channel=False)
+
+        # the third arg must be the session that was active at stop time
+        assert captured == [S.get_current_session()]

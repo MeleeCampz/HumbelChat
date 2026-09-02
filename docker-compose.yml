@@ -1,0 +1,25 @@
+# =============================================================================
+# discord-ai-bot — Docker Compose
+#
+# Runs ONLY the bot. The STT (Whisper/speeches) service is a SEPARATE,
+# already-running container reachable over the network — point the bot at it
+# via STT_URL in .env (e.g. http://192.168.1.50:8000/v1).
+#
+# Usage:
+#   docker compose up -d --build
+#   docker compose logs -f bot
+# =============================================================================
+services:
+  bot:
+    build: .
+    container_name: discord-ai-bot
+    environment:
+      # Container-internal path for recordings (differs from the host mount).
+      RECORDINGS_DIR: /app/data/recordings
+    volumes:
+      # Persist recordings, chat history, KB, etc. across restarts
+      - ./data:/app/data
+      # Mount .env live so load_dotenv() picks up changes without a rebuild.
+      # This is where you set STT_URL to your Whisper container's IP.
+      - ./.env:/app/.env:ro
+    restart: unless-stopped

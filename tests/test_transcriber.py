@@ -22,6 +22,7 @@ import wave
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 import bot_core.transcriber as T
@@ -405,6 +406,48 @@ class TestBuildInterleavedTranscript:
         assert "[01:05.25] Alice: x" in T.build_interleaved_transcript(report)
 
 
+class TestBuildSessionTranscript:
+    """build_session_transcript() feeds transcript.txt AND the session notes,
+    so it must return something useful for BOTH backends."""
+
+    def test_prefers_chronological_when_timestamps_exist(self):
+        report = T.TranscriptionReport(model="m", language_requested="de", started_at=0.0,
+                                       backend="local")
+        report.speakers.append(_spk(1, "Alice",
+                                    segments=[{"start": 2.0, "end": 4.0, "text": "hallo"}]))
+        out = T.build_session_transcript(report)
+        assert "[00:02.00] Alice: hallo" in out
+
+    def test_falls_back_to_per_speaker_blocks_for_http(self):
+        # http backend: no segment timestamps -> interleaved() is empty;
+        # the session transcript must still capture who said what.
+        report = T.TranscriptionReport(model="m", language_requested="", started_at=0.0,
+                                       backend="http")
+        report.speakers.append(_spk(1, "Alice", text="hello there"))
+        report.speakers.append(_spk(2, "Bob", text="hi back"))
+
+        out = T.build_session_transcript(report)
+        assert "[Alice]" in out and "hello there" in out
+        assert "[Bob]" in out and "hi back" in out
+        # speakers keep their manifest order
+        assert out.index("[Alice]") < out.index("[Bob]")
+
+    def test_failed_speakers_skipped_in_fallback(self):
+        report = T.TranscriptionReport(model="m", language_requested="", started_at=0.0,
+                                       backend="http")
+        report.speakers.append(_spk(1, "Alice", error="boom"))
+        report.speakers.append(_spk(2, "Bob", text="still here"))
+
+        out = T.build_session_transcript(report)
+        assert "[Bob]" in out and "boom" not in out
+
+    def test_empty_when_no_speech(self):
+        report = T.TranscriptionReport(model="m", language_requested="", started_at=0.0,
+                                       backend="http")
+        report.speakers.append(_spk(1, "Alice", error="boom"))
+        assert T.build_session_transcript(report) == ""
+
+
 class TestWriteTranscript:
     def test_writes_json_and_updates_manifest(self, tmp_path):
         d = tmp_path / "rec"
@@ -455,3 +498,179 @@ class TestWriteTranscript:
         txt = (d / "transcript.txt").read_text(encoding="utf-8")
         assert "[00:02.00] Alice: hallo" in txt
         assert "[00:05.00] Bob: servus" in txt
+
+    def test_http_report_writes_per_speaker_txt(self, tmp_path):
+        # http backend has no segment timestamps — transcript.txt must still
+        # be written via the per-speaker fallback (this is also what lands
+        # in the session notes).
+        d = tmp_path / "rec"
+        d.mkdir()
+        (d / "manifest.json").write_text(json.dumps({"duration_s": 10.0}))
+        manifest = {"manifest_path": str(d / "manifest.json")}
+
+        report = T.TranscriptionReport(model="qwen3-asr-1.7b", language_requested="",
+                                       started_at=1.0, backend="http")
+        report.speakers.append(_spk(1, "Alice", text="hello there"))
+        report.finished_at = 3.5
+
+        T.write_transcript(d, manifest, report)
+        txt = (d / "transcript.txt").read_text(encoding="utf-8")
+        assert "[Alice]" in txt and "hello there" in txt
+
+
+# ── silence trim / chunk planning / segment merge (http pipeline) ────────────
+class TestTrimSilence:
+    def test_trims_leading_and_trailing_silence(self):
+        rate = 16_000
+        sil = np.zeros(rate * 2, dtype=np.int16)
+        loud = np.full(rate * 1, 8000, dtype=np.int16)   # ~-12 dBFS
+        pcm = np.concatenate([sil, loud, sil])
+        trimmed, offset = T._trim_silence(pcm, rate=rate, silence_dbfs=-45.0)
+        assert len(trimmed) == rate * 1          # only the loud second remains
+        assert offset == rate * 2                # started after 2s of silence
+        assert np.all(np.abs(trimmed.astype(int)) >= 7999)
+
+    def test_keeps_quiet_speech_above_threshold(self):
+        rate = 16_000
+        quiet = np.full(rate, 2000, dtype=np.int16)     # ~-24 dBFS, above -45
+        pcm = np.concatenate([np.zeros(rate // 2, dtype=np.int16), quiet,
+                              np.zeros(rate // 2, dtype=np.int16)])
+        trimmed, offset = T._trim_silence(pcm, rate=rate, silence_dbfs=-45.0)
+        assert len(trimmed) == rate and offset == rate // 2
+
+    def test_fully_silent_trims_to_empty(self):
+        pcm = np.zeros(16_000, dtype=np.int16)
+        trimmed, offset = T._trim_silence(pcm, rate=16_000, silence_dbfs=-45.0)
+        assert len(trimmed) == 0 and offset == 0
+
+    def test_empty_input(self):
+        trimmed, offset = T._trim_silence(np.zeros(0, dtype=np.int16), rate=16_000)
+        assert len(trimmed) == 0 and offset == 0
+
+
+class TestPlanChunks:
+    def test_single_chunk_when_small(self):
+        assert T._plan_chunks(1000, rate=16_000, max_bytes=None, chunk_seconds=0) == [(0, 1000)]
+
+    def test_size_cap_splits_and_covers(self):
+        # cap that allows exactly (2044-44)//2 = 1000 samples per chunk
+        ranges = T._plan_chunks(3500, rate=16_000, max_bytes=2044, chunk_seconds=0)
+        assert all(e - s <= 1000 for s, e in ranges)
+        assert ranges[0] == (0, 1000) and ranges[-1][1] == 3500
+        assert sum(e - s for s, e in ranges) == 3500   # contiguous + covering
+
+    def test_time_cap_splits(self):
+        ranges = T._plan_chunks(960_000, rate=16_000, max_bytes=None, chunk_seconds=30)
+        assert ranges == [(0, 480_000), (480_000, 960_000)]
+
+    def test_tightest_bound_wins(self):
+        # size cap allows 1000 samples; time cap allows 2s (32000) -> size wins
+        ranges = T._plan_chunks(5000, rate=16_000, max_bytes=2044, chunk_seconds=2)
+        assert all(e - s <= 1000 for s, e in ranges)
+
+    def test_zero_bounds_is_single_chunk(self):
+        assert T._plan_chunks(12345, rate=16_000, max_bytes=None, chunk_seconds=0) == [(0, 12345)]
+
+    def test_empty_returns_nothing(self):
+        assert T._plan_chunks(0, rate=16_000, max_bytes=2044) == []
+
+
+class TestPcmToWavBytes:
+    def test_roundtrip_header_and_payload(self):
+        pcm = np.arange(100, dtype=np.int16)
+        data = T._pcm_to_wav_bytes(pcm, rate=16_000)
+        assert data[:4] == b"RIFF" and data[8:12] == b"WAVE"
+        with wave.open(io.BytesIO(data), "rb") as wf:
+            assert wf.getframerate() == 16_000
+            assert wf.getnchannels() == 1
+            assert wf.getsampwidth() == 2
+            assert wf.getnframes() == 100
+            back = np.frombuffer(wf.readframes(100), dtype=np.int16)
+        assert list(back) == list(pcm)
+
+
+class TestMergeSegments:
+    def test_shifts_by_chunk_offset(self):
+        segs = [{"start": 0.5, "end": 2.0, "text": "hello"},
+                {"start": 3.0, "end": 4.5, "text": "world"}]
+        out = T._merge_segments(segs, t_start=60.0)
+        assert out[0]["start"] == 60.5 and out[0]["end"] == 62.0
+        assert out[1]["start"] == 63.0 and out[1]["text"] == "world"
+
+    def test_zero_offset_is_identity(self):
+        segs = [{"start": 1.0, "end": 2.0, "text": "x"}]
+        assert T._merge_segments(segs, t_start=0.0) == segs
+
+
+class TestHttpChunkedPipeline:
+    """End-to-end http path: trim -> resample -> chunk -> merge (fake backend)."""
+
+    def _wav_with_padding(self, path, *, rate=48_000, loud_ms=1000,
+                          lead_silence_ms=2000, tail_silence_ms=2000):
+        n = lambda ms: rate * ms // 1000
+        samples = np.concatenate([
+            np.zeros(n(lead_silence_ms), dtype=np.int16),
+            np.full(n(loud_ms), 8000, dtype=np.int16),
+            np.zeros(n(tail_silence_ms), dtype=np.int16),
+        ])
+        with wave.open(str(path), "wb") as wf:
+            wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(rate)
+            wf.writeframes(samples.tobytes())
+
+    class _ChunkClient:
+        """OpenAI-client-shaped fake: returns one segment per call, times
+        relative to that chunk's start (as a real backend would)."""
+        def __init__(self):
+            self.calls: list[dict] = []
+            self.audio = SimpleNamespace(transcriptions=SimpleNamespace(create=self._create))
+        async def _create(self, **kw):
+            idx = len(self.calls)
+            self.calls.append(kw)
+            return {"text": f"part{idx}", "language": "de",
+                    "segments": [{"start": 0.1, "end": 0.9, "text": f"part{idx}"}]}
+
+    @pytest.mark.asyncio
+    async def test_trims_padding_and_shifts_segments(self, tmp_path, monkeypatch):
+        from config import settings as S
+        monkeypatch.setattr(S, "STT_TRIM_SILENCE", True, raising=False)
+        monkeypatch.setattr(S, "STT_MAX_UPLOAD_MB", 25, raising=False)
+        monkeypatch.setattr(S, "STT_CHUNK_SECONDS", 600, raising=False)
+
+        p = tmp_path / "spk.wav"
+        self._wav_with_padding(p)  # 2s sil + 1s loud + 2s sil @48k (~5s total)
+        fake = self._ChunkClient()
+        monkeypatch.setattr(T, "_stt_client", lambda: fake)
+
+        r = await T.transcribe_wav(p, model="m")
+        assert r.ok
+        # Padding was trimmed -> a single small upload (not the full ~5s).
+        assert len(fake.calls) == 1
+        uploaded = fake.calls[0]["file"][1]
+        with wave.open(io.BytesIO(uploaded), "rb") as wf:
+            assert abs(wf.getframerate() - 16_000) <= 1
+            assert wf.getnframes() < 48_000          # far less than the ~80k untrimmed
+        # The loud part sat at 2-3s on the timeline -> merged segment starts ~2.1s.
+        assert len(r.segments) == 1
+        assert abs(r.segments[0]["start"] - 2.1) < 0.15
+
+    @pytest.mark.asyncio
+    async def test_chunks_long_audio_and_merges_offsets(self, tmp_path, monkeypatch):
+        from config import settings as S
+        monkeypatch.setattr(S, "STT_TRIM_SILENCE", True, raising=False)
+        monkeypatch.setattr(S, "STT_MAX_UPLOAD_MB", 0, raising=False)   # no size cap
+        monkeypatch.setattr(S, "STT_CHUNK_SECONDS", 1, raising=False)   # 1s chunks
+
+        p = tmp_path / "spk.wav"
+        self._wav_with_padding(p, loud_ms=4000, lead_silence_ms=0, tail_silence_ms=0)
+        fake = self._ChunkClient()
+        monkeypatch.setattr(T, "_stt_client", lambda: fake)
+
+        r = await T.transcribe_wav(p, model="m")
+        assert r.ok
+        # 4s of audio in 1s chunks -> 4 uploads; each segment shifted by its chunk.
+        assert len(fake.calls) == 4
+        starts = [seg["start"] for seg in r.segments]
+        assert len(starts) == 4
+        expected = [0.1, 1.1, 2.1, 3.1]
+        for got, want in zip(starts, expected):
+            assert abs(got - want) < 0.05, f"{got} != {want}"

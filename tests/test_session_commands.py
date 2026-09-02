@@ -1,6 +1,7 @@
 """Tests for the session slash-command handlers (commands.session_commands)."""
 from __future__ import annotations
 
+import pathlib
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -281,3 +282,72 @@ class TestSessionNotesCommand:
         from commands.session_commands import handle_session_notes
         await handle_session_notes(ix, action="destroy", note=None)
         assert any("Unknown action" in m for m in ix._sent)
+
+
+class TestAddTranscript:
+    """sessions.add_transcript() — automatic transcript -> session notes."""
+
+    def test_appends_single_bullet_with_header(self):
+        S.start_session(name="T")
+        session, n = S.add_transcript("hello there", title="Voice channel transcript — #vc (2026-08-31 22:00, 10s)")
+        assert n == 1
+        notes = S.get_notes(session)
+        assert len(notes) == 1
+        ts, text = notes[0]
+        assert isinstance(ts, float)
+        assert "Voice channel transcript — #vc" in text
+        assert "part 1/1" in text
+        assert "hello there" in text
+
+    def test_long_transcript_is_chunked(self):
+        S.start_session(name="T")
+        long_text = "word " * 2000  # ~10k chars -> several bullets
+        session, n = S.add_transcript(long_text.strip(), title="Voice channel transcript")
+        assert n > 1
+        notes = S.get_notes(session)
+        texts = [t for _ts, t in notes]
+        assert "part 1/" + str(n) in texts[0]
+        assert f"continued, part {n}/{n}" in texts[-1]
+        # no bullet exceeds the display-safe limit (header overhead included)
+        assert all(len(t) <= 2000 for t in texts)
+        # full text is preserved across chunks (whitespace-normalized)
+        joined = " ".join("".join(t.split()) for t in texts)
+        assert long_text.strip().split()[0] in joined
+
+    def test_no_active_session_returns_none(self):
+        session, n = S.add_transcript("hello")
+        assert session is None and n == 0
+
+    def test_empty_text_is_noop(self):
+        S.start_session(name="T")
+        session, n = S.add_transcript("   ")
+        assert n == 0
+        assert S.get_notes(session) == []
+
+    def test_pins_to_ended_session_when_pinned(self):
+        # STT completes after the recording's session ended — the transcript
+        # must still land in THAT session's file, not the new active one.
+        S.start_session(name="Old")
+        old = S.get_current_session()
+        S.end_session(overview="done")
+        S._state["last_start_at"] -= 2 * 3600
+        S.start_session(name="New")
+
+        session, n = S.add_transcript("pinned words", title="Voice channel transcript",
+                                      session=old)
+        assert n == 1 and session is old
+        assert "pinned words" in pathlib.Path(old["file"]).read_text(encoding="utf-8")
+        assert all("pinned words" not in t for _ts, t in S.get_notes())
+
+    @pytest.mark.asyncio
+    async def test_bullet_lands_in_notes_file_and_view(self, ix):
+        from commands.session_commands import handle_session_notes
+        S.start_session(name="T")
+        S.add_transcript("the key is under the bridge", title="Voice channel transcript — #vc")
+        path = pathlib.Path(S.get_current_session()["file"])
+        on_disk = path.read_text(encoding="utf-8")
+        assert "under the bridge" in on_disk
+        # and it shows up in /session_notes view
+        await handle_session_notes(ix, action="view")
+        view_msgs = [m for m in ix._sent if "Session notes" in m]
+        assert any("under the bridge" in m for m in view_msgs)

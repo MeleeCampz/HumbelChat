@@ -118,7 +118,7 @@ Queue a reminder that is delivered when the **next** session starts (in the chan
 
 | Action | Description |
 |---|---|
-| `add` | Append a timestamped note to the current session (requires an active session; notes are stored in the session file and re-indexed for RAG) |
+| `add` | Append a timestamped note to the current session (requires an active session; notes are stored in the session file and re-indexed for RAG). Voice-channel transcripts from `/stop_recording` are added automatically this way when STT finishes |
 | `view` | Show the current session's notes — or the most recent ended session's if none is active (reads the file from disk, so manual edits are picked up) |
 
 ### Voice recording
@@ -137,7 +137,7 @@ Joins the voice channel you're currently in and starts capturing each participan
 
 Stops capturing, writes one WAV per speaker plus a `manifest.json`, and replies (ephemerally) with a per-speaker summary and the attached manifest. By default the bot leaves the voice channel afterwards.
 
-With `STT_ENABLED` on (default), each speaker's audio is then transcribed in the background via the backend's `/v1/audio/transcriptions` endpoint (`STT_MODEL`, e.g. `qwen3-asr-1.7b`) and a follow-up message with the transcript preview + attached `transcript.json` is posted when done. Set `transcribe: false` to skip STT for one recording, or `STT_ENABLED=0` in `.env` to disable it entirely.
+With `STT_ENABLED` on (default), each speaker's audio is then transcribed in the background via the backend's `/v1/audio/transcriptions` endpoint (`STT_MODEL`, e.g. `qwen3-asr-1.7b`) and a follow-up message with the transcript preview + attached `transcript.json` is posted when done. If a session is active, the finished transcript is also appended to its notes automatically — pinned to the session that was active when the recording stopped, even if it ends before STT finishes (`STT_ADD_TO_SESSION=0` in `.env` opts out). Set `transcribe: false` to skip STT for one recording, or `STT_ENABLED=0` in `.env` to disable it entirely.
 
 ### `/sync`
 
