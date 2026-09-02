@@ -403,6 +403,13 @@ async def on_ready() -> None:
     if n_rearmed:
         log.info("Re-armed %d pending reminder(s)", n_rearmed)
 
+    # Crash durability: attach the voice recorder (installs the SIGTERM flush
+    # handler) and recover any recording left open by an unclean shutdown.
+    try:
+        _recover_crashed_recordings(bot)
+    except Exception:  # pragma: no cover - never block startup on recovery
+        log.exception("Crashed-recording recovery failed (continuing)")
+
 
 @bot.event
 async def on_message(message: discord.Message) -> None:
@@ -508,6 +515,24 @@ def _enforce_single_instance() -> None:
 
 
 # ── Startup ────────────────────────────────────────────────────────────
+
+def _recover_crashed_recordings(bot_obj) -> None:
+    """Attach the voice recorder and recover orphaned recordings at startup.
+
+    Attaching installs the SIGTERM flush handler (so ``docker stop`` / compose
+    restarts always write complete WAVs). :func:`recover_orphans` then rebuilds
+    any recording whose process died mid-capture (OOM/segfault/power) — but
+    only if its session marker is at least ~5 minutes old, so a still-live
+    recording (bot restarted while a meeting was going) is left untouched.
+    """
+    from config.settings import RECORDINGS_DIR
+    from bot_core.voice_recorder import attach_to_bot, recover_orphans
+
+    attach_to_bot(bot_obj, RECORDINGS_DIR)  # also installs the SIGTERM flush hook
+    recovered = recover_orphans(RECORDINGS_DIR)
+    if recovered:
+        log.info("Recovered %d crashed recording(s) at startup", len(recovered))
+
 
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
