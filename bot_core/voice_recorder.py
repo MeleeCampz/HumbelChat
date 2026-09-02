@@ -48,6 +48,19 @@ loop. The recorder methods used by both are synchronous and only touch
 in-memory structures protected by a single lock, so they are safe to call from
 either context.
 
+Crash durability
+-----------------
+Each speaker's decoded frames are appended to an append-only binary log on
+disk *as they decode* (``<name>_<user_id>.log``) rather than held in an
+unbounded in-memory list. A crash therefore loses only the few frames still in
+flight at the moment it happens — not hours of audio — and the RAM footprint
+drops to "current frame + file handles" (the old buffer grew ~96 KB/s per
+active speaker). On ``stop()`` the logs are read back and laid out on the same
+nominal 20 ms grid as before, then deleted. A session that crashed without a
+clean stop leaves a ``.recording`` marker + its logs; :func:`recover_orphans`
+rebuilds those into WAVs + a manifest flagged ``"recovered": true`` (auto-run
+at startup for orphans older than ~5 minutes, and available as a manual call).
+
 This module is intentionally import-safe: importing it never connects to voice
 and has no side effects until :func:`attach_to_bot` / :meth:`VoiceRecorder.start`
 are called.
@@ -56,6 +69,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
+import signal
 import struct
 import threading
 import time
@@ -75,6 +91,22 @@ CHANNELS = 1                  # we record mono (one file per speaker)
 SAMPLE_WIDTH = 2              # 16-bit PCM
 FRAME_SAMPLES = SAMPLE_RATE // 50   # one nominal voice frame == 20 ms of audio
 
+# ── Crash durability ────────────────────────────────────────────────────────
+# Every decoded frame is appended to a per-speaker, append-only binary log on
+# disk the moment it decodes (instead of sitting in an unbounded RAM list), so
+# a crash mid-recording loses only the few frames still in flight — not hours
+# of audio. On stop() / after a crash the logs are read back and laid out on
+# the same nominal 20 ms grid as before.
+#
+# Log layout (little-endian):
+#   header : "DRAV" + uint32 version(=1) + uint32 sample_rate
+#            + uint32 channels + uint32 sample_width + uint32 frame_samples
+#   record : int64 ts_us  |  uint32 pcm_len  |  pcm bytes   (repeated)
+_SPEAKER_LOG_MAGIC = b"DRAV"
+_SPEAKER_LOG_VERSION = 1
+_RECOVERY_THRESHOLD_S: float = 5 * 60.0   # auto-recover orphans older than this
+_MARKER_NAME = ".recording"               # session marker inside each recording dir
+
 # RTP "rtpsize" transport layout constants.
 _RTP_HEADER_SIZE = 12
 _AUTH_TAG_LEN = 16            # Poly1305 / GCM tag
@@ -91,8 +123,11 @@ class _Speaker:
     user_id: int
     display_name: str = ""
     ssrc: Optional[int] = None
-    # list of (absolute_epoch_seconds, pcm_bytes) in arrival order
-    frames: list[tuple[float, bytes]] = field(default_factory=list)
+    # On-disk append-only log for this speaker's decoded PCM (None until the
+    # first frame arrives). Replaces the old in-RAM frames list — see the
+    # crash-durability note above. Counters are kept here for the manifest.
+    log: Optional["_SpeakerLog"] = None
+    frame_count: int = 0
     total_pcm_bytes: int = 0
     decode_failures: int = 0
     decrypt_failures: int = 0
@@ -100,6 +135,122 @@ class _Speaker:
     @property
     def duration_s(self) -> float:
         return self.total_pcm_bytes / (SAMPLE_RATE * CHANNELS * SAMPLE_WIDTH)
+
+
+# ── Per-speaker on-disk frame log (crash durability) ────────────────────────
+class _SpeakerLog:
+    """Append-only, on-disk log of one speaker's decoded PCM frames.
+
+    Each record is ``int64 ts_us | uint32 pcm_len | pcm bytes`` following a
+    small header. Frames are appended (and flushed) the moment they decode,
+    so a crash loses at most the frame currently in flight rather than the
+    whole in-memory buffer. The same reader (:meth:`read_frames`) is used by
+    ``stop()`` and by crash recovery, guaranteeing both paths rebuild an
+    identical timeline.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self._fh = open(self.path, "ab")
+        hdr = (
+            _SPEAKER_LOG_MAGIC
+            + struct.pack("<IIIII", _SPEAKER_LOG_VERSION, SAMPLE_RATE,
+                          CHANNELS, SAMPLE_WIDTH, FRAME_SAMPLES)
+        )
+        self._fh.write(hdr)
+        self._fh.flush()
+
+    def write_frame(self, ts: float, pcm: bytes) -> None:
+        """Append one decoded frame. ``ts`` is an absolute epoch (seconds)."""
+        self._fh.write(struct.pack("<qI", int(ts * 1_000_000), len(pcm)))
+        self._fh.write(pcm)
+        self._fh.flush()
+
+    def close(self) -> None:
+        try:
+            self._fh.close()
+        except Exception:  # pragma: no cover - already closed / OS error
+            pass
+
+    @staticmethod
+    def read_frames(path: Path) -> list[tuple[float, bytes]]:
+        """Read back ``(epoch_seconds, pcm_bytes)`` records in arrival order.
+
+        Tolerates a trailing partial record (a frame that was mid-write when
+        the process died) by stopping at the first incomplete one — the loss
+        is bounded to that single 20 ms frame. Returns ``[]`` for an empty or
+        malformed log.
+        """
+        data = Path(path).read_bytes()
+        if len(data) < 4 or data[:4] != _SPEAKER_LOG_MAGIC:
+            return []
+        offset = 4 + struct.calcsize("<IIIII")
+        out: list[tuple[float, bytes]] = []
+        n_rec = struct.calcsize("<qI")
+        while offset + n_rec <= len(data):
+            ts_us, pcm_len = struct.unpack_from("<qI", data, offset)
+            offset += n_rec
+            if offset + pcm_len > len(data):
+                break  # trailing partial record from a crash — drop it
+            out.append((ts_us / 1_000_000.0, data[offset:offset + pcm_len]))
+            offset += pcm_len
+        return out
+
+    @staticmethod
+    def read_meta(path: Path) -> Optional[dict]:
+        """Parse the log header (sample_rate/channels/width/frame_samples)."""
+        try:
+            data = Path(path).read_bytes()
+            if len(data) < 4 or data[:4] != _SPEAKER_LOG_MAGIC:
+                return None
+            version, rate, ch, width, frame_samples = struct.unpack_from(
+                "<IIIII", data, 4)
+        except (OSError, struct.error):
+            return None
+        if version != _SPEAKER_LOG_VERSION:
+            return None
+        return {"sample_rate": rate, "channels": ch,
+                "sample_width": width, "frame_samples": frame_samples}
+
+
+def _write_timeline_wav_from_frames(
+    *, path: Path, frames: list[tuple[float, bytes]], origin: float,
+    total_samples: int,
+) -> tuple[int, int]:
+    """Lay *frames* onto the shared nominal 20 ms grid and write a WAV.
+
+    This is the single source of truth for timeline placement — used by both
+    ``stop()`` and crash recovery so they produce identical output. Frames are
+    anchored at the first frame's arrival offset, then exactly one nominal
+    frame (``FRAME_SAMPLES`` = 20 ms) apart, regardless of jittery wall-clock
+    arrivals (see :func:`_write_timeline_wav`). Returns ``(gap_frames,
+    overlap_frames)`` diagnostics.
+    """
+    samples = bytearray(total_samples * SAMPLE_WIDTH)  # zero-filled silence
+    cursor = int(max(0.0, frames[0][0] - origin) * SAMPLE_RATE) if frames else 0
+    gap_frames = overlap_frames = 0
+    prev_arr: Optional[int] = None
+    for ts, pcm in frames:
+        arr = int(max(0.0, ts - origin) * SAMPLE_RATE)
+        if prev_arr is not None:
+            delta = arr - prev_arr
+            if delta > FRAME_SAMPLES + FRAME_SAMPLES // 2:
+                gap_frames += 1      # arrival >30 ms late -> jitter hole
+            elif delta < FRAME_SAMPLES - FRAME_SAMPLES // 2:
+                overlap_frames += 1  # arrival <10 ms early -> burst
+        prev_arr = arr
+        byte_idx = cursor * SAMPLE_WIDTH
+        end_byte = min(len(samples), byte_idx + len(pcm))
+        if byte_idx < len(samples):
+            samples[byte_idx:end_byte] = pcm[:end_byte - byte_idx]
+        cursor += FRAME_SAMPLES
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as wf:
+        wf.setnchannels(CHANNELS)
+        wf.setsampwidth(SAMPLE_WIDTH)
+        wf.setframerate(SAMPLE_RATE)
+        wf.writeframes(bytes(samples))
+    return gap_frames, overlap_frames
 
 
 # ── The recorder ─────────────────────────────────────────────────────────────
@@ -168,6 +319,11 @@ class VoiceRecorder:
         if out_dir is not None:
             self.out_dir = Path(out_dir)
 
+        # Clear any stale per-speaker logs / marker left in this directory by a
+        # previous session (defensive — normally stop()/discard() remove them).
+        with self._lock:
+            self._remove_session_artifacts()
+
         # If the bot is already connected to this exact channel (e.g. a new
         # recording after /stop_recording with leave_channel=false), no fresh
         # handshake happens and Discord will NOT re-send the initial op-11/op-5
@@ -212,6 +368,23 @@ class VoiceRecorder:
             self._framing_logged.clear()
             self._first_stage_error = {}
             self._dave_state = {}
+
+        # Write the session marker FIRST so a crash at any point after this is
+        # recoverable (the per-speaker logs are created lazily on first frame).
+        try:
+            self.out_dir.mkdir(parents=True, exist_ok=True)
+            marker = {
+                "started_at": round(self._started_at, 3),
+                "guild_id": guild_id,
+                "channel_id": channel_id,
+                "channel_name": channel_name,
+                "pid": os.getpid(),
+            }
+            (self.out_dir / _MARKER_NAME).write_text(
+                json.dumps(marker, indent=2), encoding="utf-8")
+        except OSError as e:  # pragma: no cover - disk errors
+            log.error("Could not write recording marker in %s: %s", self.out_dir, e)
+
         log.info(
             "Voice recording started (guild=%s channel=%s#%s)",
             guild_id, channel_id, channel_name,
@@ -228,6 +401,10 @@ class VoiceRecorder:
             if not self._recording:
                 return
             self._recording = False
+            for sp in self._speakers.values():
+                if sp.log is not None:
+                    sp.log.close()
+            self._remove_session_artifacts()
             self._speakers.clear()
             self._ssrc_to_user.clear()
             self._decoders.clear()
@@ -235,42 +412,62 @@ class VoiceRecorder:
         log.info("Voice recording discarded (join failed)")
 
     def stop(self) -> Optional[dict]:
-        """Stop capturing and write WAV files + manifest. Returns the manifest."""
+        """Stop capturing and write WAV files + manifest. Returns the manifest.
+
+        Reads each speaker's on-disk frame log back, lays the frames on the
+        shared nominal 20 ms grid (identical to the old in-memory path), writes
+        one WAV per speaker plus ``manifest.json``, then removes the session
+        logs and marker so a later crash-recovery run won't re-process them.
+        """
         with self._lock:
             if not self._recording:
                 return None
             self._recording = False
             self._ended_at = time.time()
 
+        # Read every speaker's frame log back from disk (the single source of
+        # truth for what was captured) and close the file handles.
+        with self._lock:
+            for sp in self._speakers.values():
+                if sp.log is not None:
+                    sp.log.close()
+            speakers_data = {
+                uid: (
+                    _SpeakerLog.read_frames(sp.log.path)
+                    if sp.log is not None else []
+                )
+                for uid, sp in self._speakers.items()
+            }
+
         # Build the timeline-aligned WAV per speaker.
         speakers_out: list[dict] = []
         max_end = self._started_at
-        with self._lock:
-            for sp in self._speakers.values():
-                if not sp.frames:
-                    continue
-                first_ts = sp.frames[0][0]
-                # Nominal duration (frames x 20 ms), not wall-clock span, so
-                # network jitter doesn't inflate the file length.
-                end_ts = first_ts + len(sp.frames) * FRAME_SAMPLES / SAMPLE_RATE
-                max_end = max(max_end, end_ts)
+        for uid, frames in speakers_data.items():
+            if not frames:
+                continue
+            first_ts = frames[0][0]
+            # Nominal duration (frames x 20 ms), not wall-clock span, so
+            # network jitter doesn't inflate the file length.
+            end_ts = first_ts + len(frames) * FRAME_SAMPLES / SAMPLE_RATE
+            max_end = max(max_end, end_ts)
 
         total_duration = max(0.0, max_end - self._started_at)
         total_samples = int(total_duration * SAMPLE_RATE)
 
         with self._lock:
             for user_id, sp in sorted(self._speakers.items()):
-                if not sp.frames:
+                frames = speakers_data.get(user_id) or []
+                if not frames:
                     continue
                 wav_path = self.out_dir / _wav_filename(user_id, sp.display_name)
-                gap_frames, overlap_frames = _write_timeline_wav(
+                gap_frames, overlap_frames = _write_timeline_wav_from_frames(
                     path=wav_path,
-                    frames=sp.frames,
+                    frames=frames,
                     origin=self._started_at,
                     total_samples=total_samples,
                 )
-                first_ts = sp.frames[0][0]
-                last_end_ts = first_ts + len(sp.frames) * FRAME_SAMPLES / SAMPLE_RATE
+                first_ts = frames[0][0]
+                last_end_ts = first_ts + len(frames) * FRAME_SAMPLES / SAMPLE_RATE
                 speakers_out.append({
                     "user_id": user_id,
                     "display_name": sp.display_name,
@@ -280,7 +477,7 @@ class VoiceRecorder:
                     "first_speech_offset_s": round(first_ts - self._started_at, 3),
                     "last_speech_offset_s": round(last_end_ts - self._started_at, 3),
                     "spoken_duration_s": round(sp.duration_s, 3),
-                    "frames_captured": len(sp.frames),
+                    "frames_captured": len(frames),
                     "decode_failures": sp.decode_failures,
                     "decrypt_failures": sp.decrypt_failures,
                     "jitter_gap_frames": gap_frames,
@@ -323,6 +520,11 @@ class VoiceRecorder:
             manifest["manifest_path"] = str(manifest_path)
         except OSError as e:  # pragma: no cover - disk errors
             log.error("Failed to write recording manifest: %s", e)
+
+        # The WAVs + manifest are durable now — remove the intermediate session
+        # logs and marker so crash-recovery never re-processes a finished run.
+        with self._lock:
+            self._remove_session_artifacts()
 
         log.info(
             "Voice recording stopped: %d speaker(s), %.1fs total -> %s",
@@ -498,9 +700,61 @@ class VoiceRecorder:
                     sp.display_name = resolve_name(user_id) or ""
                 except Exception:
                     sp.display_name = ""
-            sp.frames.append((now, pcm))
+            # Durability: append the decoded frame to this speaker's on-disk log
+            # (created lazily) instead of holding it in an unbounded RAM list.
+            if sp.log is None:
+                sp.log = _SpeakerLog(self._log_path_for(user_id, sp.display_name))
+            sp.log.write_frame(now, pcm)
+            sp.frame_count += 1
             sp.total_pcm_bytes += len(pcm)
             self._total_packets += 1
+
+    # ── session-artifact helpers (crash durability) ────────────────────────
+    def _log_path_for(self, user_id: int, display_name: str) -> Path:
+        """On-disk frame-log path for a speaker in the current recording dir."""
+        return self.out_dir / (_wav_filename(user_id, display_name) + ".log")
+
+    def _remove_session_artifacts(self) -> None:
+        """Delete this session's per-speaker ``*.log`` files and ``.recording``
+        marker from ``out_dir``. Must be called with the lock held."""
+        try:
+            if not self.out_dir.exists():
+                return
+            for p in self.out_dir.iterdir():
+                if p.name == _MARKER_NAME or p.suffix == ".log":
+                    try:
+                        p.unlink()
+                    except OSError:  # pragma: no cover - benign race
+                        pass
+        except OSError:  # pragma: no cover - disk errors
+            pass
+
+    def install_sigterm_flush(self) -> None:
+        """Install a SIGTERM handler that flushes an in-flight recording.
+
+        Docker sends SIGTERM on ``docker stop`` / compose restarts. The default
+        action would kill the process and leave the session logs + marker on
+        disk (recoverable, but truncated). Instead we run :meth:`stop` so a
+        *clean* shutdown always writes complete WAVs + manifest. Hard crashes
+        (OOM/segfault/power) can't be caught — that's what crash recovery is
+        for. Only installed in the main thread; otherwise it's a no-op.
+        """
+        if threading.current_thread() is not threading.main_thread():
+            log.warning("SIGTERM flush not installed (not on main thread)")
+            return
+        try:
+            signal.signal(signal.SIGTERM, self._sigterm_handler)
+        except (ValueError, OSError) as e:  # pragma: no cover - exotic platforms
+            log.warning("Could not install SIGTERM handler: %s", e)
+
+    def _sigterm_handler(self, signum: int, frame: Any) -> None:
+        log.info("SIGTERM received — flushing in-flight voice recording before exit")
+        try:
+            if self.is_recording:
+                self.stop()
+        except Exception:  # pragma: no cover - defensive
+            log.exception("Error flushing recording on SIGTERM (logs remain recoverable)")
+        os._exit(0)
 
     def _record_stage_error(self, stage: str, detail: str, hexdump: str) -> None:
         """Count a pipeline-stage failure and log the first one loudly."""
@@ -627,6 +881,9 @@ def attach_to_bot(bot: discord.Client, out_dir: Path) -> VoiceRecorder:
 
     if not _attached:
         _attached = True
+        # Clean shutdowns (docker stop / compose restart) send SIGTERM — flush
+        # any in-flight recording so we don't leave an orphan on disk.
+        recorder.install_sigterm_flush()
         log.info("Voice recorder attached to bot (out_dir=%s)", out_dir)
 
     return recorder
@@ -876,29 +1133,162 @@ def _write_timeline_wav(
     how often consecutive arrivals deviated more than ±50% from the nominal
     20 ms interval — for manifest diagnostics.
     """
-    samples = bytearray(total_samples * SAMPLE_WIDTH)  # zero-filled silence
-    cursor = int(max(0.0, frames[0][0] - origin) * SAMPLE_RATE) if frames else 0
-    gap_frames = overlap_frames = 0
-    prev_arr: Optional[int] = None
-    for ts, pcm in frames:
-        arr = int(max(0.0, ts - origin) * SAMPLE_RATE)
-        if prev_arr is not None:
-            delta = arr - prev_arr
-            if delta > FRAME_SAMPLES + FRAME_SAMPLES // 2:
-                gap_frames += 1      # arrival >30 ms late -> jitter hole
-            elif delta < FRAME_SAMPLES - FRAME_SAMPLES // 2:
-                overlap_frames += 1  # arrival <10 ms early -> burst
-        prev_arr = arr
-        byte_idx = cursor * SAMPLE_WIDTH
-        end_byte = min(len(samples), byte_idx + len(pcm))
-        if byte_idx < len(samples):
-            samples[byte_idx:end_byte] = pcm[:end_byte - byte_idx]
-        cursor += FRAME_SAMPLES
+    return _write_timeline_wav_from_frames(
+        path=path, frames=frames, origin=origin, total_samples=total_samples)
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with wave.open(str(path), "wb") as wf:
-        wf.setnchannels(CHANNELS)
-        wf.setsampwidth(SAMPLE_WIDTH)
-        wf.setframerate(SAMPLE_RATE)
-        wf.writeframes(bytes(samples))
-    return gap_frames, overlap_frames
+
+# ── Crash recovery (rebuild a recording whose process died mid-capture) ─────
+def recover_orphans(
+    recordings_dir: Path,
+    *,
+    threshold_s: float = _RECOVERY_THRESHOLD_S,
+    now: Optional[float] = None,
+) -> list[dict]:
+    """Rebuild WAVs + manifest for recording dirs left open by a crash.
+
+    An *orphan* is a directory under ``recordings_dir`` that has a ``.recording``
+    marker but no ``manifest.json`` — i.e. the process captured audio (spilling
+    it to per-speaker ``*.log`` files) but never ran :meth:`VoiceRecorder.stop`.
+    This happens when the bot is OOM-killed, segfaults, or loses power; a clean
+    SIGTERM shutdown flushes via the signal handler instead and leaves no orphan.
+
+    Only orphans whose marker ``started_at`` is at least ``threshold_s`` in the
+    past are recovered — a very recent one might belong to a recording that is
+    still live (e.g. the bot restarted while a meeting was ongoing), and we
+    don't want to silently truncate it. Returns the list of manifests written.
+    """
+    recordings_dir = Path(recordings_dir)
+    if not recordings_dir.is_dir():
+        return []
+    now = time.time() if now is None else now
+    recovered: list[dict] = []
+    for entry in sorted(recordings_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        marker_path = entry / _MARKER_NAME
+        if not marker_path.exists() or (entry / "manifest.json").exists():
+            continue
+        try:
+            started_at = float(json.loads(marker_path.read_text()).get("started_at", 0.0))
+        except (OSError, ValueError, json.JSONDecodeError):
+            log.warning("Recovery: unreadable marker in %s — skipping", entry.name)
+            continue
+        if now - started_at < threshold_s:
+            log.info(
+                "Recovery: %s started %.0fs ago (< %.0fs) — leaving it alone",
+                entry.name, now - started_at, threshold_s,
+            )
+            continue
+        manifest = _recover_one(entry, now)
+        if manifest is not None:
+            recovered.append(manifest)
+    return recovered
+
+
+def _recover_one(rec_dir: Path, now: float) -> Optional[dict]:
+    """Rebuild one orphaned recording into WAVs + a ``recovered`` manifest."""
+    try:
+        marker = json.loads((rec_dir / _MARKER_NAME).read_text())
+    except (OSError, ValueError, json.JSONDecodeError) as e:
+        log.warning("Recovery: could not read marker in %s: %s", rec_dir.name, e)
+        return None
+    started_at = float(marker.get("started_at", now))
+
+    # Collect this recording's speaker logs (path + decoded frames).
+    logs: list[tuple[Path, list[tuple[float, bytes]]]] = []
+    for p in sorted(rec_dir.iterdir()):
+        if p.suffix != ".log":
+            continue
+        frames = _SpeakerLog.read_frames(p)
+        if not frames:
+            continue
+        logs.append((p, frames))
+    if not logs:
+        log.warning("Recovery: %s has no recoverable speaker logs — removing marker", rec_dir.name)
+        try:
+            (rec_dir / _MARKER_NAME).unlink(missing_ok=True)
+        except OSError:  # pragma: no cover
+            pass
+        return None
+
+    # Shared timeline span across all speakers (same rule as stop()).
+    max_end = started_at
+    for _, frames in logs:
+        first_ts = frames[0][0]
+        max_end = max(max_end, first_ts + len(frames) * FRAME_SAMPLES / SAMPLE_RATE)
+    total_samples = int(max(0.0, max_end - started_at) * SAMPLE_RATE)
+
+    speakers_out: list[dict] = []
+    for log_path, frames in logs:
+        user_id = _user_id_from_log_name(log_path.name)
+        display_name = ""
+        wav_path = rec_dir / _wav_filename(user_id, display_name)
+        gap_frames, overlap_frames = _write_timeline_wav_from_frames(
+            path=wav_path, frames=frames, origin=started_at, total_samples=total_samples,
+        )
+        first_ts = frames[0][0]
+        last_end_ts = first_ts + len(frames) * FRAME_SAMPLES / SAMPLE_RATE
+        speakers_out.append({
+            "user_id": user_id,
+            "display_name": display_name,
+            "ssrc": None,
+            "wav_file": wav_path.name,
+            "wav_path": str(wav_path),
+            "first_speech_offset_s": round(first_ts - started_at, 3),
+            "last_speech_offset_s": round(last_end_ts - started_at, 3),
+            "spoken_duration_s": round(len(frames) * FRAME_SAMPLES / SAMPLE_RATE, 3),
+            "frames_captured": len(frames),
+            "decode_failures": None,
+            "decrypt_failures": None,
+            "jitter_gap_frames": gap_frames,
+            "jitter_overlap_frames": overlap_frames,
+        })
+
+    manifest = {
+        "guild_id": marker.get("guild_id"),
+        "channel_id": marker.get("channel_id"),
+        "channel_name": marker.get("channel_name", ""),
+        "started_at": round(started_at, 3),
+        "ended_at": round(now, 3),
+        "duration_s": round(now - started_at, 3),
+        "sample_rate": SAMPLE_RATE,
+        "channels": CHANNELS,
+        "bit_depth": SAMPLE_WIDTH * 8,
+        "recovered": True,
+        "recovery_note": (
+            "Rebuilt after an unclean shutdown: the bot captured this audio to "
+            "disk but was killed before writing WAVs. Audio is complete up to "
+            "the last flushed frame; anything in flight at crash time (at most a "
+            "few 20 ms frames) is lost. Decode/decrypt failure counts are not "
+            "available for recovered recordings."
+        ),
+        "speakers": speakers_out,
+    }
+
+    manifest_path = rec_dir / "manifest.json"
+    try:
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        manifest["manifest_path"] = str(manifest_path)
+    except OSError as e:  # pragma: no cover - disk errors
+        log.error("Recovery: could not write manifest for %s: %s", rec_dir.name, e)
+        return None
+
+    # Success — remove the intermediate logs + marker.
+    try:
+        for p in list(rec_dir.iterdir()):
+            if p.suffix == ".log" or p.name == _MARKER_NAME:
+                p.unlink(missing_ok=True)
+    except OSError:  # pragma: no cover
+        pass
+    log.info(
+        "Recovered orphaned recording %s: %d speaker(s), %.1fs -> %s",
+        rec_dir.name, len(speakers_out), manifest["duration_s"], rec_dir,
+    )
+    return manifest
+
+
+def _user_id_from_log_name(log_name: str) -> int:
+    """Recover the user id from a ``<name>_<user_id>.log`` filename."""
+    stem = log_name[:-4] if log_name.endswith(".log") else log_name
+    m = re.search(r"_(\d+)$", stem)
+    return int(m.group(1)) if m else 0

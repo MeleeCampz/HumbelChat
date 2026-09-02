@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import struct
+import time
 import wave
 from pathlib import Path
 
@@ -27,6 +28,8 @@ from bot_core.voice_recorder import (
     SAMPLE_RATE,
     VoiceRecorder,
     VoiceRecorderError,
+    _SpeakerLog,
+    recover_orphans,
     _decrypt_dave,
     _decrypt_transport,
     _decode_opus,
@@ -225,9 +228,12 @@ class TestCapturePath:
             r.handle_packet(pkt, mode="aead_xchacha20_poly1305_rtpsize",
                             secret_key=key, dave_session=None, resolve_name=lambda uid: "Alice")
         sp = r._speakers[4242]
-        assert len(sp.frames) == 2
+        assert sp.frame_count == 2
         assert sp.display_name == "Alice"
         assert sp.total_pcm_bytes == 2 * 1920
+        # Frames are durably on disk (crash-safe), not in an in-RAM list.
+        assert sp.log is not None and sp.log.path.exists()
+        assert len(_SpeakerLog.read_frames(sp.log.path)) == 2
 
     def test_unknown_ssrc_counted_and_dropped(self):
         r = self._recorder()
@@ -251,8 +257,8 @@ class TestCapturePath:
             pkt = _make_xchacha_packet(SILENCE_PACKET, key, ssrc=ssrc)
             r.handle_packet(pkt, mode="aead_xchacha20_poly1305_rtpsize",
                             secret_key=key, dave_session=None, resolve_name=lambda u: "x")
-        assert len(r._speakers[1].frames) == 1
-        assert len(r._speakers[2].frames) == 1
+        assert r._speakers[1].frame_count == 1
+        assert r._speakers[2].frame_count == 1
 
 
 # ── start() state reset & the pre-join op-5 burst ordering ───────────────────
@@ -294,8 +300,8 @@ class TestStartOrdering:
             r.handle_packet(_make_xchacha_packet(SILENCE_PACKET, key, ssrc=ssrc),
                             mode="aead_xchacha20_poly1305_rtpsize", secret_key=key,
                             dave_session=None, resolve_name=lambda uid: "x")
-        assert len(r._speakers[101].frames) == 1
-        assert len(r._speakers[202].frames) == 1
+        assert r._speakers[101].frame_count == 1
+        assert r._speakers[202].frame_count == 1
 
     @pytest.mark.asyncio
     async def test_start_after_burst_without_connection_clears_map(self):
@@ -485,7 +491,7 @@ class TestBotWiring:
         state.listeners[0](pkt)  # type: ignore[index]
 
         assert rec._total_packets == 1
-        assert len(rec._speakers[777].frames) == 1
+        assert rec._speakers[777].frame_count == 1
 
 
 # ── filename sanitisation ────────────────────────────────────────────────────
@@ -550,3 +556,212 @@ class TestWriteTimelineWav:
         total = int((frames[0][0] - origin) * SAMPLE_RATE) + len(frames) * FRAME_SAMPLES
         gaps, overlaps = _write_timeline_wav(path=tmp_path / "s.wav", frames=frames, origin=origin, total_samples=total)
         assert gaps == 1 and overlaps == 1
+
+
+# ── Crash durability: on-disk frame logs ─────────────────────────────────────
+class TestSpeakerLog:
+    def test_write_then_read_roundtrip(self, tmp_path):
+        p = tmp_path / "s.log"
+        lg = _SpeakerLog(p)
+        lg.write_frame(1000.000, b"\x01\x02" * 8)
+        lg.write_frame(1000.020, b"\x03\x04" * 8)
+        lg.close()
+        frames = _SpeakerLog.read_frames(p)
+        assert len(frames) == 2
+        assert abs(frames[0][0] - 1000.000) < 1e-6
+        assert frames[0][1] == b"\x01\x02" * 8
+        assert frames[1][1] == b"\x03\x04" * 8
+
+    def test_read_meta_reports_format(self, tmp_path):
+        p = tmp_path / "s.log"
+        lg = _SpeakerLog(p)
+        lg.write_frame(1.0, b"\x00" * 4)
+        lg.close()
+        meta = _SpeakerLog.read_meta(p)
+        assert meta["sample_rate"] == SAMPLE_RATE
+        assert meta["channels"] == 1
+        assert meta["frame_samples"] == FRAME_SAMPLES
+
+    def test_trailing_partial_record_is_dropped(self, tmp_path):
+        """A frame mid-write at crash time must not corrupt the readable prefix."""
+        p = tmp_path / "s.log"
+        lg = _SpeakerLog(p)
+        lg.write_frame(1000.0, b"\x01" * 16)   # complete record
+        lg.close()
+        # Simulate a crash that left a header + partial payload on disk.
+        with open(p, "ab") as fh:
+            import struct as st
+            fh.write(st.pack("<qI", int(1000.02 * 1_000_000), 16))
+            fh.write(b"\x02" * 5)              # only 5 of 16 bytes made it
+        frames = _SpeakerLog.read_frames(p)
+        assert len(frames) == 1
+        assert frames[0][1] == b"\x01" * 16
+
+    def test_read_frames_on_empty_or_bad_file(self, tmp_path):
+        empty = tmp_path / "empty.log"
+        empty.write_bytes(b"")
+        assert _SpeakerLog.read_frames(empty) == []
+        bad = tmp_path / "bad.log"
+        bad.write_bytes(b"XXXX" + b"\x00" * 20)
+        assert _SpeakerLog.read_frames(bad) == []
+
+
+# ── Crash durability: stop() reads logs, cleans up ───────────────────────────
+class TestStopDurability:
+    def test_stop_writes_from_disk_and_removes_logs(self, tmp_path):
+        r = VoiceRecorder(tmp_path / "rec")
+        r.start(guild_id=1, channel_id=2, channel_name="General")
+        key = nacl.utils.random(32)
+        ssrc = 0x4444
+        r._note_speaker(ssrc, 555)
+        for i in range(6):
+            pkt = _make_xchacha_packet(SILENCE_PACKET, key, ssrc=ssrc, counter=i + 1)
+            r.handle_packet(pkt, mode="aead_xchacha20_poly1305_rtpsize",
+                            secret_key=key, dave_session=None, resolve_name=lambda uid: "Carol")
+        # A per-speaker log file exists on disk while recording (durability).
+        logs = list((tmp_path / "rec").glob("*.log"))
+        assert len(logs) == 1
+
+        manifest = r.stop()
+        assert manifest is not None
+        sp = manifest["speakers"][0]
+        assert sp["frames_captured"] == 6
+        assert (tmp_path / "rec" / sp["wav_file"]).exists()
+        # After a clean stop the intermediate logs + marker are gone.
+        assert not list((tmp_path / "rec").glob("*.log"))
+        assert not (tmp_path / "rec" / ".recording").exists()
+
+    def test_discard_removes_logs_and_marker(self, tmp_path):
+        r = VoiceRecorder(tmp_path / "rec")
+        r.start(guild_id=1, channel_id=2)
+        key = nacl.utils.random(32)
+        r._note_speaker(0x5, 9)
+        r.handle_packet(_make_xchacha_packet(SILENCE_PACKET, key, ssrc=0x5),
+                        mode="aead_xchacha20_poly1305_rtpsize", secret_key=key,
+                        dave_session=None, resolve_name=lambda uid: "")
+        assert list((tmp_path / "rec").glob("*.log"))
+        r.discard()
+        assert not list((tmp_path / "rec").glob("*.log"))
+        assert not (tmp_path / "rec" / ".recording").exists()
+
+    def test_start_clears_stale_artifacts(self, tmp_path):
+        d = tmp_path / "rec"
+        d.mkdir()
+        (d / "stale.log").write_bytes(b"junk")
+        (d / ".recording").write_text("{}")
+        r = VoiceRecorder(d)
+        r.start(guild_id=1, channel_id=2)
+        assert not (d / "stale.log").exists()
+        # start() re-writes a fresh marker for the new session
+        assert (d / ".recording").exists()
+
+
+# ── Crash recovery: recover_orphans() ────────────────────────────────────────
+def _make_orphan(rec_dir: Path, started_at: float) -> None:
+    """Create a crashed-session dir: marker + one speaker log, no manifest."""
+    rec_dir.mkdir(parents=True, exist_ok=True)
+    (rec_dir / ".recording").write_text(json.dumps(
+        {"started_at": started_at, "guild_id": 1, "channel_id": 2,
+         "channel_name": "crashed-room", "pid": 4242}))
+    lg = _SpeakerLog(rec_dir / "Bob_777.log")
+    t = started_at + 1.0
+    for i in range(5):
+        lg.write_frame(t, b"\x07\x08" * (FRAME_SAMPLES // 2))
+        t += 0.02
+    lg.close()
+
+
+class TestRecoverOrphans:
+    def test_recovers_old_orphan(self, tmp_path):
+        rec_dir = tmp_path / "recording_20260101-000000"
+        _make_orphan(rec_dir, started_at=time.time() - 3600)  # an hour old
+        recovered = recover_orphans(tmp_path)
+        assert len(recovered) == 1
+        m = recovered[0]
+        assert m["recovered"] is True
+        assert m["channel_name"] == "crashed-room"
+        assert len(m["speakers"]) == 1
+        sp = m["speakers"][0]
+        assert sp["user_id"] == 777
+        assert sp["frames_captured"] == 5
+        # WAV written, logs + marker cleaned up, manifest on disk.
+        assert (rec_dir / sp["wav_file"]).exists()
+        assert not list(rec_dir.glob("*.log"))
+        assert not (rec_dir / ".recording").exists()
+        assert (rec_dir / "manifest.json").exists()
+
+    def test_skips_recent_orphan_within_threshold(self, tmp_path):
+        rec_dir = tmp_path / "recording_recent"
+        _make_orphan(rec_dir, started_at=time.time() - 60)  # 60s ago < 5 min
+        assert recover_orphans(tmp_path) == []
+        # untouched — still an open session
+        assert (rec_dir / ".recording").exists()
+        assert list(rec_dir.glob("*.log"))
+
+    def test_skips_completed_recording(self, tmp_path):
+        rec_dir = tmp_path / "recording_done"
+        _make_orphan(rec_dir, started_at=time.time() - 3600)
+        (rec_dir / "manifest.json").write_text("{}")  # already finalized
+        assert recover_orphans(tmp_path) == []
+
+    def test_no_op_when_dir_missing(self, tmp_path):
+        assert recover_orphans(tmp_path / "does-not-exist") == []
+
+    def test_recovers_multiple_speakers_and_drops_empty_logs(self, tmp_path):
+        rec_dir = tmp_path / "recording_multi"
+        _make_orphan(rec_dir, started_at=time.time() - 3600)
+        # a second speaker with real frames...
+        lg2 = _SpeakerLog(rec_dir / "Dan_888.log")
+        t = time.time() - 3590
+        for i in range(4):
+            lg2.write_frame(t, b"\x09" * (FRAME_SAMPLES))
+            t += 0.02
+        lg2.close()
+        # ...and a third speaker whose log is empty (no audio) -> dropped.
+        _SpeakerLog(rec_dir / "Erin_999.log").close()
+
+        recovered = recover_orphans(tmp_path)
+        assert len(recovered) == 1
+        uids = sorted(s["user_id"] for s in recovered[0]["speakers"])
+        assert uids == [777, 888]   # Erin (empty) excluded
+
+
+# ── Crash durability: SIGTERM graceful flush ─────────────────────────────────
+class TestSigtermFlush:
+    def _patch_exit(self, monkeypatch):
+        # The real handler ends with os._exit(0), which would kill the test
+        # process. Replace it with something that raises SystemExit so we can
+        # assert on the flushed state without actually exiting.
+        import bot_core.voice_recorder as vr
+
+        def _fake_exit(code):
+            raise SystemExit(code)
+
+        monkeypatch.setattr(vr.os, "_exit", _fake_exit)
+
+    def test_sigterm_handler_flushes_recording(self, tmp_path, monkeypatch):
+        r = VoiceRecorder(tmp_path / "rec")
+        r.start(guild_id=1, channel_id=2)
+        key = nacl.utils.random(32)
+        r._note_speaker(0x6, 123)
+        for i in range(3):
+            r.handle_packet(_make_xchacha_packet(SILENCE_PACKET, key, ssrc=0x6),
+                            mode="aead_xchacha20_poly1305_rtpsize", secret_key=key,
+                            dave_session=None, resolve_name=lambda uid: "Dave")
+        assert r.is_recording
+
+        self._patch_exit(monkeypatch)
+        with pytest.raises(SystemExit):
+            r._sigterm_handler(15, None)
+
+        assert not r.is_recording
+        manifest = json.loads((tmp_path / "rec" / "manifest.json").read_text())
+        assert manifest["speakers"][0]["frames_captured"] == 3
+        assert not list((tmp_path / "rec").glob("*.log"))
+
+    def test_sigterm_handler_noop_when_not_recording(self, tmp_path, monkeypatch):
+        r = VoiceRecorder(tmp_path / "rec")  # never start()
+        self._patch_exit(monkeypatch)
+        with pytest.raises(SystemExit):
+            r._sigterm_handler(15, None)
+        assert not (tmp_path / "rec" / "manifest.json").exists()
