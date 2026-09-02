@@ -13,6 +13,13 @@ def _safe_int(value: str | None, default: int) -> int:
         return default
 
 
+def _safe_float(value: str | None, default: float) -> float:
+    try:
+        return float(value) if value else default
+    except (ValueError, TypeError):
+        return default
+
+
 def _history_reset_flag(value: str | None) -> bool:
     """Return True if *value* is the sentinel string "clear" (case-insensitive).
 
@@ -123,13 +130,21 @@ STT_ENABLED: bool = os.getenv("STT_ENABLED", "1") not in ("0", "false", "no")
 # Which engine performs the transcription:
 #   local — faster-whisper on this machine (default). Real per-segment
 #           timestamps -> interleaved chronological transcript, no upload cap.
-#   http  — the OpenAI-compatible /v1/audio/transcriptions endpoint of the AI
-#           backend (plain text only; ~25 MB upload cap).
+#   http  — an OpenAI-compatible /v1/audio/transcriptions endpoint (e.g. a
+#           separate Whisper API container, addressed via STT_URL).
+#           Requests verbose_json + segment timestamps; ~25 MB upload cap.
 STT_BACKEND: str = os.getenv("STT_BACKEND", "local")
 # Model name for the local backend: any faster-whisper model id, e.g.
 # tiny / base / small / medium / large-v3 / large-v3-turbo (or an HF repo in
 # owner/model form). Downloaded on first use (~1.6 GB for large-v3-turbo).
 STT_LOCAL_MODEL: str = os.getenv("STT_LOCAL_MODEL", "large-v3-turbo")
+# Base URL of the OpenAI-compatible STT backend (used only when
+# STT_BACKEND=http). Point this at your Whisper API container, e.g.
+#   http://192.168.1.50:8000/v1        (separate container on the network)
+#   http://whisper-api:8000/v1          (sidecar in the same compose file)
+# Falls back to INFER_URL when unset, so a single backend serving both
+# chat and STT keeps working.
+STT_URL: str = os.getenv("STT_URL") or INFER_URL
 # STT model slug as accepted by the backend's /v1/audio/transcriptions route
 # (used only when STT_BACKEND=http). unsloth-studio defaults: tiny, base,
 # small, large-v3-turbo, large-v3, qwen3-asr-0.6b, qwen3-asr-1.7b.
@@ -138,6 +153,32 @@ STT_MODEL: str = os.getenv("STT_MODEL", "qwen3-asr-1.7b")
 STT_LANGUAGE: str = os.getenv("STT_LANGUAGE", "")
 # Per-file HTTP timeout in seconds (long recordings + cold model load).
 STT_TIMEOUT: int = _safe_int(os.getenv("STT_TIMEOUT"), 300)
+# ── http-backend upload handling (trim -> resample -> chunk) ────────────────
+# Hard cap on a single /v1/audio/transcriptions upload, in MB. A speaker's
+# audio is split into chunks that each fit under this cap, so arbitrarily long
+# recordings still transcribe. 0 = unlimited (no size-based splitting). The
+# default 25 matches the ~25 MB per-request limit most Whisper backends impose.
+STT_MAX_UPLOAD_MB: int = _safe_int(os.getenv("STT_MAX_UPLOAD_MB"), 25)
+# Also split a speaker's audio into chunks of at most this many seconds, even
+# when they'd fit under the size cap — useful to bound per-request latency on
+# very long recordings. 0 = never split by time (size cap only).
+STT_CHUNK_SECONDS: int = _safe_int(os.getenv("STT_CHUNK_SECONDS"), 600)
+# Trim leading/trailing silence below STT_SILENCE_DBFS from each speaker's
+# audio before resampling/uploading (1 = on, 0 = off). The recorder writes a
+# full-length WAV with the first/last frames zero-padded to the session start/
+# end; trimming removes that padding so short meetings don't upload hours of
+# silence. Segment timestamps are shifted back onto the shared timeline.
+STT_TRIM_SILENCE: bool = os.getenv("STT_TRIM_SILENCE", "1") not in ("0", "false", "no")
+# Silence threshold for STT_TRIM_SILENCE, in dBFS (negative). Samples with a
+# level below this are treated as silence. -45 is well under typical speech
+# but above the digital-noise floor of quiet channels.
+STT_SILENCE_DBFS: float = _safe_float(os.getenv("STT_SILENCE_DBFS"), -45.0)
+# Append the finished transcript to the ACTIVE session's notes automatically
+# when transcription completes (see bot_core.sessions.add_transcript). The
+# full transcript is stored as timestamped note bullets, so it shows up in
+# /session_notes and stays RAG-searchable. Set STT_ADD_TO_SESSION=0 to keep
+# transcripts out of the session notes.
+STT_ADD_TO_SESSION: bool = os.getenv("STT_ADD_TO_SESSION", "1") not in ("0", "false", "no")
 
 CHUNK_TARGET: int = _safe_int(os.getenv("CHUNK_SIZE"), 2000)
 RAG_MAX_DOCS: int = _safe_int(os.getenv("RAG_MAX_DOCS"), 4)

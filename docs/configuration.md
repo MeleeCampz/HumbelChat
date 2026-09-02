@@ -63,6 +63,7 @@ A smaller baseline is usually better for Discord. Very large `max_tokens` values
 | `STT_MODEL` | Model slug for the backend's `/v1/audio/transcriptions` endpoint (unsloth-studio: `tiny`, `base`, `small`, `large-v3-turbo`, `large-v3`, `qwen3-asr-0.6b`, `qwen3-asr-1.7b`, or any HF `owner/model`) | `qwen3-asr-1.7b` |
 | `STT_LANGUAGE` | Force a transcription language (e.g. `en`, `de`); empty = auto-detect | *(empty)* |
 | `STT_TIMEOUT` | Per-file HTTP timeout in seconds (long recordings + cold model load) | `300` |
+| `STT_ADD_TO_SESSION` | Append the finished transcript to the active session's notes when STT completes; set `0` to keep transcripts out of the session notes | `1` |
 
 STT runs on the same OpenAI-compatible backend as chat (`INFER_URL` / `INFER_API_KEY`) — see [Voice Recording — Speech-to-text](./voice-recording.md#speech-to-text).
 

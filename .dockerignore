@@ -1,0 +1,62 @@
+# Version control
+.git
+.gitignore
+
+# Python artifacts
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.dist-info
+pip-wheel-metadata
+
+# Test artifacts
+tests/
+.pytest_cache/
+*.egg-info/
+.coverage
+htmlcov/
+*.cover
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Build artifacts (the bot itself is built, not copied as a wheel)
+*.tar.gz
+*.whl
+dist/
+build/
+
+# Docs / knowledge (not needed at runtime)
+kb/
+docs/
+RAG_Vector_Plan.md
+CODE_REVIEW_FINDINGS.md
+TASKS.md
+
+# Config / examples
+.env.example
+.env.local*
+*.example
+
+# Temporary / cache
+temp/
+*.tmp
+.venv/
+venv/
+
+# Local only files not in repo
+.bot.pid
+.started

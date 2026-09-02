@@ -90,3 +90,5 @@ kb/.index_cache/   # legacy location (pre-rename); superseded by .vector_index_c
 
 # Git
 .git/
+# Whisper API sidecar env (may hold HF_TOKEN)
+whisper-api.env

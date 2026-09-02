@@ -1,8 +1,10 @@
 """Speech-to-text for voice recordings.
 
 After ``/stop_recording`` writes one WAV per speaker, this module transcribes
-each file and writes a ``transcript.json`` (plus an interleaved
-``transcript.txt``) next to the recording's ``manifest.json``.
+each file and writes a ``transcript.json`` (plus a chronological
+``transcript.txt``) next to the recording's ``manifest.json``. When a
+session is active, the same transcript text is appended to that session's
+notes (see :func:`bot_core.sessions.add_transcript`).
 
 Two backends are supported, selected via ``STT_BACKEND``:
 
@@ -46,7 +48,6 @@ from pathlib import Path
 log = logging.getLogger("bot.transcriber")
 
 TARGET_SAMPLE_RATE = 16_000   # Whisper-class ASR expects 16 kHz mono
-MAX_UPLOAD_BYTES = 24 * 1024 * 1024  # stay under the backend's ~25 MB cap
 
 
 class TranscriptionError(Exception):
@@ -62,24 +63,34 @@ _inference_lock = threading.Lock()          # serialize CPU transcriptions
 
 
 def _stt_client():
-    """Shared AsyncOpenAI client for the backend (same URL/key as chat)."""
+    """Shared AsyncOpenAI client for the STT backend.
+
+    Uses ``STT_URL`` (falls back to ``INFER_URL`` when unset) so the STT
+    service can live in a different container from the chat LLM. The API key
+    reuses ``INFER_API_KEY`` — set it to any non-empty string for backends
+    that don't require auth.
+    """
     global _shared_stt_client
     if _shared_stt_client is None:
         from openai import AsyncOpenAI
 
-        from config.settings import INFER_API_KEY, INFER_URL
-        _shared_stt_client = AsyncOpenAI(api_key=INFER_API_KEY, base_url=INFER_URL)
+        from config.settings import INFER_API_KEY, STT_URL
+        api_key = INFER_API_KEY or "no-key"
+        _shared_stt_client = AsyncOpenAI(api_key=api_key, base_url=STT_URL)
     return _shared_stt_client
 
 
-def _to_16k_mono_wav(wav_path: Path) -> bytes:
-    """Read a WAV and return it as 16 kHz mono 16-bit PCM *WAV* bytes.
+def _load_to_16k_mono(wav_path: Path) -> tuple[np.ndarray, int]:
+    """Read a WAV and return ``(int16 mono samples, rate)`` at 16 kHz.
 
-    The recorder writes 48 kHz mono; the backend's STT sidecar decodes to
-    16 kHz internally, so we do it here to shrink uploads ~3x (the backend
-    caps requests at ~25 MB — a 48 kHz WAV hits that in ~4 minutes).
+    The recorder writes 48 kHz mono; Whisper-class models want 16 kHz, so we
+    downmix (if needed) and resample here — a ~3x size reduction that also
+    keeps uploads under the backend's per-request cap. The returned array is
+    *always* at ``TARGET_SAMPLE_RATE`` (16 kHz), so callers use the returned
+    rate for all sample↔second conversions. Raises :class:`TranscriptionError`
+    for unsupported bit depths.
     """
-    import io
+    import numpy as np
 
     with wave.open(str(wav_path), "rb") as wf:
         channels = wf.getnchannels()
@@ -91,7 +102,6 @@ def _to_16k_mono_wav(wav_path: Path) -> bytes:
     if sample_width != 2:
         raise TranscriptionError(f"Unsupported WAV bit depth {sample_width * 8} in {wav_path.name}")
 
-    import numpy as np
     samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
     if channels > 1:
         samples = samples.reshape(-1, channels).mean(axis=1)
@@ -102,7 +112,20 @@ def _to_16k_mono_wav(wav_path: Path) -> bytes:
         x_new = np.linspace(0.0, 1.0, num=n_out, endpoint=False)
         samples = np.interp(x_new, x_old, samples)
 
-    pcm = np.clip(samples, -32768.0, 32767.0).astype(np.int16)
+    # The array is now at TARGET_SAMPLE_RATE (resampled above if needed).
+    return np.clip(samples, -32768.0, 32767.0).astype(np.int16), TARGET_SAMPLE_RATE
+
+
+def _to_16k_mono_wav(wav_path: Path) -> bytes:
+    """Read a WAV and return it as 16 kHz mono 16-bit PCM *WAV* bytes.
+
+    Kept for callers/tests that want the full file; the http pipeline uses
+    :func:`_load_to_16k_mono` + chunking instead so long recordings can be
+    split under the upload cap.
+    """
+    import io
+
+    pcm, _rate = _load_to_16k_mono(wav_path)
     buf = io.BytesIO()
     with wave.open(buf, "wb") as out:
         out.setnchannels(1)
@@ -110,6 +133,82 @@ def _to_16k_mono_wav(wav_path: Path) -> bytes:
         out.setframerate(TARGET_SAMPLE_RATE)
         out.writeframes(pcm.tobytes())
     return buf.getvalue()
+
+
+def _trim_silence(
+    pcm: np.ndarray, *, rate: int = TARGET_SAMPLE_RATE, silence_dbfs: float = -45.0,
+) -> tuple[np.ndarray, int]:
+    """Trim leading/trailing samples quieter than *silence_dbfs*.
+
+    Returns ``(trimmed_pcm, trim_start_samples)`` where the offset is in the
+    16 kHz domain — callers use it to shift segment timestamps back onto the
+    shared timeline. A fully-silent clip trims to empty (offset 0).
+    """
+    import numpy as np
+
+    n = len(pcm)
+    if n == 0:
+        return pcm, 0
+    # dBFS relative to full scale (32768); -45 dBFS ≈ amplitude 32768*10^(-45/20).
+    threshold = 32768.0 * (10.0 ** (silence_dbfs / 20.0))
+    loud = np.abs(pcm.astype(np.float32)) >= threshold
+    if not loud.any():
+        return pcm[:0], 0
+    first = int(np.argmax(loud))                 # index of first loud sample
+    last = n - 1 - int(np.argmax(loud[::-1]))    # index of last loud sample
+    return pcm[first:last + 1], first
+
+
+def _pcm_to_wav_bytes(pcm: np.ndarray, rate: int = TARGET_SAMPLE_RATE) -> bytes:
+    """Encode an int16 mono array as a minimal RIFF/WAVE file (44-byte header)."""
+    import struct
+
+    data = pcm.tobytes()
+    header = (
+        b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVE"
+        + b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
+        + b"data" + struct.pack("<I", len(data))
+    )
+    return header + data
+
+
+def _plan_chunks(n_samples: int, *, rate: int = TARGET_SAMPLE_RATE,
+                 max_bytes: int | None = None, chunk_seconds: float = 0.0) -> list[tuple[int, int]]:
+    """Split *n_samples* of mono PCM into ``(start_sample, end_sample)`` ranges.
+
+    A range is bounded by whichever comes first: the size cap (a chunk's WAV —
+    header + data — must fit under *max_bytes*) or the time cap (*chunk_seconds*
+    > 0). If neither bound yields a positive length, the whole clip becomes one
+    chunk. Ranges are contiguous and cover ``[0, n_samples)`` exactly.
+    """
+    if n_samples <= 0:
+        return []
+    step = None
+    if max_bytes is not None and max_bytes > 0:
+        # 44-byte WAV header + 2 bytes per sample must fit under the cap.
+        step = max(1, (max_bytes - 44) // 2)
+    if chunk_seconds and chunk_seconds > 0:
+        s = int(chunk_seconds * rate)
+        if s <= 0:
+            raise ValueError(f"chunk_seconds too small for {rate} Hz: {chunk_seconds}")
+        step = s if step is None else min(step, s)
+    if step is None or step >= n_samples:
+        return [(0, n_samples)]
+    return [(i, min(i + step, n_samples)) for i in range(0, n_samples, step)]
+
+
+def _merge_segments(segs: list[dict], *, t_start: float) -> list[dict]:
+    """Shift per-chunk segments back onto the shared timeline.
+
+    Each chunk was transcribed independently, so its segment times are relative
+    to that chunk's start. Adding *t_start* (the chunk's offset on the speaker's
+    16 kHz audio) puts every segment on one clock — the same clock the recorder
+    aligns all speakers' WAVs to.
+    """
+    return [{"start": round(s.get("start", 0.0) + t_start, 3),
+             "end": round(s.get("end", 0.0) + t_start, 3),
+             "text": (s.get("text") or "").strip()}
+            for s in segs]
 
 
 @dataclass
@@ -154,6 +253,36 @@ class TranscriptionReport:
 def _error_message(exc: Exception) -> str:
     """Extract a human-readable message from an OpenAI API error."""
     return getattr(exc, "message", None) or str(exc)
+
+
+def _extract_segments(resp) -> tuple[str, str | None, list[dict]]:
+    """Pull ``(text, language, segments)`` out of a verbose_json response.
+
+    The OpenAI SDK may hand back an object (``.segments`` / ``.start`` ...) or a
+    plain dict (``"segments"`` / ``"start"`` ...). Segment times are relative to
+    the start of *this chunk* — the caller shifts them onto the shared timeline.
+    """
+    text = ""
+    lang: str | None = None
+    segs: list[dict] = []
+    if isinstance(resp, dict):
+        text = resp.get("text") or ""
+        lang = resp.get("language")
+        for s in resp.get("segments") or []:
+            segs.append({"start": round(s.get("start", 0), 3),
+                         "end": round(s.get("end", 0), 3),
+                         "text": (s.get("text") or "").strip()})
+    elif hasattr(resp, "segments"):
+        text = getattr(resp, "text", "") or ""
+        lang = getattr(resp, "language", None)
+        for s in resp.segments:
+            segs.append({"start": round(s.start, 3),
+                         "end": round(s.end, 3),
+                         "text": (s.text or "").strip()})
+    else:
+        text = getattr(resp, "text", "") or ""
+        lang = getattr(resp, "language", None)
+    return text.strip(), lang, segs
 
 
 def _local_model(name: str):
@@ -240,46 +369,68 @@ async def transcribe_wav(wav_path: Path, *, model: str, language: str = "") -> S
                              text=text, language=lang, elapsed_s=round(elapsed, 2), segments=segs)
 
     # ── http backend (OpenAI-compatible /v1/audio/transcriptions) ────────────
+    # Pipeline: load + resample to 16 kHz mono -> trim edge silence -> split
+    # into chunks that fit under the upload cap -> transcribe each chunk ->
+    # merge segments back onto the shared timeline. See _plan_chunks.
+    from config.settings import STT_CHUNK_SECONDS, STT_MAX_UPLOAD_MB, STT_SILENCE_DBFS, STT_TRIM_SILENCE
+
     try:
-        upload_bytes = _to_16k_mono_wav(wav_path)
+        pcm16, rate = _load_to_16k_mono(wav_path)
     except TranscriptionError as e:
         return SpeakerResult(user_id=0, display_name="", wav_file=wav_path.name, error=str(e))
     except Exception as e:  # corrupt/missing WAV
         return SpeakerResult(user_id=0, display_name="", wav_file=wav_path.name,
                              error=f"could not read WAV: {e}")
 
-    if len(upload_bytes) > MAX_UPLOAD_BYTES:
-        return SpeakerResult(user_id=0, display_name="", wav_file=wav_path.name,
-                             error=(f"audio too large for backend ({len(upload_bytes) / 1024 / 1024:.1f} MB > "
-                                    f"{MAX_UPLOAD_BYTES / 1024 / 1024:.0f} MB limit)"))
+    t_start = 0.0
+    if STT_TRIM_SILENCE:
+        pcm16, trim_samples = _trim_silence(pcm16, rate=rate, silence_dbfs=STT_SILENCE_DBFS)
+        t_start = trim_samples / rate
 
-    fields: dict = {"model": model, "timeout": STT_TIMEOUT}
+    max_bytes = (STT_MAX_UPLOAD_MB * 1024 * 1024) if STT_MAX_UPLOAD_MB > 0 else None
+    try:
+        ranges = _plan_chunks(len(pcm16), rate=rate, max_bytes=max_bytes,
+                              chunk_seconds=float(STT_CHUNK_SECONDS or 0))
+    except ValueError as e:
+        return SpeakerResult(user_id=0, display_name="", wav_file=wav_path.name, error=str(e))
+
+    fields: dict = {
+        "model": model,
+        "timeout": STT_TIMEOUT,
+        "response_format": "verbose_json",
+        "timestamp_granularities": ["segment"],
+    }
     if language:
         fields["language"] = language
 
     client = _stt_client()
-    try:
-        resp = await client.audio.transcriptions.create(
-            file=(wav_path.name, upload_bytes, "audio/wav"), **fields,
-        )
-    except Exception as e:  # noqa: BLE001 - surface backend errors per-speaker
-        msg = _error_message(e)
-        log.warning("STT failed for %s (model=%s): %s", wav_path.name, model, msg)
-        return SpeakerResult(user_id=0, display_name="", wav_file=wav_path.name, error=msg)
-
-    elapsed = time.monotonic() - started
-    text = ""
+    text_parts: list[str] = []
     lang: str | None = None
-    if isinstance(resp, dict):
-        text = resp.get("text") or ""
-        lang = resp.get("language")
-    else:
-        text = getattr(resp, "text", "") or ""
-        lang = getattr(resp, "language", None)
+    all_segs: list[dict] = []
+    for i, (s, e) in enumerate(ranges):
+        chunk_name = wav_path.name if len(ranges) == 1 else f"{wav_path.stem}__chunk{i + 1:02d}.wav"
+        try:
+            resp = await client.audio.transcriptions.create(
+                file=(chunk_name, _pcm_to_wav_bytes(pcm16[s:e]), "audio/wav"), **fields,
+            )
+        except Exception as exc:  # noqa: BLE001 - surface backend errors per-speaker
+            msg = _error_message(exc)
+            log.warning("STT failed for %s chunk %d/%d (model=%s): %s",
+                        wav_path.name, i + 1, len(ranges), model, msg)
+            return SpeakerResult(user_id=0, display_name="", wav_file=wav_path.name, error=msg)
+        c_text, c_lang, c_segs = _extract_segments(resp)
+        text_parts.append(c_text)
+        if lang is None and c_lang:
+            lang = c_lang
+        all_segs.extend(_merge_segments(c_segs, t_start=t_start + s / rate))
 
-    log.info("STT done: %s -> %d chars in %.1fs (model=%s)", wav_path.name, len(text), elapsed, model)
+    merged_text = " ".join(p for p in text_parts if p).strip()
+    elapsed = time.monotonic() - started
+    log.info("STT done: %s -> %d chars, %d segment(s) over %d chunk(s) in %.1fs (model=%s)",
+             wav_path.name, len(merged_text), len(all_segs), len(ranges), elapsed, model)
     return SpeakerResult(user_id=0, display_name="", wav_file=wav_path.name,
-                         text=text.strip(), language=lang, elapsed_s=round(elapsed, 2))
+                         text=merged_text, language=lang,
+                         elapsed_s=round(elapsed, 2), segments=all_segs)
 
 
 def resolve_recording_dir(manifest: dict) -> Path | None:
@@ -340,6 +491,25 @@ async def transcribe_recording(manifest: dict) -> TranscriptionReport:
 
     report.finished_at = time.time()
     return report
+
+
+def build_session_transcript(report: TranscriptionReport) -> str:
+    """The transcript text that ``transcript.txt`` and the session notes use.
+
+    Prefers :func:`build_interleaved_transcript` (chronological, per-segment
+    timestamps — local backend). When no speaker produced timestamps (http
+    backend), falls back to one attributed block per speaker so the session
+    notes still capture who said what. Returns "" when there is no speech.
+    """
+    text = build_interleaved_transcript(report)
+    if text.strip():
+        return text
+    blocks: list[str] = []
+    for s in report.speakers:
+        if s.ok and s.text:
+            name = s.display_name or f"user {s.user_id}"
+            blocks.append(f"[{name}]\n{s.text}\n")
+    return "\n".join(blocks).rstrip() + ("\n" if blocks else "")
 
 
 def build_interleaved_transcript(report: TranscriptionReport) -> str:
@@ -413,11 +583,11 @@ def write_transcript(out_dir: Path, manifest: dict, report: TranscriptionReport)
     try:
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
-        # Interleaved chronological transcript (needs segment timestamps —
-        # always present on the local backend).
-        interleaved = build_interleaved_transcript(report)
-        if interleaved:
-            (out_dir / "transcript.txt").write_text(interleaved, encoding="utf-8")
+        # Chronological transcript (per-segment timestamps on the local
+        # backend; per-speaker blocks as fallback for the http backend).
+        transcript_text = build_session_transcript(report)
+        if transcript_text:
+            (out_dir / "transcript.txt").write_text(transcript_text, encoding="utf-8")
 
         # Point the manifest at the transcript (best effort).
         mp = out_dir / "manifest.json"

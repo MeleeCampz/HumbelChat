@@ -393,6 +393,69 @@ def add_note(text: str, author: str = "") -> dict | None:
     return session
 
 
+def add_transcript(text: str, title: str = "", session: dict | None = None) -> tuple[dict | None, int]:
+    """Append a finished voice-channel transcript to a session's notes.
+
+    Called from the STT background job after ``/stop_recording`` so the full
+    conversation lands in the session notes (and thus in RAG) automatically.
+    *session* pins the target — normally the session that was active when the
+    recording stopped, which may have ended by the time transcription
+    finishes; its notes file still gets the transcript. When omitted, the
+    currently active session is used.
+
+    The text is split into note bullets of at most ~1800 chars each — small
+    enough to display in ``/session_notes`` and close to the KB chunker's
+    limits, so long transcripts stay searchable. Each bullet keeps the
+    ``(timestamp) text`` shape the notes file uses, with a transcript header
+    on the first one.
+
+    Returns ``(session, n_bullets)``; ``(None, 0)`` when no session is
+    available or the transcript is empty. Never raises — STT delivery must
+    not be blocked by note bookkeeping.
+    """
+    try:
+        if session is None:
+            session = get_current_session()
+        if session is None:
+            return None, 0
+        clean = " ".join(str(text).split())
+        if not clean:
+            return None, 0
+
+        def _chunk(s: str) -> list[str]:
+            parts: list[str] = []
+            cur = ""
+            for word in s.split():
+                if cur and len(cur) + 1 + len(word) > 1800:
+                    parts.append(cur)
+                    cur = word
+                else:
+                    cur = f"{cur} {word}".strip()
+            if cur:
+                parts.append(cur)
+            return parts or [""]
+
+        bullets = _chunk(clean)
+        now = time.time()
+        header = title.strip() or "Voice channel transcript"
+        for i, part in enumerate(bullets):
+            if i == 0:
+                body = f"🎙️ {header} — part 1/{len(bullets)}: {part}"
+            else:
+                body = f"{header} (continued, part {i + 1}/{len(bullets)}): {part}"
+            session.setdefault("notes", []).append([now + i, body])
+
+        _write_session_file(session)
+        _index_session_file(pathlib.Path(session["file"]))
+        _save()
+        log.info("Transcript added to %s: %d note bullet(s), %d chars",
+                 session.get("name"), len(bullets), len(clean))
+        return session, len(bullets)
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("Could not add transcript to session notes: %s", e)
+        return None, 0
+
+
 def get_notes(session: dict | None = None) -> list[list]:
     """Notes of *session* (default: current, else last known)."""
     s = session if session is not None else _state.get("session")

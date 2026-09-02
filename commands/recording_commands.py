@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
+import time
 from datetime import datetime
 
 import discord
@@ -33,6 +34,7 @@ from bot_core.voice_recorder import (
 )
 from config.settings import (
     RECORDINGS_DIR,
+    STT_ADD_TO_SESSION,
     STT_BACKEND,
     STT_ENABLED,
     STT_LOCAL_MODEL,
@@ -228,6 +230,13 @@ async def handle_stop_recording(
     if not sp_lines:
         sp_lines.append("  • (no audio was captured — nobody spoke, or SSRC mapping didn't resolve)")
 
+    # Pin the transcript to the session active AT RECORD TIME: transcription
+    # runs in the background, so by the time it finishes the user may have
+    # ended/started sessions — the notes still belong to this recording's
+    # session (its file is written even if that session has ended).
+    from bot_core import sessions as S
+    session_at_stop = S.get_current_session()
+
     # Only transcribe when enabled (globally + per-command) and there is
     # actual speech to transcribe.
     stt_speakers = [s for s in speakers if s.get("frames_captured", 0) > 0]
@@ -258,7 +267,10 @@ async def handle_stop_recording(
     await interaction.followup.send(body, file=manifest_file, ephemeral=True)
 
     if run_stt:
-        spawn_tracked_task(_run_transcription(interaction, manifest), name="stt-transcription")
+        spawn_tracked_task(
+            _run_transcription(interaction, manifest, session_at_stop),
+            name="stt-transcription",
+        )
 
 
 async def _safe_followup(interaction: discord.Interaction, body: str, files: list | None = None) -> None:
@@ -269,9 +281,16 @@ async def _safe_followup(interaction: discord.Interaction, body: str, files: lis
         log.warning("Could not deliver STT result (interaction expired?): %s", e)
 
 
-async def _run_transcription(interaction: discord.Interaction, manifest: dict) -> None:
+async def _run_transcription(
+    interaction: discord.Interaction,
+    manifest: dict,
+    session_at_stop: dict | None = None,
+) -> None:
     """Background job: transcribe every speaker's WAV, write transcript.json,
-    and post a summary with the transcript file attached."""
+    append the transcript to the session that was active when the recording
+    stopped (when enabled), and post a summary with the transcript file
+    attached."""
+    from bot_core import sessions as S
     from bot_core import transcriber
 
     try:
@@ -295,9 +314,40 @@ async def _run_transcription(interaction: discord.Interaction, manifest: dict) -
         else:
             lines.append(f"  • **{name}**: ⚠️ {s.error}")
 
+    # Automatically fold the transcript into the notes of the session that
+    # was active when the recording stopped (see handle_stop_recording) so it
+    # shows up in /session_notes and stays RAG-searchable. Best effort: a
+    # missing session or a bookkeeping error only changes the message line.
+    session_line = ""
+    if STT_ADD_TO_SESSION:
+        started = datetime.fromtimestamp(
+            manifest.get("started_at") or time.time()
+        ).strftime("%Y-%m-%d %H:%M")
+        title = (
+            f"Voice channel transcript — #{manifest.get('channel_name') or '?'} "
+            f"({started}, {int(manifest.get('duration_s') or 0)}s)"
+        )
+        try:
+            session, n_bullets = S.add_transcript(
+                transcriber.build_session_transcript(report), title=title,
+                session=session_at_stop,
+            )
+            if session is not None:
+                fname = pathlib.Path(session["file"]).name
+                status = "active" if S.get_current_session() is session else "ended"
+                session_line = (
+                    f"\n\n📝 Added to the {status} session's notes "
+                    f"(**{session.get('name') or '(untitled)'}**, {n_bullets} note(s)) — `{fname}`"
+                )
+            else:
+                log.info("Transcript not added: no active session at STT completion")
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning("Could not add transcript to session notes: %s", e)
+
     body = (
         f"🎧 **Transcription done** — {report.ok_count}/{total} speaker(s) OK, "
         f"{report.finished_at - report.started_at:.0f}s total.\n" + "\n".join(lines)
+        + session_line
     )
 
     files: list = []
