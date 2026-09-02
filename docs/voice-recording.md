@@ -124,15 +124,18 @@ Consequences:
 
 ## Speech-to-text
 
-Implemented in [`bot_core/transcriber.py`](../bot_core/transcriber.py). STT runs on the **same OpenAI-compatible backend** as chat (same `INFER_URL` / `INFER_API_KEY`) via its `/v1/audio/transcriptions` endpoint — no extra service to run.
+Implemented in [`bot_core/transcriber.py`](../bot_core/transcriber.py). Two engines, selected by `STT_BACKEND`:
+
+- **`local` (default)** — faster-whisper running on this machine (no upload, real per-segment timestamps, no size cap). Model via `STT_LOCAL_MODEL`.
+- **`http`** — an OpenAI-compatible `/v1/audio/transcriptions` endpoint. By default `STT_URL` falls back to `INFER_URL` (so a single backend serving both chat and STT "just works"); point `STT_URL` at a separate Whisper container to run it out-of-process. It reuses `INFER_API_KEY`.
 
 Flow after `/stop_recording` (http backend):
 
 ```
 per-speaker WAV ──► downmix/resample to 16 kHz mono (numpy)
                  ──► trim leading/trailing silence below STT_SILENCE_DBFS
-                 ──► split into chunks that fit under STT_MAX_UPLOAD_MB /
-                     STT_CHUNK_SECONDS (recursively, so long files always fit)
+                 ──► split into chunks that each fit under STT_MAX_UPLOAD_MB /
+                     STT_CHUNK_SECONDS (so long files always fit)
                  ──► POST each chunk to /v1/audio/transcriptions (verbose_json)
                  ──► merge segments back onto the shared timeline
                  ──► transcript.json next to manifest.json
@@ -149,13 +152,13 @@ Key details:
 - **Silence trim (http).** The recorder writes a *full-length* WAV with the first/last frames zero-padded out to the session start/end, so a short meeting still produces a long file. `STT_TRIM_SILENCE` (on by default) trims everything quieter than `STT_SILENCE_DBFS` from both ends before upload; the removed span is added back as an offset so segment timestamps land on the correct point of the shared timeline.
 - **Chunked upload (http).** A speaker's audio is split into chunks that each fit under `STT_MAX_UPLOAD_MB` (default 25) and/or `STT_CHUNK_SECONDS` (default 600), so arbitrarily long recordings transcribe instead of hitting the backend's per-request size cap. Chunks are uploaded sequentially and their segments merged back onto one clock, so the interleaved transcript is unaffected.
 - **Per-speaker attribution comes free.** Each file is one person, so no diarization is needed; `transcript.json` maps text back to speaker by `user_id`/`display_name` from the manifest.
-- **Sequential processing.** One local backend = one inference slot, so speakers are transcribed one at a time (same reasoning as the global AI lock).
+- **Sequential processing.** Speakers are transcribed one at a time (one inference slot — faster-whisper for the local backend, the shared HTTP endpoint for the http backend), so concurrent recordings never fight over the model.
 - **Per-speaker error isolation.** A failing file (e.g. model not downloaded) is reported in `transcript.json` and the Discord message; the other speakers still get transcribed.
-- **Automatic session notes.** When a session is active (`/start_session`) and `STT_ADD_TO_SESSION` is on (default), the finished transcript is appended to the notes of the session that was active **when the recording stopped** — via [`bot_core.sessions.add_transcript()`](../bot_core/sessions.py) as timestamped note bullets of ~1800 chars each, so long transcripts stay displayable in `/session_notes` and RAG-searchable. The target is pinned at stop time: if you end that session (or start a new one) while STT is still running, the transcript still lands in the original session's notes file. The same text is what `transcript.txt` contains: chronological `[mm:ss] Speaker: line` with per-segment timestamps (local backend), or one attributed block per speaker (http backend). If no session was active when the recording stopped, the transcript is still posted to the channel but nothing is added; set `STT_ADD_TO_SESSION=0` to opt out entirely.
+- **Automatic session notes.** When a session is active (`/start_session`) and `STT_ADD_TO_SESSION` is on (default), the finished transcript is appended to the notes of the session that was active **when the recording stopped** — via [`bot_core.sessions.add_transcript()`](../bot_core/sessions.py) as timestamped note bullets of ~1800 chars each, so long transcripts stay displayable in `/session_notes` and RAG-searchable. The target is pinned at stop time: if you end that session (or start a new one) while STT is still running, the transcript still lands in the original session's notes file. The same text is what `transcript.txt` contains: chronological `[mm:ss] Speaker: line` with per-segment timestamps (both backends), or one attributed block per speaker only if the backend returned no segment timing. If no session was active when the recording stopped, the transcript is still posted to the channel but nothing is added; set `STT_ADD_TO_SESSION=0` to opt out entirely.
 
 ### Session notes
 
-When a session is active (started with `/start_session`) and `STT_ADD_TO_SESSION` is on (default), the finished transcript is appended to that session's notes automatically once transcription completes — no extra command needed. The text is identical to `transcript.txt`: chronological `[mm:ss] Speaker: line` entries when the local backend provides segment timestamps, or one attributed block per speaker on the http backend. Long transcripts are split into timestamped note bullets of ~1800 chars each (`part 1/N`, `continued, part N/N`), so they stay readable in `/session_notes` and index cleanly for RAG.
+When a session is active (started with `/start_session`) and `STT_ADD_TO_SESSION` is on (default), the finished transcript is appended to that session's notes automatically once transcription completes — no extra command needed. The text is identical to `transcript.txt`: chronological `[mm:ss] Speaker: line` entries (both backends return per-segment timestamps via `verbose_json`), falling back to one attributed block per speaker only if the backend returns no segment timing. Long transcripts are split into timestamped note bullets of ~1800 chars each (`part 1/N`, `continued, part N/N`), so they stay readable in `/session_notes` and index cleanly for RAG.
 
 The target session is pinned at **stop time**: the transcript always goes to the session that was active when `/stop_recording` ran, even if it ends (or is replaced) before transcription finishes. If no session was active at that moment, nothing is added (the transcript is still posted to the channel and saved on disk).
 
@@ -175,6 +178,17 @@ The target session is pinned at **stop time**: the transcript always goes to the
 | `STT_ADD_TO_SESSION` | `1` | `0` = don't append the finished transcript to the active session's notes |
 
 > **Model must be downloaded first** (unsloth-studio: Settings → Voice). A missing model surfaces as a per-speaker error like `STT model 'small' is not downloaded.` — the recording itself is always safe on disk.
+
+### Subtleties & edge cases
+
+Verified behaviors that are easy to get wrong:
+
+- **Timestamps survive silence trimming.** Each speaker's WAV starts at recording time 0 (zero-padded out to the session start). Trimming removes the leading silence, but the number of trimmed samples is re-added as an offset (`t_start = trimmed / 16000`) *and* each chunk's start is added on top of it. So a sentence that began 2 s into a recording still transcribes with `start ≈ 2.0 s`, on the same clock as every other speaker. (This offset math was a bug: if the resampled array's sample rate is wrong, every timestamp drifts — `_load_to_16k_mono` returns the array *and* its true 16 kHz rate so all conversions agree.)
+- **Chunks are cut at fixed sample offsets with no overlap.** A chunk's per-chunk segment times are relative to that chunk's start; merging shifts them by `trim_offset + chunk_start` seconds. Because chunks are contiguous (no crossfade/overlap) and the shift is a pure constant, the merged segments reassemble on one timeline with no gaps or duplicates.
+- **A `verbose_json` backend gives per-speaker *and* interleaved timing.** Since the http path requests segment granularity, `build_session_transcript()` now produces chronological `[mm:ss] Speaker: line` for *both* backends — not just the local one. The per-speaker fallback block only appears if a backend ignores `verbose_json` and returns plain text.
+- **One chunk failure fails only that speaker.** The http loop returns an error `SpeakerResult` on the first chunk that fails; the other speakers are still transcribed (they run independently). A failed speaker appears in `transcript.json` with its `error` and is omitted from the interleaved text.
+- **Session pinning follows the *dict*, not liveness.** `handle_stop_recording` captures the active session's dict at stop time and passes it to the background job. If that session was *ended* and a *new* one started before STT finished, the transcript still lands in the **old** session's file (intended) and the message says so. **Edge case:** if *no* session was active at stop time but one is started *while STT runs*, the transcript is **not** added anywhere (it can't fall back to the later session) — it's still posted to the channel and saved to disk. Start the session *before* `/stop_recording` if you want it captured.
+- **Resampling length.** 48 kHz → 16 kHz is computed as `int(n * 16000 / 48000)`, so a WAV's sample count shrinks by exactly 3 (within ±1). Downstream sample↔second math always uses the 16 kHz rate.
 
 ### `transcript.json` schema
 
