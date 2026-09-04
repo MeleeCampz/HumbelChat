@@ -13,7 +13,13 @@ Two backends are supported, selected via ``STT_BACKEND``:
     size cap. The model (default ``large-v3-turbo``, int8 on CPU) is loaded
     lazily on first use and cached for the process lifetime; transcription is
     serialized through one lock so concurrent recordings share the slot.
-    Configured with ``STT_LOCAL_MODEL``.
+    Configured with ``STT_LOCAL_MODEL``. The raw WAV (typically 48 kHz) is
+    handed to the model as-is — PyAV resamples to 16 kHz properly on its own,
+    so there is no manual downsample step. Silero VAD is on by default
+    (``STT_VAD_FILTER=1``): it skips silence, saves decode time, and — more
+    importantly for long, mostly-silent recordings — prevents Whisper from
+    hallucinating filler words ("Vielen Dank.", "Okay." ...) in the gaps.
+    Set ``STT_VAD_FILTER=0`` to transcribe every sample verbatim.
   * ``http`` — an OpenAI-compatible ``/v1/audio/transcriptions`` endpoint
     (e.g. a separate Whisper API container, addressed via ``STT_URL``; falls
     back to ``INFER_URL`` when unset). It reuses ``INFER_API_KEY``. Model
@@ -320,11 +326,15 @@ def _local_transcribe(wav_path: Path, model_name: str, language: str) -> tuple[s
 
     Returns ``(text, detected_language, segments)`` where each segment is
     ``{"start": s, "end": e, "text": t}`` with times in seconds relative to the
-    start of the file. VAD filtering skips long silence stretches so quiet
-    recordings don't waste decode time.
+    start of the file. The WAV is passed to faster-whisper unmodified (PyAV
+    does the 16 kHz conversion); Silero VAD (``STT_VAD_FILTER``, default on)
+    skips long silence stretches so quiet recordings don't waste decode time
+    or trigger filler hallucinations.
     """
+    from config.settings import STT_VAD_FILTER
+
     model = _local_model(model_name)
-    kwargs: dict = {"vad_filter": True}
+    kwargs: dict = {"vad_filter": STT_VAD_FILTER}
     if language:
         kwargs["language"] = language
     with _inference_lock:
