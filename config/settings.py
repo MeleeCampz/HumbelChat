@@ -140,7 +140,7 @@ STT_BACKEND: str = os.getenv("STT_BACKEND", "local")
 STT_LOCAL_MODEL: str = os.getenv("STT_LOCAL_MODEL", "large-v3-turbo")
 # Base URL of the OpenAI-compatible STT backend (used only when
 # STT_BACKEND=http). Point this at your Whisper API container, e.g.
-#   http://192.168.1.50:8000/v1        (separate container on the network)
+#   http://<stt-host>:8000/v1          (separate container on the network)
 #   http://whisper-api:8000/v1          (sidecar in the same compose file)
 # Falls back to INFER_URL when unset, so a single backend serving both
 # chat and STT keeps working.
@@ -173,6 +173,12 @@ STT_TRIM_SILENCE: bool = os.getenv("STT_TRIM_SILENCE", "1") not in ("0", "false"
 # level below this are treated as silence. -45 is well under typical speech
 # but above the digital-noise floor of quiet channels.
 STT_SILENCE_DBFS: float = _safe_float(os.getenv("STT_SILENCE_DBFS"), -45.0)
+# Silero VAD filter for the local (faster-whisper) backend: skips silence so
+# long quiet recordings don't waste decode time — and, more importantly, stop
+# Whisper from hallucinating filler words in the gaps (observed: "Vielen
+# Dank." emitted at times where one speaker's track was 100% digital silence).
+# Set STT_VAD_FILTER=0 to transcribe every sample verbatim.
+STT_VAD_FILTER: bool = os.getenv("STT_VAD_FILTER", "1") not in ("0", "false", "no")
 # Append the finished transcript to the ACTIVE session's notes automatically
 # when transcription completes (see bot_core.sessions.add_transcript). The
 # full transcript is stored as timestamped note bullets, so it shows up in
