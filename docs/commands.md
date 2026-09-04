@@ -6,7 +6,7 @@ The bot uses Discord slash commands by default, plus a legacy prefix command for
 
 All commands begin with `/`.
 
-**Visibility:** most commands post their output **publicly** in the channel (all 13 non-recording commands were reviewed and set to public on 2026-08-29). The two voice-recording commands (`/start_recording`, `/stop_recording`) respond **ephemerally** — only the invoker sees the confirmation and results.
+**Visibility:** all commands post their output **publicly** in the channel, so every message is visible to everyone in the channel. The 13 non-recording commands were reviewed and set to public on 2026-08-29; the voice-recording commands (`/start_recording`, `/stop_recording`) and their background transcription follow-up were switched from ephemeral to public on 2026-09-04.
 
 ### `/ai`
 
@@ -135,7 +135,7 @@ Joins the voice channel you're currently in and starts capturing each participan
 /stop_recording [leave_channel: true] [transcribe: true]
 ```
 
-Stops capturing, writes one WAV per speaker plus a `manifest.json`, and replies (ephemerally) with a per-speaker summary and the attached manifest. By default the bot leaves the voice channel afterwards.
+Stops capturing, writes one WAV per speaker plus a `manifest.json`, and replies with a per-speaker summary and the attached manifest (visible to the whole channel). By default the bot leaves the voice channel afterwards.
 
 With `STT_ENABLED` on (default), each speaker's audio is then transcribed in the background via the backend's `/v1/audio/transcriptions` endpoint (`STT_MODEL`, e.g. `qwen3-asr-1.7b`) and a follow-up message with the transcript preview + attached `transcript.json` is posted when done. If a session is active, the finished transcript is also appended to its notes automatically — pinned to the session that was active when the recording stopped, even if it ends before STT finishes (`STT_ADD_TO_SESSION=0` in `.env` opts out). Set `transcribe: false` to skip STT for one recording, or `STT_ENABLED=0` in `.env` to disable it entirely.
 
