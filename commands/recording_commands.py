@@ -119,7 +119,6 @@ async def handle_start_recording(interaction: discord.Interaction) -> None:
     if interaction.guild_id is None:
         await interaction.response.send_message(
             "⚠️ Voice recording only works inside a server (not DMs).",
-            ephemeral=True,
         )
         return
 
@@ -127,17 +126,16 @@ async def handle_start_recording(interaction: discord.Interaction) -> None:
     if channel is None:
         await interaction.response.send_message(
             "⚠️ You're not in a voice channel. Join one first, then run `/start_recording`.",
-            ephemeral=True,
         )
         return
 
     bot = get_bot()
     if bot is None:
-        await interaction.response.send_message("⚠️ Bot isn't ready yet — try again in a moment.", ephemeral=True)
+        await interaction.response.send_message("⚠️ Bot isn't ready yet — try again in a moment.")
         return
 
     # Joining voice can take a few seconds; defer so we don't blow the 15 s window.
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer()
 
     try:
         recorder = _get_recorder(bot)
@@ -160,13 +158,12 @@ async def handle_start_recording(interaction: discord.Interaction) -> None:
         recorder.discard()
         await interaction.followup.send(
             "⚠️ I don't have permission to join that voice channel (need **Connect** and **Speak**).",
-            ephemeral=True,
         )
         return
     except Exception as e:  # pragma: no cover - defensive
         log.exception("Failed to start voice recording")
         recorder.discard()
-        await interaction.followup.send(f"⚠️ Failed to start recording: {e}", ephemeral=True)
+        await interaction.followup.send(f"⚠️ Failed to start recording: {e}")
         return
 
     log.info("Recording started: %s", recorder.snapshot())
@@ -174,7 +171,6 @@ async def handle_start_recording(interaction: discord.Interaction) -> None:
         f"🎙️ **Recording started** in #{getattr(channel, 'name', '?')}.\n"
         f"Each participant's audio is captured separately with timestamps.\n"
         f"Files will be saved to `{out_dir.name}/` when you run `/stop_recording`.",
-        ephemeral=True,
     )
 
 
@@ -188,29 +184,28 @@ async def handle_stop_recording(
     and (optionally) kick off per-speaker STT in the background."""
     bot = get_bot()
     if bot is None:
-        await interaction.response.send_message("⚠️ Bot isn't ready yet — try again in a moment.", ephemeral=True)
+        await interaction.response.send_message("⚠️ Bot isn't ready yet — try again in a moment.")
         return
 
     recorder = getattr(bot, "_voice_recorder", None)
     if recorder is None or not recorder.is_recording:
         await interaction.response.send_message(
             "⚠️ No recording is active. Start one with `/start_recording`.",
-            ephemeral=True,
         )
         return
 
     # Writing WAVs + manifest can exceed the 15 s window for long recordings.
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer()
 
     try:
         manifest = recorder.stop()
     except Exception as e:  # pragma: no cover - defensive
         log.exception("Failed to stop voice recording")
-        await interaction.followup.send(f"⚠️ Failed to stop recording: {e}", ephemeral=True)
+        await interaction.followup.send(f"⚠️ Failed to stop recording: {e}")
         return
 
     if manifest is None:
-        await interaction.followup.send("⚠️ The recording was already stopped.", ephemeral=True)
+        await interaction.followup.send("⚠️ The recording was already stopped.")
         return
 
     # Optionally leave the voice channel so we don't keep occupying a slot.
@@ -264,7 +259,7 @@ async def handle_stop_recording(
         except Exception:  # pragma: no cover - defensive
             manifest_file = None
 
-    await interaction.followup.send(body, file=manifest_file, ephemeral=True)
+    await interaction.followup.send(body, file=manifest_file)
 
     if run_stt:
         spawn_tracked_task(
@@ -276,7 +271,7 @@ async def handle_stop_recording(
 async def _safe_followup(interaction: discord.Interaction, body: str, files: list | None = None) -> None:
     """Best-effort followup — the webhook can expire for very long recordings."""
     try:
-        await interaction.followup.send(body, files=files or [], ephemeral=True)
+        await interaction.followup.send(body, files=files or [])
     except Exception as e:  # pragma: no cover - expired webhooks
         log.warning("Could not deliver STT result (interaction expired?): %s", e)
 
