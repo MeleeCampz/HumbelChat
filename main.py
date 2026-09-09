@@ -164,20 +164,39 @@ SYNC_MARKER = pathlib.Path(__file__).parent / ".commands_synced"
 async def _ensure_commands_synced() -> None:
     """Sync commands once on first run; skip on subsequent restarts.
 
-    This avoids the duplication problem caused by syncing on every
-    on_ready event (which fires on every reconnect).
+    On the first run we do a *full* sync via :mod:`bot_core.command_sync`,
+    which also **purges** any stale guild-scoped / renamed registrations so the
+    ``/`` menu shows each command exactly once. On later restarts we skip the
+    auto-sync entirely — this avoids the duplication problem caused by syncing
+    on every on_ready event (which fires on every reconnect). If commands ever
+    get out of sync afterwards, use the ``/sync`` command.
     """
     if SYNC_MARKER.exists():
         log.info("Commands already synced previously; skipping auto-sync.")
         return
 
-    log.info("First startup detected; syncing commands globally...")
+    log.info("First startup detected; syncing (and purging stale) commands...")
     try:
-        await bot.tree.sync()
-        SYNC_MARKER.touch(exist_ok=True)
-        log.info("Commands synced and marker written.")
+        from bot_core import command_sync
+        report = await command_sync.sync_commands(bot)
     except Exception as e:
-        log.error("Initial command sync failed: %s", e)
+        # No marker on exception → the next restart retries the sync.
+        log.error("Initial command sync failed (will retry on next restart): %s", e)
+        return
+    if report.get("error"):
+        # The upload was rejected (e.g. bad command payload). Do NOT write the
+        # marker — otherwise every future restart would skip the sync and new
+        # commands would silently never reach Discord.
+        log.error(
+            "Initial command sync FAILED — commands not registered, marker NOT "
+            "written (will retry on next restart): %s", report["error"],
+        )
+        return
+    SYNC_MARKER.touch(exist_ok=True)
+    log.info(
+        "Commands synced and marker written. Removed stale: guilds=%s global=%s",
+        [n for n, _ in report["guild_names"]], report["global_deleted"],
+    )
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -293,6 +312,13 @@ async def reindex_kb_command(interaction: discord.Interaction) -> None:
     """Re-index KB files — delegated to commands/kb_commands.py."""
     from commands.kb_commands import handle_reindex_kb
     await handle_reindex_kb(interaction)
+
+
+@bot.tree.command(name="sync_kb", description="Re-index only new, renamed, edited or deleted KB files — unchanged files are skipped.")
+async def sync_kb_command(interaction: discord.Interaction) -> None:
+    """Fast diff-based KB sync — delegated to commands/kb_commands.py."""
+    from commands.kb_commands import handle_sync_kb
+    await handle_sync_kb(interaction)
 
 
 @bot.tree.command(
