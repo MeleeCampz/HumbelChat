@@ -29,6 +29,7 @@ Usage
     # Incremental updates
     await store.update_single_document("new_doc.md")   # re-indexes only this file
     await store.remove_document("old_doc.txt")         # removes from index
+    idx, report = await store.sync_changes()           # cheap diff-based sync (added/renamed/changed/removed)
     await store.rebuild()                              # full rebuild (force)
 
 """
@@ -222,6 +223,135 @@ class KBIndexStore:
 
         logger.warning("No matching chunks found to remove for '%s'", file_path)
         return False
+
+    async def sync_changes(self) -> tuple[KBVectorIndex, dict]:
+        """Sync the index with files added, renamed, changed, or deleted on disk.
+
+        Cheap counterpart to :meth:`rebuild`: it reuses the disk cache and only
+        re-embeds files whose chunks are missing or no longer match disk.  This
+        covers documents that were never added through the Discord upload
+        command (dropped into the KB folder, renamed, edited, or removed
+        externally).
+
+        Returns ``(index, report)`` where *report* contains
+        ``added / changed / renamed / removed / failed`` lists (renamed is a
+        list of ``(old_name, new_name)`` pairs) plus ``changed_count`` (files
+        that needed re-embedding) and ``ok`` (False when the embedding backend
+        failed for at least one file).
+        """
+        if self._index is None or self._index.is_empty():
+            await self.load()  # normal incremental load (never raises)
+
+        files = _iter_kb_files(self.kb_path)
+        rows = self._read_cache_rows() if self._db_path.exists() else {}
+
+        added: list[pathlib.Path] = []
+        changed: list[pathlib.Path] = []
+        removed: list[str] = []
+
+        for path in files:
+            cached = rows.get(path.name)
+            if cached is None:
+                added.append(path)
+            elif not await self._chunks_valid(cached, path):
+                changed.append(path)
+
+        disk_names = {p.name.lower() for p in files}
+        for name in rows:
+            if name.lower() not in disk_names:
+                removed.append(name)
+
+        # A file whose old name disappeared and whose new name is unindexed —
+        # with identical content — is a rename, not remove+add.  Pair them by
+        # content signature so the report stays honest and the user sees the
+        # rename instead of two noisy entries.
+        # Signatures are strip-normalized because cached chunk content is
+        # stored stripped (chunker output) while raw disk text often keeps a
+        # trailing newline — an un-stripped compare would miss plain renames.
+        old_sig: dict[str, str] = {}
+        for name in removed:
+            chunks = rows.get(name) or []
+            if chunks:
+                old_sig[name] = "\0".join(c["content"] for c in chunks)
+
+        def _new_sig(path: pathlib.Path) -> str:
+            try:
+                return path.read_bytes().decode("utf-8", errors="replace").strip()
+            except OSError:
+                return ""
+
+        used_old: set[str] = set()
+        renamed: list[tuple[str, str]] = []
+        still_added: list[pathlib.Path] = []
+        for path in added:
+            sig = _new_sig(path)
+            match = next(
+                (old for old in removed if old not in used_old and old_sig.get(old) == sig),
+                None,
+            )
+            if match:
+                used_old.add(match)
+                renamed.append((match, path.name))
+                changed.append(path)
+            else:
+                still_added.append(path)
+
+        # De-dup: a renamed file lands in both `still_added` (via `changed`)
+        # and `changed` — embedding it twice would duplicate its chunks.
+        to_embed: list[pathlib.Path] = []
+        for p in still_added + changed:
+            if p not in to_embed:
+                to_embed.append(p)
+
+        failures: list[str] = []
+        if to_embed:
+            try:
+                new_entries, new_embeddings = await self._embed_files(to_embed)
+            except Exception as exc:
+                logger.warning("Sync-embed failed for %d file(s): %s", len(to_embed), exc)
+                failures = [p.name for p in to_embed]
+                new_entries, new_embeddings = [], []
+
+        if to_embed or removed:
+            old_docs = list(self._index._docs) if self._index is not None else []
+            merged = old_docs
+            for path in to_embed:
+                # Each replace targets exactly one source_file, so only hand it
+                # this file's own rows — keeps other files' rows intact and
+                # drops the old rows of a renamed file.
+                file_entries = [e for e in new_entries if e[2].lower() == path.name.lower()]
+                file_embs = [new_embeddings[i] for i, e in enumerate(new_entries) if e[2].lower() == path.name.lower()]
+                if file_entries:
+                    merged = self._merge_replace(merged, path.name, file_entries, file_embs)
+            # Drop rows for files that are gone from disk (renamed-away names
+            # too, so a rename ends up as replace instead of duplicate).
+            stale = {n.lower() for n in removed}
+            merged = [d for d in merged if d.source().lower() not in stale]
+            self._index = KBVectorIndex.from_entries(
+                self._entries_from_docs(merged),
+                [d.embedding for d in merged],
+            )
+            # Only persist a non-empty index — never wipe a good on-disk cache
+            # with an empty one when the embedding backend is down.
+            if not self._index.is_empty():
+                await self._save_to_disk()
+
+        report = {
+            "added": [p.name for p in still_added],
+            "changed": [p.name for p in changed if p.name not in {r[1] for r in renamed}],
+            "renamed": renamed,
+            "removed": [n for n in removed if n not in used_old],
+            "failed": failures,
+            "changed_count": len(to_embed),
+            "ok": not failures,
+        }
+        logger.info(
+            "KB sync: %d added, %d changed, %d renamed, %d removed, %d failed (%d chunk(s) total)",
+            len(report["added"]), len(report["changed"]), len(renamed),
+            len(report["removed"]), len(failures),
+            self._index.count() if self._index else 0,
+        )
+        return self._index, report
 
     # ── Querying ────────────────────────────────────────────────────────
 

@@ -47,6 +47,14 @@ Without `path`, shows a root-level overview (top-level folders + files with name
 
 Rebuild the vector index from scratch using smart chunking and configured embeddings.
 
+
+### `/sync_kb`
+
+Fast, diff-based sync: re-indexes only files that were added, renamed, edited, or
+deleted on disk (i.e. managed outside `/upload_kb`, which auto-indexes its own
+uploads). Unchanged files are never re-embedded, and a failed embedding call can
+not wipe the existing cache. Use it after dropping or renaming documents into
+the KB folder by hand.
 ### `/clear_history`
 
 Clear the conversation history for the current server/channel.

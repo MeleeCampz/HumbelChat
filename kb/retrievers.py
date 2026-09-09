@@ -425,6 +425,29 @@ async def update_kb_document(file_path: str | pathlib.Path) -> bool:
     return await _index_store.update_single_document(file_path)
 
 
+async def sync_kb_store() -> tuple[Optional["KBVectorIndex"], dict]:
+    """Sync the (singleton) index with files changed on disk outside the bot.
+
+    Re-embeds only new/renamed/changed files and drops rows for files that
+    were deleted externally.  Goes through the module-level singleton store so
+    the live RAG path sees the updated index immediately.  Returns
+    ``(index, report)`` — see ``KBIndexStore.sync_changes`` for the report
+    shape.
+    """
+    global _index_store
+
+    if _index_store is None:
+        from config.settings import KB_PATH
+        from kb.index import KBIndexStore
+        _index_store = KBIndexStore(KB_PATH)
+        await _index_store.load()
+        _kb_path_for_store = KB_PATH
+
+    if _index_store is None:
+        return None, {"ok": False, "failed": [], "error": "index store unavailable"}
+    return await _index_store.sync_changes()
+
+
 async def remove_kb_document(file_path: str | pathlib.Path) -> bool:
     """Remove a KB document from the vector index."""
     if _index_store is None or _index_store.get_index() is None:

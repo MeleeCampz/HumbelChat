@@ -1,4 +1,4 @@
-"""Knowledge-base commands — /upload_kb, /list_kb_docs and /reindex_kb."""
+"""Knowledge-base commands — /upload_kb, /list_kb_docs, /sync_kb and /reindex_kb."""
 from __future__ import annotations
 
 import asyncio
@@ -209,3 +209,49 @@ async def handle_reindex_kb(interaction):
         msg_parts = [f"❌ Failed to reindex KB: **{e}**"]
 
     await interaction.followup.send("\n".join(msg_parts))
+
+
+async def handle_sync_kb(interaction) -> None:
+    """Re-index only files that changed on disk (new, renamed, edited, deleted).
+
+    Unlike /reindex_kb this never re-embeds unchanged files, so it is fast and
+    cheap — use it after dropping/renaming documents into the KB folder by
+    hand (i.e. not via /upload_kb, which auto-indexes its own files).
+    """
+    await interaction.response.defer()
+
+    from kb.retrievers import sync_kb_store
+
+    try:
+        idx, report = await sync_kb_store()
+    except Exception as e:
+        log.error("KB sync failed: %s", e, exc_info=True)
+        await interaction.followup.send(f"❌ KB sync failed: **{e}**")
+        return
+
+    changed = report.get("changed_count", 0)
+    if changed == 0:
+        await interaction.followup.send(
+            "✅ Nothing to do — the index already matches the KB folder."
+        )
+        return
+
+    lines: list[str] = [f"🔄 **KB sync** — re-indexed **{changed}** file(s)."]
+    for name in report.get("added", []):
+        lines.append(f"  🆕 added: `{name}`")
+    for old, new in report.get("renamed", []):
+        lines.append(f"  🔁 renamed: `{old}` → `{new}`")
+    for name in report.get("changed", []):
+        lines.append(f"  ✏️ changed: `{name}`")
+    for name in report.get("removed", []):
+        lines.append(f"  🗑️ removed from index: `{name}`")
+
+    count = idx.count() if idx is not None else 0
+    lines.append(f"\nIndex now has **{count:,}** chunk(s).")
+    if report.get("failed"):
+        lines.append(
+            "⚠️ Some files could not be embedded (backend may be down): "
+            + ", ".join(f"`{n}`" for n in report["failed"]) + " — run again or use `/reindex_kb`."
+        )
+
+    await interaction.followup.send("\n".join(lines))
