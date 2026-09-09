@@ -674,3 +674,39 @@ class TestHttpChunkedPipeline:
         expected = [0.1, 1.1, 2.1, 3.1]
         for got, want in zip(starts, expected):
             assert abs(got - want) < 0.05, f"{got} != {want}"
+
+
+# ── model unload + converted-audio preservation ─────────────────────────────
+class TestUnloadSttModel:
+    def test_clears_cache_and_counts(self):
+        sentinel = object()
+        T._local_models["a"] = sentinel
+        T._local_models["b"] = object()
+        n = T.unload_stt_model()
+        assert n == 2
+        assert T._local_models == {}
+
+    def test_empty_is_zero_and_noop(self):
+        T._local_models.clear()
+        assert T.unload_stt_model() == 0
+
+
+class TestSaveSttConverted:
+    def test_writes_16k_mono_next_to_source(self, tmp_path):
+        src = tmp_path / "spk_1.wav"
+        _make_wav(src, rate=48_000, channels=1, ms=200)
+        out = T.save_stt_converted(src, tmp_path)
+        assert out is not None and out.exists()
+        assert out.name == "spk_1__stt_input_16k.wav"
+        assert out.parent == src.parent
+        # The saved conversion is 16 kHz mono.
+        with wave.open(str(out), "rb") as wf:
+            assert wf.getframerate() == 16_000
+            assert wf.getnchannels() == 1
+            assert wf.getsampwidth() == 2
+        # Source is left untouched (still 48 kHz).
+        with wave.open(str(src), "rb") as wf:
+            assert wf.getframerate() == 48_000
+
+    def test_missing_file_returns_none(self, tmp_path):
+        assert T.save_stt_converted(tmp_path / "nope.wav", tmp_path) is None

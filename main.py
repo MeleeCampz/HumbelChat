@@ -358,16 +358,22 @@ async def remind_next_session_command(interaction: discord.Interaction, message:
     await handle_remind_next_session(interaction, message)
 
 
-@bot.tree.command(name="session_notes", description="Add notes to the current session or view them.")
-@app_commands.describe(action="add / view", note="The note text (required for action: add)")
+@bot.tree.command(
+    name="session_notes",
+    description="Add notes (or a .txt/.md document) to the current session, or view them.",
+)
+@app_commands.describe(action="add / view")
+@app_commands.describe(note="The note text (for action: add, free text)")
+@app_commands.describe(file="A .txt or .md file to add as a whole document (for action: add)")
 async def session_notes_command(
     interaction: discord.Interaction,
     action: str = "view",
     note: str | None = None,
+    file: discord.Attachment | None = None,
 ) -> None:
     """Session notes — delegated to commands/session_commands.py."""
     from commands.session_commands import handle_session_notes
-    await handle_session_notes(interaction, action=action, note=note)
+    await handle_session_notes(interaction, action=action, note=note, file=file)
 
 
 @bot.tree.command(

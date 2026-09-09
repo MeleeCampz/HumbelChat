@@ -121,13 +121,21 @@ Queue a reminder that is delivered when the **next** session starts (in the chan
 ### `/session_notes`
 
 ```
-/session_notes [action: add|view] [note: <text>]
+/session_notes [action: add|view] [note: <text>] [file: <.txt/.md>]
 ```
 
 | Action | Description |
 |---|---|
 | `add` | Append a timestamped note to the current session (requires an active session; notes are stored in the session file and re-indexed for RAG). Voice-channel transcripts from `/stop_recording` are added automatically this way when STT finishes |
 | `view` | Show the current session's notes — or the most recent ended session's if none is active (reads the file from disk, so manual edits are picked up) |
+
+**Adding a text document:** `add` also accepts a **file** — a `.txt` or `.md` attachment — instead of (or in place of) the `note` text:
+
+```
+/session_notes action: add file: <.txt or .md file>
+```
+
+The whole document is stored in the session notes the same way a transcript is: split into `📎 <filename> — part 1/N` bullets (≤ ~1500 chars each) so long files stay readable in `view` and index cleanly for RAG. Only `.txt` / `.md` are accepted (other types are rejected), the file must be valid UTF-8 and ≤ 2 MB, and a file takes precedence over an inline `note` when both are supplied.
 
 ### Voice recording
 

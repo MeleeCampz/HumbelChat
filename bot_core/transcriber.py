@@ -321,6 +321,56 @@ def _local_model(name: str):
         return model
 
 
+def unload_stt_model() -> int:
+    """Drop any loaded local (faster-whisper) model to free RAM.
+
+    faster-whisper models are ~1 GB+ of resident memory. They are loaded
+    lazily on first use (:func:`_local_model`) and, without this, would stay
+    resident for the whole process lifetime. Call this once a transcription
+    batch is done to release the weights; the next transcription transparently
+    re-loads (the re-load is instant because the weights are already on disk
+    in the HF cache). The ``_inference_lock`` is held while the cache is
+    emptied so a concurrent transcription can't be left pointing at a freed
+    model. Returns the number of model slots released.
+
+    Only affects the *local* backend — the http backend holds no in-process
+    model, so this is a no-op for it (it simply clears an empty cache).
+    """
+    with _inference_lock:
+        with _local_models_lock:
+            n = len(_local_models)
+            _local_models.clear()
+    if n:
+        log.info("Unloaded %d local STT model(s) to free RAM", n)
+    return n
+
+
+def save_stt_converted(wav_path: Path, out_dir: Path) -> Path | None:
+    """Save the *converted* 16 kHz mono input the STT model actually consumes.
+
+    The recording's source WAV is kept on disk **unmodified** (48 kHz mono —
+    the recorder writes it as-is and nothing ever re-encodes it). This helper
+    additionally writes the resampled/mono-mixed form that the ASR engine
+    receives, right next to the source (``<stem>__stt_input_16k.wav``), so the
+    48 kHz→16 kHz conversion can be verified independently later. Both files
+    together form the full provenance of one transcription.
+
+    Best-effort: any failure (unreadable WAV, disk error) is logged and
+    swallowed — saving the diagnostic conversion must never block the actual
+    transcription. Returns the written path, or ``None`` on failure.
+    """
+    try:
+        pcm16, rate = _load_to_16k_mono(Path(wav_path))
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / (Path(wav_path).stem + "__stt_input_16k.wav")
+        out_path.write_bytes(_pcm_to_wav_bytes(pcm16, rate=rate))
+        return out_path
+    except Exception as e:  # noqa: BLE001 - diagnostic only
+        log.warning("Could not save STT 16k conversion for %s: %s", wav_path, e)
+        return None
+
+
 def _local_transcribe(wav_path: Path, model_name: str, language: str) -> tuple[str, str | None, list[dict]]:
     """Run faster-whisper on one WAV *synchronously* (call via to_thread).
 
@@ -381,6 +431,9 @@ async def transcribe_wav(wav_path: Path, *, model: str, language: str = "") -> S
             log.warning("Local STT failed for %s (model=%s): %s", wav_path.name, model, e)
             return SpeakerResult(user_id=0, display_name="", wav_file=wav_path.name,
                                  error=f"local whisper: {e}")
+        # Preserve the 16 kHz mono input the model consumes, next to the
+        # unmodified 48 kHz source, for later verification (best effort).
+        save_stt_converted(wav_path, wav_path.parent)
         elapsed = time.monotonic() - started
         log.info("Local STT done: %s -> %d chars, %d segment(s) in %.1fs (model=%s)",
                  wav_path.name, len(text), len(segs), elapsed, model)
@@ -400,6 +453,10 @@ async def transcribe_wav(wav_path: Path, *, model: str, language: str = "") -> S
     except Exception as e:  # corrupt/missing WAV
         return SpeakerResult(user_id=0, display_name="", wav_file=wav_path.name,
                              error=f"could not read WAV: {e}")
+
+    # Preserve the 16 kHz mono input the backend consumes, next to the
+    # unmodified 48 kHz source, for later verification (best effort).
+    save_stt_converted(wav_path, wav_path.parent)
 
     t_start = 0.0
     if STT_TRIM_SILENCE:

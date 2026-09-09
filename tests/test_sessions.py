@@ -157,6 +157,76 @@ class TestNotes:
         assert len(notes) == 1
 
 
+class TestAddDocument:
+    """sessions.add_document() — an uploaded .txt/.md file → session notes."""
+
+    def test_no_active_session_returns_none(self):
+        session, n = S.add_document("hello")
+        assert session is None and n == 0
+
+    def test_empty_text_is_noop(self):
+        S.start_session(name="T")
+        session, n = S.add_document("   ")
+        assert n == 0
+        assert S.get_notes(session) == []
+
+    def test_single_bullet_with_title(self):
+        S.start_session(name="D")
+        session, n = S.add_document("the answer is 42", title="answer.txt")
+        assert n == 1
+        ts, text = S.get_notes(session)[0]
+        assert isinstance(ts, float)
+        assert "answer.txt" in text
+        assert "part 1/1" in text
+        assert "the answer is 42" in text
+        # and it is written to the session file
+        assert "the answer is 42" in pathlib.Path(session["file"]).read_text(encoding="utf-8")
+
+    def test_default_title_used(self):
+        S.start_session(name="D")
+        session, n = S.add_document("just words")
+        assert n == 1
+        assert "Uploaded document" in S.get_notes(session)[0][1]
+
+    def test_long_document_is_chunked_and_preserved(self):
+        S.start_session(name="D")
+        long_text = "word " * 2000  # ~10k chars → several bullets
+        session, n = S.add_document(long_text.strip(), title="big.md")
+        assert n > 1
+        texts = [t for _ts, t in S.get_notes(session)]
+        assert "part 1/" + str(n) in texts[0]
+        assert f"continued, part {n}/{n}" in texts[-1]
+        # no bullet exceeds the display-safe limit (header overhead included)
+        assert all(len(t) <= 2000 for t in texts)
+        # full text preserved across chunks (whitespace-normalized)
+        joined = " ".join("".join(t.split()) for t in texts)
+        assert long_text.strip().split()[0] in joined
+        # first word present on disk
+        assert "word" in pathlib.Path(session["file"]).read_text(encoding="utf-8")
+
+    def test_pins_to_given_session(self):
+        """*session* pins the target — the document lands in THAT session's file."""
+        S.start_session(name="Old")
+        old = S.get_current_session()
+        S.end_session(overview="done")
+        S._state["last_start_at"] -= 2 * 3600
+        S.start_session(name="New")
+
+        session, n = S.add_document("pinned doc", title="doc.md", session=old)
+        assert n == 1 and session is old
+        assert "pinned doc" in pathlib.Path(old["file"]).read_text(encoding="utf-8")
+        assert all("pinned doc" not in t for _ts, t in S.get_notes())
+
+    def test_overlong_single_word_forms_own_piece(self):
+        """A word longer than the chunk limit is not dropped."""
+        S.start_session(name="D")
+        blob = "x" * 5000
+        session, n = S.add_document(blob, title="blob.txt")
+        assert n >= 1
+        joined = " ".join("".join(t.split()) for _ts, t in S.get_notes(session))
+        assert blob in joined
+
+
 class TestNextSessionReminders:
 
     def test_queue_and_list(self):
