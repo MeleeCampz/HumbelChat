@@ -297,6 +297,15 @@ async def _run_transcription(
         await _safe_followup(interaction, f"⚠️ Transcription failed: {e}")
         return
 
+    # Free the local faster-whisper model's RAM now that this recording's
+    # transcription batch is done (a no-op for the http backend, which holds
+    # no in-process model). The next transcription re-loads from the on-disk
+    # HF cache, so this only costs a one-off load — not a re-download.
+    try:
+        transcriber.unload_stt_model()
+    except Exception:  # pragma: no cover - defensive
+        log.exception("Failed to unload STT model after transcription")
+
     total = len(report.speakers)
     lines = []
     for s in report.speakers:

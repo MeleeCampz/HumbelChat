@@ -371,6 +371,32 @@ def end_session(overview: str | None = None, name: str | None = None) -> dict | 
 
 # ── Public API — notes ───────────────────────────────────────────────────
 
+#: Word-based chunk target for notes that hold large text (transcripts, uploaded
+#: documents).  Kept under the ~1800-char display cap so every bullet stays
+#: readable in ``/session_notes`` and maps cleanly onto one KB chunk.
+_NOTE_CHUNK_TARGET = 1500
+
+
+def _chunk_words(text: str, limit: int = _NOTE_CHUNK_TARGET) -> list[str]:
+    """Split *text* into word-wrapped pieces of at most *limit* chars.
+
+    Shared by the transcript and document note paths. Pieces are never empty
+    (a single over-long word still forms its own piece) and reassemble into the
+    original whitespace-normalized text.
+    """
+    parts: list[str] = []
+    cur = ""
+    for word in text.split():
+        if cur and len(cur) + 1 + len(word) > limit:
+            parts.append(cur)
+            cur = word
+        else:
+            cur = f"{cur} {word}".strip()
+    if cur:
+        parts.append(cur)
+    return parts
+
+
 def add_note(text: str, author: str = "") -> dict | None:
     """Append a timestamped note to the current session.
 
@@ -403,8 +429,9 @@ def add_transcript(text: str, title: str = "", session: dict | None = None) -> t
     finishes; its notes file still gets the transcript. When omitted, the
     currently active session is used.
 
-    The text is split into note bullets of at most ~1800 chars each — small
-    enough to display in ``/session_notes`` and close to the KB chunker's
+    The text is split into note bullets of at most ~1500 chars each
+    (``_NOTE_CHUNK_TARGET``) — small enough to display in ``/session_notes`` and
+    close to the KB chunker's
     limits, so long transcripts stay searchable. Each bullet keeps the
     ``(timestamp) text`` shape the notes file uses, with a transcript header
     on the first one.
@@ -422,20 +449,7 @@ def add_transcript(text: str, title: str = "", session: dict | None = None) -> t
         if not clean:
             return None, 0
 
-        def _chunk(s: str) -> list[str]:
-            parts: list[str] = []
-            cur = ""
-            for word in s.split():
-                if cur and len(cur) + 1 + len(word) > 1800:
-                    parts.append(cur)
-                    cur = word
-                else:
-                    cur = f"{cur} {word}".strip()
-            if cur:
-                parts.append(cur)
-            return parts or [""]
-
-        bullets = _chunk(clean)
+        bullets = _chunk_words(clean)
         now = time.time()
         header = title.strip() or "Voice channel transcript"
         for i, part in enumerate(bullets):
@@ -453,6 +467,53 @@ def add_transcript(text: str, title: str = "", session: dict | None = None) -> t
         return session, len(bullets)
     except Exception as e:  # pragma: no cover - defensive
         log.warning("Could not add transcript to session notes: %s", e)
+        return None, 0
+
+
+def add_document(text: str, title: str = "", session: dict | None = None) -> tuple[dict | None, int]:
+    """Store an uploaded text document (e.g. ``.txt`` / ``.md``) in a session's notes.
+
+    The inverse of the transcript path: the whole file lands in the session
+    notes (and therefore in RAG) the same way a transcript does, but attributed
+    as a *document* instead of a voice recording. The text is split into note
+    bullets of at most ~1500 chars each (``_NOTE_CHUNK_TARGET``, see
+    :func:`add_transcript`), the first
+    carrying a ``📎 <title> — part 1/N`` header, so a long file stays readable
+    in ``/session_notes`` and chunker-friendly for indexing.
+
+    *session* pins the target (defaults to the current one) — usually the active
+    session, passed explicitly so callers can target a specific one. Returns
+    ``(session, n_bullets)`` and ``(None, 0)`` for empty/whitespace-only input or
+    when no session is available. Never raises — storing a document must not be
+    blocked by note bookkeeping.
+    """
+    try:
+        if session is None:
+            session = get_current_session()
+        if session is None:
+            return None, 0
+        clean = " ".join(str(text).split())
+        if not clean:
+            return None, 0
+
+        bullets = _chunk_words(clean)
+        now = time.time()
+        header = title.strip() or "Uploaded document"
+        for i, part in enumerate(bullets):
+            if i == 0:
+                body = f"📎 {header} — part 1/{len(bullets)}: {part}"
+            else:
+                body = f"{header} (continued, part {i + 1}/{len(bullets)}): {part}"
+            session.setdefault("notes", []).append([now + i, body])
+
+        _write_session_file(session)
+        _index_session_file(pathlib.Path(session["file"]))
+        _save()
+        log.info("Document added to %s: %d note bullet(s), %d chars (%s)",
+                 session.get("name"), len(bullets), len(clean), header)
+        return session, len(bullets)
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("Could not add document to session notes: %s", e)
         return None, 0
 
 

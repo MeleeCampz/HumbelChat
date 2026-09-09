@@ -290,6 +290,25 @@ under a single inference lock; VAD filters silence; real segment timestamps come
 back on the same shared-timeline basis (file time 0 == recording start), so no
 trim/chunk/offset logic is needed.
 
+### D5. Provenance: source kept as-is + the model's input saved
+For **verification** the pipeline never re-encodes the recorder's WAV. The
+per-speaker source stays **48 kHz mono 16-bit** exactly as `stop()` wrote it.
+Separately, `transcribe_wav` (both backends) calls `save_stt_converted()`
+(`bot_core/transcriber.py`), which writes the **16 kHz mono** form the ASR engine
+consumes right next to the source as `<stem>__stt_input_16k.wav`. So one
+recording holds both halves of the provenance — the unmodified 48 kHz original
+*and* the converted input that was actually transcribed — for independent later
+verification. Saving is best-effort (a failure is logged, never fatal).
+
+### D6. Unloading the local model after the batch
+A faster-whisper model is ~1 GB+ of resident RAM. It is loaded lazily on first
+use and cached, but without intervention it would stay resident for the process
+lifetime. After a recording's transcription batch completes, `_run_transcription`
+calls `unload_stt_model()` (`bot_core/transcriber.py`), which empties the model
+cache and releases the weights. The next transcription transparently re-loads
+from the on-disk Hugging Face cache (a fast re-load, **not** a re-download). This
+is a no-op for the `http` backend, which holds no in-process model.
+
 ---
 
 ## Part E — Output & delivery
@@ -336,10 +355,13 @@ data/recordings/recording_20260831-014251/
 ├── manifest.json          # session + per-speaker metadata (+ "transcript" pointer)
 ├── transcript.json        # per-speaker text + segments (shared timeline)
 ├── transcript.txt         # chronological [mm:ss] Speaker: line
-├── MeleeChan_268856797626892288.wav
-└── ...                    # one 48 kHz mono WAV per speaker
+├── MeleeChan_268856797626892288.wav                    # 48 kHz mono source (unmodified)
+├── MeleeChan_268856797626892288__stt_input_16k.wav     # 16 kHz mono = what the model saw
+└── ...                    # one 48 kHz mono WAV (+ 16k conversion) per speaker
 data/knowledge/session_notes/2026-08-31_01_MySession.md   # ← transcript bullets
 ```
+
+The `__stt_input_16k.wav` files are written only when STT actually runs (see D5); a recording that was never transcribed holds just the 48 kHz source WAVs.
 
 ---
 
@@ -353,6 +375,7 @@ data/knowledge/session_notes/2026-08-31_01_MySession.md   # ← transcript bulle
 | Crash durability | `bot_core/voice_recorder.py` | `_SpeakerLog`, `recover_orphans`, `install_sigterm_flush` |
 | Timeline / WAV writing | `bot_core/voice_recorder.py` | `_write_timeline_wav_from_frames` |
 | STT pipeline | `bot_core/transcriber.py` | `transcribe_wav`, `transcribe_recording`, `_trim_silence`, `_plan_chunks`, `_merge_segments` |
+| STT provenance + model RAM | `bot_core/transcriber.py` | `save_stt_converted`, `unload_stt_model` |
 | Transcript assembly | `bot_core/transcriber.py` | `write_transcript`, `build_session_transcript`, `build_interleaved_transcript` |
 | Session notes | `bot_core/sessions.py` | `add_transcript` |
 | Startup recovery | `main.py` | `_recover_crashed_recordings` (from `on_ready`) |

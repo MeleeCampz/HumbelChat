@@ -29,6 +29,14 @@ _OVERVIEW_POST_LIMIT = 1800
 # How many recent chat messages feed the AI overview.
 _OVERVIEW_HISTORY_MESSAGES = 30
 
+# ── /session_notes document uploads ──────────────────────────────────────────
+#: Text-document extensions accepted by ``/session_notes action: add`` with a file
+#: attached. Deliberately limited to plain text / markdown (what was asked for);
+#: everything else is rejected before it is read or stored.
+_SESSION_DOC_EXTENSIONS = {".txt", ".md"}
+#: Max size for a session-notes document upload (bytes).
+_SESSION_DOC_MAX_BYTES = 2 * 1024 * 1024
+
 
 def _summary_prompt() -> str:
     """System prompt for the /end_session AI overview.
@@ -266,16 +274,25 @@ async def handle_session_notes(
     interaction: discord.Interaction,
     action: str = "view",
     note: str | None = None,
+    file: discord.Attachment | None = None,
 ) -> None:
-    """Add a note to the current session or view notes (current/last session)."""
+    """Add a note (or an uploaded ``.txt`` / ``.md`` document) to the current session,
+    or view notes (current/last session)."""
     from bot_core import sessions as S
 
     act = (action or "view").strip().lower()
 
     if act == "add":
+        # A document upload wins over an inline note: it is the richer action
+        # and keeps a single, unambiguous result.
+        if file is not None:
+            await _add_document_from_attachment(interaction, file)
+            return
+
         if not note or not note.strip():
             await interaction.response.send_message(
-                "⚠️ Please provide a note, e.g. `/session_notes action: add note: \"remember the API key\"`.",
+                "⚠️ Please provide a note, e.g. `/session_notes action: add note: \"remember the API key\"` "
+                "— or attach a `.txt`/`.md` file to add a whole document.",
                 
             )
             return
@@ -304,7 +321,90 @@ async def handle_session_notes(
         )
         return
 
-    # view — current session if active, else the most recent one.
+    await _show_session_notes(interaction)
+
+
+async def _add_document_from_attachment(interaction: discord.Interaction, file: discord.Attachment) -> None:
+    """Store an uploaded ``.txt``/``.md`` file into the active session's notes.
+
+    Reads the attachment, validates its type and size, decodes it as UTF-8 text
+    and hands it to ``sessions.add_document`` (chunked into readable, RAG-safe
+    note bullets). Any validation failure is reported back to the user and the
+    session is left untouched.
+    """
+    from bot_core import sessions as S
+
+    session = S.get_current_session()
+    if session is None:
+        await interaction.response.send_message(
+            "⚠️ There is no active session to add a document to. Start one with `/start_session` first.",
+            
+        )
+        return
+
+    filename = (file.filename or "").strip()
+    ext = pathlib.PurePosixPath(filename).suffix.lower()
+    if ext not in _SESSION_DOC_EXTENSIONS:
+        allowed = ", ".join(sorted(_SESSION_DOC_EXTENSIONS))
+        await interaction.response.send_message(
+            f"⚠️ Only text documents can be added to session notes ({allowed}) — got `{ext or 'no extension'}`. "
+            f"Use `note:` for free text.",
+            
+        )
+        return
+
+    if file.size > _SESSION_DOC_MAX_BYTES:
+        await interaction.response.send_message(
+            f"⚠️ Document too large: {file.size:,} bytes (max {_SESSION_DOC_MAX_BYTES:,}). "
+            f"Trim it or upload in smaller parts.",
+            
+        )
+        return
+
+    try:
+        data = await file.read()
+    except Exception as e:
+        log.error("Failed to read session-notes document %r: %s", filename, e)
+        await interaction.response.send_message(f"⚠️ Could not read `{filename or 'attachment'}`: {e.__class__.__name__}.")
+        return
+
+    if not data:
+        await interaction.response.send_message(f"⚠️ `{filename or 'attachment'}` is empty — nothing to add.")
+        return
+
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        await interaction.response.send_message(
+            f"⚠️ `{filename or 'attachment'}` is not valid UTF-8 text. "
+            f"Only plain-text documents (`.txt` / `.md`) can be added to session notes.",
+            
+        )
+        return
+
+    if not text.strip():
+        await interaction.response.send_message(f"⚠️ `{filename or 'attachment'}` is empty — nothing to add.")
+        return
+
+    title = filename or "document"
+    updated, n = S.add_document(text, title=title, session=session)
+    if updated is None or n == 0:
+        await interaction.response.send_message("⚠️ Could not add the document.")
+        return
+
+    total = len(updated.get("notes", []))
+    await interaction.response.send_message(
+        f"📎 Document **{title}** added to session **{updated.get('name') or '(untitled)'}** "
+        f"({n} note bullet(s), {total} note(s) total).\n"
+        f"📄 `{pathlib.Path(updated['file']).name}`",
+    )
+    return
+
+
+async def _show_session_notes(interaction: discord.Interaction) -> None:
+    """View notes of the current session (or the last ended one)."""
+    from bot_core import sessions as S
+
     session = S.get_current_session() or S.get_last_session()
     if session is None:
         await interaction.response.send_message(

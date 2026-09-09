@@ -51,13 +51,16 @@ Each recording directory contains:
 recordings/recording_20260831-014251/
 ├── manifest.json          # session + per-speaker metadata (see below)
 ├── transcript.json        # STT results (written after /stop_recording, if enabled)
-├── MeleeChan_268856797626892288.wav
+├── MeleeChan_268856797626892288.wav                    # 48 kHz mono source (unmodified)
+├── MeleeChan_268856797626892288__stt_input_16k.wav     # 16 kHz mono (written if STT ran)
 └── ...                    # one WAV per speaker who produced audio
 ```
 
 While a recording is in progress the directory also holds transient durability files — a `.recording` session marker and one `<name>_<user_id>.log` per speaker (the raw decoded frames, streamed to disk as they arrive). These are removed automatically once the recording is finalized (by `stop()`, a clean shutdown, or crash recovery), so a *finished* directory contains only the WAVs + manifest (+ transcript). If you ever see them left behind, that's an orphan awaiting recovery.
 
-WAV files are **48 kHz, mono, 16-bit PCM** — the format STT engines expect. The filename is `<sanitized_display_name>_<user_id>.wav` (non-alphanumeric characters become `_`, name truncated to 40 chars; falls back to `user-<id>` if no name could be resolved).
+WAV files are **48 kHz, mono, 16-bit PCM** — the original source is never re-encoded or touched by STT. The filename is `<sanitized_display_name>_<user_id>.wav` (non-alphanumeric characters become `_`, name truncated to 40 chars; falls back to `user-<id>` if no name could be resolved).
+
+When STT actually runs, a second file is written next to each source: `<stem>__stt_input_16k.wav` — the **16 kHz mono** form the ASR engine consumed. Keeping the unmodified 48 kHz original *and* the converted input lets the 48 kHz→16 kHz conversion be verified independently later. See [recording-to-transcript.md → D5](recording-to-transcript.md#d5-provenance-source-kept-as-is--the-models-input-saved).
 
 ### Timeline model
 

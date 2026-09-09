@@ -284,6 +284,110 @@ class TestSessionNotesCommand:
         assert any("Unknown action" in m for m in ix._sent)
 
 
+def _doc_attachment(name: str, content: str, size: int | None = None) -> MagicMock:
+    """A fake discord.Attachment exposing only the fields the handler reads."""
+    att = MagicMock()
+    att.filename = name
+    att.size = size if size is not None else len(content.encode("utf-8"))
+    att.read = AsyncMock(return_value=content.encode("utf-8"))
+    return att
+
+
+class TestSessionNotesDocumentUpload:
+    """``/session_notes action: add`` with a ``.txt`` / ``.md`` file attached."""
+
+    @pytest.mark.asyncio
+    async def test_add_txt_success_and_view(self, ix):
+        from commands.session_commands import handle_session_notes
+        S.start_session(name="Docs")
+        await handle_session_notes(ix, action="add", note=None,
+                                   file=_doc_attachment("notes.txt", "ship the API key fix"))
+        assert any("Document" in m and "notes.txt" in m for m in ix._sent)
+        # it landed in the session notes…
+        session = S.get_current_session()
+        assert any("ship the API key fix" in t for _ts, t in S.get_notes(session))
+        # …and shows up in the view
+        await handle_session_notes(ix, action="view")
+        view = [m for m in ix._sent if "Session notes" in m]
+        assert any("ship the API key fix" in m for m in view)
+
+    @pytest.mark.asyncio
+    async def test_add_md_success(self, ix):
+        from commands.session_commands import handle_session_notes
+        S.start_session(name="Docs")
+        await handle_session_notes(ix, action="add", note=None,
+                                   file=_doc_attachment("plan.md", "# Plan\n- step one\n- step two"))
+        assert any("plan.md" in m and "added to session" in m for m in ix._sent)
+
+    @pytest.mark.asyncio
+    async def test_disallowed_extension_refused(self, ix):
+        from commands.session_commands import handle_session_notes
+        S.start_session(name="Docs")
+        await handle_session_notes(ix, action="add", note=None,
+                                   file=_doc_attachment("photo.png", "binary-ish"))
+        assert any("Only text documents" in m for m in ix._sent)
+        assert S.get_notes(S.get_current_session()) == []
+
+    @pytest.mark.asyncio
+    async def test_oversized_refused(self, ix):
+        from commands.session_commands import handle_session_notes
+        S.start_session(name="Docs")
+        await handle_session_notes(ix, action="add", note=None,
+                                   file=_doc_attachment("huge.txt", "x" * 2_000_000, size=3_000_000))
+        assert any("too large" in m for m in ix._sent)
+        assert S.get_notes(S.get_current_session()) == []
+
+    @pytest.mark.asyncio
+    async def test_empty_file_refused(self, ix):
+        from commands.session_commands import handle_session_notes
+        S.start_session(name="Docs")
+        await handle_session_notes(ix, action="add", note=None,
+                                   file=_doc_attachment("empty.txt", ""))
+        assert any("nothing to add" in m for m in ix._sent)
+        assert S.get_notes(S.get_current_session()) == []
+
+    @pytest.mark.asyncio
+    async def test_invalid_utf8_refused(self, ix):
+        from commands.session_commands import handle_session_notes
+        S.start_session(name="Docs")
+        att = MagicMock()
+        att.filename = "binary.txt"
+        att.size = 4
+        att.read = AsyncMock(return_value=b"\xff\xfe\x00\x01")
+        await handle_session_notes(ix, action="add", note=None, file=att)
+        assert any("not valid UTF-8" in m for m in ix._sent)
+        assert S.get_notes(S.get_current_session()) == []
+
+    @pytest.mark.asyncio
+    async def test_no_active_session_refused(self, ix):
+        from commands.session_commands import handle_session_notes
+        await handle_session_notes(ix, action="add", note=None,
+                                   file=_doc_attachment("a.txt", "hello"))
+        assert any("no active session" in m for m in ix._sent)
+
+    @pytest.mark.asyncio
+    async def test_file_wins_over_inline_note(self, ix):
+        from commands.session_commands import handle_session_notes
+        S.start_session(name="Docs")
+        await handle_session_notes(ix, action="add", note="inline note",
+                                   file=_doc_attachment("doc.txt", "from the file"))
+        texts = [t for _ts, t in S.get_notes(S.get_current_session())]
+        assert any("from the file" in t for t in texts)
+        assert not any("inline note" in t for t in texts)
+
+    @pytest.mark.asyncio
+    async def test_long_document_chunked(self, ix):
+        from commands.session_commands import handle_session_notes
+        S.start_session(name="Docs")
+        await handle_session_notes(ix, action="add", note=None,
+                                   file=_doc_attachment("long.md", ("word " * 2000).strip()))
+        texts = [t for _ts, t in S.get_notes(S.get_current_session())]
+        assert len(texts) > 1
+        assert any("part 1/" in t for t in texts)
+        # every stored bullet stays display-safe
+        assert all(len(t) <= 2000 for t in texts)
+
+
 class TestAddTranscript:
     """sessions.add_transcript() — automatic transcript -> session notes."""
 
