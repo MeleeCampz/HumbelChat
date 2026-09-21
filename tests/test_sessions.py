@@ -29,7 +29,7 @@ def clean_state():
 
 class TestStartSession:
 
-    def test_start_creates_state_and_file(self):
+    def test_start_creates_state_and_folder(self):
         session, closed = S.start_session(name="My Session")
         assert closed is None
         assert session["name"] == "My Session"
@@ -37,17 +37,22 @@ class TestStartSession:
         assert S.get_current_session() is session
         f = pathlib.Path(session["file"])
         assert f.exists()
+        assert f.name == "notes.md"  # per-session folder
+        # Folder carries date + increasing index + name
+        m = datetime.fromtimestamp(session["started_at"]).strftime("%Y-%m-%d")
+        d = f.parent
+        assert d.name.startswith(m)
+        assert "My Session" in d.name
+        assert session["dir"] == str(d)
         content = f.read_text(encoding="utf-8")
         assert "# Session: My Session" in content
-        # Filename always carries date + increasing index.
-        m = datetime.fromtimestamp(session["started_at"]).strftime("%Y-%m-%d")
-        assert session["file"].endswith(".md")
-        assert m in f.name
 
     def test_start_without_name(self):
         session, _ = S.start_session()
         assert session["name"] == ""
-        assert "(no notes)" in pathlib.Path(session["file"]).read_text(encoding="utf-8")
+        f = pathlib.Path(session["file"])
+        assert f.name == "notes.md"
+        assert "(no notes)" in f.read_text(encoding="utf-8")
 
     def test_start_while_active_refused(self):
         """Only one session at a time — an active (young) session blocks a new start."""
@@ -88,11 +93,12 @@ class TestStartSession:
         assert "- Ended:" in old_file.read_text(encoding="utf-8")
         assert S.get_current_session() is new
 
-    def test_name_sanitized_for_filename(self):
+    def test_name_sanitized_for_foldername(self):
         session, _ = S.start_session(name="../evil name?!  ")
-        assert "/" not in session["file"].split("/")[-1]
-        assert "?" not in pathlib.Path(session["file"]).name
-        assert "evil" in pathlib.Path(session["file"]).name
+        folder = pathlib.Path(session["dir"])
+        assert "/" not in folder.name
+        assert "?" not in folder.name
+        assert "evil" in folder.name
 
 
 class TestEndSession:
@@ -158,7 +164,8 @@ class TestNotes:
 
 
 class TestAddDocument:
-    """sessions.add_document() — an uploaded .txt/.md file → session notes."""
+    """sessions.add_document() — an uploaded .txt/.md file → its own file in the
+    session's attachments/ folder (no pre-chunking; KB chunks it on its own)."""
 
     def test_no_active_session_returns_none(self):
         session, n = S.add_document("hello")
@@ -170,42 +177,45 @@ class TestAddDocument:
         assert n == 0
         assert S.get_notes(session) == []
 
-    def test_single_bullet_with_title(self):
+    def test_document_written_as_own_file(self):
         S.start_session(name="D")
         session, n = S.add_document("the answer is 42", title="answer.txt")
         assert n == 1
-        ts, text = S.get_notes(session)[0]
-        assert isinstance(ts, float)
-        assert "answer.txt" in text
-        assert "part 1/1" in text
-        assert "the answer is 42" in text
-        # and it is written to the session file
-        assert "the answer is 42" in pathlib.Path(session["file"]).read_text(encoding="utf-8")
+        # A standalone .md file exists under the session's attachments/ folder
+        att_dir = pathlib.Path(session["dir"]) / "attachments"
+        files = [f for f in att_dir.iterdir() if f.is_file()]
+        assert len(files) == 1
+        body = files[0].read_text(encoding="utf-8")
+        assert "the answer is 42" in body
+        # The notes state is unchanged (no pre-chunking, no pointer stored).
+        assert S.get_notes(session) == []
+        # notes.md lists the attachment under a pointer section
+        content = pathlib.Path(session["file"]).read_text(encoding="utf-8")
+        assert "## Attachments" in content
+        assert files[0].name in content
 
     def test_default_title_used(self):
         S.start_session(name="D")
         session, n = S.add_document("just words")
         assert n == 1
-        assert "Uploaded document" in S.get_notes(session)[0][1]
+        att_dir = pathlib.Path(session["dir"]) / "attachments"
+        assert len(list(att_dir.iterdir())) == 1
+        assert "just words" in att_dir.iterdir().__next__().read_text(encoding="utf-8")
 
-    def test_long_document_is_chunked_and_preserved(self):
+    def test_long_document_not_chunked(self):
         S.start_session(name="D")
-        long_text = "word " * 2000  # ~10k chars → several bullets
-        session, n = S.add_document(long_text.strip(), title="big.md")
-        assert n > 1
-        texts = [t for _ts, t in S.get_notes(session)]
-        assert "part 1/" + str(n) in texts[0]
-        assert f"continued, part {n}/{n}" in texts[-1]
-        # no bullet exceeds the display-safe limit (header overhead included)
-        assert all(len(t) <= 2000 for t in texts)
-        # full text preserved across chunks (whitespace-normalized)
-        joined = " ".join("".join(t.split()) for t in texts)
-        assert long_text.strip().split()[0] in joined
-        # first word present on disk
-        assert "word" in pathlib.Path(session["file"]).read_text(encoding="utf-8")
+        long_text = ("word " * 2000).strip()  # ~10k chars — stays in ONE file
+        session, n = S.add_document(long_text, title="big.md")
+        assert n == 1  # one file, not several bullets
+        att_dir = pathlib.Path(session["dir"]) / "attachments"
+        files = [f for f in att_dir.iterdir() if f.is_file()]
+        assert len(files) == 1
+        body = files[0].read_text(encoding="utf-8")
+        # The whole document is preserved verbatim (KB will chunk it).
+        assert long_text in body
 
     def test_pins_to_given_session(self):
-        """*session* pins the target — the document lands in THAT session's file."""
+        """*session* pins the target — the document lands in THAT session's folder."""
         S.start_session(name="Old")
         old = S.get_current_session()
         S.end_session(overview="done")
@@ -214,17 +224,73 @@ class TestAddDocument:
 
         session, n = S.add_document("pinned doc", title="doc.md", session=old)
         assert n == 1 and session is old
-        assert "pinned doc" in pathlib.Path(old["file"]).read_text(encoding="utf-8")
-        assert all("pinned doc" not in t for _ts, t in S.get_notes())
+        att_dir = pathlib.Path(old["dir"]) / "attachments"
+        assert any("pinned doc" in f.read_text(encoding="utf-8") for f in att_dir.iterdir())
+        # The new active session's folder has no attachment
+        new_dir = pathlib.Path(S.get_current_session()["dir"]) / "attachments"
+        assert not new_dir.exists() or len(list(new_dir.iterdir())) == 0
 
-    def test_overlong_single_word_forms_own_piece(self):
-        """A word longer than the chunk limit is not dropped."""
+    def test_repeated_uploads_get_distinct_files(self):
         S.start_session(name="D")
-        blob = "x" * 5000
-        session, n = S.add_document(blob, title="blob.txt")
-        assert n >= 1
-        joined = " ".join("".join(t.split()) for _ts, t in S.get_notes(session))
-        assert blob in joined
+        S.add_document("one", title="same.txt")
+        S.add_document("two", title="same.txt")
+        att_dir = pathlib.Path(S.get_current_session()["dir"]) / "attachments"
+        names = sorted(f.name for f in att_dir.iterdir())
+        assert len(names) == 2  # unique_path disambiguates duplicates
+
+
+class TestAddTranscript:
+    """sessions.add_transcript() — a finished transcript → its own file in the
+    session's transcripts/ folder (no pre-chunking; KB chunks it on its own)."""
+
+    def test_no_active_session_returns_none(self):
+        session, n = S.add_transcript("hello")
+        assert session is None and n == 0
+
+    def test_empty_text_is_noop(self):
+        S.start_session(name="T")
+        session, n = S.add_transcript("   ")
+        assert n == 0
+        assert S.get_notes(session) == []
+
+    def test_transcript_written_as_own_file(self):
+        S.start_session(name="T")
+        session, n = S.add_transcript("hello there\nsecond line",
+                                      title="Voice channel transcript — #vc (2026-08-31 22:00, 10s)")
+        assert n == 1
+        tdir = pathlib.Path(session["dir"]) / "transcripts"
+        files = [f for f in tdir.iterdir() if f.is_file()]
+        assert len(files) == 1
+        body = files[0].read_text(encoding="utf-8")
+        assert "hello there" in body and "second line" in body
+        assert "Voice channel transcript" in body
+        # notes state unchanged; notes.md lists the transcript pointer
+        assert S.get_notes(session) == []
+        content = pathlib.Path(session["file"]).read_text(encoding="utf-8")
+        assert "## Transcripts" in content and files[0].name in content
+
+    def test_long_transcript_not_chunked(self):
+        S.start_session(name="T")
+        long_text = ("word " * 2000).strip()  # ~10k chars — stays in ONE file
+        session, n = S.add_transcript(long_text, title="Voice channel transcript")
+        assert n == 1
+        tdir = pathlib.Path(session["dir"]) / "transcripts"
+        files = [f for f in tdir.iterdir() if f.is_file()]
+        assert len(files) == 1
+        assert long_text in files[0].read_text(encoding="utf-8")
+
+    def test_pins_to_ended_session_when_pinned(self):
+        S.start_session(name="Old")
+        old = S.get_current_session()
+        S.end_session(overview="done")
+        S._state["last_start_at"] -= 2 * 3600
+        S.start_session(name="New")
+
+        session, n = S.add_transcript("pinned words", title="Voice channel transcript",
+                                      session=old)
+        assert n == 1 and session is old
+        tdir = pathlib.Path(old["dir"]) / "transcripts"
+        assert any("pinned words" in f.read_text(encoding="utf-8") for f in tdir.iterdir())
 
 
 class TestNextSessionReminders:
@@ -331,9 +397,9 @@ class TestNaming:
         d = S.notes_dir()
         d.mkdir(parents=True, exist_ok=True)
         today = datetime.now().strftime("%Y-%m-%d")
-        (d / f"{today}_01_existing.md").write_text("# old\n", encoding="utf-8")
+        (d / f"{today}_01_existing").mkdir()  # a pre-existing session folder
         session, _ = S.start_session(name="Indexed")
-        assert f"{today}_02_Indexed.md" == pathlib.Path(session["file"]).name
+        assert pathlib.Path(session["dir"]).name == f"{today}_02_Indexed"
 
     def test_persistence_disabled_via_empty_env(self, monkeypatch):
         monkeypatch.setenv("SESSIONS_PERSIST_FILE", "")

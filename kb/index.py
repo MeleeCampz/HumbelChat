@@ -98,6 +98,30 @@ def _iter_kb_files(kb_path: pathlib.Path) -> list[pathlib.Path]:
     return files
 
 
+def _rel_key(kb_path: pathlib.Path, path: pathlib.Path) -> str:
+    """KB-relative POSIX path used as the stable identity for a file in the
+    vector index.
+
+    The index historically keyed documents by their *basename* alone.  That is
+    ambiguous once a KB contains subfolders — the per-session notes folders live
+    under ``session_notes/<date>_<idx>/`` and each holds a ``notes.md``, a
+    ``transcript_01.md``, etc.  Keying by basename made every session's
+    ``notes.md`` (and same-named attachments/transcripts) collapse onto the
+    same cache key and silently overwrite one another.
+
+    Keying by the path *relative to the KB root* makes each file unique while
+    staying identical to the basename for flat (root-level) KBs, so existing
+    caches and behaviour are unchanged for the common case.
+    """
+    try:
+        return path.resolve().relative_to(kb_path.resolve()).as_posix()
+    except ValueError:
+        # Path is not under the KB root (e.g. a bare filename handed to
+        # update_single_document / remove_document) — fall back to the basename
+        # so those calls behave exactly as before.
+        return pathlib.Path(path).name
+
+
 # ──────────────────────────── Index store ────────────────────────────────
 
 class KBIndexStore:
@@ -193,14 +217,15 @@ class KBIndexStore:
             return False
 
         old_docs = list(self._index._docs) if self._index is not None else []
-        merged = self._merge_replace(old_docs, path.name, entries, embeddings)
+        key = _rel_key(self.kb_path, path)
+        merged = self._merge_replace(old_docs, key, entries, embeddings)
         self._index = KBVectorIndex.from_entries(
             self._entries_from_docs(merged),
             [d.embedding for d in merged],
         )
 
         await self._save_to_disk()
-        logger.info("Updated index with '%s' (%d chunk(s))", path.name, len(entries))
+        logger.info("Updated index with '%s' (%d chunk(s))", key, len(entries))
         return True
 
     async def remove_document(self, file_path: str | pathlib.Path) -> bool:
@@ -208,7 +233,7 @@ class KBIndexStore:
         if self._index is None or self._index.is_empty():
             return False
 
-        target = pathlib.Path(file_path).name.lower()
+        target = _rel_key(self.kb_path, pathlib.Path(file_path)).lower()
         old_count = self._index.count()
         self._index._docs = [  # type: ignore[union-attr]
             doc for doc in self._index._docs  # type: ignore[union-attr]
@@ -218,7 +243,7 @@ class KBIndexStore:
         removed = old_count - self._index.count()
         if removed > 0:
             await self._save_to_disk()
-            logger.info("Removed %d chunk(s) for '%s'", removed, pathlib.Path(file_path).name)
+            logger.info("Removed %d chunk(s) for '%s'", removed, target)
             return True
 
         logger.warning("No matching chunks found to remove for '%s'", file_path)
@@ -250,13 +275,13 @@ class KBIndexStore:
         removed: list[str] = []
 
         for path in files:
-            cached = rows.get(path.name)
+            cached = rows.get(_rel_key(self.kb_path, path))
             if cached is None:
                 added.append(path)
             elif not await self._chunks_valid(cached, path):
                 changed.append(path)
 
-        disk_names = {p.name.lower() for p in files}
+        disk_names = {_rel_key(self.kb_path, p).lower() for p in files}
         for name in rows:
             if name.lower() not in disk_names:
                 removed.append(name)
@@ -291,7 +316,7 @@ class KBIndexStore:
             )
             if match:
                 used_old.add(match)
-                renamed.append((match, path.name))
+                renamed.append((match, _rel_key(self.kb_path, path)))
                 changed.append(path)
             else:
                 still_added.append(path)
@@ -309,20 +334,21 @@ class KBIndexStore:
                 new_entries, new_embeddings = await self._embed_files(to_embed)
             except Exception as exc:
                 logger.warning("Sync-embed failed for %d file(s): %s", len(to_embed), exc)
-                failures = [p.name for p in to_embed]
+                failures = [_rel_key(self.kb_path, p) for p in to_embed]
                 new_entries, new_embeddings = [], []
 
         if to_embed or removed:
             old_docs = list(self._index._docs) if self._index is not None else []
             merged = old_docs
             for path in to_embed:
-                # Each replace targets exactly one source_file, so only hand it
-                # this file's own rows — keeps other files' rows intact and
-                # drops the old rows of a renamed file.
-                file_entries = [e for e in new_entries if e[2].lower() == path.name.lower()]
-                file_embs = [new_embeddings[i] for i, e in enumerate(new_entries) if e[2].lower() == path.name.lower()]
+                # Each replace targets exactly one source_file (relative path),
+                # so only hand it this file's own rows — keeps other files' rows
+                # intact and drops the old rows of a renamed file.
+                key = _rel_key(self.kb_path, path)
+                file_entries = [e for e in new_entries if e[2].lower() == key.lower()]
+                file_embs = [new_embeddings[i] for i, e in enumerate(new_entries) if e[2].lower() == key.lower()]
                 if file_entries:
-                    merged = self._merge_replace(merged, path.name, file_entries, file_embs)
+                    merged = self._merge_replace(merged, key, file_entries, file_embs)
             # Drop rows for files that are gone from disk (renamed-away names
             # too, so a rename ends up as replace instead of duplicate).
             stale = {n.lower() for n in removed}
@@ -337,8 +363,9 @@ class KBIndexStore:
                 await self._save_to_disk()
 
         report = {
-            "added": [p.name for p in still_added],
-            "changed": [p.name for p in changed if p.name not in {r[1] for r in renamed}],
+            "added": [_rel_key(self.kb_path, p) for p in still_added],
+            "changed": [_rel_key(self.kb_path, p) for p in changed
+                        if _rel_key(self.kb_path, p) not in {r[1] for r in renamed}],
             "renamed": renamed,
             "removed": [n for n in removed if n not in used_old],
             "failed": failures,
@@ -381,10 +408,11 @@ class KBIndexStore:
         embeddings: list[list[float]] = []
 
         for path in files:
-            cached = cached_rows.get(path.name)
+            key = _rel_key(self.kb_path, path)
+            cached = cached_rows.get(key)
             if cached is not None and await self._chunks_valid(cached, path):
                 for c in cached:
-                    entries.append((c["doc_name"], c["content"], path.name))
+                    entries.append((c["doc_name"], c["content"], key))
                     embeddings.append(c["embedding"])
                 continue
 
@@ -433,13 +461,14 @@ class KBIndexStore:
         to_embed_files: list[pathlib.Path] = []
 
         for path in files:
-            cached = cached_rows.get(path.name)
+            key = _rel_key(self.kb_path, path)
+            cached = cached_rows.get(key)
             if cached is None or not await self._chunks_valid(cached, path):
                 # New file, or any chunk changed → re-embed the whole file.
                 to_embed_files.append(path)
                 continue
             for c in cached:
-                entries.append((c["doc_name"], c["content"], path.name))
+                entries.append((c["doc_name"], c["content"], key))
                 embeddings.append(c["embedding"])
 
         reused = len(entries)
@@ -450,7 +479,7 @@ class KBIndexStore:
                 logger.warning(
                     "Incremental update failed (%d file(s) not re-embedded: %s): %s — "
                     "serving %d cached chunk(s) only",
-                    len(to_embed_files), [p.name for p in to_embed_files], exc, reused,
+                    len(to_embed_files), [_rel_key(self.kb_path, p) for p in to_embed_files], exc, reused,
                 )
                 new_entries, new_embeddings = [], []
             entries.extend(new_entries)
@@ -488,10 +517,10 @@ class KBIndexStore:
                 except OSError:
                     continue
                 if text:
-                    flat.append((path.name, text, path.name))
+                    flat.append((path.name, text, _rel_key(self.kb_path, path)))
                 continue
             for c in chunks:
-                flat.append((f"{c.display_name} [{c.section_path}]", c.content, path.name))
+                flat.append((f"{c.display_name} [{c.section_path}]", c.content, _rel_key(self.kb_path, path)))
 
         if not flat:
             return [], []
@@ -605,6 +634,14 @@ class KBIndexStore:
             if source == display and " [" in source:
                 m = _re.match(r"^\S+\.(?:txt|md|csv|html|xml|rtf)\b", source)
                 source = m.group(0) if m else source.split(" [")[0]
+            # v3 caches that predate the per-session folder layout keyed rows
+            # by *basename*.  Re-key those to the file's KB-relative path so
+            # they match the new key (only when the basename is unique on disk,
+            # otherwise the row is ambiguous and will be re-embedded on next load).
+            if "/" not in source:
+                matches = [p for p in _iter_kb_files(self.kb_path) if p.name == source]
+                if len(matches) == 1:
+                    source = _rel_key(self.kb_path, matches[0])
             result.setdefault(source, []).append({
                 "doc_name": display,
                 "content": content,

@@ -492,5 +492,61 @@ class TestIterKBFiles:
         assert names == {"a.md", "b.txt"}
 
 
+# ─────────────────── 11. Per-session folders (basename collision) ─────────
+# Regression guard for the original bug that made /session_notes split
+# "weirdly": the vector index keyed documents by *basename* alone, so once
+# sessions live in subfolders under session_notes/ every session's notes.md,
+# transcript_01.md, and same-named attachments collapsed onto one cache key
+# and overwrote one another.
+
+class TestPerSessionFolders:
+    @pytest.fixture
+    def session_kb(self, tmp_path):
+        import pathlib
+        kb = tmp_path / "kb_sessions"
+        for idx, name, alpha in ((1, "A", "ALPHA"), (2, "B", "BETA")):
+            s = kb / "session_notes" / f"2026-09-16_{idx:02d}_{name}"
+            (s / "attachments").mkdir(parents=True)
+            (s / "transcripts").mkdir()
+            (s / "notes.md").write_text(f"# Session {name}\n\n- {alpha.lower()} note\n")
+            (s / "attachments" / "doc.md").write_text(f"{alpha} DOC UNIQUE\n")
+            (s / "transcripts" / "transcript_01.md").write_text(f"{alpha} TRANSCRIPT\n")
+        return kb
+
+    @pytest.mark.asyncio
+    async def test_distinct_sessions_do_not_collide(self, session_kb, tmp_path):
+        store = make_store(tmp_path, session_kb)
+        install_fake_embedder(store)
+        idx = await store.load()
+
+        # 6 files (2 x notes.md + 2 x doc.md + 2 x transcript_01.md) — each
+        # needs its OWN source key, i.e. the KB-relative path, not the basename.
+        keys = [d.source() for d in idx._docs]
+        assert len(keys) == 6
+        assert len(set(keys)) == 6, "basename collision — sessions overwrote each other"
+        assert all("/" in k for k in keys)
+
+        # Every session's content survives independently.
+        joined = {d.content for d in idx._docs}
+        assert any("ALPHA DOC UNIQUE" in c for c in joined)
+        assert any("BETA DOC UNIQUE" in c for c in joined)
+        assert any("alpha note" in c for c in joined)
+        assert any("beta note" in c for c in joined)
+
+    @pytest.mark.asyncio
+    async def test_remove_one_session_file_keeps_the_other(self, session_kb, tmp_path):
+        store = make_store(tmp_path, session_kb)
+        install_fake_embedder(store)
+        idx = await store.load()
+
+        s1_doc = session_kb / "session_notes" / "2026-09-16_01_A" / "attachments" / "doc.md"
+        assert await store.remove_document(str(s1_doc)) is True
+
+        idx = store.get_index()
+        # Session A's doc is gone, but session B's same-named doc remains.
+        assert not any("ALPHA DOC UNIQUE" in d.content for d in idx._docs)
+        assert any("BETA DOC UNIQUE" in d.content for d in idx._docs)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

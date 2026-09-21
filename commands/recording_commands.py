@@ -318,10 +318,12 @@ async def _run_transcription(
         else:
             lines.append(f"  • **{name}**: ⚠️ {s.error}")
 
-    # Automatically fold the transcript into the notes of the session that
-    # was active when the recording stopped (see handle_stop_recording) so it
-    # shows up in /session_notes and stays RAG-searchable. Best effort: a
-    # missing session or a bookkeeping error only changes the message line.
+    # Automatically fold the transcript into the session that was active when
+    # the recording stopped (see handle_stop_recording) so it shows up in
+    # /session_notes and stays RAG-searchable.  The transcript is saved as its
+    # own file under the session's transcripts/ folder (see
+    # sessions.add_transcript).  Best effort: a missing session or a
+    # bookkeeping error only changes the message line.
     session_line = ""
     if STT_ADD_TO_SESSION:
         started = datetime.fromtimestamp(
@@ -332,21 +334,23 @@ async def _run_transcription(
             f"({started}, {int(manifest.get('duration_s') or 0)}s)"
         )
         try:
-            session, n_bullets = S.add_transcript(
+            session, n_files = S.add_transcript(
                 transcriber.build_session_transcript(report), title=title,
                 session=session_at_stop,
             )
-            if session is not None:
-                fname = pathlib.Path(session["file"]).name
+            if session is not None and n_files:
+                tdir = pathlib.Path(S._session_dir(session)) / S._SUBDIR_TRANSCRIPTS
+                tfname = sorted(p.name for p in tdir.iterdir() if p.is_file())[-1] if tdir.exists() else ""
                 status = "active" if S.get_current_session() is session else "ended"
+                tfn = f" — `transcripts/{tfname}`" if tfname else ""
                 session_line = (
-                    f"\n\n📝 Added to the {status} session's notes "
-                    f"(**{session.get('name') or '(untitled)'}**, {n_bullets} note(s)) — `{fname}`"
+                    f"\n\n🎙️ Added to the {status} session **{session.get('name') or '(untitled)'}** "
+                    f"(1 transcript file){tfn}"
                 )
             else:
                 log.info("Transcript not added: no active session at STT completion")
         except Exception as e:  # pragma: no cover - defensive
-            log.warning("Could not add transcript to session notes: %s", e)
+            log.warning("Could not add transcript to session: %s", e)
 
     body = (
         f"🎧 **Transcription done** — {report.ok_count}/{total} speaker(s) OK, "
