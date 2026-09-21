@@ -94,11 +94,20 @@ class KBVectorIndex:
             if ext not in {".txt", ".md", ".csv", ".html", ".xml", ".rtf"}:
                 continue
 
+            # Key by the KB-relative path (unique across subfolders) so per-session
+            # files with identical basenames don't collide.  Mirrors the keying
+            # used by KBIndexStore in kb.index (computed inline here rather than
+            # imported, to avoid a circular import between the two modules).
+            try:
+                src_key = p.resolve().relative_to(root.resolve()).as_posix()
+            except ValueError:
+                src_key = p.name
+
             # Let Chunker handle file reading and sizing internally
             chunks = await Chunker.split_file(p)
             for chunk in chunks:
                 display_name = f"{chunk.display_name} [{chunk.section_path}]"
-                entries.append((display_name, chunk.content, p.name))
+                entries.append((display_name, chunk.content, src_key))
 
 
         # Build the index (embeds all chunks via OpenWebUI backend)

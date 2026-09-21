@@ -28,6 +28,10 @@ log = logging.getLogger("bot.session_commands")
 _OVERVIEW_POST_LIMIT = 1800
 # How many recent chat messages feed the AI overview.
 _OVERVIEW_HISTORY_MESSAGES = 30
+# Discord message cap is 2000 chars; keep view messages under it.
+_VIEW_MSG_LIMIT = 1900
+# How many recent notes / pointers to show in /session_notes view.
+_VIEW_NOTE_LIMIT = 25
 
 # ── /session_notes document uploads ──────────────────────────────────────────
 #: Text-document extensions accepted by ``/session_notes action: add`` with a file
@@ -325,12 +329,13 @@ async def handle_session_notes(
 
 
 async def _add_document_from_attachment(interaction: discord.Interaction, file: discord.Attachment) -> None:
-    """Store an uploaded ``.txt``/``.md`` file into the active session's notes.
+    """Store an uploaded ``.txt``/``.md`` file in the active session.
 
     Reads the attachment, validates its type and size, decodes it as UTF-8 text
-    and hands it to ``sessions.add_document`` (chunked into readable, RAG-safe
-    note bullets). Any validation failure is reported back to the user and the
-    session is left untouched.
+    and hands it to ``sessions.add_document`` — which saves it as a standalone
+    ``.md`` file under the session's ``attachments/`` folder (one file per
+    upload; the KB indexer chunks it on its own).  Any validation failure is
+    reported back to the user and the session is left untouched.
     """
     from bot_core import sessions as S
 
@@ -392,13 +397,75 @@ async def _add_document_from_attachment(interaction: discord.Interaction, file: 
         await interaction.response.send_message("⚠️ Could not add the document.")
         return
 
-    total = len(updated.get("notes", []))
+    # The document is one standalone file under the session's attachments/ folder.
+    from bot_core import sessions as _S
+    att_dir = pathlib.Path(_S._session_dir(updated)) / _S._SUBDIR_ATTACHMENTS
+    files = sorted(att_dir.iterdir()) if att_dir.exists() else []
+    fname = files[-1].name if files else title
     await interaction.response.send_message(
-        f"📎 Document **{title}** added to session **{updated.get('name') or '(untitled)'}** "
-        f"({n} note bullet(s), {total} note(s) total).\n"
-        f"📄 `{pathlib.Path(updated['file']).name}`",
+        f"📎 Document **{title}** added to session **{updated.get('name') or '(untitled)'}**\n"
+        f"📄 Saved as `attachments/{fname}` (one file, RAG-enabled).",
     )
     return
+
+
+def _chunk_display(text: str, limit: int = _VIEW_MSG_LIMIT) -> list[str]:
+    """Word-wrap *text* into Discord-safe message pieces of at most *limit* chars.
+
+    Notes are stored whole (no pre-chunking); they are split into readable
+    messages ONLY at display time, here.  A long note simply continues on the
+    next message instead of being cut off.  A single word longer than *limit*
+    still forms its own (unavoidable) piece.
+    """
+    parts: list[str] = []
+    cur = ""
+    for word in text.split():
+        if cur and len(cur) + 1 + len(word) > limit:
+            parts.append(cur)
+            cur = word
+        else:
+            cur = f"{cur} {word}".strip()
+    if cur:
+        parts.append(cur)
+    return [p for p in parts if p]
+
+
+def _build_view_parts(session: dict) -> list[str]:
+    """Build the display-only /session_notes messages for one session.
+
+    Notes are shown in full (word-wrapped across messages when long); the
+    standalone documents (attachments / transcripts) are listed as pointers to
+    their own files — that is where the full text lives and is indexed.
+    """
+    from bot_core import sessions as S
+
+    status = "**current**" if S.get_current_session() else "**last (ended)**"
+    lines = [f"📝 **Session notes — {session.get('name') or '(untitled)'}** ({status})"]
+    if session.get("overview"):
+        lines.append(f"📄 Overview: “{_truncate(session['overview'], 300)}”")
+    lines.append("")
+    notes = S.get_notes(session)
+    if not notes:
+        lines.append("(no notes yet — add one with `/session_notes action: add note: \"...\"`)")
+    else:
+        shown = notes[-_VIEW_NOTE_LIMIT:]
+        for _ts, text in shown:
+            lines.append(f"- {text}")
+        if len(notes) > len(shown):
+            lines.append(f"… and {len(notes) - len(shown)} earlier note(s).")
+    for subdir, heading in ((S._SUBDIR_ATTACHMENTS, "📎 Attachments"),
+                            (S._SUBDIR_TRANSCRIPTS, "🎙️ Transcripts")):
+        docs = S._session_docs(session, subdir)
+        if docs:
+            lines.append("")
+            lines.append(f"**{heading}**")
+            for name in docs:
+                lines.append(f"- `{subdir}/{name}`")
+    lines.append("")
+    lines.append(f"📄 Folder: `{pathlib.Path(session['dir']).name}/` (notes.md + files, RAG-enabled)")
+    lines.append("(long notes are split across messages; full text is in the session folder)")
+
+    return _chunk_display("\n".join(lines))
 
 
 async def _show_session_notes(interaction: discord.Interaction) -> None:
@@ -412,23 +479,15 @@ async def _show_session_notes(interaction: discord.Interaction) -> None:
         )
         return
 
-    notes = S.refresh_notes_from_disk(session)
-    status = "**current**" if S.get_current_session() else "**last (ended)**"
-    lines = [f"📝 **Session notes — {session.get('name') or '(untitled)'}** ({status})"]
-    if session.get("overview"):
-        lines.append(f"📄 Overview: “{_truncate(session['overview'], 300)}”")
-    lines.append("")
-    if not notes:
-        lines.append("(no notes yet — add one with `/session_notes action: add note: \"...\"`)")
-    else:
-        shown = notes[-25:]
-        for _ts, text in shown:
-            lines.append(f"- {text}")
-        if len(notes) > len(shown):
-            lines.append(f"… and {len(notes) - len(shown)} earlier note(s).")
-    lines.append(f"\n📄 File: `{pathlib.Path(session['file']).name}` (editable on disk)")
+    # Pick up manual edits to the notes file (re-parses real notes).
+    S.refresh_notes_from_disk(session)
 
-    body = "\n".join(lines)
-    if len(body) > 1900:
-        body = body[:1900].rstrip() + "\n…(truncated — see the file for the full notes)"
-    await interaction.response.send_message(body)
+    # Notes are stored whole and only split at display time — so a long note
+    # needs several messages.  Send them sequentially (no defer needed: the
+    # view is local and fast, well within the 15 s response window).
+    parts = _build_view_parts(session)
+    for i, part in enumerate(parts):
+        if i == 0:
+            await interaction.response.send_message(part)
+        else:
+            await interaction.followup.send(part)

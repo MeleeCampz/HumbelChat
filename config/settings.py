@@ -179,11 +179,12 @@ STT_SILENCE_DBFS: float = _safe_float(os.getenv("STT_SILENCE_DBFS"), -45.0)
 # Dank." emitted at times where one speaker's track was 100% digital silence).
 # Set STT_VAD_FILTER=0 to transcribe every sample verbatim.
 STT_VAD_FILTER: bool = os.getenv("STT_VAD_FILTER", "1") not in ("0", "false", "no")
-# Append the finished transcript to the ACTIVE session's notes automatically
-# when transcription completes (see bot_core.sessions.add_transcript). The
-# full transcript is stored as timestamped note bullets, so it shows up in
-# /session_notes and stays RAG-searchable. Set STT_ADD_TO_SESSION=0 to keep
-# transcripts out of the session notes.
+# Save the finished transcript for the ACTIVE session automatically when
+# transcription completes (see bot_core.sessions.add_transcript).  The full
+# transcript is stored as its own .md file under the session's transcripts/
+# folder, so it shows up in /session_notes and stays RAG-searchable (chunked
+# by the KB indexer). Set STT_ADD_TO_SESSION=0 to keep transcripts out of
+# the sessions.
 STT_ADD_TO_SESSION: bool = os.getenv("STT_ADD_TO_SESSION", "1") not in ("0", "false", "no")
 
 CHUNK_TARGET: int = _safe_int(os.getenv("CHUNK_SIZE"), 2000)
