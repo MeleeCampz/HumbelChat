@@ -5,9 +5,11 @@ ask_ai_with_model() with a clean, testable module interface.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import pathlib
 import re
+from functools import partial
 
 
 # ──────────────────────────── Helpers ────────────────────────────────
@@ -281,7 +283,10 @@ def get_relevant_chunks(
         n_lines = max(len(all_lines), 1)
 
         for target_term in query_terms:
-            term_line_count = sum(1 for li, _hc in any_hits if target_term in all_lines[li].strip().lower())
+            # NOTE: any_hits tuples are (hit_count, line_idx) — unpack in that
+            # order (an earlier swap here used the hit count as a line index,
+            # which IndexError'd on small files, P0 #4).
+            term_line_count = sum(1 for _hc, li in any_hits if target_term in all_lines[li].strip().lower())
             if term_line_count > 0.15 * n_lines:
                 continue  # too common to be a useful anchor
             header_li: int | None = None
@@ -403,3 +408,54 @@ def get_relevant_chunks(
             results.append((f"{doc_name} (relevant chunks)", "\n\n".join(chunks)))
 
     return results
+
+
+# ─────────────── Async wrappers (P0 #4: keep the event loop free) ───────────────
+#
+# The keyword retrieval path and the /list_kb_docs command were doing
+# rglob + per-file reads + SHA-256 hashing *on the event loop thread*.  On a
+# large KB that froze the entire bot (gateway, typing indicators, voice) for
+# the duration of the scan.  The wrappers below run the identical blocking
+# work in the default thread pool and return the same data — callers only
+# need to await them.
+
+async def _run_in_thread(func, *args, **kwargs):
+    """Run *func* in the default executor.
+
+    Uses ``loop.run_in_executor`` directly (rather than ``asyncio.to_thread``)
+    so tests can stub the executor; ``partial`` keeps kwargs intact.
+    """
+    loop = asyncio.get_running_loop()
+    future = loop.run_in_executor(None, partial(func, *args, **kwargs))
+    return await asyncio.ensure_future(future)
+
+
+async def read_kb_files_async(
+    kb_path: str | pathlib.Path,
+    max_lines_per_file: int = 200,
+    max_bytes_per_file: int = 1024 * 1024,
+    query: str = "",
+    top_n: int = 5,
+) -> list[tuple[str, str]]:
+    """Thread-pool wrapper around :func:`read_kb_files` (P0 #4)."""
+    return await _run_in_thread(
+        read_kb_files, kb_path,
+        max_lines_per_file=max_lines_per_file,
+        max_bytes_per_file=max_bytes_per_file,
+        query=query,
+        top_n=top_n,
+    )
+
+
+async def get_relevant_chunks_async(
+    kb_path: str | pathlib.Path,
+    doc_names: list[str],
+    query: str = "",
+    window_lines: int = 5,
+) -> list[tuple[str, str]]:
+    """Thread-pool wrapper around :func:`get_relevant_chunks` (P0 #4)."""
+    return await _run_in_thread(
+        get_relevant_chunks, kb_path, doc_names,
+        query=query,
+        window_lines=window_lines,
+    )

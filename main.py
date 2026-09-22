@@ -443,6 +443,103 @@ async def on_ready() -> None:
         log.exception("Crashed-recording recovery failed (continuing)")
 
 
+@bot.tree.error
+async def on_app_command_error(
+    interaction: discord.Interaction,
+    error: app_commands.AppCommandError,
+) -> None:
+    """P1 #11: global error handler for application (slash) commands.
+
+    Without this, any unhandled exception in a command body surfaces in
+    Discord as the generic "Application command failed" popup with no log
+    trail. ``bot.tree.on_error`` is invoked for every top-level command
+    failure (``_from_interaction`` catches it, wrapping non-``AppCommandError``
+    exceptions into ``CommandInvokeError``) — see ``discord.app_commands.tree``.
+    We log the full traceback and send a short, friendly *ephemeral* follow-up
+    so only the invoking user sees it.
+    """
+    cmd = getattr(interaction, "command", None)
+    log.error(
+        "Application command %r failed with %s: %s", getattr(cmd, "name", "?"),
+        type(error).__name__, error,
+        exc_info=error,
+    )
+
+    # Derive a user-facing message. ``CommandInvokeError`` carries the *real*
+    # exception in ``.original`` (and as ``__cause__``), so we can name the
+    # original cause without leaking a raw traceback.
+    original = getattr(error, "original", None) or error
+    if isinstance(error, app_commands.CommandSignatureMismatch):
+        user_msg = "⚠️ The bot ran into an internal error on that command. Please try again — and let the owner know if it keeps happening."
+    elif isinstance(error, app_commands.CheckFailure):
+        user_msg = "⚠️ You don't have permission to use this command."
+    elif isinstance(error, app_commands.CommandInvokeError):
+        user_msg = f"⚠️ {type(original).__name__}: {original}"
+    else:
+        user_msg = f"⚠️ {type(error).__name__}: {error}"
+
+    # Best-effort: this handler may run after the interaction already responded
+    # (deferred → followed up) or not.  Try the primary response first, then
+    # fall back to a follow-up.
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.send_message(user_msg, ephemeral=True)
+            return
+    except Exception:
+        pass
+    try:
+        await interaction.followup.send(user_msg, ephemeral=True)
+    except Exception as e:  # pragma: no cover - purely defensive
+        log.warning("on_app_command_error: follow-up send failed: %s", e)
+
+
+@bot.event
+async def on_shutdown() -> None:
+    """P1 #12: graceful-close hook.
+
+    Runs on ``SIGTERM``/``SIGINT`` (the only signals discord.py lets the event
+    loop handle cleanly).  Stops in-flight work, cancels any tracked background
+    tasks so they don't leak, and flushes the vector index store to disk (this
+    was previously dead code — :func:`kb.retrievers.shutdown_vector_store` was
+    defined but never called).  All state in this bot is already persisted
+    immediately, so nothing more is needed beyond flushing the in-memory index.
+    """
+    log.info("Bot shutting down — cleaning up background tasks + vector store")
+    # 1. Stop any per-channel typing indicator loops (tracked as
+    #    bot.typing_tasks in the /ai and prefix handlers).
+    for t in list(getattr(bot, "typing_tasks", []) or []):
+        try:
+            if not t.done():
+                t.cancel()
+        except Exception:
+            pass
+    # 2. Cancel any other tracked background tasks (spawned via
+    #    utils.background_tasks.spawn_tracked_task — strong refs are kept in
+    #    _ACTIVE_BACKGROUND_TASKS so they aren't GC'd before we can cancel).
+    from utils.background_tasks import _ACTIVE_BACKGROUND_TASKS
+    for t in list(_ACTIVE_BACKGROUND_TASKS):
+        try:
+            if not t.done():
+                t.cancel()
+        except Exception:
+            pass
+    # 3. Flush + close the vector index store (the one resource that would
+    #    otherwise be left to the OS).
+    from kb.retrievers import shutdown_vector_store
+    try:
+        await shutdown_vector_store()
+    except Exception as e:
+        log.warning("Vector store shutdown failed: %s", e)
+    # 4. Close the shared embeddings HTTP client (P2 #21) so the connection
+    #    pool is torn down cleanly instead of lingering until process exit.
+    from kb.embedder import close_client
+    try:
+        await close_client()
+    except Exception as e:
+        log.warning("Embeddings client shutdown failed: %s", e)
+    log.info("Bot shutdown complete")
+
+
 @bot.event
 async def on_message(message: discord.Message) -> None:
     if message.author == bot.user:

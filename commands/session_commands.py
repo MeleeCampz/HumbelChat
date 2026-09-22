@@ -15,6 +15,7 @@ import discord
 
 from bot_core.ai_client import _make_client, _validate_model
 from bot_core.history import get_active_char_key, get_history
+from bot_core.errors import extract_reply_text
 from config.characters import get_character
 from config.settings import (
     DEFAULT_MODEL,
@@ -135,7 +136,9 @@ async def _generate_overview(session: dict, guild_id: int | None, channel_id: in
             temperature=0.3,
             max_tokens=1500,
         )
-        summary = resp.choices[0].message.content or ""
+        # P1 #8: empty `choices` raises here → caught by the except below →
+        # _fallback_overview, instead of crashing with an IndexError.
+        summary = extract_reply_text(resp, default="")
         if not summary.strip():
             raise ValueError("empty overview")
         return summary.strip()

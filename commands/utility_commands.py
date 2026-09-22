@@ -11,6 +11,7 @@ import httpx
 from config.settings import DEFAULT_MODEL, FALLBACK_MODELS
 from bot_core.history import get_active_char_key, get_history
 from bot_core.ai_client import _make_client, _validate_model
+from bot_core.errors import extract_reply_text
 from config.characters import get_character
 
 log = logging.getLogger("bot.utility_commands")
@@ -21,6 +22,11 @@ OCR_MAX_DOWNLOAD_BYTES = 8 * 1024 * 1024
 # NOTE: .heic/.heif are intentionally NOT listed — Discord attachments arrive
 # without a usable MIME mapping for them and the vision backend rejects them.
 OCR_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif")
+
+# /summarize <url> fetch guard (P1 #16): stream + cap so an oversized response
+# is aborted mid-download instead of being buffered whole. The summariser only
+# ever slices the first 32 KB of the body, so we never need more than this.
+SUMMARIZE_MAX_FETCH_BYTES = 1 * 1024 * 1024  # 1 MB
 
 # Extension → MIME type for the data-URI sent to the vision model.
 _OCR_MIME_MAP = {
@@ -85,6 +91,12 @@ async def handle_remind_command(
         )
         return
 
+    # P1 #15: cap absurd delays (e.g. 10^9 s) so the reminder — and its
+    # background task — doesn't live forever. Tell the user we clamped it.
+    from bot_core.reminders import MAX_REMINDER_DELAY_SEC, clamp_reminder_delay
+    clamped = delay > MAX_REMINDER_DELAY_SEC
+    delay = clamp_reminder_delay(delay)
+
     channel_id = interaction.channel.id
 
     # Fail fast: refuse to schedule into a channel we cannot actually write
@@ -107,7 +119,13 @@ async def handle_remind_command(
     schedule_reminder(channel_id, message, delay)
 
     unit_singular = time_unit.rstrip("s") if time_value != 1 else time_unit
-    prompt_text = "✅ Reminder set for **" + str(time_value) + " " + unit_singular + "** from now!"
+    if clamped:
+        prompt_text = (
+            f"✅ Reminder set for **{delay // 86400} days** from now "
+            f"(max I can schedule — you asked for more)."
+        )
+    else:
+        prompt_text = "✅ Reminder set for **" + str(time_value) + " " + unit_singular + "** from now!"
     confirmation = prompt_text + f'\n📝 I\'ll ping you with: "{message}"'
     await interaction.followup.send(confirmation)
 
@@ -183,6 +201,9 @@ async def handle_ocr_command(
             temperature=0,
             max_tokens=4096,
         )
+        # P1 #8: empty `choices` raises AIBackendError → caught below as a
+        # friendly "OCR failed" message instead of an IndexError.
+        reply = extract_reply_text(resp, default="(no text found)")
     except Exception as e:
         log.error("OCR request failed: %s", e)
         await interaction.followup.send(
@@ -190,7 +211,6 @@ async def handle_ocr_command(
             
         )
         return
-    reply = resp.choices[0].message.content or "(no text found)"
 
     MAX_LEN = 1900
     if len(reply) <= MAX_LEN:
@@ -217,15 +237,25 @@ async def handle_summarize_command(
     text = ""
     src = ""
     if file_url:
+        # P1 #16: hardened fetch — scheme/SSRF guard + streamed size cap (the
+        # old code did client.get() + resp.text, buffering the entire body and
+        # with no guard against file:// / internal hosts).
+        from utils import url_fetch
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(file_url, timeout=10.0)
-                resp.raise_for_status()
-                text = resp.text[:32000]
-                src = f"file from `{file_url[:80]}...`"
+            data = await url_fetch.fetch_url(
+                file_url, max_bytes=SUMMARIZE_MAX_FETCH_BYTES, timeout=10.0,
+            )
+            text = data.decode("utf-8", errors="replace")[:32000]
+            src = f"file from `{file_url[:80]}...`"
+        except url_fetch.UnsafeUrlError as e:
+            await interaction.followup.send(f"⚠️ URL not allowed: {e}")
+            return
+        except url_fetch.UrlTooLargeError as e:
+            await interaction.followup.send(f"⚠️ {e}")
+            return
         except Exception as e:
             log.error("Failed to fetch file_url: %s", e)
-            await interaction.followup.send(f"⚠️ Error fetching URL: {e}")
+            await interaction.followup.send(f"⚠️ Error fetching URL: {e.__class__.__name__}")
             return
     else:
         guild_id = interaction.guild_id or 0
@@ -263,7 +293,10 @@ async def handle_summarize_command(
                 temperature=0.3,
                 max_tokens=2048,
             )
-            summary = resp.choices[0].message.content or "(empty)"
+            # P1 #8: empty `choices` raises here → caught by the per-model
+            # except → the next fallback model gets a turn (previously this
+            # crashed the whole command with an IndexError).
+            summary = extract_reply_text(resp, default="(empty)")
             break  # Success!
         except Exception as e:
             log.error("Summarize error with model %s: %s", model, e)
@@ -326,11 +359,12 @@ async def handle_translate_command(
             temperature=0.3,
             max_tokens=4096,
         )
+        # P1 #8: empty `choices` → friendly "Translation failed" (see OCR).
+        translated = extract_reply_text(resp, default="(translation failed)")
     except Exception as e:
         log.error("Translate request failed: %s", e)
         await interaction.followup.send(f"⚠️ Translation failed: {e.__class__.__name__}. Please try again.")
         return
-    translated = resp.choices[0].message.content or "(translation failed)"
 
     MAX_LEN = 1900
     if len(translated) <= MAX_LEN:

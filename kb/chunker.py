@@ -16,6 +16,7 @@ Usage
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import pathlib
 import re
@@ -59,6 +60,19 @@ class Chunker:
         Returns
         -------
         List of ``ChunkInfo`` objects representing semantically coherent sections.
+
+        The (blocking) read + regex pass runs in a worker thread — P0 #4:
+        chunking a large document on the event loop froze the whole bot.
+        """
+        return await asyncio.to_thread(cls.split_file_sync, file_path)
+
+    @classmethod
+    def split_file_sync(
+        cls,
+        file_path: str | pathlib.Path,
+    ) -> list[ChunkInfo]:
+        """Synchronous chunking core — call via :meth:`split_file` (or
+        ``asyncio.to_thread``) from async code.
         """
         root = pathlib.Path(file_path)
         if not root.exists():

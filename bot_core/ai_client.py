@@ -12,7 +12,7 @@ import time
 
 import asyncio
 from contextlib import asynccontextmanager
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, APIStatusError
 
 from bot_core.history import ensure_history, get_history, set_history
 from config.settings import (
@@ -185,6 +185,61 @@ def _scaled_timeout(total_chars: int) -> float:
     return min(REQUEST_TIMEOUT + extra, REQUEST_TIMEOUT * 4)
 
 
+# ─────────────────────────────────────────────────────────────────────────
+#  P1 #7: bounded retry of the *completion* call on transient failures
+# ─────────────────────────────────────────────────────────────────────────
+# Total attempts = 2 (one retry) to keep worst-case latency bounded; the
+# backoff delay is overridable so tests don't actually sleep.
+_COMPLETION_MAX_ATTEMPTS = 2
+_COMPLETION_RETRY_BACKOFF_S = 1.5
+
+
+def _is_transient_api_failure(exc: BaseException) -> bool:
+    """True for failures a retry is worth: 5xx, 429, timeouts, connections.
+
+    Never retries 4xx auth/validation/model-not-found (400/401/403/404 etc.).
+    429 is included: the backend said "slow down" — one retry after a short
+    backoff is worth trying (the retry-then-raise path still surfaces the
+    backend's Retry-After message if it fails again).
+    """
+    if isinstance(exc, APIStatusError):
+        return exc.status_code == 429 or exc.status_code >= 500
+    name = type(exc).__name__
+    return name in (
+        "APIConnectionError", "APITimeoutError",
+        "ConnectError", "ConnectTimeout", "ReadTimeout", "PoolTimeout",
+        "ConnectionError", "RemoteProtocolError",
+        "TimeoutError",
+    ) or "timed out" in str(exc).lower()
+
+
+async def _call_completion_with_retry(client: AsyncOpenAI, **kwargs):
+    """Invoke ``chat.completions.create`` with one retry on transient errors.
+
+    P1 #7: a transient 5xx / timeout / connection blip used to fail the whole
+    turn on the first attempt. Retried once after a short exponential
+    backoff; anything non-transient (4xx, malformed request) re-raises
+    immediately. NOTE: this wraps ONLY the completion call — the RAG query
+    rewrite sub-call in ``kb.retrievers`` keeps its own budget and is never
+    retried here.
+    """
+    last_exc: BaseException | None = None
+    for attempt in range(_COMPLETION_MAX_ATTEMPTS):
+        try:
+            return await client.chat.completions.create(**kwargs)
+        except Exception as e:  # noqa: BLE001 — classified by the caller
+            if attempt + 1 >= _COMPLETION_MAX_ATTEMPTS or not _is_transient_api_failure(e):
+                raise
+            last_exc = e
+            delay = _COMPLETION_RETRY_BACKOFF_S * (2 ** attempt)
+            log.warning(
+                "Transient AI failure (%s: %s); retrying completion call in %.1fs (attempt %d/%d)",
+                type(e).__name__, e, delay, attempt + 1, _COMPLETION_MAX_ATTEMPTS,
+            )
+            await asyncio.sleep(delay)
+    raise last_exc  # pragma: no cover — unreachable, loop always returns/raises
+
+
 def _resolve_request_params(char_obj) -> tuple[int, float]:
     """Resolve max_tokens and temperature from character config."""
     _char_max = char_obj.max_tokens if (char_obj and char_obj.max_tokens) else None
@@ -327,7 +382,10 @@ async def ask_ai(
         timeout_sec = _scaled_timeout(_total_chars)
 
         try:
-            resp = await client.chat.completions.create(
+            # P1 #7: one bounded retry on transient 5xx/timeout/connection
+            # failures before we give up on the turn.
+            resp = await _call_completion_with_retry(
+                client,
                 model=effective_model,
                 messages=messages,
                 temperature=_request_temp,
@@ -335,6 +393,13 @@ async def ask_ai(
                 stream=False,
                 timeout=timeout_sec,
             )
+            # P1 #8: extract the reply safely — an empty `choices` array is a
+            # malformed backend response, not a crash. `extract_reply_text`
+            # returns a placeholder for empty *content* and raises AIBackendError
+            # for empty *choices*, which the except below turns into a
+            # user-friendly message.
+            from bot_core.errors import extract_reply_text
+            reply_text = extract_reply_text(resp)
         except Exception as e:
             # §3.7: structured error taxonomy — surface a user-friendly message
             # instead of a raw SDK traceback.
@@ -345,11 +410,10 @@ async def ask_ai(
                 # Classifier is pure (returns, never raises) — re-raise the
                 # classified error so handlers can show the retry-after message.
                 raise classified from e
-            if isinstance(classified, ValueError) or getattr(classified, "category", "") in ("timeout", "model_not_found", "backend_down"):
+            if isinstance(classified, ValueError) or getattr(classified, "category", "") in ("timeout", "model_not_found", "backend_down", "backend_error"):
                 raise ValueError(classified.user_message) from e
             raise
 
-        reply_text = resp.choices[0].message.content or "(empty response)"
         log.info("RAW_AI_RESPONSE_START\n%s\nRAW_AI_RESPONSE_END", reply_text)
 
         # ── Update history ─────────────────────────────────────────────
@@ -360,8 +424,11 @@ async def ask_ai(
         history.append({"role": "user", "content": user_message})
         history.append({"role": "assistant", "content": reply_text})
         max_entries = 2 * CONTEXT_WINDOW if CONTEXT_WINDOW else 50
-        if len(history) > max_entries:
-            set_history(guild_id, channel_id, history[-max_entries:])
+        # P0 #2: persist EVERY turn — set_history() is the only disk write and
+        # used to run only on cap overflow, so a restart before the channel
+        # filled its window lost up to `max_entries` recent turns.  Writing the
+        # trimmed tail also caps the in-memory list at the same window.
+        set_history(guild_id, channel_id, history[-max_entries:])
 
         approx_tokens = max(1, len(reply_text) // 4)  # §4.3: char-based estimate, not word count
         return reply_text, {"model_used": effective_model, "tokens_approx": approx_tokens}

@@ -31,24 +31,29 @@ _reminders: dict[str, dict] = {}
 _tasks: dict[str, asyncio.Task] = {}
 
 
-def _resolve_bot():
-    """The running bot instance, or None if it is not usable right now.
-
-    Kept separate from the diagnostic probe in :func:`_fire` so tests can
-    monkeypatch exactly one thing.  Returns ``None`` for both "no bot"
-    and "bot present but not ready" — only the error reason distinguishes.
-    """
-    try:
-        from main import bot as _bot
-    except Exception:
-        return None
-    return _bot if getattr(_bot, "is_ready", lambda: False)() else None
-
 # How many failed delivery attempts are tolerated before a reminder is
 # dropped.  Protects permanently-undeliverable reminders (e.g. a channel
 # whose permissions were revoked after scheduling) from being retried on
 # every restart/reconnect forever.
 MAX_DELIVERY_ATTEMPTS = 3
+
+# P1 #15: hard cap on a reminder's delay (seconds) — 30 days. Without it an
+# absurd request (e.g. 10^9 s) is persisted and its background task + JSON
+# entry live forever. Both the /remind command (user-facing clamp + notice) and
+# schedule_reminder (the store's own guard) share this constant + clamp.
+MAX_REMINDER_DELAY_SEC = 30 * 24 * 3600
+
+
+def clamp_reminder_delay(delay_sec: int) -> int:
+    """Clamp a requested reminder delay to [0, MAX_REMINDER_DELAY_SEC].
+
+    P1 #15: arbitrary (even absurd) delays were accepted and persisted
+    forever. Callers use this so a 40-day request becomes a 30-day reminder
+    instead of an unbounded one. Negative/zero values are returned as-is (the
+    <10 s minimum is enforced elsewhere, by the command)."""
+    if delay_sec > MAX_REMINDER_DELAY_SEC:
+        return MAX_REMINDER_DELAY_SEC
+    return delay_sec
 
 # Transient failures: the bot instance itself is momentarily unavailable
 # (gateway hiccup / resume in progress).  These get an IN-SESSION backoff
@@ -263,6 +268,10 @@ def schedule_reminder(channel_id: int, message: str, delay_sec: int) -> str:
 
     Returns the reminder id.  Call from an async context.
     """
+    # P1 #15: clamp absurd delays so nothing is persisted for years. The
+    # /remind command already clamps + tells the user; this is the store's
+    # own guard so the invariant holds no matter who calls schedule_reminder.
+    delay_sec = clamp_reminder_delay(delay_sec)
     rid = uuid.uuid4().hex[:12]
     _reminders[rid] = {
         "channel_id": channel_id,

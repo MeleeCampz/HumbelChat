@@ -466,13 +466,14 @@ class TestPersistence:
 
     @pytest.mark.asyncio
     async def test_metadata_records_schema_version(self, kb_dir, tmp_path):
+        from kb.index import _SCHEMA_VERSION
         store = make_store(tmp_path, kb_dir)
         install_fake_embedder(store)
         await store.load()
         conn = sqlite3.connect(str(store.db_path))
         meta = dict(conn.execute("SELECT key, value FROM metadata").fetchall())
         conn.close()
-        assert meta["schema_version"] == "3"
+        assert meta["schema_version"] == _SCHEMA_VERSION
         assert str(store.kb_path) == meta["kb_path"]
 
 

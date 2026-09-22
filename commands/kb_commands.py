@@ -7,7 +7,7 @@ import pathlib
 
 import httpx
 
-from kb.storage import validate_upload, list_kb_files
+from kb.storage import validate_upload_async, list_kb_files_async
 
 log = logging.getLogger("bot.commands.kb")
 
@@ -32,19 +32,25 @@ async def handle_upload_kb(
         data = await attachment.read()
         fname = attachment.filename or "attachment"
     elif url:
+        # P1 #16: hardened fetch -- scheme/SSRF guard + streamed size cap.
+        # (The old code did client.get() + resp.content, buffering the entire
+        # body before the 20 MB check, with no file:// / internal-host guard.)
+        from utils import url_fetch
         try:
-            async with httpx.AsyncClient(timeout=UPLOAD_DOWNLOAD_TIMEOUT) as client:
-                resp = await client.get(url, follow_redirects=True)
-                resp.raise_for_status()
-                data = resp.content
-        except (httpx.HTTPError, asyncio.TimeoutError) as exc:
+            data = await url_fetch.fetch_url(
+                url,
+                max_bytes=UPLOAD_MAX_DOWNLOAD_BYTES,
+                timeout=UPLOAD_DOWNLOAD_TIMEOUT,
+            )
+        except url_fetch.UnsafeUrlError as exc:
+            await interaction.followup.send(f"⚠️ URL not allowed: {exc}")
+            return
+        except url_fetch.UrlTooLargeError as exc:
+            await interaction.followup.send(f"⚠️ Remote file too large: {exc}")
+            return
+        except (httpx.HTTPError, asyncio.TimeoutError, OSError) as exc:
             await interaction.followup.send(
                 f"⚠️ Failed to download `{url[:120]}`: {exc.__class__.__name__}"
-            )
-            return
-        if len(data) > UPLOAD_MAX_DOWNLOAD_BYTES:
-            await interaction.followup.send(
-                f"⚠️ Remote file too large (> {UPLOAD_MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB)."
             )
             return
         fname = url.split("?")[0].split("/")[-1] or "remote_file"
@@ -55,8 +61,10 @@ async def handle_upload_kb(
         return
 
     # --- step 2 & 3: validate + write to KB_PATH ---
+    # P0 #4: the write + SHA-256 hash run in a worker thread so a large
+    # upload can't freeze the event loop (gateway/typing/voice).
     try:
-        dest, summary = validate_upload(data, filename=fname, kb_path=None, subfolder=subfolder)
+        dest, summary = await validate_upload_async(data, filename=fname, kb_path=None, subfolder=subfolder)
     except ValueError as exc:
         await interaction.followup.send(f"Upload rejected: **{exc}**")
         return
@@ -78,7 +86,9 @@ async def handle_upload_kb(
     approx_chunks_display = ""
     try:
         from config.settings import CHUNK_TARGET
-        n = len(pathlib.Path(dest).read_text(encoding="utf-8", errors="replace"))
+        n = len(await asyncio.to_thread(
+            pathlib.Path(dest).read_text, encoding="utf-8", errors="replace"
+        ))
         if CHUNK_TARGET:
             approx_chunks_display = f" (approx {n // CHUNK_TARGET} chunks)"
     except Exception:
@@ -117,21 +127,21 @@ async def handle_list_kb_docs(interaction, subfolder_path: str | None = None):
     from config.settings import KB_PATH
 
     if subfolder_path:
-        # Subfolder view: recurse into that path
-        docs = list_kb_files(KB_PATH, subfolder=subfolder_path, recursive=True)
+        # Subfolder view: recurse into that path (P0 #4: off the event loop)
+        docs = await list_kb_files_async(KB_PATH, subfolder=subfolder_path, recursive=True)
         lines: list[str] = [
             f"**Knowledge Base** documents — `{subfolder_path}`",
             "📂 **Subdirectories:**",
         ]
         # Show nested directories within the subfolder
         scan_root = pathlib.Path(KB_PATH) / subfolder_path
-        subdirs = get_root_directories(scan_root)
+        subdirs = await asyncio.to_thread(get_root_directories, scan_root)
         for d in sorted(subdirs):
             lines.append(f"  📂 `{d}`")
     else:
-        # Root view: show directories + root-level files only
-        docs = list_kb_files(KB_PATH, subfolder=None, recursive=False)
-        dirs = get_root_directories(KB_PATH)
+        # Root view: show directories + root-level files only (P0 #4: off the event loop)
+        docs = await list_kb_files_async(KB_PATH, subfolder=None, recursive=False)
+        dirs = await asyncio.to_thread(get_root_directories, KB_PATH)
         lines = [
             "**Knowledge Base** documents",
             "📁 **Root directories:**",
@@ -170,8 +180,12 @@ async def handle_reindex_kb(interaction):
     await interaction.response.defer()
 
     # --- Phase 2: use persistent vector index (KBIndexStore) ---
+    # P0 #1: rebuild in a SEPARATE KBIndexStore, then swap it into the
+    # module singleton via replace_index_store().  The old code rebuilt a
+    # throwaway store while the live RAG path kept serving the stale
+    # in-memory singleton until the bot restarted.
     from kb.index import KBIndexStore
-    from kb.retrievers import retrieve_kb_documents, DEFAULT_METHOD
+    from kb.retrievers import retrieve_kb_documents, DEFAULT_METHOD, replace_index_store
 
     strategy = DEFAULT_METHOD
     msg_parts: list[str] = []
@@ -181,11 +195,18 @@ async def handle_reindex_kb(interaction):
         idx = await store.load(force_rebuild=True)
 
         if idx is None or idx.is_empty():
-            # Index didn't build — check why (no KB files? no embedding backend?)
-            docs = list_kb_files(kb_path, recursive=True)
+            # Index didn't build — check why (no KB files? no embedding backend?).
+            # The old singleton keeps serving (its cache was only dropped for
+            # this throwaway store), so the bot degrades to "old index +
+            # keyword fallback" rather than going dark.
+            docs = await list_kb_files_async(kb_path, recursive=True)
             msg_parts.append("❌ Vector index could not be built.")
             msg_parts.append(f"KB has {len(docs)} file(s) but 0 chunks.")
         else:
+            # Swap the rebuilt store into the singleton BEFORE the sanity test
+            # so the sanity check validates the index RAG will actually serve.
+            replace_index_store(store, kb_path)
+
             doc_count = idx.count()
             msg_parts.append(f"✅ Successfully rebuilt the vector index for **{kb_path}**.")
             msg_parts.append(f"   • **{doc_count:,}** chunk(s) indexed")
@@ -201,8 +222,6 @@ async def handle_reindex_kb(interaction):
                     msg_parts.append("   • ⚠️ Retrieval returned 0 documents for a sample query")
             except Exception as re:
                 msg_parts.append(f"   • ⚠️ Retrieval sanity check failed: {re}")
-
-        await store.shutdown()
 
     except Exception as e:
         log.error("Reindexing failed: %s", e, exc_info=True)
