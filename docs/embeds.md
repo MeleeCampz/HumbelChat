@@ -1,7 +1,7 @@
-# Embeds (Beyond20-style delivery)
+# Embeds (structured delivery)
 
 AI replies are requested non-streaming and delivered as **Discord embeds** —
-the same style the Beyond20 bot uses for rolls: a title, a description, and
+the same structured layout a roll card uses: a title, a description, and
 inline fields. Structured replies (headings, tables, lists) look far cleaner
 as an embed than as plain text, because Discord messages only support a small
 Markdown subset (no tables).

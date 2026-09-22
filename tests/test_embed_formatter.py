@@ -1,4 +1,4 @@
-"""Tests for Beyond20-style embed formatting (utils/embed_formatter.py).
+"""Tests for structured Discord-embed formatting (utils/embed_formatter.py).
 
 Covers:
   - block extraction (headings, tables, code, lists, paragraphs)

@@ -83,7 +83,7 @@ STT runs on the same OpenAI-compatible backend as chat (`INFER_URL` / `INFER_API
 
 | Variable | Description | Default |
 |---|---|---|
-| `EMBED_FORMAT` | Render /ai replies as Beyond20-style Discord embeds; set to 0/false/no for classic plain text | `1` |
+| `EMBED_FORMAT` | Render /ai replies as structured Discord embeds; set to 0/false/no for classic plain text | `1` |
 
 Replies are requested non-streaming and delivered as embeds (title +
 description + inline fields); long structured replies become multiple embed
