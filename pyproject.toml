@@ -58,6 +58,9 @@ all = [
 dev = [
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
+    # The test suite imports numpy directly (tests/test_transcriber.py), so it
+    # is a dev/test dependency in its own right.
+    "numpy==1.26.4",
 ]
 
 [project.scripts]

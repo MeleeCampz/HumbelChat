@@ -4,6 +4,8 @@ A self-hosted Discord bot with AI chat, configurable AI personas, and optional R
 
 ## Quick start
 
+Requires **Python 3.10+** (3.12 recommended — see `.python-version`).
+
 ```bash
 python3 -m venv venv
 source venv/bin/activate   # Linux/macOS
@@ -11,6 +13,14 @@ pip install -r requirements.txt
 cp .env.example .env
 # edit .env and set at minimum: DISCORD_BOT_TOKEN, INFER_URL, INFER_API_KEY
 python main.py
+```
+
+Prefer the packaged install (base + optional extras) instead of `requirements.txt`:
+```bash
+pip install -e .                # base (AI chat + RAG text retrieval)
+pip install -e '.[stt]'         # + local STT (faster-whisper)
+pip install -e '.[rag-vector]'  # + vector retrieval (fastembed)
+pip install -e '.[all]'         # everything
 ```
 
 Or use a startup script (the bot runs in a detached tmux session so it survives browser/terminal shutdowns):
@@ -22,7 +32,7 @@ Or use a startup script (the bot runs in a detached tmux session so it survives 
 ## Docs
 
 - [Configuration](./docs/configuration.md) — env vars, response-length/token defaults, and fallback behavior
-- [Embeds](./docs/embeds.md) — Beyond20-style embed rendering for /ai replies
+- [Embeds](./docs/embeds.md) — structured Discord-embed rendering for /ai replies
 - [Characters](./docs/characters.md) — `characters.json` format and per-character settings
 - [RAG / Knowledge Base](./docs/rag.md) — retrieval methods, smart chunking, supported file types
 - [Voice Recording](./docs/voice-recording.md) — per-speaker voice capture for STT (pipeline, manifest format, troubleshooting)
@@ -56,19 +66,17 @@ Full reference: [Commands](./docs/commands.md)
 
 ```
 discord-ai-bot/
-├── main.py
-├── bot_core/
-│   ├── ai_client.py
-│   ├── history.py
-│   └── voice_recorder.py
-├── config/
-│   ├── settings.py
-│   └── characters.py
-├── commands/
-├── kb/
-├── utils/
+├── main.py            # entry point (wires bot, commands, startup)
+├── config/            # settings.py (env), characters.py
+├── bot_core/          # ai_client, history, voice_recorder, transcriber, sessions, ...
+├── commands/          # slash + prefix command handlers
+├── kb/                # storage, chunker, embedder, retrievers, vector_db, ...
+├── utils/             # embed_formatter, response_splitter, url_fetch, typing_loop, ...
+├── data/              # runtime data (knowledge base, recordings, session notes)
 ├── botctl.sh          # tmux-based run/stop/restart helper
-└── docs/
+├── requirements.txt   # pinned deps (see pyproject.toml for optional extras)
+├── pyproject.toml     # packaging: base + [stt] [rag-vector] [dev] extras
+└── docs/              # in-depth docs (index: docs/README.md)
 ```
 
 ## License

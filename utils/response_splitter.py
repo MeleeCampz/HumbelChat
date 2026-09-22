@@ -137,7 +137,7 @@ async def send_long_response_embedded(
     reply_text: str,
     char_name: str = "",
 ) -> bool:
-    """Deliver *reply_text* as Beyond20-style Discord embed(s).
+    """Deliver *reply_text* as structured Discord embed(s).
 
     The reply is parsed into one or more ``discord.Embed`` objects (title +
     description + inline fields; tables become aligned monospace blocks —
@@ -159,7 +159,7 @@ async def send_long_response_embedded(
             return False
 
         # Discord allows at most 10 embeds per message.  Batch the embeds so
-        # a long reply becomes ONE compact message (Beyond20 style) instead of
+        # a long reply becomes ONE compact message (embed style) instead of
         # a flood of single-embed messages; only pathologically long replies
         # (>10 sections) spill into a second message.
         _MAX_EMBEDS_PER_MSG = 10
