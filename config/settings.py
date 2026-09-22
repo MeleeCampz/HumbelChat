@@ -56,6 +56,10 @@ REQUEST_TIMEOUT: int = _safe_int(os.getenv("AI_REQUEST_TIMEOUT"), 120)
 # a positive value starts a periodic background check at that interval.
 AI_HEALTH_CHECK_INTERVAL: int = _safe_int(os.getenv("AI_HEALTH_CHECK_INTERVAL"), 0)
 AI_HEALTH_CHECK_TIMEOUT: int = _safe_int(os.getenv("AI_HEALTH_CHECK_TIMEOUT"), 5)
+# P1 #6: fallback (seconds) used when a 429 carries no parseable Retry-After
+# header. The header value itself is clamped to [5, 120] s (see
+# bot_core.errors._parse_retry_after); this is only the no-header fallback.
+AI_RETRY_AFTER_FALLBACK_S: int = _safe_int(os.getenv("AI_RETRY_AFTER_FALLBACK_S"), 30)
 MAX_TOKENS: int = _safe_int(os.getenv("MAX_TOKENS"), 2000)
 MAX_TOKENS_HARD_CAP: int = _safe_int(os.getenv("MAX_TOKENS_HARD_CAP"), 4096)
 
@@ -101,6 +105,10 @@ def _or_default(value: str | None, default: str) -> str:
 #  EMBEDDING MODEL
 # ════════════════════════════════════
 EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "nomic-embed-text:latest")
+# P2 #21: per-request timeout (seconds) for the /embeddings endpoint. Was
+# hardcoded to 30 in kb/embedder; configurable here now. The HTTP client is
+# shared across batches (keep-alive), so only this per-request timeout applies.
+EMBED_TIMEOUT: int = _safe_int(os.getenv("EMBED_TIMEOUT"), 30)
 
 # ════════════════════════════════════
 #  KNOWLEDGE BASE
@@ -199,7 +207,11 @@ RAG_WINDOW_LINES: int = _safe_int(os.getenv("RAG_WINDOW_LINES"), 80)
 # embeds them in one batch, and merges the rankings (reciprocal rank fusion).
 # Confident queries pay nothing extra.  Set RAG_QUERY_REWRITER=0 to disable entirely.
 RAG_QUERY_REWRITER: bool = os.getenv("RAG_QUERY_REWRITER", "1") not in ("0", "false", "no")
-RAG_REWRITE_MIN_SCORE: float = float(os.getenv("RAG_REWRITE_MIN_SCORE", "0.35") or 0.35)
+# P1 #10: route through _safe_float so a garbage value (e.g. RAG_REWRITE_MIN_SCORE=abc)
+# falls back to the 0.35 default instead of raising ValueError at *import* — the
+# same treatment every other numeric env var above gets. (The old
+# ``float(...) or 0.35`` never guarded against an unparseable string.)
+RAG_REWRITE_MIN_SCORE: float = _safe_float(os.getenv("RAG_REWRITE_MIN_SCORE"), 0.35)
 RAG_QUERY_MAX_EXPANSIONS: int = _safe_int(os.getenv("RAG_QUERY_MAX_EXPANSIONS"), 3)
 # Wall-clock budget (seconds) for the LLM rewrite call itself.
 RAG_REWRITE_BUDGET_SECONDS: int = _safe_int(os.getenv("RAG_REWRITE_BUDGET_SECONDS"), 10)

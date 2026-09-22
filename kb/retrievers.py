@@ -85,6 +85,73 @@ async def _ensure_index_store(kb_path: str | pathlib.Path) -> Optional["KBIndexS
     return _index_store
 
 
+# ─────────────────────── Singleton store management ───────────────────────
+
+def replace_index_store(
+    store: "KBIndexStore | None",
+    kb_path: str | pathlib.Path | None = None,
+) -> None:
+    """Atomically swap in a freshly built index store (P0 #1).
+
+    ``/reindex_kb`` rebuilds the index in a *separate* ``KBIndexStore``; without
+    this swap the module singleton that the live RAG path uses keeps serving
+    the **old** in-memory index until the bot restarts.  After the swap, the
+    next ``retrieve_kb_documents`` / ``update_kb_document`` call immediately
+    uses the rebuilt index.
+
+    The previous store is shut down in the background (best effort) so its
+    resources are released without blocking the swap.  Pass ``kb_path`` to
+    remember which path the store belongs to (used for log context).
+    """
+    global _index_store, _kb_path_for_store
+    old_store = _index_store
+    _index_store = store
+    if kb_path is not None:
+        _kb_path_for_store = kb_path
+    logger.info(
+        "Vector index store swapped in (%d chunks)%s",
+        store.get_index().count() if store is not None and store.get_index() else 0,
+        f" (was {old_store.get_index().count()} chunks)" if old_store is not None and old_store.get_index() else "",
+    )
+    if old_store is not None and old_store is not store:
+        # Best-effort async cleanup of the replaced store.  It is no longer
+        # referenced by any retrieval path, so shut it down out-of-band.
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_safe_shutdown_store(old_store))
+        except RuntimeError:
+            # No running loop (e.g. called from a sync test) — nothing to do;
+            # the store's state is already persisted to disk.
+            pass
+
+
+async def _safe_shutdown_store(store: "KBIndexStore") -> None:
+    try:
+        await store.shutdown()
+    except Exception as exc:
+        logger.warning("Shutdown of replaced index store failed: %s", exc)
+
+
+async def reset_index_store() -> None:
+    """Clear the singleton so the next retrieval call rebuilds it.
+
+    Useful after the on-disk cache was invalidated out-of-band.  Unlike
+    :func:`replace_index_store` this does NOT take a replacement store — the
+    next ``_ensure_index_store`` call loads a fresh one from disk.
+    """
+    global _index_store, _kb_path_for_store
+    old_store = _index_store
+    _index_store = None
+    _kb_path_for_store = None
+    if old_store is not None:
+        logger.info("Vector index store reset; will reload from disk on next use")
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_safe_shutdown_store(old_store))
+        except RuntimeError:
+            pass
+
+
 # ───────────────────────────── Helpers ──────────────────────────────
 
 async def _keyword_fallback(
@@ -94,11 +161,13 @@ async def _keyword_fallback(
     window_lines: int,
 ) -> list[tuple[str, str]]:
     """Fallback to keyword/TF-IDF retrieval when vector index is unavailable."""
-    from kb.reader import read_kb_files, get_relevant_chunks
+    # P0 #4: the file scan + window extraction is blocking IO — run it in a
+    # worker thread so a large KB can't freeze the event loop mid-fallback.
+    from kb.reader import read_kb_files_async, get_relevant_chunks_async
 
-    scored = read_kb_files(kb_path, query=query, top_n=top_n * 3, max_lines_per_file=300)
+    scored = await read_kb_files_async(kb_path, query=query, top_n=top_n * 3, max_lines_per_file=300)
     doc_names = [name for name, _ in scored[:top_n]] if scored else []
-    chunks = get_relevant_chunks(kb_path, doc_names, query=query, window_lines=window_lines)
+    chunks = await get_relevant_chunks_async(kb_path, doc_names, query=query, window_lines=window_lines)
     logger.info(
         "Keyword fallback: %d files ranked → %d relevant chunk(s) with ~%.0f chars",
         len(scored), len(chunks),
@@ -266,7 +335,7 @@ async def _expand_low_confidence_query(
 
 # ───────────────────────────── Strategies ─────────────────────────────
 
-def _retrieve_keyword(
+async def _retrieve_keyword(
     query: str,
     kb_path: str | pathlib.Path,
     top_n: int,
@@ -277,18 +346,21 @@ def _retrieve_keyword(
              (first 300 lines is sufficient for relevance ranking).
     Phase 2: Extract only relevant line-windows from the top-N documents
              via get_relevant_chunks(), avoiding full-file dump in context.
+
+    P0 #4: both phases are blocking filesystem IO, so the whole pass runs
+    off the event loop (see ``read_kb_files_async`` / ``get_relevant_chunks_async``).
     """
-    from kb.reader import read_kb_files, get_relevant_chunks
+    from kb.reader import read_kb_files_async, get_relevant_chunks_async
     from config.settings import RAG_WINDOW_LINES
 
     # Phase 1 — quick scoring pass (300 lines is plenty for keyword overlap)
-    scored = read_kb_files(kb_path, query=query, top_n=top_n * 3, max_lines_per_file=300)
+    scored = await read_kb_files_async(kb_path, query=query, top_n=top_n * 3, max_lines_per_file=300)
     if not scored:
         return []
 
     # Phase 2 — extract only matched windows from top documents
     doc_names = [name for name, _ in scored[:top_n]]
-    chunks = get_relevant_chunks(kb_path, doc_names, query=query, window_lines=RAG_WINDOW_LINES)
+    chunks = await get_relevant_chunks_async(kb_path, doc_names, query=query, window_lines=RAG_WINDOW_LINES)
 
     logger.info(
         "Keyword retrieval: %d files ranked → %d relevant chunk(s) with ~%.0f chars",
@@ -391,7 +463,7 @@ async def retrieve_kb_documents(
     method = strategy.lower() if strategy else DEFAULT_METHOD
 
     if method == "keyword":
-        return _retrieve_keyword(query, kb_path, top_n)
+        return await _retrieve_keyword(query, kb_path, top_n)
 
     if method == "vector":
         return await _retrieve_vector(
@@ -403,26 +475,36 @@ async def retrieve_kb_documents(
     logger.warning(
         "Unknown retrieval strategy '%s'; falling back to keyword", method
     )
-    return _retrieve_keyword(query, kb_path, top_n)
+    return await _retrieve_keyword(query, kb_path, top_n)
 
 
 async def update_kb_document(file_path: str | pathlib.Path) -> bool:
-    """Re-index or add a single KB document. Use after ``!add_kb_file``."""
+    """Re-index or add a single KB document. Use after ``!add_kb_file``.
+
+    P0 #3: concurrent first-time calls used to each build a store and race on
+    the same SQLite temp-file swap — the init is now serialized behind
+    ``_index_init_lock``.
+    """
     global _index_store, _kb_path_for_store
     if _index_store is not None and _index_store.get_index() is not None:
         return await _index_store.update_single_document(file_path)
 
-    # No store yet — initialize one (loads the disk cache) and update through it.
-    logger.warning("No index loaded; initializing store for single-document update")
-    from kb.index import KBIndexStore
-    from config.settings import KB_PATH
-    store = KBIndexStore(KB_PATH)
-    await store.load()
-    if store.get_index() is None or store.get_index().is_empty():
-        return False
-    _index_store = store
-    _kb_path_for_store = KB_PATH
-    return await _index_store.update_single_document(file_path)
+    async with _get_index_init_lock():
+        # Re-check inside the lock — a concurrent caller may have finished init.
+        if _index_store is not None and _index_store.get_index() is not None:
+            return await _index_store.update_single_document(file_path)
+
+        # No store yet — initialize one (loads the disk cache) and update through it.
+        logger.warning("No index loaded; initializing store for single-document update")
+        from kb.index import KBIndexStore
+        from config.settings import KB_PATH
+        store = KBIndexStore(KB_PATH)
+        await store.load()
+        if store.get_index() is None or store.get_index().is_empty():
+            return False
+        _index_store = store
+        _kb_path_for_store = KB_PATH
+        return await _index_store.update_single_document(file_path)
 
 
 async def sync_kb_store() -> tuple[Optional["KBVectorIndex"], dict]:
@@ -434,14 +516,15 @@ async def sync_kb_store() -> tuple[Optional["KBVectorIndex"], dict]:
     ``(index, report)`` — see ``KBIndexStore.sync_changes`` for the report
     shape.
     """
-    global _index_store
+    global _index_store, _kb_path_for_store
 
-    if _index_store is None:
-        from config.settings import KB_PATH
-        from kb.index import KBIndexStore
-        _index_store = KBIndexStore(KB_PATH)
-        await _index_store.load()
-        _kb_path_for_store = KB_PATH
+    async with _get_index_init_lock():
+        if _index_store is None:
+            from config.settings import KB_PATH
+            from kb.index import KBIndexStore
+            _index_store = KBIndexStore(KB_PATH)
+            await _index_store.load()
+            _kb_path_for_store = KB_PATH
 
     if _index_store is None:
         return None, {"ok": False, "failed": [], "error": "index store unavailable"}

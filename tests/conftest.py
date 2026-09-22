@@ -97,6 +97,23 @@ def _clear_model_list_cache():
 
 
 @pytest.fixture(autouse=True)
+def _reset_kb_retrievers_singleton(monkeypatch):
+    """Reset the vector-index singleton between tests.
+
+    ``/reindex_kb`` now swaps a freshly built store into the module-level
+    ``kb.retrievers._index_store`` singleton (P0 #1). Without this, a mock
+    store swapped in by one test would leak into the RAG path of later tests.
+    """
+    try:
+        from kb import retrievers as _r
+    except Exception:
+        return
+    monkeypatch.setattr(_r, "_index_store", None, raising=False)
+    monkeypatch.setattr(_r, "_kb_path_for_store", None, raising=False)
+    monkeypatch.setattr(_r, "_index_init_lock", None, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _no_auto_index_on_upload(monkeypatch):
     """Keep /upload_kb tests from touching the real embedding backend.
 

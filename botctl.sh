@@ -28,7 +28,7 @@ cmd_start() {
     # so a stale session cannot spawn a second bot instance.
     tmux new-session -d -s "$SESSION" -c "$SCRIPT_DIR" "./start_bot.sh"
     echo "Bot starting in detached tmux session '$SESSION'."
-    echo "  Live output:  ./botctl.sh logs   (or: tmux attach -t $SESSION)"
+    echo "  Live output:  ./botctl.sh logs   (TTY: attaches; piped: last 2000 lines)"
     echo "  File logs:    $LOG_DIR/bot.log, $LOG_DIR/dev.log"
 }
 
@@ -64,8 +64,18 @@ cmd_status() {
 }
 
 cmd_logs() {
-    # Follow the live tmux pane output (what you'd see in the terminal).
-    exec tmux follow -t "$SESSION"
+    # P1 #5: `tmux follow` does not exist (tmux 3.5a has no such command) —
+    # this used to error out.  Now: a real TTY gets an interactive attach
+    # (live scrolling, Ctrl-b d to detach); anything piped/redirected gets a
+    # non-interactive one-shot capture of the last 2000 pane lines.
+    if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+        echo "No bot session running (no tmux session '$SESSION'). Start it with: ./botctl.sh start" >&2
+        exit 1
+    fi
+    if [ -t 0 ] && [ -t 1 ]; then
+        exec tmux attach -t "$SESSION"
+    fi
+    exec tmux capture-pane -p -S -2000 -t "$SESSION" | tail -n 2000
 }
 
 case "${1:-}" in

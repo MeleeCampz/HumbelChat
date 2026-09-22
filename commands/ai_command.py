@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 
 import config.settings as _settings
-from config.characters import get_character
+from config.characters import get_character, default_character
 from bot_core import ai_client
 from bot_core.history import get_active_char_key
 from utils.background_tasks import spawn_tracked_task
@@ -35,15 +35,38 @@ async def handle_ai_command(
         log.error("Error deferring interaction: %s", e)
         return
 
-    # 2. Resolve character
+    # 2. Resolve character.
+    #    ``character_name`` is the *explicit* request (None when the user just
+    #    typed /ai with no persona). The fallback is the channel's persisted
+    #    active key, which itself defaults to the default character when no
+    #    per-channel key exists (see bot_core.history.get_active_char_key).
     char_key = character_name
+    explicit = character_name is not None
     if char_key is None:
         char_key = get_active_char_key(interaction.guild_id, interaction.channel_id)
 
     char_obj = get_character(char_key)
     if char_obj is None:
-        await interaction.followup.send(f"Character `{character_name}` not found.")
-        return
+        if explicit:
+            # The user named a character that isn't in the registry — name it.
+            await interaction.followup.send(f"Character `{character_name}` not found.")
+            return
+        # P1 #9: no character was named, but the *persisted* active key points
+        # at a character that no longer exists in characters.json (it was
+        # deleted). The old code rendered ``Character `None` not found`` (it
+        # interpolated ``character_name``, which is None here) and hard-stopped
+        # /ai. Instead, fall back to the default character and tell the user.
+        char_obj = default_character()
+        log.info(
+            "/ai: persisted active character %r not found for guild=%s channel=%s; "
+            "falling back to default %r.",
+            char_key, interaction.guild_id, interaction.channel_id, char_obj.key,
+        )
+        await interaction.followup.send(
+            f"⚠️ Your saved character `{char_key}` no longer exists, so I'm using "
+            f"**{char_obj.display}** for this message. Use `/character set` to "
+            "pick a different one."
+        )
 
     model_slug = char_obj.model or ""
     user_id = getattr(getattr(interaction, "user", None), "id", None)

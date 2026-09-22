@@ -18,7 +18,7 @@ mkdir -p "$LOG_DIR"
 if [ -f ".bot.pid" ]; then
     old_pid=$(cat .bot.pid | tr -d '[:space:]')
     if kill -0 "$old_pid" 2>/dev/null; then
-        echo "Bot already running (PID $old_pid). Use ./stop_bot.sh first."
+        echo "Bot already running (PID $old_pid). Use ./botctl.sh stop first."
         exit 1
     else
         rm -f .bot.pid

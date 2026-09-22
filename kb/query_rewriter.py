@@ -123,7 +123,10 @@ Expansions:
                 timeout=self.REWRITE_TIMEOUT_SEC,
             )
 
-            content = response.choices[0].message.content or ""
+            # P1 #8: empty `choices` raises AIBackendError → caught below →
+            # no expansions (instead of an IndexError from `choices[0]`).
+            from bot_core.errors import extract_reply_text
+            content = extract_reply_text(response, default="")
             lines = [line.strip() for line in content.split("\n") if line.strip()]
             return lines[: self.max_expansions]  # type: ignore[arg-type]
 

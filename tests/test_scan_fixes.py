@@ -106,6 +106,50 @@ class TestUploadValidation:
 
 # ─────────────────────── 3. /upload_kb URL hardening ─────────────────────────
 
+class _FakeStream:
+    def __init__(self, resp):
+        self._resp = resp
+
+    async def __aenter__(self):
+        return self._resp
+
+    async def __aexit__(self, *a):
+        return False
+
+
+def _streaming_client_factory(url, body: bytes, chunks: int = 1):
+    """Build a stand-in for ``httpx.AsyncClient`` whose ``stream()`` yields
+    *body* in *chunks* slices — this drives the REAL ``url_fetch.fetch_url``
+    streaming path (scheme guard + size cap) without touching the network."""
+    import httpx as _httpx
+
+    resp = MagicMock()
+    resp.url = _httpx.URL(url)
+    resp.raise_for_status = lambda: None
+
+    async def _aiter():
+        step = max(1, len(body) // chunks)
+        for i in range(0, len(body), step):
+            yield body[i:i + step]
+
+    resp.aiter_bytes = _aiter
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def stream(self, method, url, **kw):
+            return _FakeStream(resp)
+
+    return _Client
+
+
 class TestUploadKBUrl:
 
     @pytest.mark.asyncio
@@ -113,14 +157,9 @@ class TestUploadKBUrl:
         """The interaction must be deferred before any download starts (bug #3)."""
         from commands.kb_commands import handle_upload_kb
 
-        mock_resp = MagicMock()
-        mock_resp.content = b"tiny remote file"
-        mock_resp.raise_for_status = MagicMock()
-        mock_client = MagicMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.get = AsyncMock(return_value=mock_resp)
+        factory = _streaming_client_factory("https://example.com/doc.txt", b"tiny remote file")
 
-        with patch("commands.kb_commands.httpx.AsyncClient", return_value=mock_client), \
+        with patch("utils.url_fetch.httpx.AsyncClient", factory), \
              patch("kb.storage.KB_PATH", temp_kb_dir):
             await handle_upload_kb(ix, attachment=None, url="https://example.com/doc.txt")
 
@@ -129,17 +168,16 @@ class TestUploadKBUrl:
 
     @pytest.mark.asyncio
     async def test_url_upload_oversized_rejected(self, ix, temp_kb_dir):
-        """Downloads above the cap are rejected before validate_upload (bug #3)."""
+        """Downloads above the cap are rejected mid-stream, before validate_upload.
+
+        P1 #16: the cap must trip *while* streaming, so 5000 bytes with a 1000
+        cap is aborted (not buffered whole) and surfaced as a friendly error.
+        """
         from commands.kb_commands import handle_upload_kb
 
-        mock_resp = MagicMock()
-        mock_resp.content = b"x" * 5000
-        mock_resp.raise_for_status = MagicMock()
-        mock_client = MagicMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.get = AsyncMock(return_value=mock_resp)
+        factory = _streaming_client_factory("https://example.com/big.bin", b"x" * 5000, chunks=50)
 
-        with patch("commands.kb_commands.httpx.AsyncClient", return_value=mock_client), \
+        with patch("utils.url_fetch.httpx.AsyncClient", factory), \
              patch("commands.kb_commands.UPLOAD_MAX_DOWNLOAD_BYTES", 1000), \
              patch("kb.storage.KB_PATH", temp_kb_dir):
             await handle_upload_kb(ix, attachment=None, url="https://example.com/big.bin")
@@ -152,11 +190,10 @@ class TestUploadKBUrl:
 
         from commands.kb_commands import handle_upload_kb
 
-        mock_client = MagicMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.get = AsyncMock(side_effect=_httpx.ConnectError("refused"))
+        def _raising(*a, **k):
+            raise _httpx.ConnectError("refused")
 
-        with patch("commands.kb_commands.httpx.AsyncClient", return_value=mock_client), \
+        with patch("utils.url_fetch.httpx.AsyncClient", _raising), \
              patch("kb.storage.KB_PATH", temp_kb_dir):
             await handle_upload_kb(ix, attachment=None, url="https://dead.example/f.txt")
 
@@ -191,22 +228,23 @@ class TestSummarizeUrl:
 
     @pytest.mark.asyncio
     async def test_summarize_url_fetches_and_succeeds(self, ix):
-        """httpx must be importable in the module (bug #5) and the happy path works."""
+        """The happy path: a fetchable URL is summarized end-to-end.
+
+        P1 #16: the fetch now goes through ``utils.url_fetch.fetch_url``
+        (streaming + scheme guard), so we drive the real streaming path with a
+        fake ``httpx.AsyncClient``.
+        """
         from commands.utility_commands import handle_summarize_command
 
-        mock_resp = MagicMock()
-        mock_resp.text = "A long document to summarize."
-        mock_resp.raise_for_status = MagicMock()
-        mock_client = MagicMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.get = AsyncMock(return_value=mock_resp)
+        factory = _streaming_client_factory(
+            "https://example.com/doc.txt", b"A long document to summarize.")
 
         ai_resp = MagicMock()
         ai_resp.choices = [MagicMock(message=MagicMock(content="SUMMARY_TEXT"))]
         ai_client = MagicMock()
         ai_client.chat.completions.create = AsyncMock(return_value=ai_resp)
 
-        with patch("commands.utility_commands.httpx.AsyncClient", return_value=mock_client), \
+        with patch("utils.url_fetch.httpx.AsyncClient", factory), \
              patch("commands.utility_commands._make_client", return_value=ai_client), \
              patch("commands.utility_commands._resolve_utility_model",
                    return_value=("test-model", None, None)):

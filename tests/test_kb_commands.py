@@ -36,16 +36,10 @@ class TestUploadKBCommand:
         await ix.followup.send("placeholder", ephemeral=True)  # initialize _sent
         sent = ix._sent
 
-        # Mock httpx client
-        mock_resp = MagicMock()
-        mock_resp.content = b"Remote file content."
-        mock_resp.raise_for_status = MagicMock()
-
-        mock_client = MagicMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.get = AsyncMock(return_value=mock_resp)
-
-        with patch("httpx.AsyncClient", return_value=mock_client):
+        # P1 #16: the fetch goes through utils.url_fetch.fetch_url (streaming +
+        # scheme guard). Stub it to return the bytes so this test stays focused
+        # on the upload flow.
+        with patch("utils.url_fetch.fetch_url", new=AsyncMock(return_value=b"Remote file content.")):
             with patch("kb.storage.KB_PATH", temp_kb_dir):
                 from commands.kb_commands import handle_upload_kb
 

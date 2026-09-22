@@ -27,9 +27,55 @@ logger = logging.getLogger("kb.embedder")
 # ──────────────── Constants ───────────────────────────────────────────────
 
 from config.settings import EMBEDDING_MODEL as _DEFAULT_MODEL
+from config.settings import EMBED_TIMEOUT
 _BATCH_SIZE = 8  # documents per batch (conservative for shared inference backends)
 _RETRY_ATTEMPTS = 3          # per endpoint — transient 5xx / connection errors are common
 _RETRY_BACKOFF_SECONDS = 1.5 # base delay; multiplied by the attempt number
+
+
+# ── P2 #21: shared HTTP client ─────────────────────────────────────────────
+# The old code built a fresh ``httpx.AsyncClient`` for *every batch* (and
+# actually for every retry attempt), so no TCP connection was ever reused across
+# batches — each batch paid a full handshake to the local inference backend.
+# One process-wide client is created lazily on first use and reused for every
+# subsequent batch (keep-alive).  ``close_client()`` is called on bot shutdown
+# (see main.on_shutdown) so the connection pool is torn down cleanly.
+_shared_client: httpx.AsyncClient | None = None
+_client_lock: asyncio.Lock | None = None
+
+
+async def _get_client() -> httpx.AsyncClient:
+    """Return the shared embeddings ``httpx.AsyncClient``, creating it on first use.
+
+    Double-checked under an ``asyncio.Lock`` so concurrent first-time calls
+    create exactly one client.  The per-request timeout comes from
+    ``config.settings.EMBED_TIMEOUT`` (was hardcoded ``timeout=30`` per batch).
+    """
+    global _shared_client, _client_lock
+    if _shared_client is not None:
+        return _shared_client
+    if _client_lock is None:
+        _client_lock = asyncio.Lock()
+    async with _client_lock:
+        if _shared_client is None:
+            _shared_client = httpx.AsyncClient(timeout=EMBED_TIMEOUT)
+    return _shared_client
+
+
+async def close_client() -> None:
+    """Close + reset the shared client (idempotent). Called on bot shutdown
+    and by tests to isolate the process-wide client between event loops.
+
+    Only the *client* is reset — the lock is kept (recreating asyncio locks
+    is the one thing the codebase deliberately avoids; a single lock instance
+    is safe to reuse across loops)."""
+    global _shared_client
+    if _shared_client is not None:
+        try:
+            await _shared_client.aclose()
+        except Exception:
+            pass
+    _shared_client = None
 
 
 class Embedder:
@@ -116,29 +162,32 @@ class Embedder:
         # OpenAI-compatible embeddings endpoints are typically /embeddings or /v1/embeddings
         endpoints_to_try = remaining_suffixes
 
+        # P2 #21: reuse ONE shared client across every batch/endpoint/attempt
+        # (connection pooling / keep-alive) instead of a fresh client per call.
+        client = await _get_client()
+
         last_exc: Exception | None = None
         for suffix in endpoints_to_try:
             url = base_url + suffix
             for attempt in range(1, _RETRY_ATTEMPTS + 1):
                 try:
-                    async with httpx.AsyncClient(timeout=30) as client:
-                        resp = await client.post(url, json=payload, headers=headers)
-                        resp.raise_for_status()
-                        data = resp.json()
+                    resp = await client.post(url, json=payload, headers=headers)
+                    resp.raise_for_status()
+                    data = resp.json()
 
-                        # OpenAI-compatible response format: {"data": [...], "model": ...}
-                        if isinstance(data, dict) and "data" in data:
-                            embeddings = [d["embedding"] for d in data["data"]]  # type: ignore[index]
-                        else:
-                            raise ValueError(f"Unexpected response shape: {data}")
+                    # OpenAI-compatible response format: {"data": [...], "model": ...}
+                    if isinstance(data, dict) and "data" in data:
+                        embeddings = [d["embedding"] for d in data["data"]]  # type: ignore[index]
+                    else:
+                        raise ValueError(f"Unexpected response shape: {data}")
 
-                        logger.debug(
-                            "Embedded %d texts via %s (model=%s)",
-                            len(texts),
-                            url,
-                            self.model_name,
-                        )
-                        return embeddings
+                    logger.debug(
+                        "Embedded %d texts via %s (model=%s)",
+                        len(texts),
+                        url,
+                        self.model_name,
+                    )
+                    return embeddings
 
                 except httpx.HTTPStatusError as exc:
                     last_exc = exc
