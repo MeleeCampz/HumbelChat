@@ -101,6 +101,15 @@ def validate_upload(
             f"File too large: {len(data):,} bytes (max {MAX_FILE_SIZE:,})"
         )
 
+    # P3 #36: reject 0-byte uploads. An empty file has nothing to index and
+    # would otherwise be stored as a 0 KB document that RAG can never match —
+    # a common accident when an attachment is selected but not fully read.
+    if len(data) == 0:
+        raise ValueError(
+            f"File '{filename or 'upload'}' is empty (0 bytes). "
+            "Upload a file that actually contains content."
+        )
+
     ext = _infer_extension(filename)
 
     # Reject unsupported file types before anything touches disk.

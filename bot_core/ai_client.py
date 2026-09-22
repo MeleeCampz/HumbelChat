@@ -4,6 +4,10 @@ P2 additions:
   - Input length cap (MAX_INPUT_CHARS)
   - Per-user sliding-window rate limiting
   - RAG context injected into user message (not system prompt)
+
+P3 additions:
+  - Streaming completions (:func:`ask_ai_stream`) for live progress display
+  - Live queue-depth tracking on the global AI slot (:func:`ai_queue_depth`)
 """
 from __future__ import annotations
 
@@ -274,11 +278,265 @@ def _get_global_ai_lock() -> asyncio.Lock:
     return _global_ai_lock
 
 
+# Live queue state (P3 #26). asyncio.Lock doesn't expose how many coroutines
+# are waiting, so we track it by hand to be able to (a) tell a user how many
+# requests are ahead of them and (b) log long waits. These are mutated only on
+# the event-loop thread, so no extra locking is needed.
+_ai_active: bool = False    # True while some request holds the slot
+_ai_waiters: int = 0        # requests queued behind the active one
+
+
 @asynccontextmanager
 async def _ai_slot():
-    """Hold the process-wide AI slot for the duration of one request."""
-    async with _get_global_ai_lock():
-        yield
+    """Hold the process-wide AI slot for the duration of one request.
+
+    P3 #26: maintains the live queue counters so callers can surface
+    "queued behind N requests" feedback instead of waiting silently.
+    """
+    global _ai_active, _ai_waiters
+    _ai_waiters += 1
+    got_slot = False
+    try:
+        async with _get_global_ai_lock():
+            got_slot = True
+            _ai_waiters -= 1
+            _ai_active = True
+            try:
+                yield
+            finally:
+                _ai_active = False
+    finally:
+        # We never acquired the slot (e.g. cancelled while waiting) — drop our
+        # waiter count so the queue depth stays accurate.
+        if not got_slot:
+            _ai_waiters = max(0, _ai_waiters - 1)
+
+
+def ai_slot_busy() -> bool:
+    """True if an AI request is currently in flight (holding the slot)."""
+    return _ai_active
+
+
+def ai_queue_depth() -> int:
+    """Number of AI requests queued behind the one currently in flight."""
+    return _ai_waiters
+
+
+def _reset_ai_slot_state() -> None:
+    """Test helper: clear the queue counters + the lock (fresh event loop)."""
+    global _ai_active, _ai_waiters, _global_ai_lock
+    _ai_active = False
+    _ai_waiters = 0
+    _global_ai_lock = None
+
+
+class _AIRequestContext:
+    """Everything one AI turn needs, computed once (P3 #24/#26).
+
+    Built a single place (:func:`_build_ai_request`) and shared between the
+    non-streaming :func:`ask_ai` and the streaming :func:`ask_ai_stream`, so
+    the two paths can never diverge in how they resolve the model, RAG
+    context, messages, and timeout.
+    """
+
+    def __init__(
+        self,
+        *,
+        effective_model: str,
+        client: AsyncOpenAI,
+        messages: list[dict],
+        user_message: str,
+        guild_id: int,
+        channel_id: int,
+        username: str,
+        system_p: str,
+        rag_context: str,
+        included_names: list[str],
+        recent_history: list[dict],
+        total_chars: int,
+        max_tokens: int,
+        temperature: float,
+        timeout_sec: float,
+    ) -> None:
+        self.effective_model = effective_model
+        self.client = client
+        self.messages = messages
+        self.user_message = user_message
+        self.guild_id = guild_id
+        self.channel_id = channel_id
+        self.username = username
+        self.system_p = system_p
+        self.rag_context = rag_context
+        self.included_names = included_names
+        self.recent_history = recent_history
+        self.total_chars = total_chars
+        self.max_tokens = max_tokens
+        self.temperature = temperature
+        self.timeout_sec = timeout_sec
+
+
+def _append_user_message(username: str, user_message: str, rag_context: str) -> str:
+    """Build the *final* user-turn content: username decoration + RAG context.
+
+    P3 #37: the username is stripped of Discord markdown emphasis characters
+    so a display name like ``**bold**`` can't break the ``**{username}:**``
+    prompt-prefix formatting (it would otherwise swallow a following token).
+    """
+    safe_username = (username or "").replace("*", "")
+    base = f"**{safe_username}:** {user_message}" if safe_username else user_message
+    if rag_context:
+        base = (
+            f"[Relevant knowledge-base context]\n{rag_context}\n\n"
+            f"---\n\n"
+            f"{base}"
+        )
+    return base
+
+
+async def _build_ai_request(
+    user_message: str,
+    model_slug: str,
+    guild_id: int,
+    channel_id: int,
+    username: str = "",
+    user_id: str | int | None = None,
+) -> _AIRequestContext:
+    """Resolve model + RAG + messages for one turn, with validation.
+
+    Raises :class:`RateLimitError` (re-raised as-is) or ``ValueError`` (input
+    too long / no model) before any completion work. All shared state (history
+    read, RAG retrieval, model validation) lives here so both delivery paths
+    behave identically.
+    """
+    # ── P2-1: Input length cap ──────────────────────────────────────────
+    if len(user_message) > MAX_INPUT_CHARS:
+        raise ValueError(
+            f"Input too long: {len(user_message)} chars exceeds the "
+            f"{MAX_INPUT_CHARS}-character limit. Please shorten your message."
+        )
+
+    # ── P2-2: Rate limiting ─────────────────────────────────────────────
+    if user_id is not None:
+        check_rate_limit(str(user_id))
+
+    effective_model = (model_slug or "").strip() or DEFAULT_MODEL
+    if not effective_model:
+        raise ValueError(
+            f"No model configured for this request. Character model='{model_slug}' is empty "
+            f"and DEFAULT_MODEL is not set. Set MODEL_NAME in .env or add a model to the character."
+        )
+    log.debug("Using model '%s' for this request.", effective_model)
+
+    client = _make_client()
+    effective_model = await _validate_model(client, effective_model)
+
+    ensure_history(guild_id, channel_id)
+    history = get_history(guild_id, channel_id)
+    max_messages = CONTEXT_WINDOW
+
+    from config.characters import get_character, default_character
+    from bot_core.history import get_active_char_key
+
+    active_key = get_active_char_key(guild_id, channel_id)
+    char_obj = get_character(active_key) or default_character()
+    system_p = getattr(char_obj, "system_prompt", None) or DEFAULT_SYSTEM_PROMPT or "You are a helpful AI assistant."
+
+    # ── RAG context ──────────────────────────────────────────────────
+    rag_context = ""
+    included_names: list[str] = []
+    from kb.retrievers import retrieve_kb_documents
+    kb_docs = await retrieve_kb_documents(
+        query=user_message,
+        kb_path=KB_PATH,
+        strategy=RAG_RETRIEVAL_METHOD,
+        top_n=RAG_MAX_DOCS,
+        window_lines=RAG_WINDOW_LINES,
+        rewrite_model=effective_model,  # same model as the completion call
+    )
+    if kb_docs:
+        rag_context, included_names = _build_rag_context(kb_docs)
+
+    # ── Build messages ─────────────────────────────────────────────────
+    messages: list[dict] = []
+    # P2-3: system prompt is persona-only (no RAG)
+    if system_p:
+        messages.append({"role": "system", "content": system_p})
+
+    recent_history = history[-(2 * max_messages):] if max_messages else []
+    messages.extend(recent_history)
+
+    # P2-3: RAG context injected into the user message, right before the question
+    messages.append({"role": "user", "content": _append_user_message(username, user_message, rag_context)})
+
+    _total_chars = sum(len(m.get("content", "")) for m in messages)
+    _approx_tokens = int(_total_chars / 4)
+    log.info(
+        "ask_ai → model=%s messages_in_prompt=%d KB_files=%d system_chars=%d rag_chars=%d history_msgs=%d total_chars=%.1fK estimated_tokens=%d",
+        effective_model, len(messages), len(included_names),
+        len(system_p), len(rag_context) if rag_context else 0,
+        len(recent_history), _total_chars / 1024, _approx_tokens,
+    )
+    if included_names:
+        for display_name in included_names:
+            log.debug("RAG doc included: %s", display_name)
+
+    _request_max_tokens, _request_temp = _resolve_request_params(char_obj)
+
+    # §2.3: scale the timeout with prompt size — large RAG contexts take the
+    # backend much longer, and a flat 120 s cap caused frequent timeouts on
+    # 60 K+ token prompts. Add 0.5 s per 1000 chars of prompt (capped).
+    timeout_sec = _scaled_timeout(_total_chars)
+
+    return _AIRequestContext(
+        effective_model=effective_model,
+        client=client,
+        messages=messages,
+        user_message=user_message,
+        guild_id=guild_id,
+        channel_id=channel_id,
+        username=username,
+        system_p=system_p,
+        rag_context=rag_context,
+        included_names=included_names,
+        recent_history=recent_history,
+        total_chars=_total_chars,
+        max_tokens=_request_max_tokens,
+        temperature=_request_temp,
+        timeout_sec=timeout_sec,
+    )
+
+
+def _persist_turn(guild_id: int, channel_id: int, user_message: str, reply_text: str) -> None:
+    """Append a (user, assistant) pair to history and persist it (P0 #2).
+
+    Store the *clean* user message (not the RAG-inflated ``user_content``),
+    then write the trimmed tail to disk so a restart can't lose recent turns.
+    """
+    history = get_history(guild_id, channel_id)
+    history.append({"role": "user", "content": user_message})
+    history.append({"role": "assistant", "content": reply_text})
+    max_entries = 2 * CONTEXT_WINDOW if CONTEXT_WINDOW else 50
+    set_history(guild_id, channel_id, history[-max_entries:])
+
+
+def _friendly_ai_error(e: BaseException, *, model: str, backend_url: str) -> None:
+    """Raise the right, user-facing exception for a failed completion (P1 #7/#8).
+
+    §3.7: surface a user-friendly message instead of a raw SDK traceback. A
+    classified ``RateLimitError`` is re-raised as-is (handlers show the
+    retry-after message); known categories become a ``ValueError`` carrying the
+    friendly message; anything else propagates.
+    """
+    from bot_core.errors import classify_ai_error
+    classified = classify_ai_error(e, model=model, backend_url=backend_url)
+    log.error("AI request failed (%s): %s", getattr(classified, "category", "unknown"), e)
+    if isinstance(classified, RateLimitError):
+        raise classified from e
+    if isinstance(classified, ValueError) or getattr(classified, "category", "") in (
+        "timeout", "model_not_found", "backend_down", "backend_error",
+    ):
+        raise ValueError(classified.user_message) from e
+    raise e
 
 
 async def ask_ai(
@@ -294,104 +552,22 @@ async def ask_ai(
     Returns (reply_text, extra_info_dict).
     """
     async with _ai_slot():
-        # ── P2-1: Input length cap ──────────────────────────────────────
-        if len(user_message) > MAX_INPUT_CHARS:
-            raise ValueError(
-                f"Input too long: {len(user_message)} chars exceeds the "
-                f"{MAX_INPUT_CHARS}-character limit. Please shorten your message."
-            )
-
-        # ── P2-2: Rate limiting ─────────────────────────────────────────
-        if user_id is not None:
-            check_rate_limit(str(user_id))
-
-        effective_model = (model_slug or "").strip() or DEFAULT_MODEL
-        if not effective_model:
-            raise ValueError(
-                f"No model configured for this request. Character model='{model_slug}' is empty "
-                f"and DEFAULT_MODEL is not set. Set MODEL_NAME in .env or add a model to the character."
-            )
-        log.debug("Using model '%s' for this request.", effective_model)
-
-        client = _make_client()
-        effective_model = await _validate_model(client, effective_model)
-
-        ensure_history(guild_id, channel_id)
-        history = get_history(guild_id, channel_id)
-        max_messages = CONTEXT_WINDOW
-
-        from config.characters import get_character, default_character
-        from bot_core.history import get_active_char_key
-
-        active_key = get_active_char_key(guild_id, channel_id)
-        char_obj = get_character(active_key) or default_character()
-        system_p = getattr(char_obj, "system_prompt", None) or DEFAULT_SYSTEM_PROMPT or "You are a helpful AI assistant."
-
-        # ── RAG context ────────────────────────────────────────────────
-        rag_context = ""
-        included_names: list[str] = []
-        from kb.retrievers import retrieve_kb_documents
-        kb_docs = await retrieve_kb_documents(
-            query=user_message,
-            kb_path=KB_PATH,
-            strategy=RAG_RETRIEVAL_METHOD,
-            top_n=RAG_MAX_DOCS,
-            window_lines=RAG_WINDOW_LINES,
-            rewrite_model=effective_model,  # same model as the completion call
+        ctx = await _build_ai_request(
+            user_message, model_slug, guild_id, channel_id,
+            username=username, user_id=user_id,
         )
-        if kb_docs:
-            rag_context, included_names = _build_rag_context(kb_docs)
-
-        # ── Build messages ─────────────────────────────────────────────
-        messages: list[dict] = []
-        # P2-3: system prompt is persona-only (no RAG)
-        if system_p:
-            messages.append({"role": "system", "content": system_p})
-
-        recent_history = history[-(2 * max_messages):] if max_messages else []
-        messages.extend(recent_history)
-
-        # P2-3: RAG context injected into the user message, right before the question
-        user_content = f"**{username}:** {user_message}" if username else user_message
-        if rag_context:
-            user_content = (
-                f"[Relevant knowledge-base context]\n{rag_context}\n\n"
-                f"---\n\n"
-                f"{user_content}"
-            )
-        messages.append({"role": "user", "content": user_content})
-
-        _total_chars = sum(len(m.get("content", "")) for m in messages)
-        _approx_tokens = int(_total_chars / 4)
-        log.info(
-            "ask_ai → model=%s messages_in_prompt=%d KB_files=%d system_chars=%d rag_chars=%d history_msgs=%d total_chars=%.1fK estimated_tokens=%d",
-            effective_model, len(messages), len(included_names),
-            len(system_p), len(rag_context) if rag_context else 0,
-            len(recent_history), _total_chars / 1024, _approx_tokens,
-        )
-        if included_names:
-            for display_name in included_names:
-                log.debug("RAG doc included: %s", display_name)
-
-        timeout_sec = REQUEST_TIMEOUT
-        _request_max_tokens, _request_temp = _resolve_request_params(char_obj)
-
-        # §2.3: scale the timeout with prompt size — large RAG contexts take the
-        # backend much longer, and a flat 120 s cap caused frequent timeouts on
-        # 60 K+ token prompts. Add 0.5 s per 1000 chars of prompt (capped).
-        timeout_sec = _scaled_timeout(_total_chars)
 
         try:
             # P1 #7: one bounded retry on transient 5xx/timeout/connection
             # failures before we give up on the turn.
             resp = await _call_completion_with_retry(
-                client,
-                model=effective_model,
-                messages=messages,
-                temperature=_request_temp,
-                max_tokens=_request_max_tokens,
+                ctx.client,
+                model=ctx.effective_model,
+                messages=ctx.messages,
+                temperature=ctx.temperature,
+                max_tokens=ctx.max_tokens,
                 stream=False,
-                timeout=timeout_sec,
+                timeout=ctx.timeout_sec,
             )
             # P1 #8: extract the reply safely — an empty `choices` array is a
             # malformed backend response, not a crash. `extract_reply_text`
@@ -400,36 +576,96 @@ async def ask_ai(
             # user-friendly message.
             from bot_core.errors import extract_reply_text
             reply_text = extract_reply_text(resp)
-        except Exception as e:
-            # §3.7: structured error taxonomy — surface a user-friendly message
-            # instead of a raw SDK traceback.
-            from bot_core.errors import classify_ai_error
-            classified = classify_ai_error(e, model=effective_model, backend_url=INFER_URL)
-            log.error("AI request failed (%s): %s", getattr(classified, "category", "unknown"), e)
-            if isinstance(classified, RateLimitError):
-                # Classifier is pure (returns, never raises) — re-raise the
-                # classified error so handlers can show the retry-after message.
-                raise classified from e
-            if isinstance(classified, ValueError) or getattr(classified, "category", "") in ("timeout", "model_not_found", "backend_down", "backend_error"):
-                raise ValueError(classified.user_message) from e
-            raise
+        except Exception as e:  # noqa: BLE001 — classified below
+            _friendly_ai_error(e, model=ctx.effective_model, backend_url=INFER_URL)
 
         log.info("RAW_AI_RESPONSE_START\n%s\nRAW_AI_RESPONSE_END", reply_text)
 
-        # ── Update history ─────────────────────────────────────────────
-        # Store the *clean* user message, not `user_content` (which carries the
-        # RAG context blob + username decoration). Persisting the inflated form
-        # would re-inject stale KB context into every subsequent turn and bloat
-        # prompts by ~RAG_MAX_CHARS per past turn.
-        history.append({"role": "user", "content": user_message})
-        history.append({"role": "assistant", "content": reply_text})
-        max_entries = 2 * CONTEXT_WINDOW if CONTEXT_WINDOW else 50
-        # P0 #2: persist EVERY turn — set_history() is the only disk write and
-        # used to run only on cap overflow, so a restart before the channel
-        # filled its window lost up to `max_entries` recent turns.  Writing the
-        # trimmed tail also caps the in-memory list at the same window.
-        set_history(guild_id, channel_id, history[-max_entries:])
+        # ── Update history (P0 #2) ──────────────────────────────────────
+        _persist_turn(guild_id, channel_id, user_message, reply_text)
 
         approx_tokens = max(1, len(reply_text) // 4)  # §4.3: char-based estimate, not word count
-        return reply_text, {"model_used": effective_model, "tokens_approx": approx_tokens}
+        return reply_text, {"model_used": ctx.effective_model, "tokens_approx": approx_tokens}
 
+
+async def ask_ai_stream(
+    user_message: str,
+    model_slug: str,
+    guild_id: int,
+    channel_id: int,
+    username: str = "",
+    user_id: str | int | None = None,
+):
+    """Streaming variant of :func:`ask_ai` (P3 #24).
+
+    An ``async generator`` that yields progressively-grown text as the
+    completion is produced, and yields the *final* full reply as its last
+    value. It holds the same process-wide AI slot for the whole turn and
+    persists history exactly once, at the end, so a mid-stream failure (or a
+    cancelled consumer) leaves no partial turn in the history.
+
+    Yields
+    ------
+    str
+        Each yield is the reply text so far (monotonically growing). The
+        final yield is the complete reply.
+
+    Raises
+    ------
+    asyncio.CancelledError
+        Propagates cleanly so a consumer can abandon the turn (P3 #25).
+    RateLimitError
+        Re-raised as-is (see :func:`_friendly_ai_error`).
+    ValueError
+        Input-too-long / no-model / classified friendly error (P1 #7/#8).
+    """
+    async with _ai_slot():
+        ctx = await _build_ai_request(
+            user_message, model_slug, guild_id, channel_id,
+            username=username, user_id=user_id,
+        )
+
+        collected: list[str] = []
+        try:
+            # The streaming call is NOT retried: a mid-stream transient failure
+            # is ambiguous (we may have already emitted tokens), so we surface
+            # it immediately rather than risk a duplicated partial reply. The
+            # non-streaming path keeps its one bounded retry.
+            stream = await ctx.client.chat.completions.create(
+                model=ctx.effective_model,
+                messages=ctx.messages,
+                temperature=ctx.temperature,
+                max_tokens=ctx.max_tokens,
+                stream=True,
+                timeout=ctx.timeout_sec,
+            )
+            async for chunk in stream:
+                try:
+                    delta = chunk.choices[0].delta.content
+                except (IndexError, AttributeError, KeyError, TypeError):
+                    continue
+                if delta:
+                    collected.append(delta)
+                    yield "".join(collected)
+        except asyncio.CancelledError:
+            # Abandoned (e.g. /ai stop, P3 #25). Do not persist a partial turn.
+            log.info(
+                "ask_ai_stream: cancelled — %d chars accumulated, not persisted",
+                len("".join(collected)),
+            )
+            raise
+        except Exception as e:  # noqa: BLE001 — classified below
+            _friendly_ai_error(e, model=ctx.effective_model, backend_url=INFER_URL)
+
+        reply_text = "".join(collected).strip()
+        if not reply_text:
+            from bot_core.errors import AIBackendError
+            _friendly_ai_error(
+                AIBackendError("The AI backend returned an empty response."),
+                model=ctx.effective_model, backend_url=INFER_URL,
+            )
+
+        log.info("RAW_AI_RESPONSE_START\n%s\nRAW_AI_RESPONSE_END", reply_text)
+        _persist_turn(guild_id, channel_id, user_message, reply_text)
+        # Final value: the complete reply (also the last delta).
+        yield reply_text

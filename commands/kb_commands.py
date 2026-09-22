@@ -18,7 +18,6 @@ UPLOAD_DOWNLOAD_TIMEOUT = 60.0  # seconds
 
 async def handle_upload_kb(
     interaction,                           # Discord Interaction
-    kb_name: str | None = None,            # override for KB folder name
     url: str | None = None,                 # remote URL → download
     attachment=None,                        # discord.Attachment or None
     subfolder: str | None = None,           # optional subfolder

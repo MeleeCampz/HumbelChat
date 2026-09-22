@@ -1,0 +1,76 @@
+# P3 #27: proper packaging metadata.
+#
+#   * Base install:        pip install -e .
+#   * With local STT:      pip install -e .[stt]
+#   * With vector RAG:     pip install -e .[rag-vector]
+#   * Everything:          pip install -e .[all]
+#   * Dev / test tooling:  pip install -e .[dev]
+#
+# Heavy STT (faster-whisper) and vector (fastembed) deps are optional extras —
+# they were previously labelled "optional" in requirements.txt comments but
+# were always installed. Both are imported lazily by the code (see
+# bot_core/transcriber.py and kb/vector_db.py), so a base-only install imports
+# and runs cleanly; they are only required when the corresponding feature is
+# enabled.
+#
+# requirements.txt is retained for pin compatibility / `pip install -r`.
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "discord-ai-bot"
+version = "0.1.0"
+description = "Discord bot with AI chat, knowledge-base RAG, and voice recording"
+readme = "README.md"
+requires-python = ">=3.10"          # code uses `str | None` (PEP 604); dev env is 3.12
+authors = [{ name = "discord-ai-bot" }]
+
+dependencies = [
+    # Core runtime (see requirements.txt for the matching pins).
+    "python-dotenv==1.2.2",
+    # [voice] pulls PyNaCl + davey (DAVE E2EE, mandatory for Discord voice
+    # since 2026-03-01). libopus is a *system* package (e.g. `apt-get install
+    # libopus0`) and is loaded by discord.py via ctypes at runtime.
+    "discord.py[voice]==2.7.1",
+    "cryptography==49.0.0",   # AES-256-GCM voice transport decryption
+    "openai==2.44.0",
+    "httpx==0.28.1",
+]
+
+[project.optional-dependencies]
+# Local STT backend (STT_BACKEND=local): segment timestamps -> transcript.
+stt = [
+    "faster-whisper==1.2.1",
+    "numpy==1.26.4",
+]
+# Vector retrieval (RAG_RETRIEVAL_METHOD=vector).
+rag-vector = [
+    "fastembed==0.8.0",
+    "numpy==1.26.4",
+]
+all = [
+    "faster-whisper==1.2.1",
+    "fastembed==0.8.0",
+    "numpy==1.26.4",
+]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+]
+
+[project.scripts]
+# P3 #27: console entry point (main.py exposes run_bot()).
+discord-ai-bot = "main:run_bot"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["bot_core*", "commands*", "kb*", "utils*", "config*"]
+# tests/ has an __init__.py (it is a test package, not runtime code) — exclude
+# it from the installable wheel.
+exclude = ["tests*", "temp*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
