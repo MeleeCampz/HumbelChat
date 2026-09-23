@@ -129,7 +129,7 @@ class TestEndSessionCommand:
         with p1, p2:
             await handle_end_session(ix)
         ended = S.get_last_session()
-        assert "KI-Zusammenfassung nicht verfügbar" in ended["overview"]
+        assert "AI summary unavailable" in ended["overview"]
         assert "note that survives" in ended["overview"]
 
     @pytest.mark.asyncio
@@ -170,9 +170,9 @@ class TestEndSessionCommand:
 
         sys_msg = inst.chat.completions.create.await_args.kwargs["messages"][0]
         # The built-in default is the strict single-session prompt (not the
-        # old free-form "session overviews" text), written in German.
-        assert "genau EINE Session" in sys_msg["content"]
-        assert "STRENGE REGELN" in sys_msg["content"]
+        # old free-form "session overviews" text), written in English.
+        assert "exactly ONE session" in sys_msg["content"]
+        assert "STRICT RULES" in sys_msg["content"]
 
     @pytest.mark.asyncio
     async def test_end_renames(self, ix):
@@ -480,8 +480,8 @@ class TestOverviewSourceAssembly:
                          title="Voice transcript")
         session = S.get_current_session()
         text, refs = _session_documents_text(session)
-        assert "Quelle: attachments/session3.md" in text
-        assert "Quelle: transcripts/" in text
+        assert "Source: attachments/session3.md" in text
+        assert "Source: transcripts/" in text
         # the verbatim document bodies are present, not just pointers
         assert "über die Brücke" in text
         assert "Colum erzählt" in text
@@ -499,9 +499,9 @@ class TestOverviewSourceAssembly:
         session = S.get_current_session()
         text, refs = _session_documents_text(session)
         # first document is trimmed to the budget, second dropped…
-        assert "a.md" in text and "[Dokument abgeschnitten]" in text
+        assert "a.md" in text and "[document truncated]" in text
         # …but still listed so the model knows it exists
-        assert "weitere Dokumente wegen Größe nicht enthalten" in text
+        assert "additional documents not included due to size" in text
         assert len(refs) == 2
 
 
@@ -513,11 +513,11 @@ class TestOverviewPromptIncludesSources:
     def test_system_prompt_instructs_model_to_detect_language(self):
         from commands.session_commands import _summary_prompt
         prompt = _summary_prompt()
-        # the default prompt is written in German (the campaign language) …
-        assert "Übersicht" in prompt
+        # the default prompt is written in English and is language-neutral …
+        assert "closing overview" in prompt
         # … and makes the model itself determine the sources' language
-        assert "Bestimme die Sprache der bereitgestellten Quellen selbst" in prompt
-        assert "SPRACHE" in prompt
+        assert "Determine the language of the provided sources yourself" in prompt
+        assert "LANGUAGE" in prompt
 
     def test_no_hardcoded_language_detection_in_code(self):
         import commands.session_commands as sc
@@ -525,7 +525,7 @@ class TestOverviewPromptIncludesSources:
         assert not hasattr(sc, "_GERMAN_MARKERS")
 
     @pytest.mark.asyncio
-    async def test_prompt_contains_document_body_and_german_labels(self, ix, monkeypatch):
+    async def test_prompt_contains_document_body_and_english_labels(self, ix, monkeypatch):
         import commands.session_commands as sc
         from commands.session_commands import handle_end_session
         S.start_session(name="Lang")
@@ -550,9 +550,9 @@ class TestOverviewPromptIncludesSources:
         user_content = messages[1]["content"]
         # 1) the session document's verbatim text feeds the overview
         assert "über die Brücke" in user_content
-        # 2) the prompt is in German and carries no hard-coded language pin
-        assert "Sitzungsname:" in user_content
-        assert "## Sitzungsdateien" in user_content
-        assert "## Ergänzende Quellen" in user_content
+        # 2) the prompt is in English and carries no hard-coded language pin
+        assert "Session name:" in user_content
+        assert "## Session files" in user_content
+        assert "## Supplemental sources" in user_content
         assert "OUTPUT LANGUAGE" not in user_content
-        assert "SPRACHE" in system_content
+        assert "LANGUAGE" in system_content
