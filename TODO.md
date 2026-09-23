@@ -158,10 +158,10 @@
 - **Verify:** With `BOT_NO_LOG_FILES=1` + level set, console shows the expected discord log lines.
 
 ### 35. Split `bot_core/voice_recorder.py` (1 294 lines)
-- [ ] **Where:** `bot_core/voice_recorder.py`.
+- [x] **Done (2026-09-23).** **Where:** `bot_core/voice/` package (new) + `bot_core/voice_recorder.py` (now a 69-line re-exporting facade).
 - **Problem:** Monolithic module (recording lifecycle, DAVE decryption, session glue).
-- **Fix:** Extract e.g. `voice/dave.py` (decryption), `voice/session.py` (state machine); keep a facade so public API is unchanged.
-- **Verify:** All voice tests pass unchanged; module sizes drop below ~600 lines each.
+- **Fix:** Split into `voice/capture.py` (constants, `_Speaker`, `_SpeakerLog`, timeline WAV writers), `voice/dave.py` (RTP/DAVE decrypt + Opus decode, pure helpers), `voice/session.py` (`VoiceRecorder` state machine + bot wiring), `voice/recover.py` (crash recovery). `bot_core.voice_recorder` re-exports the full public + internal surface, so every existing import path (production code and the test suite, **unchanged**) keeps working. Docs (`README.md`, `docs/voice-recording.md`, `docs/recording-to-transcript.md`) updated to the new layout.
+- **Verify:** Full suite 592 passed (voice: 119 passed, `tests/` untouched); `ruff check` clean; mypy error count on the voice code unchanged by the move (12 → 12, all pre-existing type debt). Module sizes: capture 201, dave 163, recover 186, session 750, facade 69 — all well under the ~600-line target (session holds the state machine, which was the bulk of the file).
 
 ### 36. 0-byte uploads accepted
 - [ ] **Where:** `kb/storage.py` (`validate_upload`).

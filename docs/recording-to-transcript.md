@@ -59,7 +59,7 @@ A fresh per-recording directory is created:
 `RECORDINGS_DIR/recording_YYYYMMDD-HHMMSS/` (default
 `data/recordings/`, configurable via `RECORDINGS_DIR`).
 
-`VoiceRecorder.start()` (`bot_core/voice_recorder.py`) resets all state and —
+`VoiceRecorder.start()` (`bot_core/voice/session.py`) resets all state and —
 **first thing** — writes a `.recording` marker file into that directory. The
 marker is what makes a later crash recoverable (Part C).
 
@@ -189,7 +189,7 @@ output is byte-identical to a clean stop.
   old** are auto-recovered. A very recent one might belong to a recording that
   is *still live* (the bot restarted while a meeting was ongoing); auto-recovering
   it would silently truncate it. Recent orphans are left alone and can be
-  recovered manually via `bot_core.voice_recorder.recover_orphans()`.
+  recovered manually via `bot_core.voice.recover.recover_orphans()`.
 - A trailing **partial record** (a frame mid-write at crash time) is detected and
   dropped — bounded loss of a single 20 ms frame.
 - Recovered manifests set `decode_failures`/`decrypt_failures` to `null` (those
@@ -370,10 +370,10 @@ The `__stt_input_16k.wav` files are written only when STT actually runs (see D5)
 | Concern | File | Key symbol |
 |---|---|---|
 | Slash commands | `commands/recording_commands.py` | `handle_start_recording`, `handle_stop_recording`, `_run_transcription` |
-| Capture pipeline | `bot_core/voice_recorder.py` | `VoiceRecorder.start/stop`, `handle_packet`, `_process_mapped_packet` |
-| Decrypt (transport/DAVE) | `bot_core/voice_recorder.py` | `_decrypt_transport`, `_decrypt_dave`, `_extract_passthrough_opus` |
-| Crash durability | `bot_core/voice_recorder.py` | `_SpeakerLog`, `recover_orphans`, `install_sigterm_flush` |
-| Timeline / WAV writing | `bot_core/voice_recorder.py` | `_write_timeline_wav_from_frames` |
+| Capture pipeline | `bot_core/voice/session.py` | `VoiceRecorder.start/stop`, `handle_packet`, `_process_mapped_packet` |
+| Decrypt (transport/DAVE) | `bot_core/voice/dave.py` | `_decrypt_transport`, `_decrypt_dave`, `_extract_passthrough_opus` |
+| Crash durability | `bot_core/voice/capture.py` + `voice/recover.py` | `_SpeakerLog`, `recover_orphans`, `install_sigterm_flush` |
+| Timeline / WAV writing | `bot_core/voice/capture.py` | `_write_timeline_wav_from_frames` |
 | STT pipeline | `bot_core/transcriber.py` | `transcribe_wav`, `transcribe_recording`, `_trim_silence`, `_plan_chunks`, `_merge_segments` |
 | STT provenance + model RAM | `bot_core/transcriber.py` | `save_stt_converted`, `unload_stt_model` |
 | Transcript assembly | `bot_core/transcriber.py` | `write_transcript`, `build_session_transcript`, `build_interleaved_transcript` |
