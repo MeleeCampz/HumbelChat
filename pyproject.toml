@@ -61,6 +61,10 @@ dev = [
     # The test suite imports numpy directly (tests/test_transcriber.py), so it
     # is a dev/test dependency in its own right.
     "numpy==1.26.4",
+    # P3 #28: CI tooling (lint + type-check + coverage).
+    "ruff==0.16.8",
+    "mypy==2.3.1",
+    "pytest-cov==7.0.0",
 ]
 
 [project.scripts]
@@ -77,3 +81,39 @@ exclude = ["tests*", "temp*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["bot_core", "commands", "kb", "utils", "config"]
+omit = ["tests/*", "temp/*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# P3 #28: gate on the *correctness* rules (syntax errors E9 + pyflakes F: unused
+# imports, undefined names, unused variables, unreachable code, ...). Stylistic
+# rules (E501 line-length, E402 import-order, B023, ...) are intentionally left
+# out so the CI gate stays focused on real bugs and is green on the current
+# tree; widen `select` as the codebase is cleaned up.
+select = ["E9", "F"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+# P3 #28: legacy modules are intentionally *relaxed* for now (they predate
+# type-checking and still carry real type debt). The new P3 modules below are
+# held to --strict. CI enforces this with:
+#   mypy --strict --follow-imports=skip <new modules>
+
+[[tool.mypy.overrides]]
+module = ["bot_core.ai_runs"]
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["commands.ai_stop_command"]
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["utils.typing_loop"]
+strict = true

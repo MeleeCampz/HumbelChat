@@ -112,7 +112,7 @@ class TestListKBFilesCache:
 
     def test_subfolder_scan_does_not_prune_siblings(self, kb):
         """A subfolder listing must not drop root-level files from the cache."""
-        full = S.list_kb_files(kb)          # populates cache with 3 keys
+        S.list_kb_files(kb)                 # populates cache with 3 keys
         sub = S.list_kb_files(kb, subfolder="sub")
         assert [d["filename"] for d in sub] == ["c.txt"]
         # Root files must still be listed afterwards (cache not pruned wrongly).

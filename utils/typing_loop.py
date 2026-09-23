@@ -1,9 +1,10 @@
 """Typing-indicator task for long-pending AI responses."""
 from __future__ import annotations
 import asyncio
+from typing import Any
 
 
-async def typing_loop_task(channel, duration_sec: float | None = 30) -> None:
+async def typing_loop_task(channel: Any, duration_sec: float | None = 30) -> None:
     """Send typing indicators every ~10 s.
 
     Used while a deferred interaction is waiting on the AI backend.

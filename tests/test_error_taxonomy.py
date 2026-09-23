@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import httpx
-import pytest
 
 from bot_core.errors import AIError, BackendDownError, ModelNotFoundError, TimeoutError, classify_ai_error
 

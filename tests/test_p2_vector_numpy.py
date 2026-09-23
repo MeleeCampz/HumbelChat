@@ -99,7 +99,6 @@ class TestNumpyRanking:
         """When _docs is replaced, the cached matrix must be rebuilt (no stale data)."""
         idx = _make_index(100, 32)
         idx._rank([0.5] * 32, 5)
-        old_n = idx._mat_cache[3]
 
         # Replace the doc list wholesale (new embeddings → new object identity
         # → the cache must rebuild, not reuse the stale matrix).

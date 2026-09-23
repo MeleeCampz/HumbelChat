@@ -15,7 +15,6 @@ SDK, ``httpx``, or any other source) and returns a concrete subclass of
 from __future__ import annotations
 
 import logging
-import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 

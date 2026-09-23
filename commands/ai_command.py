@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import TYPE_CHECKING
 
 import config.settings as _settings
 from config.characters import get_character, default_character
@@ -37,6 +38,9 @@ from utils.response_splitter import (
     DISCORD_SAFE_CHUNK,
 )
 from utils.typing_loop import typing_loop_task
+
+if TYPE_CHECKING:  # discord is referenced only in string annotations
+    import discord
 
 log = logging.getLogger("bot.commands.ai_command")
 
