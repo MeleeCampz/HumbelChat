@@ -29,6 +29,15 @@ log = logging.getLogger("bot.session_commands")
 _OVERVIEW_POST_LIMIT = 1800
 # How many recent chat messages feed the AI overview.
 _OVERVIEW_HISTORY_MESSAGES = 30
+# Total budget (chars) for the session documents that feed the AI overview.
+# The full session log(s) are the authoritative source for the overview — this
+# exists only to keep the prompt size bounded for very long sessions; each
+# included document keeps its header + full text (trimmed from the tail if it
+# alone exceeds the whole budget).
+_OVERVIEW_DOC_BUDGET = 60_000
+# Budget for the combined supplemental sources (notes + recent chat) in the
+# overview prompt — the session documents are primary and get their own budget.
+_OVERVIEW_SUPPLEMENT_BUDGET = 8_000
 # Discord message cap is 2000 chars; keep view messages under it.
 _VIEW_MSG_LIMIT = 1900
 # How many recent notes / pointers to show in /session_notes view.
@@ -50,6 +59,51 @@ def _summary_prompt() -> str:
     falls back to the built-in default when unset/empty.
     """
     return SESSION_SUMMARY_PROMPT.strip() or DEFAULT_SESSION_SUMMARY_PROMPT
+
+
+# ── Overview source assembly ────────────────────────────────────────────
+
+def _session_documents_text(session: dict) -> tuple[str, list[str]]:
+    """Full text of the session's own documents (attachments + transcripts).
+
+    Returns ``(text, refs)`` where *refs* are ``<subdir>/<filename>`` labels
+    (one per non-empty document found).  *text* is the concatenation of those
+    documents (each with a small ``Quelle:`` header so the model can tell them
+    apart), trimmed to ``_OVERVIEW_DOC_BUDGET`` chars in total.  When the
+    budget is exhausted the remaining documents are dropped with a note so the
+    model knows more material exists for the session.
+    """
+    from bot_core import sessions as S
+
+    parts: list[str] = []
+    refs: list[str] = []
+    omitted: list[str] = []
+    budget_left = _OVERVIEW_DOC_BUDGET
+    for subdir in (S._SUBDIR_ATTACHMENTS, S._SUBDIR_TRANSCRIPTS):
+        for name in S._session_docs(session, subdir):
+            ref = f"{subdir}/{name}"
+            path = S._session_dir(session) / ref
+            try:
+                body = path.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                continue
+            if not body:
+                continue
+            refs.append(ref)
+            if budget_left <= 0:
+                omitted.append(ref)
+                continue
+            # Keep each document whole when it fits; trim a single document
+            # that alone exceeds the whole budget from the tail (the head
+            # carries the session's most relevant opening material).
+            if len(body) > budget_left:
+                body = body[:budget_left].rstrip() + "\n…[Dokument abgeschnitten]"
+            parts.append(f"Quelle: {ref}\n\n{body}")
+            budget_left -= len(body)
+    if omitted:
+        parts.append("…[weitere Dokumente wegen Größe nicht enthalten: "
+                     + ", ".join(omitted) + "]")
+    return "\n".join(parts).strip(), refs
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -76,44 +130,99 @@ def _resolve_overview_model(guild_id: int | None, channel_id: int) -> str:
 
 
 def _fallback_overview(session: dict, notes: list[list]) -> str:
-    """Plain-text overview used when the AI backend is unavailable."""
+    """Plain-text overview used when the AI backend is unavailable.
+
+    Still points the user at the session's own documents (the real source of
+    truth) so an ended session is never left without a usable record.
+    """
     from datetime import datetime
     started = datetime.fromtimestamp(session["started_at"]).strftime("%Y-%m-%d %H:%M")
     ended = (datetime.fromtimestamp(session.get("ended_at") or session["started_at"])
              .strftime("%Y-%m-%d %H:%M"))
     lines = [
-        f"Session **{session.get('name') or 'untitled'}** — {started} → {ended}",
+        f"Sitzung **{session.get('name') or 'ohne Titel'}** — {started} → {ended}",
         "",
-        "AI overview unavailable (backend error) — notes recorded in this session:",
+        "KI-Zusammenfassung nicht verfügbar (Backend-Fehler) — in dieser Session vermerkte Notizen:",
     ]
     if notes:
         for ts, text in notes[-30:]:
             lines.append(f"- {text}")
     else:
-        lines.append("- (no notes were added)")
+        lines.append("- (keine Notizen angelegt)")
+    try:
+        _docs, doc_refs = _session_documents_text(session)
+        if doc_refs:
+            lines += ["", "Sitzungsdateien (vollständiges Protokoll)"]
+            lines += [f"- `{ref}`" for ref in doc_refs]
+    except Exception:  # pragma: no cover - defensive
+        pass
     return "\n".join(lines)
 
 
-async def _generate_overview(session: dict, guild_id: int | None, channel_id: int) -> str:
-    """AI overview of the session from its notes + recent chat in this channel.
+def _build_supplemental_sources(session: dict, guild_id: int | None, channel_id: int) -> str:
+    """Combined notes + recent chat section for the overview prompt.
 
-    Falls back to a plain-text note listing when no model is configured or
-    the request fails — /end_session must always produce an overview.
+    Notes come first (they are timestamped and session-specific); the recent
+    chat of the ending channel is appended last as the weakest signal.  The
+    combined text is trimmed from the tail to ``_OVERVIEW_SUPPLEMENT_BUDGET``
+    chars so the session documents always stay the dominant source.
     """
     notes = session.get("notes", [])
-    notes_text = "\n".join(f"- {text}" for _ts, text in notes[-50:]) or "(no notes)"
+    notes_text = "\n".join(f"- {text}" for _ts, text in notes[-50:]) or "(keine Notizen)"
 
     hist = get_history(guild_id if guild_id is not None else 0, channel_id)
     chat_lines = []
     for m in hist[-_OVERVIEW_HISTORY_MESSAGES:]:
         role = {"user": "User", "assistant": "AI"}.get(m.get("role"), m.get("role"))
         chat_lines.append(f"[{role}]: {m.get('content', '')}")
-    chat_text = "\n\n".join(chat_lines) or "(no recent chat in this channel)"
+    chat_text = "\n\n".join(chat_lines) or "(kein aktueller Chat in diesem Kanal)"
 
+    body = (
+        "## Sitzungsnotizen\n"
+        f"{notes_text}\n\n"
+        "## Letzter Chat (Kanal, in dem die Session beendet wurde — ergänzend)\n"
+        f"{chat_text}"
+    )
+    if len(body) > _OVERVIEW_SUPPLEMENT_BUDGET:
+        body = body[:_OVERVIEW_SUPPLEMENT_BUDGET].rstrip() + "\n…[abgeschnitten]"
+    return body
+
+
+async def _generate_overview(session: dict, guild_id: int | None, channel_id: int) -> str:
+    """AI overview of the session from the session's OWN material only.
+
+    Sources, strongest first: the session's own documents (attachments/ and
+    transcripts/ — the verbatim session log), then its notes, then the recent
+    chat in the ending channel.  The prompt itself instructs the model to
+    write the overview in the language of the provided sources — there is no
+    hard-coded language detection on this side (see
+    DEFAULT_SESSION_SUMMARY_PROMPT in config/settings.py).
+
+    Falls back to a plain-text note listing when no model is configured or
+    the request fails — /end_session must always produce an overview.
+    """
+    docs_text, doc_names = _session_documents_text(session)
+    supplemental = _build_supplemental_sources(session, guild_id, channel_id)
+
+    notes = session.get("notes", [])
     model = await _validate_model(_make_client(), _resolve_overview_model(guild_id, channel_id))
     if not model:
         log.warning("No model available for session overview — using plain-text fallback")
         return _fallback_overview(session, notes)
+
+    source_listing = ", ".join(doc_names) if doc_names else "(keine)"
+    log.info(
+        "Session overview for %r: %d document(s) [%s], %d chars docs",
+        session.get("name"), len(doc_names), source_listing, len(docs_text),
+    )
+
+    user_content = (
+        f"Sitzungsname: {session.get('name') or 'ohne Titel'}\n"
+        f"Enthaltene Sitzungsdateien: {source_listing}\n\n"
+        f"## Sitzungsdateien (maßgeblich — das eigene Protokoll der Session)\n"
+        f"{docs_text or '(keine Dokumente für diese Session)'}\n\n"
+        f"## Ergänzende Quellen\n{supplemental}"
+    )
 
     client = _make_client()
     try:
@@ -126,11 +235,7 @@ async def _generate_overview(session: dict, guild_id: int | None, channel_id: in
                 },
                 {
                     "role": "user",
-                    "content": (
-                        f"Session name: {session.get('name') or 'untitled'}\n\n"
-                        f"## Session notes\n{notes_text}\n\n"
-                        f"## Recent chat (channel where the session was ended)\n{chat_text}"
-                    ),
+                    "content": user_content,
                 },
             ],
             temperature=0.3,
