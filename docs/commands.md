@@ -106,7 +106,7 @@ On success the bot also delivers: the AI overview of a previously ended session 
 /end_session [name: <custom_name>]
 ```
 
-End the current session. The bot generates an AI overview from the session's notes plus recent chat in this channel (using the active character's model), appends it to the session file, and posts it here. The optional `name` renames the session in its file. If the AI backend is unavailable, a plain-text overview listing the notes is written instead.
+End the current session. The bot generates an AI overview from the session's own documents (attachments/ and transcripts/), its notes, and the recent chat in this channel (using the active character's model), appends it to the session file, and posts it here. The overview is written in the language of the session's own sources — the model determines this itself from the language rule in the system prompt (the built-in default prompt is written in German). The optional `name` renames the session in its file. If the AI backend is unavailable, a plain-text overview listing the notes is written instead.
 
 The system prompt that drives the overview is customizable via `SESSION_SUMMARY_PROMPT` in `.env` (see [Configuration](./configuration.md)) — leave it empty to use the built-in default.
 

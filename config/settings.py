@@ -94,11 +94,38 @@ FALLBACK_MODELS: list[str] = [
 
 # ── Session overview prompt (customizable) ───────────────────────────────
 #: Default system prompt used by /end_session to write the session overview.
+#: Strict by design: it must (1) only use THIS session's own sources, (2) never
+#: invent or pull in events from other sessions, and (3) itself determine the
+#: language of the provided sources and write the overview in that language
+#: (no hard-coded language detection on the bot side).
+#: The prompt is written in German — the campaign language of this project.
 DEFAULT_SESSION_SUMMARY_PROMPT: str = (
-    "You write concise session overviews. Given the notes and recent chat "
-    "of a work session, produce a short overview (max ~250 words) with: "
-    "what was done, key points/decisions, and open items or follow-ups for "
-    "the next session. Use markdown bullet points. Return ONLY the overview."
+    "Du schreibst die Abschluss-Übersicht (Overview) für genau EINE Session.\n"
+    "Die Nutzernachricht enthält die EINZIGEN Quellen für diese Session, in dieser Reihenfolge:\n"
+    "  1) Sitzungsdateien (attachments/ und transcripts/) — das vollständige, wortwörtliche Session-Protokoll.\n"
+    "  2) Sitzungsnotizen — kurze, zeitgestempelte Stichpunkte, die während der Session angelegt wurden.\n"
+    "  3) Letzter Chat — die letzten wenigen Nachrichten im Kanal, in dem die Session beendet wurde.\n"
+    "Schreibe eine knappe Übersicht (max. ~250 Wörter) mit:\n"
+    "  - Was in DIESER Session passiert ist, in der Reihenfolge des Ablaufs, als kurze Aufzählung.\n"
+    "  - Wichtige Punkte / Entscheidungen.\n"
+    "  - Offene Punkte / Folgen für die NÄCHSTE Session.\n"
+    "Verwende Markdown-Aufzählungspunkte. Gib NUR die Übersicht zurück.\n\n"
+    "STRENGE REGELN:\n"
+    "- Verwende NUR die Quellen in der Nutzernachricht. Du weißt aus sonst keiner Quelle etwas "
+    "über diese Session. Füge NICHTS hinzu, erschließe nichts und erinnere dich an keine Ereignisse, "
+    "Namen oder Orte, die nicht in den bereitgestellten Quellen vorkommen.\n"
+    "- Die Sitzungsdateien sind die maßgebliche, detaillierte Aufzeichnung; die Notizen und der "
+    "letzte Chat dienen nur als Ergänzung. Bei Widersprüchen haben die Sitzungsdateien Vorrang.\n"
+    "- Beschreibe niemals Ereignisse aus anderen/früheren Sessions und fülle Lücken niemals mit "
+    "Allgemeinplatzereien oder Handlung aus dem größeren Kampagnenrahmen. Wenn eine Quelle einen "
+    "Haken für die nächste Session nennt, liste ihn als offenen Punkt auf — erzähle aber nicht, "
+    "was davor oder danach passierte.\n"
+    "- Sind die Quellen dünn (wenige Notizen, kurzer Chat), halte die Übersicht kurz und "
+    "sachlich; fülle niemals mit erfundenen Details auf.\n"
+    "- SPRACHE: Bestimme die Sprache der bereitgestellten Quellen selbst und schreibe die GESAMTE "
+    "Übersicht in dieser Sprache (deutsche Quellen → deutsche Übersicht, englische Quellen → "
+    "englische Übersicht). Mische keine Sprachen und übersetze keine Eigennamen (Charaktere, Orte, Items).\n"
+    "- Behalte Eigennamen, Zahlen, Beträge und Itemnamen exakt so bei, wie sie in den Quellen stehen."
 )
 
 #: Override for SESSION_SUMMARY_PROMPT — set in .env to customize how the

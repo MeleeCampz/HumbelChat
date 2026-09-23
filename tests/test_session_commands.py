@@ -129,7 +129,7 @@ class TestEndSessionCommand:
         with p1, p2:
             await handle_end_session(ix)
         ended = S.get_last_session()
-        assert "AI overview unavailable" in ended["overview"]
+        assert "KI-Zusammenfassung nicht verfügbar" in ended["overview"]
         assert "note that survives" in ended["overview"]
 
     @pytest.mark.asyncio
@@ -169,7 +169,10 @@ class TestEndSessionCommand:
         await handle_end_session(ix)
 
         sys_msg = inst.chat.completions.create.await_args.kwargs["messages"][0]
-        assert "session overviews" in sys_msg["content"]
+        # The built-in default is the strict single-session prompt (not the
+        # old free-form "session overviews" text), written in German.
+        assert "genau EINE Session" in sys_msg["content"]
+        assert "STRENGE REGELN" in sys_msg["content"]
 
     @pytest.mark.asyncio
     async def test_end_renames(self, ix):
@@ -461,3 +464,95 @@ class TestAddTranscript:
         await handle_session_notes(ix, action="view")
         view_msgs = [m for m in ix._sent if "Session notes" in m]
         assert any("transcripts/" in m for m in view_msgs)
+
+
+class TestOverviewSourceAssembly:
+    """The session's own documents (attachments/transcripts) must feed the AI
+    overview — the previous bug was that only notes + a tiny recent-chat slice
+    were passed, so the model had no real session content to work from."""
+
+    def test_session_documents_text_includes_attachments_and_transcripts(self):
+        from commands.session_commands import _session_documents_text
+        S.start_session(name="Src")
+        S.add_document("Wir reisen über die Brücke nach Alderheart und treffen die Hexe.",
+                       title="session3.md")
+        S.add_transcript("Colum erzählt von der Taverne und dem Elch am Weg.",
+                         title="Voice transcript")
+        session = S.get_current_session()
+        text, refs = _session_documents_text(session)
+        assert "Quelle: attachments/session3.md" in text
+        assert "Quelle: transcripts/" in text
+        # the verbatim document bodies are present, not just pointers
+        assert "über die Brücke" in text
+        assert "Colum erzählt" in text
+        # refs are <subdir>/<filename> labels
+        assert any(r.startswith("attachments/session3.md") for r in refs)
+        assert any(r.startswith("transcripts/") for r in refs)
+
+    def test_session_documents_text_respects_budget(self, monkeypatch):
+        import commands.session_commands as sc
+        from commands.session_commands import _session_documents_text
+        monkeypatch.setattr(sc, "_OVERVIEW_DOC_BUDGET", 20_000)
+        S.start_session(name="Big")
+        S.add_document("A" * 50_000, title="a.md")
+        S.add_document("B" * 50_000, title="b.md")
+        session = S.get_current_session()
+        text, refs = _session_documents_text(session)
+        # first document is trimmed to the budget, second dropped…
+        assert "a.md" in text and "[Dokument abgeschnitten]" in text
+        # …but still listed so the model knows it exists
+        assert "weitere Dokumente wegen Größe nicht enthalten" in text
+        assert len(refs) == 2
+
+
+class TestOverviewPromptIncludesSources:
+    """Regression: the AI prompt must contain the session's own documents, and the
+    system prompt (not hard-coded bot logic) must make the model determine the
+    language of the sources itself and write the overview in that language."""
+
+    def test_system_prompt_instructs_model_to_detect_language(self):
+        from commands.session_commands import _summary_prompt
+        prompt = _summary_prompt()
+        # the default prompt is written in German (the campaign language) …
+        assert "Übersicht" in prompt
+        # … and makes the model itself determine the sources' language
+        assert "Bestimme die Sprache der bereitgestellten Quellen selbst" in prompt
+        assert "SPRACHE" in prompt
+
+    def test_no_hardcoded_language_detection_in_code(self):
+        import commands.session_commands as sc
+        assert not hasattr(sc, "_detect_language")
+        assert not hasattr(sc, "_GERMAN_MARKERS")
+
+    @pytest.mark.asyncio
+    async def test_prompt_contains_document_body_and_german_labels(self, ix, monkeypatch):
+        import commands.session_commands as sc
+        from commands.session_commands import handle_end_session
+        S.start_session(name="Lang")
+        german_log = (
+            "Wir reisen über die Brücke nach Alderheart und treffen die Hexe in "
+            "der Taverne. Die Banditen haben das Dorf überfallen, und die Eule "
+            "flüstert dem Igel zu, dass alles in Ordnung sein soll. Die Wachen "
+            "warnen uns vor Susan, die einen grünen Bären beschworen hat."
+        ) * 4
+        S.add_document(german_log, title="log.md")
+        inst = MagicMock()
+        resp = MagicMock()
+        resp.choices = [MagicMock(message=MagicMock(content="Wir reisen nach Alderheart."))]
+        inst.chat.completions.create = AsyncMock(return_value=resp)
+        monkeypatch.setattr(sc, "_make_client", lambda: inst)
+        monkeypatch.setattr(sc, "_validate_model", AsyncMock(return_value="test-model"))
+
+        await handle_end_session(ix)
+
+        messages = inst.chat.completions.create.await_args.kwargs["messages"]
+        system_content = messages[0]["content"]
+        user_content = messages[1]["content"]
+        # 1) the session document's verbatim text feeds the overview
+        assert "über die Brücke" in user_content
+        # 2) the prompt is in German and carries no hard-coded language pin
+        assert "Sitzungsname:" in user_content
+        assert "## Sitzungsdateien" in user_content
+        assert "## Ergänzende Quellen" in user_content
+        assert "OUTPUT LANGUAGE" not in user_content
+        assert "SPRACHE" in system_content
