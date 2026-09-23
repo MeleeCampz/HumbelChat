@@ -612,7 +612,6 @@ def add_document(text: str, title: str = "", session: dict | None = None) -> tup
         if not clean:
             return None, 0
 
-        header = (title.strip() or "Uploaded document")
         path = _append_document_file(session, _SUBDIR_ATTACHMENTS, title or "document", clean)
 
         _write_session_file(session)

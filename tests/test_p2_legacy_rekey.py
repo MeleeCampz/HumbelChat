@@ -9,7 +9,6 @@ ambiguous basename → left for re-embed).
 """
 from __future__ import annotations
 
-import os
 import pathlib
 import pickle
 import sqlite3

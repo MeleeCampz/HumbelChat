@@ -8,13 +8,17 @@ the request + its delivery are abandoned mid-flight and the user is told so.
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 from bot_core.ai_runs import cancel_run
+
+if TYPE_CHECKING:  # discord is referenced only for the annotation below
+    import discord
 
 log = logging.getLogger("bot.commands.ai_stop")
 
 
-async def handle_ai_stop_command(interaction) -> None:
+async def handle_ai_stop_command(interaction: "discord.Interaction") -> None:
     """Cancel the in-flight AI run for this channel, if any."""
     channel_key = interaction.channel_id if interaction.channel_id is not None else 0
     if cancel_run(channel_key):

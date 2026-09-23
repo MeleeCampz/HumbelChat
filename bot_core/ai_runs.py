@@ -14,19 +14,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 
 log = logging.getLogger("bot.ai_runs")
 
 # channel_key (int; 0 for DMs / no channel) -> in-flight /ai run task
-_ACTIVE_RUNS: dict[int, asyncio.Task] = {}
+_ACTIVE_RUNS: dict[int, asyncio.Task[Any]] = {}
 
 
-def register_run(channel_key: int, task: asyncio.Task) -> None:
+def register_run(channel_key: int, task: asyncio.Task[Any]) -> None:
     """Record the in-flight run for *channel_key* (overwrites any prior one)."""
     _ACTIVE_RUNS[channel_key] = task
 
 
-def get_run(channel_key: int) -> asyncio.Task | None:
+def get_run(channel_key: int) -> asyncio.Task[Any] | None:
     """Return the in-flight run for *channel_key*, or None."""
     return _ACTIVE_RUNS.get(channel_key)
 
@@ -44,7 +45,7 @@ def cancel_run(channel_key: int) -> bool:
     return False
 
 
-def clear_run(channel_key: int, task: asyncio.Task | None = None) -> None:
+def clear_run(channel_key: int, task: asyncio.Task[Any] | None = None) -> None:
     """Remove *task* from the registry, but only if it is still the current one.
 
     Passing *task* guards against a late ``finally`` clearing a *newer* run that

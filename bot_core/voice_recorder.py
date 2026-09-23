@@ -76,7 +76,7 @@ import struct
 import threading
 import time
 import wave
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 

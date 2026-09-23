@@ -15,7 +15,6 @@ Each test pins down a specific bug that was found, reproduced, and fixed:
 from __future__ import annotations
 
 import asyncio
-import pathlib
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch

@@ -215,7 +215,6 @@ async def handle_end_session(interaction: discord.Interaction, name: str | None 
     # Defer first — the AI overview call can exceed Discord's 15 s window.
     await interaction.response.defer()
 
-    guild_id = interaction.guild_id or 0
     channel_id = interaction.channel_id
 
     # Pick up any manual edits to the notes file before summarizing.

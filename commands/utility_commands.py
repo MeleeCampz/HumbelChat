@@ -6,7 +6,6 @@ import base64
 import logging
 
 import discord
-import httpx
 
 from config.settings import DEFAULT_MODEL, FALLBACK_MODELS
 from bot_core.history import get_active_char_key, get_history

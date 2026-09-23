@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import importlib
-import pathlib
 
 import config.settings as S
 
