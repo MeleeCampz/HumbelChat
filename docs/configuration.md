@@ -21,8 +21,8 @@ All environment variables are loaded from `.env` at the project root. Copy `.env
 | `AI_REQUEST_TIMEOUT` | HTTP timeout in seconds | `120` |
 | `AI_HEALTH_CHECK_INTERVAL` | `0` probes once at startup; positive integer repeats liveness checks every N seconds | `0` |
 | `AI_HEALTH_CHECK_TIMEOUT` | Timeout for each liveness probe | `5` |
-| `MAX_TOKENS` | Baseline max tokens per response | `2000` |
-| `MAX_TOKENS_HARD_CAP` | Absolute upper bound applied after character/global value is chosen | `4096` |
+| `MAX_TOKENS` | Baseline max tokens per response | `8000` |
+| `MAX_TOKENS_HARD_CAP` | Absolute upper bound applied after character/global value is chosen; also the budget of the one-shot retry when a response is truncated | `16384` |
 
 ## Response length defaults
 
@@ -32,7 +32,14 @@ The bot resolves `max_tokens` for each request using this precedence, then clamp
 2. Global `MAX_TOKENS` from `.env`
 3. `MAX_TOKENS_HARD_CAP` from `.env` (final clamp)
 
-A smaller baseline is usually better for Discord. Very large `max_tokens` values can produce over-long outputs and increase the chance of hitting Discord message limits.
+Budgets are intentionally generous: thinking models (e.g. Qwen3) spend part
+of `max_tokens` on internal *reasoning* before writing the visible answer,
+and the budget covers both. If a response is truncated (`finish_reason`
+`length`) with an empty answer, the bot automatically retries once at
+`MAX_TOKENS_HARD_CAP`; only if that is still truncated does it report a
+friendly error instead of an empty reply. Large values can increase response
+time and output length (long outputs are split into multiple Discord
+messages).
 
 ## Bot behavior
 

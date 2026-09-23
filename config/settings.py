@@ -83,8 +83,12 @@ AI_HEALTH_CHECK_TIMEOUT: int = _safe_int(os.getenv("AI_HEALTH_CHECK_TIMEOUT"), 5
 # header. The header value itself is clamped to [5, 120] s (see
 # bot_core.errors._parse_retry_after); this is only the no-header fallback.
 AI_RETRY_AFTER_FALLBACK_S: int = _safe_int(os.getenv("AI_RETRY_AFTER_FALLBACK_S"), 30)
-MAX_TOKENS: int = _safe_int(os.getenv("MAX_TOKENS"), 2000)
-MAX_TOKENS_HARD_CAP: int = _safe_int(os.getenv("MAX_TOKENS_HARD_CAP"), 4096)
+# Generous defaults: thinking models (e.g. Qwen3) spend part of max_tokens on
+# internal reasoning before the visible answer — small budgets can be fully
+# consumed by thinking, producing empty answers (finish_reason "length").
+# ai_client auto-retries once at MAX_TOKENS_HARD_CAP when that happens.
+MAX_TOKENS: int = _safe_int(os.getenv("MAX_TOKENS"), 8000)
+MAX_TOKENS_HARD_CAP: int = _safe_int(os.getenv("MAX_TOKENS_HARD_CAP"), 16384)
 
 # Fallback models tried (in order) when DEFAULT_MODEL fails during summarize/translate.
 # Comma-separated list of model slugs.

@@ -239,7 +239,10 @@ async def _generate_overview(session: dict, guild_id: int | None, channel_id: in
                 },
             ],
             temperature=0.3,
-            max_tokens=1500,
+            # Generous: the overview model (Qwen3) thinks first; 1500 was
+            # enough for the thinking phase alone and could exhaust the budget
+            # before the summary was written (finish_reason "length").
+            max_tokens=4096,
         )
         # P1 #8: empty `choices` raises here → caught by the except below →
         # _fallback_overview, instead of crashing with an IndexError.

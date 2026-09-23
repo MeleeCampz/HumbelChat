@@ -76,6 +76,54 @@ class AIBackendError(AIError):
         super().__init__(message, **kw)
 
 
+class AIResponseTruncatedError(AIError):
+    """The model's response was cut off by ``max_tokens`` before any answer.
+
+    Thinking models (e.g. Qwen3) spend part of ``max_tokens`` on internal
+    reasoning (returned in ``reasoning_content``) *before* the visible
+    ``content``. When the budget is exhausted mid-reasoning the API still
+    completes "successfully" — but with ``content == ""`` and
+    ``finish_reason == "length"``. Treating that as an empty *answer*
+    (a ``(empty response)`` placeholder) hid the real failure and polluted
+    channel history with the placeholder. This error lets callers retry with
+    a bigger budget and, if that still fails, surface a real message.
+    """
+
+    category = "truncated_response"
+
+    def __init__(
+        self,
+        message: str = "The model used its full token budget on reasoning and produced no answer.",
+        max_tokens: int | None = None,
+        **kw,
+    ):
+        kw.setdefault(
+            "user_message",
+            "⚠️ The model ran out of response budget before answering "
+            "(the request was too demanding for the configured max tokens). "
+            "Please ask a narrower question or try again.",
+        )
+        super().__init__(message, **kw)
+        self.max_tokens = max_tokens
+
+
+def _is_truncated_empty_response(resp, content: str) -> bool:
+    """True when *resp* is a max-tokens truncation with an empty answer.
+
+    ``finish_reason == "length"`` means the backend cut the generation off at
+    the token budget. If no visible content was produced, the whole budget
+    went into reasoning (or a partial/empty answer) — that is a truncation
+    failure, not a normal empty reply.
+    """
+    if content and content.strip():
+        return False
+    choices = getattr(resp, "choices", None)
+    if not choices:
+        return False
+    finish = getattr(choices[0], "finish_reason", None)
+    return finish == "length"
+
+
 def extract_reply_text(resp, *, default: str = "(empty response)") -> str:
     """Safely return the first choice's message content from a completion.
 
@@ -85,6 +133,13 @@ def extract_reply_text(resp, *, default: str = "(empty response)") -> str:
     and raises a friendly :class:`AIBackendError` when there is no choice at
     all so callers can surface a real error (and, for multi-model callers, try
     the next model).
+
+    Budget-exhausted truncations are distinguished: when the response was cut
+    off at ``max_tokens`` (``finish_reason == "length"``) and no visible
+    content was produced, :class:`AIResponseTruncatedError` is raised instead
+    of silently returning *default*. ``ask_ai`` catches that and retries once
+    at ``MAX_TOKENS_HARD_CAP``; other callers surface a real error message
+    instead of posting an empty placeholder.
     """
     if resp is None:
         raise AIBackendError("The AI backend returned no response.")
@@ -93,7 +148,12 @@ def extract_reply_text(resp, *, default: str = "(empty response)") -> str:
         raise AIBackendError("The AI backend returned no choices.")
     message = getattr(choices[0], "message", None)
     content = getattr(message, "content", None)
-    return content if content else default
+    if not content or not content.strip():
+        if _is_truncated_empty_response(resp, content or ""):
+            max_tokens = getattr(choices[0], "max_tokens", None)
+            raise AIResponseTruncatedError(max_tokens=max_tokens)
+        return default
+    return content
 
 
 def classify_ai_error(exc: BaseException, *, model: str = "", backend_url: str = "") -> AIError:
@@ -243,6 +303,7 @@ __all__ = [
     "ModelNotFoundError",
     "BackendDownError",
     "AIBackendError",
+    "AIResponseTruncatedError",
     "extract_reply_text",
     "classify_ai_error",
 ]
