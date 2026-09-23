@@ -1,7 +1,6 @@
 """Tests for the global session store (bot_core.sessions)."""
 from __future__ import annotations
 
-import json
 import pathlib
 import time
 from datetime import datetime

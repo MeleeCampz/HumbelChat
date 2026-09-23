@@ -15,6 +15,8 @@ SDK, ``httpx``, or any other source) and returns a concrete subclass of
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 log = logging.getLogger("bot.errors")
 
@@ -58,6 +60,42 @@ class BackendDownError(AIError):
         super().__init__(message, **kw)
 
 
+class AIBackendError(AIError):
+    """Backend was reached but returned a malformed/empty response.
+
+    Distinct from :class:`BackendDownError` (network unreachable): here the
+    request completed, but ``choices`` was empty or the response object was
+    missing — which used to crash ``resp.choices[0]`` with an unhelpful
+    ``IndexError`` (P1 #8).
+    """
+
+    category = "backend_error"
+
+    def __init__(self, message: str = "The AI backend returned an empty response.", **kw):
+        kw.setdefault("user_message", "🤖 The AI backend returned an empty response. Please try again.")
+        super().__init__(message, **kw)
+
+
+def extract_reply_text(resp, *, default: str = "(empty response)") -> str:
+    """Safely return the first choice's message content from a completion.
+
+    P1 #8: some backends return an empty ``choices`` array (or a ``None``
+    response); ``resp.choices[0].message.content`` would raise an unhelpful
+    ``IndexError``. This returns *default* when the message content is empty,
+    and raises a friendly :class:`AIBackendError` when there is no choice at
+    all so callers can surface a real error (and, for multi-model callers, try
+    the next model).
+    """
+    if resp is None:
+        raise AIBackendError("The AI backend returned no response.")
+    choices = getattr(resp, "choices", None)
+    if not choices:
+        raise AIBackendError("The AI backend returned no choices.")
+    message = getattr(choices[0], "message", None)
+    content = getattr(message, "content", None)
+    return content if content else default
+
+
 def classify_ai_error(exc: BaseException, *, model: str = "", backend_url: str = "") -> AIError:
     """Inspect *exc* and return a concrete :class:`AIError` subclass.
 
@@ -68,7 +106,8 @@ def classify_ai_error(exc: BaseException, *, model: str = "", backend_url: str =
          contains "timed out" → :class:`TimeoutError`
       3. HTTP 400 / 404 / "model not found" → :class:`ModelNotFoundError`
       4. ``httpx.ConnectError`` / message contains "connection" → :class:`BackendDownError`
-      5. HTTP 429 → ``RateLimitError`` (re-raised from bot_core)
+      5. HTTP 429 → ``RateLimitError`` carrying the backend's ``Retry-After``
+         (parsed + clamped; see :func:`_parse_retry_after`)
       6. Anything else → generic :class:`AIError`
     """
     # 1. Already classified (or the bot's own rate-limit exception).
@@ -113,16 +152,89 @@ def classify_ai_error(exc: BaseException, *, model: str = "", backend_url: str =
     ):
         return BackendDownError(str(exc), cause=exc)
 
+    # 4b. HTTP 5xx — the backend answered, but its side failed. Surfaces a
+    # friendly "try again" instead of a raw SDK exception (P1 #7).
+    if isinstance(status_code, int) and 500 <= status_code < 600:
+        return BackendDownError(
+            f"AI backend returned HTTP {status_code}.",
+            user_message="🔌 The AI backend had a problem processing your request. Please try again in a moment.",
+            cause=exc,
+        )
+
     # 5. Rate limit (429) — return a RateLimitError so callers can handle it
-    # uniformly. (Previously this *raised* from inside the classifier, which
-    # made a pure classification function have a side effect; the hardcoded
-    # 30 s retry-after also ignored the backend's Retry-After header.)
+    # uniformly. The classifier is a *pure* function (never raises). P1 #6:
+    # honour the backend's Retry-After header instead of a hardcoded 30 s.
     if status_code == 429:
         from bot_core.ai_client import RateLimitError
-        return RateLimitError("ai", retry_after=30)
+        from config.settings import AI_RETRY_AFTER_FALLBACK_S
+        raw = _extract_retry_after(exc)
+        retry_after = _parse_retry_after(raw, fallback=AI_RETRY_AFTER_FALLBACK_S)
+        if raw:
+            log.info("429 retry-after: header=%r -> %ds", raw, retry_after)
+        return RateLimitError("ai", retry_after=retry_after)
 
     # 6. Fallback
     return AIError(str(exc), cause=exc)
+
+
+# P1 #6: sane bounds for a backend-supplied 429 Retry-After value.
+_RETRY_AFTER_MIN_S = 5
+_RETRY_AFTER_MAX_S = 120
+
+
+def _extract_retry_after(exc: BaseException) -> str | None:
+    """Pull the raw ``Retry-After`` header value out of a raised exception.
+
+    Looks at ``exc.response.headers`` (openai SDK: ``APIStatusError.response``
+    is an ``httpx.Response``) and falls back to an explicit ``retry_after``
+    attribute. Returns ``None`` when the header is absent or not a string.
+    """
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        try:
+            val = headers.get("Retry-After")
+        except Exception:
+            val = None
+        if isinstance(val, (str, bytes)):
+            if isinstance(val, bytes):
+                val = val.decode("latin-1")
+            val = val.strip()
+            if val:
+                return val
+    val = getattr(exc, "retry_after", None)
+    if isinstance(val, str):
+        return val.strip() or None
+    return None
+
+
+def _parse_retry_after(raw: str | None, *, fallback: int = 30) -> int:
+    """Parse a ``Retry-After`` header (delta-seconds or HTTP-date) → seconds.
+
+    P1 #6: the backend's value is honoured, clamped to
+    ``[_RETRY_AFTER_MIN_S, _RETRY_AFTER_MAX_S]`` so a hostile/broken header
+    can neither stall the bot (huge value) nor spam it (zero/negative).
+    Malformed or missing values fall back to *fallback* (default 30 s).
+    """
+    if raw is None or not str(raw).strip():
+        return int(fallback)
+    val = str(raw).strip()
+    try:
+        seconds = float(val)  # delta-seconds form (also covers "5.0")
+    except ValueError:
+        seconds = None
+    if seconds is None:
+        # HTTP-date form, e.g. "Wed, 21 Oct 2026 07:28:00 GMT"
+        try:
+            when = parsedate_to_datetime(val)
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            seconds = (when - datetime.now(timezone.utc)).total_seconds()
+        except (TypeError, ValueError):
+            seconds = None
+    if seconds is None or seconds != seconds:  # NaN guard
+        return int(fallback)
+    return max(_RETRY_AFTER_MIN_S, min(_RETRY_AFTER_MAX_S, int(seconds)))
 
 
 __all__ = [
@@ -130,5 +242,7 @@ __all__ = [
     "TimeoutError",
     "ModelNotFoundError",
     "BackendDownError",
+    "AIBackendError",
+    "extract_reply_text",
     "classify_ai_error",
 ]

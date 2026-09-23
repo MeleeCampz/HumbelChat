@@ -2,6 +2,12 @@
 __pycache__/
 *.py[cod]
 *$py.class
+
+# Test coverage artifacts (local only — CI uploads coverage.xml, not .coverage)
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
 *.so
 .Python
 build/

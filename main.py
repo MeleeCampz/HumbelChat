@@ -28,17 +28,13 @@ from config.settings import (
     DISCORD_TOKEN,
     CHAT_HISTORY_RESET,
 )
-import config.settings as _settings  # dynamic reads (EMBED_FORMAT) for testability
 from config.characters import load_characters, default_character, get_character_choices
-from bot_core.ai_client import ask_ai as core_ask_ai
-from bot_core.ai_client import RateLimitError
+from bot_core.ai_runs import register_run, clear_run
+from commands.ai_command import run_ai_turn, start_typing, notify_if_queued
 from bot_core.health import start_backend_health_probe
 from bot_core.reminders import rearm_pending_reminders
 from utils.background_tasks import spawn_tracked_task
-from utils.channel_queue import channel_slot
 from utils.kb_utils import log_top_kb_files
-from utils.response_splitter import send_long_response, send_long_response_embedded
-from utils.typing_loop import typing_loop_task
 
 # ── Logging setup ───────────────────────────────────────────────────────
 # Handlers are attached to the "bot" logger (not root) and the bot hierarchy
@@ -50,10 +46,33 @@ _NO_FILE_LOGS = os.environ.get("BOT_NO_LOG_FILES") == "1"
 log = logging.getLogger("bot")
 log.propagate = False
 
+
+def _configure_discord_logger(dev_handler=None) -> None:
+    """Configure the discord.py logger (P3 #34).
+
+    The discord logger is kept console-only and stop-propagating. Its level is
+    driven by ``BOT_DISCORD_LOG_LEVEL`` **in both** file and console-only modes
+    — previously the level (and the whole config) lived inside the file-logging
+    branch, so ``BOT_DISCORD_LOG_LEVEL`` was silently ignored when
+    ``BOT_NO_LOG_FILES=1``. A ``dev_handler`` (dev.log) is attached only when a
+    file logger is present, so voice-gateway/DAVE debug lines reach dev.log.
+    """
+    _discord_logger = logging.getLogger("discord")
+    _discord_logger.handlers.clear()
+    _discord_logger.addHandler(logging.StreamHandler(sys.stdout))
+    _discord_console_level = os.environ.get("BOT_DISCORD_LOG_LEVEL", "INFO")
+    _discord_logger.setLevel(getattr(logging, _discord_console_level.upper(), logging.INFO))
+    if dev_handler is not None:
+        _discord_logger.addHandler(dev_handler)
+    _discord_logger.propagate = False
+
+
 if _NO_FILE_LOGS:
     # Tests / minimal environments: console-only output, no log files.
     log.addHandler(logging.StreamHandler(sys.stdout))
     log.setLevel(logging.INFO)
+    # P3 #34: still honour BOT_DISCORD_LOG_LEVEL in console-only mode.
+    _configure_discord_logger()
 else:
     LOG_DIR = pathlib.Path(__file__).resolve().parent / "logs"
     LOG_DIR.mkdir(exist_ok=True)
@@ -87,17 +106,7 @@ else:
     log.addHandler(dev_log)
     log.setLevel(logging.INFO)
 
-    # discord.py logs through the "discord" logger; keep it console-only and
-    # stop it from propagating to root (root has no handlers anyway, so this
-    # prevents duplicate lines if a handler is ever added to root).
-    _discord_logger = logging.getLogger("discord")
-    _discord_logger.handlers.clear()
-    _discord_logger.addHandler(logging.StreamHandler(sys.stdout))
-    _discord_console_level = os.environ.get("BOT_DISCORD_LOG_LEVEL", "INFO")
-    _discord_logger.setLevel(getattr(logging, _discord_console_level.upper(), logging.INFO))
-    # Voice debugging: voice-gateway + DAVE/MLS debug lines go to dev.log only.
-    _discord_logger.addHandler(dev_log)
-    _discord_logger.propagate = False
+    _configure_discord_logger(dev_handler=dev_log)
 
     # The knowledge-base modules log under their own top-level "kb" namespace
     # (kb.index, kb.embedder, kb.retrievers, ...). Attach the same handlers so
@@ -110,9 +119,15 @@ else:
     _kb_logger.addHandler(dev_log)
     _kb_logger.setLevel(logging.INFO)
 
+
 # ── Intents ─────────────────────────────────────────────────────────────
+# P3 #33: the bot only serves *guild* prefix commands and slash commands — it
+# never handles DM (non-guild) messages — so the deprecated ``messages`` intent
+# is not set. ``guild_messages`` + ``message_content`` are enough for the
+# prefix path; ``guilds`` for command/voice state. (Discord has deprecated the
+# legacy non-guild ``messages`` intent, and it only matters if you add DM
+# support later.)
 INTENTS = discord.Intents.default()
-INTENTS.messages = True
 INTENTS.guilds = True
 INTENTS.guild_messages = True
 INTENTS.message_content = True
@@ -214,6 +229,16 @@ async def ai_command(
     from commands.ai_command import handle_ai_command
     char_name = character.value if character else None
     await handle_ai_command(interaction, message, char_name)
+
+
+@bot.tree.command(
+    name="ai_stop",
+    description="Cancel the in-flight /ai reply in this channel (P3 #25).",
+)
+async def ai_stop_command(interaction: discord.Interaction) -> None:
+    """Stop an in-flight /ai — delegated to commands/ai_stop_command.py."""
+    from commands.ai_stop_command import handle_ai_stop_command
+    await handle_ai_stop_command(interaction)
 
 
 @bot.tree.command(name="character", description="Manage AI character/persona settings.")
@@ -443,6 +468,103 @@ async def on_ready() -> None:
         log.exception("Crashed-recording recovery failed (continuing)")
 
 
+@bot.tree.error
+async def on_app_command_error(
+    interaction: discord.Interaction,
+    error: app_commands.AppCommandError,
+) -> None:
+    """P1 #11: global error handler for application (slash) commands.
+
+    Without this, any unhandled exception in a command body surfaces in
+    Discord as the generic "Application command failed" popup with no log
+    trail. ``bot.tree.on_error`` is invoked for every top-level command
+    failure (``_from_interaction`` catches it, wrapping non-``AppCommandError``
+    exceptions into ``CommandInvokeError``) — see ``discord.app_commands.tree``.
+    We log the full traceback and send a short, friendly *ephemeral* follow-up
+    so only the invoking user sees it.
+    """
+    cmd = getattr(interaction, "command", None)
+    log.error(
+        "Application command %r failed with %s: %s", getattr(cmd, "name", "?"),
+        type(error).__name__, error,
+        exc_info=error,
+    )
+
+    # Derive a user-facing message. ``CommandInvokeError`` carries the *real*
+    # exception in ``.original`` (and as ``__cause__``), so we can name the
+    # original cause without leaking a raw traceback.
+    original = getattr(error, "original", None) or error
+    if isinstance(error, app_commands.CommandSignatureMismatch):
+        user_msg = "⚠️ The bot ran into an internal error on that command. Please try again — and let the owner know if it keeps happening."
+    elif isinstance(error, app_commands.CheckFailure):
+        user_msg = "⚠️ You don't have permission to use this command."
+    elif isinstance(error, app_commands.CommandInvokeError):
+        user_msg = f"⚠️ {type(original).__name__}: {original}"
+    else:
+        user_msg = f"⚠️ {type(error).__name__}: {error}"
+
+    # Best-effort: this handler may run after the interaction already responded
+    # (deferred → followed up) or not.  Try the primary response first, then
+    # fall back to a follow-up.
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.send_message(user_msg, ephemeral=True)
+            return
+    except Exception:
+        pass
+    try:
+        await interaction.followup.send(user_msg, ephemeral=True)
+    except Exception as e:  # pragma: no cover - purely defensive
+        log.warning("on_app_command_error: follow-up send failed: %s", e)
+
+
+@bot.event
+async def on_shutdown() -> None:
+    """P1 #12: graceful-close hook.
+
+    Runs on ``SIGTERM``/``SIGINT`` (the only signals discord.py lets the event
+    loop handle cleanly).  Stops in-flight work, cancels any tracked background
+    tasks so they don't leak, and flushes the vector index store to disk (this
+    was previously dead code — :func:`kb.retrievers.shutdown_vector_store` was
+    defined but never called).  All state in this bot is already persisted
+    immediately, so nothing more is needed beyond flushing the in-memory index.
+    """
+    log.info("Bot shutting down — cleaning up background tasks + vector store")
+    # 1. Stop any per-channel typing indicator loops (tracked as
+    #    bot.typing_tasks in the /ai and prefix handlers).
+    for t in list(getattr(bot, "typing_tasks", []) or []):
+        try:
+            if not t.done():
+                t.cancel()
+        except Exception:
+            pass
+    # 2. Cancel any other tracked background tasks (spawned via
+    #    utils.background_tasks.spawn_tracked_task — strong refs are kept in
+    #    _ACTIVE_BACKGROUND_TASKS so they aren't GC'd before we can cancel).
+    from utils.background_tasks import _ACTIVE_BACKGROUND_TASKS
+    for t in list(_ACTIVE_BACKGROUND_TASKS):
+        try:
+            if not t.done():
+                t.cancel()
+        except Exception:
+            pass
+    # 3. Flush + close the vector index store (the one resource that would
+    #    otherwise be left to the OS).
+    from kb.retrievers import shutdown_vector_store
+    try:
+        await shutdown_vector_store()
+    except Exception as e:
+        log.warning("Vector store shutdown failed: %s", e)
+    # 4. Close the shared embeddings HTTP client (P2 #21) so the connection
+    #    pool is torn down cleanly instead of lingering until process exit.
+    from kb.embedder import close_client
+    try:
+        await close_client()
+    except Exception as e:
+        log.warning("Embeddings client shutdown failed: %s", e)
+    log.info("Bot shutdown complete")
+
+
 @bot.event
 async def on_message(message: discord.Message) -> None:
     if message.author == bot.user:
@@ -466,54 +588,40 @@ async def on_message(message: discord.Message) -> None:
         prompt[:80],
     )
 
-    # §4.4: the tracking set in utils/background_tasks keeps the task alive
-    # even if no local references remain.
-    typing_task = spawn_tracked_task(
-        typing_loop_task(message.channel),
-        name=f"typing-{message.channel.id}",
-    )
-    # Diagnostics list only — prune finished tasks so it can't grow unbounded.
-    bot.typing_tasks = [t for t in bot.typing_tasks if not t.done()]
-    bot.typing_tasks.append(typing_task)
-
     sys_char = default_character()
     sys_model = sys_char.model if sys_char else DEFAULT_MODEL
 
-    # Hold this channel's reply slot for the ENTIRE request + delivery so a
-    # concurrent prefix command in the same channel can't interleave its
-    # messages with this one (see utils/channel_queue.py).
-    async with channel_slot(message.channel.id, name="prefix-command"):
-        try:
-            reply, _extra = await core_ask_ai(
-                prompt,
-                model_slug=sys_model or "",
-                guild_id=guild_id,
-                channel_id=message.channel.id,
-                username=message.author.display_name or "",
-                user_id=message.author.id,
-            )
-        except RateLimitError as e:
-            typing_task.cancel()
-            await message.channel.send(f"⏳ Rate limit reached — please try again in {e.retry_after}s.")
-            return
-        except ValueError as e:
-            typing_task.cancel()
-            await message.channel.send(f"⚠️ {e}")
-            return
+    # P3 #26: let the user know if other AI requests are already ahead.
+    await notify_if_queued(message)
 
-        typing_task.cancel()
-
-        if _settings.EMBED_FORMAT:
-            # Beyond20-style embed delivery (see commands/ai_command.py for the
-            # rationale); fall back to plain-text chunks when no embed is
-            # produced or a Discord API error occurs.
-            delivered = await send_long_response_embedded(
-                message, reply, str(sys_char.display)
-            )
-            if not delivered:
-                await send_long_response(message, reply, str(sys_char.display))
-        else:
-            await send_long_response(message, reply, str(sys_char.display))
+    # P3 #24: typing runs for the whole turn (queue + generation + delivery);
+    # the shared runner does the request + delivery with the same streaming /
+    # embed behaviour as /ai. The run is registered so /ai stop can cancel it.
+    channel_key = message.channel.id
+    typing_task = start_typing(message, channel_key)
+    run_task = spawn_tracked_task(
+        run_ai_turn(
+            message,
+            user_message=prompt,
+            model_slug=sys_model or "",
+            guild_id=guild_id,
+            channel_id=message.channel.id,
+            username=message.author.display_name or "",
+            user_id=message.author.id,
+            char_name=str(sys_char.display),
+        ),
+        name=f"ai-run-{channel_key}",
+    )
+    register_run(channel_key, run_task)
+    try:
+        await run_task
+    except asyncio.CancelledError:
+        # /ai stop sent its own acknowledgement; nothing more to deliver here.
+        log.info("prefix: in-flight run for channel %s cancelled (/ai stop)", channel_key)
+    finally:
+        clear_run(channel_key, run_task)
+        if typing_task is not None:
+            typing_task.cancel()
 
 
 # ── Single-instance lock ────────────────────────────────────────────────
@@ -566,7 +674,15 @@ def _recover_crashed_recordings(bot_obj) -> None:
         log.info("Recovered %d crashed recording(s) at startup", len(recovered))
 
 
-if __name__ == "__main__":
+def run_bot() -> None:
+    """P3 #27: entry point for the ``discord-ai-bot`` console script.
+
+    Extracted from the module-level ``__main__`` block so the bot can be
+    launched via ``python -m main`` *and* the installed ``discord-ai-bot``
+    console script (see ``pyproject.toml``) without duplicating the startup
+    sequence. Behaviour is unchanged: guard on the token, enforce the single
+    instance lock, log the connection target, then run the bot.
+    """
     if not DISCORD_TOKEN:
         log.error("Please set the DISCORD_BOT_TOKEN environment variable.")
         raise SystemExit(1)
@@ -581,3 +697,7 @@ if __name__ == "__main__":
     )
 
     bot.run(DISCORD_TOKEN)
+
+
+if __name__ == "__main__":
+    run_bot()

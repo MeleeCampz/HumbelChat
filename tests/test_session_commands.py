@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from bot_core import sessions as S
-from tests._shared import make_interaction
 
 
 @pytest.fixture(autouse=True)
