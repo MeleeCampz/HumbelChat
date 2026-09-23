@@ -178,15 +178,24 @@ def _build_rag_context(kb_docs: list[tuple[str, str]]) -> tuple[str, list[str]]:
     return rag_context, included_names
 
 
-def _scaled_timeout(total_chars: int) -> float:
+def _scaled_timeout(total_chars: int, max_tokens: int | None = None) -> float:
     """§2.3: derive a request timeout that scales with prompt size.
 
     Base timeout (``REQUEST_TIMEOUT``) covers a small prompt. For every
-    additional 1000 chars of prompt (≈250 tokens) we allow 0.5 s more,
-    capped at ``REQUEST_TIMEOUT * 4`` to avoid unbounded waits.
+    additional 1000 chars of prompt (≈250 tokens) we allow 0.5 s more.
+
+    Large *output* budgets (e.g. thinking models that may produce up to
+    ``max_tokens`` tokens) are scaled the same way per 1000 max_tokens,
+    because a full-budget generation at low local inference speed needs
+    roughly the same wall time as a same-size prompt. The cap is
+    ``REQUEST_TIMEOUT * 8`` so a generous budget (e.g. 16 K tokens) cannot
+    time out while the backend is legitimately still generating — at
+    ``AI_REQUEST_TIMEOUT=120`` that is 960 s worst case, still finite.
     """
     extra = (total_chars / 1000) * 0.5
-    return min(REQUEST_TIMEOUT + extra, REQUEST_TIMEOUT * 4)
+    if max_tokens:
+        extra += (max_tokens / 1000) * 0.5
+    return min(REQUEST_TIMEOUT + extra, REQUEST_TIMEOUT * 8)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -485,7 +494,9 @@ async def _build_ai_request(
     # §2.3: scale the timeout with prompt size — large RAG contexts take the
     # backend much longer, and a flat 120 s cap caused frequent timeouts on
     # 60 K+ token prompts. Add 0.5 s per 1000 chars of prompt (capped).
-    timeout_sec = _scaled_timeout(_total_chars)
+    # Timeout scales with prompt size AND the output budget (a thinking
+    # model generating up to max_tokens needs wall time for the output too).
+    timeout_sec = _scaled_timeout(_total_chars, _request_max_tokens)
 
     return _AIRequestContext(
         effective_model=effective_model,
@@ -534,6 +545,7 @@ def _friendly_ai_error(e: BaseException, *, model: str, backend_url: str) -> Non
         raise classified from e
     if isinstance(classified, ValueError) or getattr(classified, "category", "") in (
         "timeout", "model_not_found", "backend_down", "backend_error",
+        "truncated_response",
     ):
         raise ValueError(classified.user_message) from e
     raise e
@@ -557,6 +569,8 @@ async def ask_ai(
             username=username, user_id=user_id,
         )
 
+        from bot_core.errors import AIResponseTruncatedError, extract_reply_text
+
         try:
             # P1 #7: one bounded retry on transient 5xx/timeout/connection
             # failures before we give up on the turn.
@@ -574,8 +588,44 @@ async def ask_ai(
             # returns a placeholder for empty *content* and raises AIBackendError
             # for empty *choices*, which the except below turns into a
             # user-friendly message.
-            from bot_core.errors import extract_reply_text
             reply_text = extract_reply_text(resp)
+        except AIResponseTruncatedError:
+            # P4: the model spent its ENTIRE max_tokens budget on thinking
+            # and produced no answer (finish_reason "length", content empty).
+            # Retry once with a bigger budget (4×, capped at the hard cap).
+            # If the budget was already the cap, there is nothing bigger to
+            # try — surface the real error instead of an empty reply.
+            retry_budget = min(MAX_TOKENS_HARD_CAP, ctx.max_tokens * 4)
+            if retry_budget <= ctx.max_tokens:
+                log.error(
+                    "Response truncated at max_tokens=%d and the budget is "
+                    "already the hard cap — surfacing a real error",
+                    ctx.max_tokens,
+                )
+                _friendly_ai_error(
+                    AIResponseTruncatedError(max_tokens=ctx.max_tokens),
+                    model=ctx.effective_model, backend_url=INFER_URL,
+                )
+            log.warning(
+                "Response truncated (empty answer at max_tokens=%d); "
+                "retrying once with max_tokens=%d",
+                ctx.max_tokens, retry_budget,
+            )
+            try:
+                resp = await _call_completion_with_retry(
+                    ctx.client,
+                    model=ctx.effective_model,
+                    messages=ctx.messages,
+                    temperature=ctx.temperature,
+                    max_tokens=retry_budget,
+                    stream=False,
+                    timeout=ctx.timeout_sec,
+                )
+                reply_text = extract_reply_text(resp)
+            except Exception as e:  # noqa: BLE001 — classified below
+                # Covers the retry call's own transient failures AND a second
+                # truncation → friendly error, never an empty reply.
+                _friendly_ai_error(e, model=ctx.effective_model, backend_url=INFER_URL)
         except Exception as e:  # noqa: BLE001 — classified below
             _friendly_ai_error(e, model=ctx.effective_model, backend_url=INFER_URL)
 
@@ -631,15 +681,26 @@ async def ask_ai_stream(
             # is ambiguous (we may have already emitted tokens), so we surface
             # it immediately rather than risk a duplicated partial reply. The
             # non-streaming path keeps its one bounded retry.
-            stream = await ctx.client.chat.completions.create(
-                model=ctx.effective_model,
-                messages=ctx.messages,
-                temperature=ctx.temperature,
-                max_tokens=ctx.max_tokens,
-                stream=True,
-                timeout=ctx.timeout_sec,
-            )
+            from openai import AsyncStream
+            from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
+
+            stream: AsyncStream[ChatCompletionChunk] = \
+                await ctx.client.chat.completions.create(
+                    model=ctx.effective_model,
+                    messages=ctx.messages,  # type: ignore[arg-type]
+                    temperature=ctx.temperature,
+                    max_tokens=ctx.max_tokens,
+                    stream=True,
+                    timeout=ctx.timeout_sec,
+                )
             async for chunk in stream:
+                # Track the server-side finish reason (set on the final
+                # chunk) so a truncated-but-silent stream can be told apart
+                # from an ordinary empty answer (P4).
+                if getattr(chunk, "choices", None):
+                    fr = getattr(chunk.choices[0], "finish_reason", None)
+                    if fr:
+                        setattr(stream, "_final_finish_reason", fr)
                 try:
                     delta = chunk.choices[0].delta.content
                 except (IndexError, AttributeError, KeyError, TypeError):
@@ -659,7 +720,20 @@ async def ask_ai_stream(
 
         reply_text = "".join(collected).strip()
         if not reply_text:
-            from bot_core.errors import AIBackendError
+            # P4: an empty stream whose final chunk reported
+            # finish_reason "length" means the thinking model spent its whole
+            # max_tokens budget with nothing left for the answer — report that
+            # honestly instead of the generic empty-response message.
+            from bot_core.errors import AIBackendError, AIResponseTruncatedError
+            if getattr(stream, "_final_finish_reason", None) == "length":
+                _friendly_ai_error(
+                    AIResponseTruncatedError(
+                        f"Streamed response truncated at max_tokens="
+                        f"{ctx.max_tokens} with no visible answer.",
+                        max_tokens=ctx.max_tokens,
+                    ),
+                    model=ctx.effective_model, backend_url=INFER_URL,
+                )
             _friendly_ai_error(
                 AIBackendError("The AI backend returned an empty response."),
                 model=ctx.effective_model, backend_url=INFER_URL,

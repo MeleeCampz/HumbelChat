@@ -45,6 +45,11 @@ If a character sets `max_tokens`, that value is used for AI requests using that 
 
 Either way, the final value is clamped by `MAX_TOKENS_HARD_CAP`.
 
+Note: keep budgets generous for *thinking* models (e.g. Qwen3) — `max_tokens`
+covers internal reasoning **and** the visible answer. If a response is
+truncated (`finish_reason "length"`) with an empty answer, the bot
+automatically retries once at `MAX_TOKENS_HARD_CAP` before giving up.
+
 Example character with a custom limit:
 
 ```json
