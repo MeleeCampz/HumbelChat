@@ -1,9 +1,9 @@
-"""Beyond20-style embed rendering for AI replies.
+"""Structured Discord-embed rendering for AI replies.
 
 Discord messages only support a small Markdown subset (no tables, no font
 sizes), so long structured replies — character sheets, stat blocks, item
 comparisons — look messy as plain text.  This module converts an AI reply
-into a ``discord.Embed`` the way the Beyond20 bot does: structured content
+into a ``discord.Embed`` the way structured replies should be delivered:
 becomes an embed with a title, a description, and *inline fields*, which is
 the only reliable way to get table-like layouts in Discord.
 
@@ -61,8 +61,8 @@ MAX_FIELD_NAME: int = 256
 MAX_FIELD_VALUE: int = 1024
 MAX_FIELDS: int = 25
 
-# Beyond20 uses the D&D Beyond green for its roll embeds; we reuse it as the
-# default accent so /ai replies look like part of the same family.
+# The D&D Beyond green is reused as the default accent so /ai replies look
+# like part of the same family as the D&D-themed content the bot serves.
 DEFAULT_COLOR: int = 0x96BF6B
 FALLBACK_COLOR: int = 0x5865F2  # Discord blurple, used when parsing degrades
 
@@ -532,8 +532,8 @@ def _build_embed_impl(
 
     # ── Title: first H1 > override (e.g. character name) > excerpt ─────
     # The most specific wins: an explicit heading in the reply is more
-    # informative than a generic per-character label (Beyond20 titles its
-    # embeds with the item/roll name, not a bot label).
+    # informative than a generic per-character label (title the embed with the
+    # item/roll name, not a bot label).
     title = ""
     for kind, payload in blocks:
         if kind == "h1" and payload:

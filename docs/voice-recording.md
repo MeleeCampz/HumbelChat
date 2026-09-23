@@ -2,7 +2,7 @@
 
 The bot can capture a Discord voice channel **per speaker** for later speech-to-text (STT). Each participant gets their own 16-bit PCM WAV file, and a JSON manifest ties everything to absolute timestamps so a multi-speaker conversation can be reconstructed on a shared timeline.
 
-Implemented in [`bot_core/voice_recorder.py`](../bot_core/voice_recorder.py) (capture pipeline) and [`commands/recording_commands.py`](../commands/recording_commands.py) (slash-command layer).
+Implemented in the [`bot_core/voice`](../bot_core/voice/) package (`session.py` capture pipeline, `dave.py` decryption, `capture.py` on-disk frame logs, `recover.py` crash recovery) and [`commands/recording_commands.py`](../commands/recording_commands.py) (slash-command layer). `bot_core.voice_recorder` remains a thin re-exporting facade for backward compatibility.
 
 ## Commands
 
@@ -31,7 +31,7 @@ That's fixed. Three mechanisms make a crash non-destructive:
 
 1. **Stream-to-disk.** Each speaker's decoded frames are appended to an append-only binary log (`<name>_<user_id>.log`) the moment they decode, instead of being held in RAM. A crash now loses only the single frame still in flight (a trailing partial record is detected and dropped on read). The RAM footprint drops to "current frame + file handles", which also removes the OOM growth that was causing the crashes.
 2. **Graceful SIGTERM flush.** Docker sends SIGTERM on `docker stop` / compose restarts. A signal handler runs `stop()` first, so *clean* shutdowns always write complete WAVs + manifest and leave no orphan behind.
-3. **Startup auto-recovery.** On boot the bot scans for *orphans* — recording directories that have a `.recording` marker but no `manifest.json` (i.e. captured to disk but never stopped, because the process died). Each is rebuilt into WAVs + a manifest flagged `"recovered": true`. To avoid silently truncating a still-live meeting (e.g. the bot restarted while a call was ongoing), only orphans whose session started **more than 5 minutes ago** are auto-recovered; newer ones are left alone and can be recovered manually via `bot_core.voice_recorder.recover_orphans()`.
+3. **Startup auto-recovery.** On boot the bot scans for *orphans* — recording directories that have a `.recording` marker but no `manifest.json` (i.e. captured to disk but never stopped, because the process died). Each is rebuilt into WAVs + a manifest flagged `"recovered": true`. To avoid silently truncating a still-live meeting (e.g. the bot restarted while a call was ongoing), only orphans whose session started **more than 5 minutes ago** are auto-recovered; newer ones are left alone and can be recovered manually via `bot_core.voice.recover.recover_orphans()`.
 
 What's durable vs. what can still be lost:
 

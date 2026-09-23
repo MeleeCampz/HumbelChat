@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
-import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
@@ -48,7 +46,6 @@ def test_on_ready_does_not_raise():
     This directly calls the on_ready coroutine with a mocked bot to ensure
     no AttributeError occurs when iterating over _CHAR_CHOICES (the bug we fixed).
     """
-    import asyncio
     from unittest.mock import MagicMock, AsyncMock, patch
 
     # Create a fully mocked bot

@@ -11,9 +11,6 @@ import inspect
 import logging
 import os
 import pathlib
-import subprocess
-import sys
-from unittest.mock import MagicMock
 
 import pytest
 

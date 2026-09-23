@@ -20,6 +20,29 @@ def _safe_float(value: str | None, default: float) -> float:
         return default
 
 
+def _safe_bool(value: str | None, default: bool) -> bool:
+    """Parse a boolean-ish env var robustly (P3 #32).
+
+    The codebase previously scattered ad-hoc ``os.getenv(...) not in
+    ("0", "false", "no")`` checks, which mis-parsed capitalised values (e.g.
+    ``False``/``No`` were treated as *true*) and were inconsistent with one
+    another.  This single helper is the one place that decides how bool-ish
+    strings are read: explicit falsy tokens are False, explicit truthy tokens
+    are True, and anything else (empty, unset, unrecognised) falls back to
+    *default*.  Case and surrounding whitespace are ignored.
+    """
+    if value is None:
+        return default
+    v = value.strip().lower()
+    if not v:
+        return default
+    if v in ("1", "true", "yes", "on", "y", "t"):
+        return True
+    if v in ("0", "false", "no", "off", "n", "f"):
+        return False
+    return default
+
+
 def _history_reset_flag(value: str | None) -> bool:
     """Return True if *value* is the sentinel string "clear" (case-insensitive).
 
@@ -56,6 +79,10 @@ REQUEST_TIMEOUT: int = _safe_int(os.getenv("AI_REQUEST_TIMEOUT"), 120)
 # a positive value starts a periodic background check at that interval.
 AI_HEALTH_CHECK_INTERVAL: int = _safe_int(os.getenv("AI_HEALTH_CHECK_INTERVAL"), 0)
 AI_HEALTH_CHECK_TIMEOUT: int = _safe_int(os.getenv("AI_HEALTH_CHECK_TIMEOUT"), 5)
+# P1 #6: fallback (seconds) used when a 429 carries no parseable Retry-After
+# header. The header value itself is clamped to [5, 120] s (see
+# bot_core.errors._parse_retry_after); this is only the no-header fallback.
+AI_RETRY_AFTER_FALLBACK_S: int = _safe_int(os.getenv("AI_RETRY_AFTER_FALLBACK_S"), 30)
 MAX_TOKENS: int = _safe_int(os.getenv("MAX_TOKENS"), 2000)
 MAX_TOKENS_HARD_CAP: int = _safe_int(os.getenv("MAX_TOKENS_HARD_CAP"), 4096)
 
@@ -85,12 +112,12 @@ BOT_PREFIX: str = os.getenv("BOT_PREFIX", "!ai")
 # §3.6: boolean flag instead of the old ``"clear" | None`` sentinel string.
 CHAT_HISTORY_RESET: bool = _history_reset_flag(os.getenv("CHAT_HISTORY_RESET"))
 
-# Beyond20-style embed rendering for /ai replies.
+# Structured embed rendering for /ai replies.
 # Structured replies (headings, tables, lists) become a discord.Embed with a
-# title, description and inline fields — the way the Beyond20 bot formats
-# rolls. Plain prose still works; tiny/empty replies fall back to text.
-# Set EMBED_FORMAT=0 in .env to restore classic plain-text delivery.
-EMBED_FORMAT: bool = os.getenv("EMBED_FORMAT", "1") not in ("0", "false", "no")
+# title, description and inline fields. Plain prose still works; tiny/empty
+# replies fall back to text. Set EMBED_FORMAT=0 in .env to restore classic
+# plain-text delivery.
+EMBED_FORMAT: bool = _safe_bool(os.getenv("EMBED_FORMAT"), True)
 
 def _or_default(value: str | None, default: str) -> str:
     """Return value if non-empty, else default (for optional path overrides)."""
@@ -101,6 +128,10 @@ def _or_default(value: str | None, default: str) -> str:
 #  EMBEDDING MODEL
 # ════════════════════════════════════
 EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "nomic-embed-text:latest")
+# P2 #21: per-request timeout (seconds) for the /embeddings endpoint. Was
+# hardcoded to 30 in kb/embedder; configurable here now. The HTTP client is
+# shared across batches (keep-alive), so only this per-request timeout applies.
+EMBED_TIMEOUT: int = _safe_int(os.getenv("EMBED_TIMEOUT"), 30)
 
 # ════════════════════════════════════
 #  KNOWLEDGE BASE
@@ -126,7 +157,7 @@ RECORDINGS_DIR: pathlib.Path = pathlib.Path(
 # ── Speech-to-text ───────────────────────────────────────────────────────────
 # Transcribe each speaker's WAV automatically after /stop_recording.
 # Set STT_ENABLED=0 to keep recording without transcribing.
-STT_ENABLED: bool = os.getenv("STT_ENABLED", "1") not in ("0", "false", "no")
+STT_ENABLED: bool = _safe_bool(os.getenv("STT_ENABLED"), True)
 # Which engine performs the transcription:
 #   local — faster-whisper on this machine (default). Real per-segment
 #           timestamps -> interleaved chronological transcript, no upload cap.
@@ -168,7 +199,7 @@ STT_CHUNK_SECONDS: int = _safe_int(os.getenv("STT_CHUNK_SECONDS"), 600)
 # full-length WAV with the first/last frames zero-padded to the session start/
 # end; trimming removes that padding so short meetings don't upload hours of
 # silence. Segment timestamps are shifted back onto the shared timeline.
-STT_TRIM_SILENCE: bool = os.getenv("STT_TRIM_SILENCE", "1") not in ("0", "false", "no")
+STT_TRIM_SILENCE: bool = _safe_bool(os.getenv("STT_TRIM_SILENCE"), True)
 # Silence threshold for STT_TRIM_SILENCE, in dBFS (negative). Samples with a
 # level below this are treated as silence. -45 is well under typical speech
 # but above the digital-noise floor of quiet channels.
@@ -178,14 +209,14 @@ STT_SILENCE_DBFS: float = _safe_float(os.getenv("STT_SILENCE_DBFS"), -45.0)
 # Whisper from hallucinating filler words in the gaps (observed: "Vielen
 # Dank." emitted at times where one speaker's track was 100% digital silence).
 # Set STT_VAD_FILTER=0 to transcribe every sample verbatim.
-STT_VAD_FILTER: bool = os.getenv("STT_VAD_FILTER", "1") not in ("0", "false", "no")
+STT_VAD_FILTER: bool = _safe_bool(os.getenv("STT_VAD_FILTER"), True)
 # Save the finished transcript for the ACTIVE session automatically when
 # transcription completes (see bot_core.sessions.add_transcript).  The full
 # transcript is stored as its own .md file under the session's transcripts/
 # folder, so it shows up in /session_notes and stays RAG-searchable (chunked
 # by the KB indexer). Set STT_ADD_TO_SESSION=0 to keep transcripts out of
 # the sessions.
-STT_ADD_TO_SESSION: bool = os.getenv("STT_ADD_TO_SESSION", "1") not in ("0", "false", "no")
+STT_ADD_TO_SESSION: bool = _safe_bool(os.getenv("STT_ADD_TO_SESSION"), True)
 
 CHUNK_TARGET: int = _safe_int(os.getenv("CHUNK_SIZE"), 2000)
 RAG_MAX_DOCS: int = _safe_int(os.getenv("RAG_MAX_DOCS"), 4)
@@ -198,9 +229,28 @@ RAG_WINDOW_LINES: int = _safe_int(os.getenv("RAG_WINDOW_LINES"), 80)
 # the rewriter asks the LLM for up to RAG_QUERY_MAX_EXPANSIONS alternative phrasings,
 # embeds them in one batch, and merges the rankings (reciprocal rank fusion).
 # Confident queries pay nothing extra.  Set RAG_QUERY_REWRITER=0 to disable entirely.
-RAG_QUERY_REWRITER: bool = os.getenv("RAG_QUERY_REWRITER", "1") not in ("0", "false", "no")
-RAG_REWRITE_MIN_SCORE: float = float(os.getenv("RAG_REWRITE_MIN_SCORE", "0.35") or 0.35)
+RAG_QUERY_REWRITER: bool = _safe_bool(os.getenv("RAG_QUERY_REWRITER"), True)
+# P1 #10: route through _safe_float so a garbage value (e.g. RAG_REWRITE_MIN_SCORE=abc)
+# falls back to the 0.35 default instead of raising ValueError at *import* — the
+# same treatment every other numeric env var above gets. (The old
+# ``float(...) or 0.35`` never guarded against an unparseable string.)
+RAG_REWRITE_MIN_SCORE: float = _safe_float(os.getenv("RAG_REWRITE_MIN_SCORE"), 0.35)
 RAG_QUERY_MAX_EXPANSIONS: int = _safe_int(os.getenv("RAG_QUERY_MAX_EXPANSIONS"), 3)
+
+# ── Streaming AI responses (P3 #24) ────────────────────────────────────────
+# When on, /ai streams the completion token-by-token and progressively edits a
+# single Discord message as the text grows (instead of the user staring at a
+# typing indicator until the full reply is ready). Set AI_STREAM=0 to restore
+# the classic "wait, then deliver the whole reply" behaviour. This is an
+# OPT-IN: the reply is built up by editing one message, which suits most
+# setups, but a couple of Discord/local-backend edge cases (and the very long
+# reply paths that re-deliver as multi-message chunks) are simpler with the
+# proven non-streaming path, so it defaults to off.
+AI_STREAM: bool = _safe_bool(os.getenv("AI_STREAM"), False)
+# Minimum wall-clock seconds between successive message edits while streaming.
+# Discord rate-limits message edits; keeping a small floor avoids hammering the
+# API for very fast (short) generations while still giving live feedback.
+AI_STREAM_EDIT_INTERVAL_S: float = _safe_float(os.getenv("AI_STREAM_EDIT_INTERVAL_S"), 2.5)
 # Wall-clock budget (seconds) for the LLM rewrite call itself.
 RAG_REWRITE_BUDGET_SECONDS: int = _safe_int(os.getenv("RAG_REWRITE_BUDGET_SECONDS"), 10)
 

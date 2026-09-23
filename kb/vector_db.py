@@ -35,6 +35,9 @@ class _DocEntry:
     content: str
     embedding: list[float] | None = field(default=None, repr=False)
     source_file: str | None = field(default=None, repr=False)
+    # P2 #19: SHA-256 of the SOURCE file on disk. Lets the cache skip
+    # re-chunking a file whose content is unchanged (chunker is deterministic).
+    file_hash: str | None = field(default=None, repr=False)
 
     def source(self) -> str:
         """Best-effort original filename for this chunk (for cache bookkeeping)."""
@@ -61,6 +64,10 @@ class KBVectorIndex:
 
     def __init__(self) -> None:
         self._docs: list[_DocEntry] = []
+        # P2 #17: lazily-built numpy (matrix, norms) cache, invalidated whenever
+        # _docs is *replaced* (tracked by object identity + length). None until
+        # first query.
+        self._mat_cache: tuple | None = None
         from config.settings import EMBEDDING_MODEL
         self._embedder = Embedder(model_name=EMBEDDING_MODEL)
 
@@ -129,15 +136,19 @@ class KBVectorIndex:
         cls,
         entries: list[tuple[str, str, str]],  # (display_name, content, source_file)
         embeddings: list[list[float]],
+        file_hashes: list[str | None] | None = None,  # P2 #19
     ) -> KBVectorIndex:
         """Build an index from pre-embedded entries (no API calls)."""
         index = cls.__new__(cls)
         from config.settings import EMBEDDING_MODEL
         index._embedder = Embedder(model_name=EMBEDDING_MODEL)
-        index._docs = [
-            _DocEntry(display_name=n, content=c, embedding=e, source_file=s)
-            for (n, c, s), e in zip(entries, embeddings)
-        ]
+        index._mat_cache = None  # P2 #17
+        docs: list[_DocEntry] = []
+        for (n, c, s), e in zip(entries, embeddings):
+            fh = file_hashes[len(docs)] if file_hashes else None
+            docs.append(_DocEntry(display_name=n, content=c, embedding=e,
+                                  source_file=s, file_hash=fh))
+        index._docs = docs
         return index
 
     def is_empty(self) -> bool:
@@ -145,6 +156,96 @@ class KBVectorIndex:
 
     def count(self) -> int:
         return len(self._docs)
+
+    # ── P2 #17: numpy-accelerated ranking (pure-Python fallback) ──
+
+    def _ensure_matrix(self) -> tuple:
+        """Build (matrix, norms, n) from ``_docs``, caching the result.
+
+        *matrix* is a float32 ``(n, D)`` array holding every document's
+        embedding (rows with no embedding are all-zero). *norms* are its
+        per-row L2 norms.  Rebuilt only when ``_docs`` is *replaced* (a new
+        list object or a different length), so repeated queries reuse the
+        matrix and each query is a single C-level matmul rather than an
+        O(N·D) Python loop.
+        """
+        cache = self._mat_cache
+        if (cache is not None and cache[2] is self._docs
+                and cache[3] == len(self._docs)):
+            return cache[0], cache[1], cache[3]
+        import numpy as np
+
+        docs = self._docs
+        n = len(docs)
+        d = next((len(doc.embedding) for doc in docs if doc.embedding), 0)
+        if n and d:
+            mat = np.zeros((n, d), dtype="float32")
+            for i, doc in enumerate(docs):
+                emb = doc.embedding
+                if emb:
+                    mat[i] = emb
+        else:
+            mat = np.zeros((n, 0), dtype="float32")
+        norms = np.linalg.norm(mat, axis=1)
+        self._mat_cache = (mat, norms, docs, n)
+        return mat, norms, n
+
+    def _rank_py(self, q_emb: list[float], top_n: int) -> list[tuple[float, int]]:
+        """Pure-Python cosine ranking (fallback when numpy is unavailable).
+
+        Returns ``[(similarity, doc_index), ...]`` sorted descending, where
+        *doc_index* is an index into ``self._docs``.
+        """
+        scored: list[tuple[float, int]] = []
+        for i, doc in enumerate(self._docs):
+            emb = doc.embedding
+            if emb is None:
+                continue
+            sim = _cosine_similarity(q_emb, emb)
+            if sim > 0:
+                scored.append((sim, i))
+        scored.sort(key=lambda t: -t[0])
+        return scored[:top_n]
+
+    def _rank(self, q_emb: list[float], top_n: int) -> list[tuple[float, int]]:
+        """Top-*top_n* docs for *q_emb* as ``[(similarity, doc_index), ...]``.
+
+        Uses a numpy matmul (P2 #17); any failure (numpy missing, ragged
+        embeddings, …) falls back to :meth:`_rank_py`.
+        """
+        if self.is_empty() or not q_emb:
+            return []
+        try:
+            import numpy as np
+        except Exception:
+            return self._rank_py(q_emb, top_n)
+        try:
+            matrix, norms, n = self._ensure_matrix()
+            if matrix.size == 0:
+                return []
+            q = np.asarray(q_emb, dtype="float32")
+            qn = float(np.linalg.norm(q))
+            if qn == 0.0:
+                return []
+            with np.errstate(invalid="ignore", divide="ignore"):
+                sims = (matrix @ q) / (norms * qn)
+            sims = np.where(np.isfinite(sims) & (sims > 0), sims, 0.0)
+            if top_n >= n:
+                order = np.argsort(-sims)
+            else:
+                part = np.argpartition(-sims, top_n - 1)[:top_n]
+                order = part[np.argsort(-sims[part])]
+            out: list[tuple[float, int]] = []
+            for i in order:
+                s = float(sims[i])
+                if s <= 0.0:
+                    break
+                out.append((s, int(i)))
+                if len(out) >= top_n:
+                    break
+            return out
+        except Exception:
+            return self._rank_py(q_emb, top_n)
 
     # ── Querying ────────────────────────────────────────────────────
 
@@ -167,17 +268,9 @@ class KBVectorIndex:
         except Exception:
             return []
 
-        scored: list[tuple[str, float]] = []
-        for doc in self._docs:
-            emb = doc.embedding
-            if emb is None:
-                continue
-            sim = _cosine_similarity(q_emb, emb)
-            if sim > 0:
-                scored.append((doc.display_name, sim))
-
-        scored.sort(key=lambda t: -t[1])
-        return scored[:top_n]
+        # P2 #17: numpy matmul ranking (falls back to pure Python internally).
+        ranked = self._rank(q_emb, top_n)
+        return [(self._docs[i].display_name, sim) for sim, i in ranked]
 
     async def query_with_embeddings(
         self,
@@ -200,17 +293,13 @@ class KBVectorIndex:
         except Exception:
             return [], []
 
-        scored: list[tuple[str, str, float]] = []
-        for doc in self._docs:
-            emb = doc.embedding
-            if emb is None:
-                continue
-            sim = _cosine_similarity(q_emb, emb)
-            if sim > 0:
-                scored.append((doc.display_name, doc.content, sim))
-
-        scored.sort(key=lambda t: -t[2])
-        return scored[:top_n], q_emb
+        # P2 #17: numpy matmul ranking (falls back to pure Python internally).
+        ranked = self._rank(q_emb, top_n)
+        scored = [
+            (self._docs[i].display_name, self._docs[i].content, sim)
+            for sim, i in ranked
+        ]
+        return scored, q_emb
 
     async def rank_texts(
         self,
@@ -232,17 +321,16 @@ class KBVectorIndex:
 
         results: list[list[tuple[str, str, float]]] = []
         for emb in embeddings:
-            scored: list[tuple[str, str, float]] = []
             if emb:
-                for doc in self._docs:
-                    d_emb = doc.embedding
-                    if d_emb is None:
-                        continue
-                    sim = _cosine_similarity(emb, d_emb)
-                    if sim > 0:
-                        scored.append((doc.display_name, doc.content, sim))
-            scored.sort(key=lambda t: -t[2])
-            results.append(scored[:top_n])
+                # P2 #17: numpy matmul ranking (falls back to pure Python internally).
+                ranked = self._rank(emb, top_n)
+                scored = [
+                    (self._docs[i].display_name, self._docs[i].content, sim)
+                    for sim, i in ranked
+                ]
+            else:
+                scored = []
+            results.append(scored)
         return results
 
     @staticmethod

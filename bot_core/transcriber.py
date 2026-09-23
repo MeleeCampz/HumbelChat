@@ -59,6 +59,10 @@ import time
 import wave
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # numpy is imported lazily; needed only for these annotations
+    import numpy as np
 
 log = logging.getLogger("bot.transcriber")
 
@@ -544,7 +548,7 @@ async def transcribe_recording(manifest: dict) -> TranscriptionReport:
     reasoning as the global AI lock). Returns a report; per-speaker failures
     never abort the rest.
     """
-    from config.settings import STT_BACKEND, STT_LANGUAGE, STT_LOCAL_MODEL, STT_MODEL
+    from config.settings import STT_LANGUAGE, STT_LOCAL_MODEL, STT_MODEL
 
     backend = _stt_backend()
     # The local engine takes faster-whisper model ids; the HTTP endpoint takes
@@ -601,7 +605,6 @@ def build_interleaved_transcript(report: TranscriptionReport) -> str:
         s = t - m * 60
         return f"{m:02d}:{s:05.2f}"
 
-    named = {s.user_id: (s.display_name or f"user {s.user_id}") for s in report.speakers}
     events: list[tuple[float, int, str, str]] = []   # (start, seq, name, text)
     untimed: list[str] = []
     seq = 0

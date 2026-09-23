@@ -25,7 +25,7 @@ class TestUploadKBCommand:
             with patch("kb.storage.KB_PATH", temp_kb_dir):
                 from commands.kb_commands import handle_upload_kb
 
-                await handle_upload_kb(ix, attachment=attachment, kb_name=None, url=None)
+                await handle_upload_kb(ix, attachment=attachment, url=None)
 
         assert any("test_document" in s or "uploaded_doc" in s for s in sent)
 
@@ -36,22 +36,36 @@ class TestUploadKBCommand:
         await ix.followup.send("placeholder", ephemeral=True)  # initialize _sent
         sent = ix._sent
 
-        # Mock httpx client
-        mock_resp = MagicMock()
-        mock_resp.content = b"Remote file content."
-        mock_resp.raise_for_status = MagicMock()
-
-        mock_client = MagicMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.get = AsyncMock(return_value=mock_resp)
-
-        with patch("httpx.AsyncClient", return_value=mock_client):
+        # P1 #16: the fetch goes through utils.url_fetch.fetch_url (streaming +
+        # scheme guard). Stub it to return the bytes so this test stays focused
+        # on the upload flow.
+        with patch("utils.url_fetch.fetch_url", new=AsyncMock(return_value=b"Remote file content.")):
             with patch("kb.storage.KB_PATH", temp_kb_dir):
                 from commands.kb_commands import handle_upload_kb
 
-                await handle_upload_kb(ix, attachment=None, url="https://example.com/file.txt", kb_name=None)
+                await handle_upload_kb(ix, attachment=None, url="https://example.com/file.txt")
 
         assert any("file.txt" in s or "upload_kb" in s for s in sent)
+
+    @pytest.mark.asyncio
+    async def test_upload_kb_rejects_zero_byte(self, temp_kb_dir):
+        """P3 #36: a 0-byte attachment must be rejected, not stored."""
+        attachment = MagicMock()
+        attachment.filename = "empty.txt"
+        attachment.read = AsyncMock(return_value=b"")  # 0 bytes
+
+        ix = Interaction()
+        sent = ix._sent
+        with patch("kb.storage.KB_PATH", temp_kb_dir):
+            from commands.kb_commands import handle_upload_kb
+            await handle_upload_kb(ix, attachment=attachment, url=None)
+
+        joined = " ".join(sent)
+        assert "empty" in joined.lower()
+        # Nothing was written to the KB.
+        from kb.storage import list_kb_files
+        names = [d["name"] for d in list_kb_files(temp_kb_dir, recursive=True)]
+        assert not any("empty" in n for n in names)
 
     @pytest.mark.asyncio
     async def test_upload_kb_early_return(self, temp_kb_dir):

@@ -14,11 +14,10 @@ Covers:
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
+import pathlib
 import pickle
 import sqlite3
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -79,7 +78,6 @@ def with_fake(index: KBVectorIndex, store: KBIndexStore | None = None) -> FakeEm
 
 @pytest.fixture
 def kb_dir(tmp_path) -> "pathlib.Path":
-    import pathlib
     kb = tmp_path / "kb"
     kb.mkdir()
     (kb / "time_system.md").write_text(
@@ -95,7 +93,6 @@ def kb_dir(tmp_path) -> "pathlib.Path":
 
 @pytest.fixture
 def multi_chunk_kb(tmp_path) -> "pathlib.Path":
-    import pathlib
     kb = tmp_path / "kb_multi"
     kb.mkdir()
     # >8000 chars with markdown headers → multiple chunks per file
@@ -160,7 +157,7 @@ class TestCacheHit:
     @pytest.mark.asyncio
     async def test_reload_is_free_and_identical(self, kb_dir, tmp_path):
         store = make_store(tmp_path, kb_dir)
-        fake = install_fake_embedder(store)
+        install_fake_embedder(store)  # side effect: patches store + KBVectorIndex
         idx1 = await store.load()
         first = [(d.display_name, d.content, d.embedding) for d in idx1._docs]
 
@@ -466,13 +463,14 @@ class TestPersistence:
 
     @pytest.mark.asyncio
     async def test_metadata_records_schema_version(self, kb_dir, tmp_path):
+        from kb.index import _SCHEMA_VERSION
         store = make_store(tmp_path, kb_dir)
         install_fake_embedder(store)
         await store.load()
         conn = sqlite3.connect(str(store.db_path))
         meta = dict(conn.execute("SELECT key, value FROM metadata").fetchall())
         conn.close()
-        assert meta["schema_version"] == "3"
+        assert meta["schema_version"] == _SCHEMA_VERSION
         assert str(store.kb_path) == meta["kb_path"]
 
 
@@ -502,7 +500,6 @@ class TestIterKBFiles:
 class TestPerSessionFolders:
     @pytest.fixture
     def session_kb(self, tmp_path):
-        import pathlib
         kb = tmp_path / "kb_sessions"
         for idx, name, alpha in ((1, "A", "ALPHA"), (2, "B", "BETA")):
             s = kb / "session_notes" / f"2026-09-16_{idx:02d}_{name}"
