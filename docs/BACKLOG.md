@@ -91,42 +91,42 @@
 ## P3 — UX / features / DX / docs
 
 ### 24. Streaming AI responses
-- [ ] **Where:** `bot_core/ai_client.py` (`stream=False`), `commands/ai_command.py`, `main.py::on_message`.
+- [x] **Done (2026-09-23).** `ask_ai_stream()` in `bot_core/ai_client.py` + live placeholder editing in `commands/ai_command.py` (`AI_STREAM` opt-in, `AI_STREAM_EDIT_INTERVAL_S` throttle). **Where:** `bot_core/ai_client.py` (`stream=False`), `commands/ai_command.py`, `main.py::on_message`.
 - **Problem:** User waits for the full generation (up to minutes) and sees nothing; the typing indicator only covers ~30 s (`utils/typing_loop.py`).
 - **Fix:** Stream completion chunks → accumulate, and either (a) deliver progressively (edit a placeholder message in ≤ 2 000-char chunks) or (b) at minimum keep typing alive for the whole generation and show progress hints. Also fixes: typing task started before the channel queue in `ai_command.py` (indicator dies while still queued).
 - **Verify:** Manual + test that a stub streamed reply results in an edited message; typing loop test for >30 s generations.
 
 ### 25. Stop/cancel for in-flight `/ai`
-- [ ] **Where:** `commands/ai_command.py`, `bot_core/ai_client.py`.
+- [x] **Done (2026-09-23).** `bot_core/ai_runs.py` registry + `/ai stop` (`commands/ai_stop_command.py`); the turn runs in a cancelable child task. **Where:** `commands/ai_command.py`, `bot_core/ai_client.py`.
 - **Problem:** A stuck/slow request cannot be cancelled by the user.
 - **Fix:** Track the current task per channel (reuse the `bot.typing_tasks` pruning pattern); `/ai stop` (or a stop word) cancels the awaited task and reports "cancelled".
 - **Verify:** Test: task cancelled mid-generation → user notified, lock released, no orphaned typing task.
 
 ### 26. Global AI lock queue feedback (and/or per-guild lock)
-- [ ] **Where:** `bot_core/ai_client.py` (global `asyncio.Lock`), channel queue in `main.py`.
+- [x] **Done (2026-09-23).** Queue-position feedback ("N other request(s) ahead of you") via `_ai_slot()` counters + `notify_if_queued()`. **Where:** `bot_core/ai_client.py` (global `asyncio.Lock`), channel queue in `main.py`.
 - **Problem:** The lock serializes *all* channels; with `REQUEST_TIMEOUT * 4` ≈ 480 s worst case, other channels wait silently for minutes.
 - **Fix (pick one or combine):** Per-guild locks instead of global; or queue position feedback ("you're #2, ~30 s behind"); or a warning edit if wait > 60 s.
 - **Verify:** Test: two guilds → concurrent; same guild → serialized (whichever scheme is chosen).
 
 ### 27. Packaging: `pyproject.toml` with optional extras
-- [ ] **Where:** `requirements.txt` (no `pyproject.toml`; `faster-whisper 1.2.1` + `fastembed 0.8.0` are labelled "optional" in comments but always installed).
+- [x] **Done (2026-09-23).** `pyproject.toml` with `[stt]` / `[rag-vector]` / `[all]` / `[dev]` extras + `discord-ai-bot` console script; `requirements.txt` kept for pin compatibility. **Where:** `requirements.txt` (no `pyproject.toml`; `faster-whisper 1.2.1` + `fastembed 0.8.0` are labelled "optional" in comments but always installed).
 - **Problem:** Heavy STT/vector deps installed by default; no proper packaging metadata.
 - **Fix:** Add `pyproject.toml` (setuptools) with `base` deps and extras: `pip install -e .[stt,rag-vector]`; keep `requirements.txt` for pin compatibility or deprecate it.
 - **Verify:** Clean venv installs of base vs extras; import-guard tests for optional deps still pass.
 
 ### 28. CI + linting + type checking
-- [ ] **Where:** repo root (no `.github/workflows`, no ruff/mypy config, no coverage config).
+- [x] **Done (2026-09-23, CI workflow deferred).** ruff/mypy/coverage config in `pyproject.toml` (strict on new modules); `ruff check` + `mypy --strict` pass locally. The GitHub Actions workflow was deliberately *not* committed (see commit message) — add `.github/workflows/ci.yml` when the repo's CI is enabled. **Where:** repo root (no `.github/workflows`, no ruff/mypy config, no coverage config).
 - **Problem:** No automated gate on push; no static analysis.
 - **Fix:** GitHub Actions (or equivalent) running `pytest` (+ `--cov`) on a pinned Python matrix; add `ruff` (lint + format) and `mypy --strict` for new modules, relaxing per-module as needed.
 - **Verify:** CI green on current tree after baseline fixes.
 
 ### 29. Pin the Python version
-- [ ] **Where:** repo root (no `.python-version`; code uses `str | None` → needs ≥3.10; dev env is 3.12).
+- [x] **Done (2026-09-23).** `.python-version` (3.12) + `requires-python >= 3.10` in `pyproject.toml` + README note. **Where:** repo root (no `.python-version`; code uses `str | None` → needs ≥3.10; dev env is 3.12).
 - **Fix:** Add `.python-version` (3.12) + `requires-python` in the new `pyproject.toml`; mention in README.
 - **Verify:** CI matrix uses the same version.
 
 ### 30. Docs debt
-- [ ] **Where:** `docs/README.md`, root `README.md`, `.env.example`, `temp/Todos.md`.
+- [x] **Done (2026-09-23).** Doc index + structure block + env-var docs updated; all Beyond20 mentions removed (`grep -ri beyond20` → zero hits in code/docs). **Where:** `docs/README.md`, root `README.md`, `.env.example`, `temp/Todos.md`.
 - **Problem:**
   - `docs/README.md` index misses `permissions.md` and `recording-to-transcript.md`.
   - Root `README.md` "project structure" block is stale (lists 3 files; omits `utils/`, `kb/`, most `bot_core/` submodules).
@@ -136,24 +136,24 @@
 - **Verify:** `grep -ri beyond20` → zero hits; doc index matches actual files in `docs/`.
 
 ### 31. `/upload_kb` unused `kb_name` parameter
-- [ ] **Where:** `commands/kb_commands.py` (`handle_upload_kb`).
+- [x] **Done (2026-09-23).** Dead `kb_name` parameter removed from `handle_upload_kb`. **Where:** `commands/kb_commands.py` (`handle_upload_kb`).
 - **Fix:** Remove the dead parameter (or wire it up if the API was ever meant to accept a sub-KB name).
 - **Verify:** Grep for callers; tests pass.
 
 ### 32. Consistency: boolean-ish env parsing
-- [ ] **Where:** `config/settings.py` (`EMBED_FORMAT` etc. use `not in ("0","false","no")`).
+- [x] **Done (2026-09-23).** Shared `_safe_bool()` helper; all bool-ish env vars route through it. **Where:** `config/settings.py` (`EMBED_FORMAT` etc. use `not in ("0","false","no")`).
 - **Problem:** `"False"` (capital F) parses as true; inconsistent with the `_safe_bool`-style helpers elsewhere.
 - **Fix:** Use one shared helper for all bool-ish env vars.
 - **Verify:** Table-driven test for all boolean settings.
 
 ### 33. Deprecated `IntentFlags.messages`
-- [ ] **Where:** `main.py` (sets both legacy `messages` and `guild_messages`).
+- [x] **Done (2026-09-23).** Legacy `messages` intent dropped (no DM support needed); documented in `main.py`. **Where:** `main.py` (sets both legacy `messages` and `guild_messages`).
 - **Problem:** `messages` (non-guild DM intent) is deprecated by Discord; keep only if DMs are actually used.
 - **Fix:** Drop it unless DM support is required; document.
 - **Verify:** Bot connects and receives guild messages (and DMs, if retained).
 
 ### 34. `BOT_DISCORD_LOG_LEVEL` ignored when `BOT_NO_LOG_FILES=1`
-- [ ] **Where:** `main.py` logging setup (discord-logger config lives inside the file-logging branch).
+- [x] **Done (2026-09-23).** `_configure_discord_logger()` applied in both file and console-only modes. **Where:** `main.py` logging setup (discord-logger config lives inside the file-logging branch).
 - **Fix:** Configure the `discord` logger level independently of the file-logging toggle.
 - **Verify:** With `BOT_NO_LOG_FILES=1` + level set, console shows the expected discord log lines.
 
@@ -164,13 +164,13 @@
 - **Verify:** Full suite 592 passed (voice: 119 passed, `tests/` untouched); `ruff check` clean; mypy error count on the voice code unchanged by the move (12 → 12, all pre-existing type debt). Module sizes: capture 201, dave 163, recover 186, session 750, facade 69 — all well under the ~600-line target (session holds the state machine, which was the bulk of the file).
 
 ### 36. 0-byte uploads accepted
-- [ ] **Where:** `kb/storage.py` (`validate_upload`).
+- [x] **Done (2026-09-23).** `validate_upload()` rejects 0-byte uploads with a clear message. **Where:** `kb/storage.py` (`validate_upload`).
 - **Problem:** Empty files pass validation and chunk into nothing; listing then shows an empty doc (see the comment in `list_kb_docs`).
 - **Fix:** Reject 0-byte uploads with a clear message.
 - **Verify:** Test: empty bytes → `UploadValidationError`.
 
 ### 37. Cosmetic: markdown injection in stored history usernames
-- [ ] **Where:** `bot_core/ai_client.py` (user prompt prefix `**{username}:**`).
+- [x] **Done (2026-09-23).** `_append_user_message()` strips `*` from the username before the `**{username}:**` prefix. **Where:** `bot_core/ai_client.py` (user prompt prefix `**{username}:**`).
 - **Problem:** A display name containing `**` etc. breaks the prompt formatting.
 - **Fix:** Sanitize/escape the username in the prefix (or use a plain-text marker).
 - **Verify:** Test with a name containing `**bold**`.
