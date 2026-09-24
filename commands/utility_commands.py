@@ -324,6 +324,8 @@ async def handle_translate_command(
     source_language: str | None = None,
 ) -> None:
     """Translate text via the AI provider."""
+    await interaction.response.defer()
+
     parts = target_language.split(":", 1)
     tgt = parts[0].strip()
     text_to = parts[1].strip() if len(parts) > 1 else None

@@ -6,9 +6,10 @@ AI call + delivery in a *child* task and registers it here; ``/ai stop`` looks
 the channel's task up and cancels just that child task, so the parent command
 task stays healthy and can acknowledge the stop cleanly.
 
-A channel has at most one in-flight run because the /ai path already holds
-that channel's reply slot (utils.channel_queue) for the whole turn, so the
-per-channel key is unambiguous.
+A channel's slot (utils.channel_queue) allows one turn to generate and deliver
+at a time. The registry records that turn — the task that holds the slot —
+not a later turn still waiting for it. ``/ai stop`` therefore cancels the
+turn that is actually running.
 """
 from __future__ import annotations
 

@@ -10,7 +10,9 @@ These tests pin the contract: ranked index chunks are served directly,
 multiple per file, with per-file caps, for both structured (header-split)
 and unstructured ("Full Document", e.g. player session logs) data.
 """
+from kb.chunker import Chunker
 from kb.retrievers import select_ranked_chunks
+from kb.vector_db import _DocEntry
 
 
 def _ranked(*items):
@@ -105,8 +107,43 @@ class TestSelectRankedChunks:
         docs = dict(select_ranked_chunks(ranked, top_n=5))
         assert docs["a.md"] == "one"
 
+    def test_same_basename_in_different_folders_stay_separate(self):
+        ranked = _ranked(
+            ("session_notes/a/notes.md [Full Document]", "alpha note", 0.9),
+            ("session_notes/b/notes.md [Full Document]", "beta note", 0.8),
+        )
+        docs = dict(select_ranked_chunks(ranked, top_n=5))
+        assert docs["session_notes/a/notes.md"] == "alpha note"
+        assert docs["session_notes/b/notes.md"] == "beta note"
+
     def test_top_n_limits_total_files(self):
         ranked = [(f"f{i}.md [Sec]", f"content{i}", 0.9 - i * 0.01) for i in range(10)]
         docs = select_ranked_chunks(ranked, top_n=3)
         # At most top_n files; each file at most its chunk cap.
         assert len(docs) <= 3
+
+
+class TestRetrievalName:
+    def test_basename_label_uses_source_path(self):
+        doc = _DocEntry(
+            display_name="notes.md [Full Document]",
+            content="alpha",
+            source_file="session_notes/a/notes.md",
+        )
+        assert doc.retrieval_name() == "session_notes/a/notes.md [Full Document]"
+
+    def test_matching_source_keeps_display_name(self):
+        doc = _DocEntry(
+            display_name="classes.md [Rogue]",
+            content="table",
+            source_file="classes.md",
+        )
+        assert doc.retrieval_name() == "classes.md [Rogue]"
+
+
+class TestChunkerPreamble:
+    def test_text_before_first_header_is_kept(self):
+        intro = "INTRO UNIQUE PREAMBLE"
+        body = intro + "\n" + ("x" * 9000) + "\n# Title\n\nsection body that follows\n"
+        chunks = Chunker._split_by_headers(body, "doc.md", "doc.md")
+        assert any(intro in c.content for c in chunks)

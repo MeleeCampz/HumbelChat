@@ -60,6 +60,8 @@ def _disable_reminders_persistence(tmp_path, monkeypatch):
     monkeypatch.setattr(_r, "_store_path", None, raising=False)
     _r._reminders.clear()
     _r._tasks.clear()
+    _r._retry_tasks.clear()
+    _r._deliver_locks.clear()
 
 
 @pytest.fixture(autouse=True)

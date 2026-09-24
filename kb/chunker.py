@@ -78,6 +78,13 @@ class Chunker:
         if not root.exists():
             return []
 
+        try:
+            if root.stat().st_size > 1024 * 1024:
+                logger.warning("Skipping %s — larger than the 1 MB index cap", root.name)
+                return []
+        except OSError:
+            return []
+
         content_text = root.read_bytes().decode("utf-8", errors="replace")
         if not content_text:
             return []
@@ -130,7 +137,11 @@ class Chunker:
         if not headers:
             return []
 
-        raw_chunks: list[tuple[str, str]] = []  # (header_line_text, section_content_after_header)
+        raw_chunks: list[tuple[str, int]] = []  # (chunk text, size)
+
+        preamble = content[: headers[0].start()].strip()
+        if preamble:
+            raw_chunks.append((preamble, len(preamble)))
 
         for i, header_match in enumerate(headers):
             header_text = header_match.group(2).strip()
@@ -193,7 +204,12 @@ class Chunker:
         for idx, section_text in enumerate(merged):
             # Extract the primary header text for section_path
             first_header = re.match(r"^(#{1,6})\s+(.+)$", section_text.strip(), re.MULTILINE)
-            section_path = first_header.group(2).strip() if first_header else f"Section {idx + 1}"
+            if first_header:
+                section_path = first_header.group(2).strip()
+            elif not section_text.lstrip().startswith("#"):
+                section_path = "Preamble"
+            else:
+                section_path = f"Section {idx + 1}"
 
             result.append(
                 ChunkInfo(

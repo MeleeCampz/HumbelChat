@@ -139,6 +139,12 @@ async def handle_start_recording(interaction: discord.Interaction) -> None:
 
     try:
         recorder = _get_recorder(bot)
+        if recorder.is_recording:
+            await interaction.followup.send(
+                "⚠️ A recording is already in progress. "
+                "Stop it with `/stop_recording` before starting another.",
+            )
+            return
         out_dir = _new_recording_dir()
 
         # Start BEFORE joining: Discord announces the initial SSRC -> user
@@ -188,7 +194,19 @@ async def handle_stop_recording(
         return
 
     recorder = getattr(bot, "_voice_recorder", None)
-    if recorder is None or not recorder.is_recording:
+    in_memory = recorder is not None and recorder.is_recording
+    recording_guild = getattr(recorder, "guild_id", None) if in_memory else None
+    if in_memory and recording_guild is not None and interaction.guild_id != recording_guild:
+        await interaction.response.send_message(
+            "⚠️ A recording is active in another server. Stop it from that server.",
+        )
+        return
+
+    from config.settings import RECORDINGS_DIR
+    from bot_core.voice.recover import find_open_recording, recover_recording
+
+    orphan = None if in_memory else find_open_recording(RECORDINGS_DIR, interaction.guild_id)
+    if not in_memory and orphan is None:
         await interaction.response.send_message(
             "⚠️ No recording is active. Start one with `/start_recording`.",
         )
@@ -198,7 +216,7 @@ async def handle_stop_recording(
     await interaction.response.defer()
 
     try:
-        manifest = recorder.stop()
+        manifest = recorder.stop() if in_memory else recover_recording(orphan)
     except Exception as e:  # pragma: no cover - defensive
         log.exception("Failed to stop voice recording")
         await interaction.followup.send(f"⚠️ Failed to stop recording: {e}")

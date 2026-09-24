@@ -293,7 +293,6 @@ async def _expand_low_confidence_query(
     Never raises: callers fall back to the original ranking alone.
     """
     from config.settings import (
-        RAG_QUERY_MAX_EXPANSIONS,
         RAG_QUERY_REWRITER,
         RAG_REWRITE_BUDGET_SECONDS,
     )
@@ -308,9 +307,7 @@ async def _expand_low_confidence_query(
         # Use the SAME model as the main completion call — on a single-model
         # local backend a different slug would either fail or evict the loaded
         # weights.  Empty string = rewriter falls back to DEFAULT_MODEL.
-        rewriter = create_query_rewriter(
-            max_expansions=RAG_QUERY_MAX_EXPANSIONS, model_slug=rewrite_model
-        )
+        rewriter = create_query_rewriter(model_slug=rewrite_model)
         expanded = await asyncio.wait_for(
             rewriter.expand(query), timeout=RAG_REWRITE_BUDGET_SECONDS
         )
@@ -500,11 +497,11 @@ async def update_kb_document(file_path: str | pathlib.Path) -> bool:
         from config.settings import KB_PATH
         store = KBIndexStore(KB_PATH)
         await store.load()
-        if store.get_index() is None or store.get_index().is_empty():
-            return False
         _index_store = store
         _kb_path_for_store = KB_PATH
-        return await _index_store.update_single_document(file_path)
+        # A cold cache is empty until this file is indexed. Returning here
+        # used to skip the first upload after startup.
+        return await store.update_single_document(file_path)
 
 
 async def sync_kb_store() -> tuple[Optional["KBVectorIndex"], dict]:

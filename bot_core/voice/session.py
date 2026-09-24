@@ -2,7 +2,7 @@
 
 Extracted from ``bot_core.voice_recorder`` (P3 #35). :class:`VoiceRecorder`
 is the per-session state machine (start/stop, SSRC->user mapping, decode
-path, SIGTERM flush); ``attach_to_bot`` / ``recorder_voice_cls`` wire it
+path); ``attach_to_bot`` / ``recorder_voice_cls`` wire it
 into the discord.py client idempotently.
 """
 from __future__ import annotations
@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import signal
 import struct
 import threading
 import time
@@ -88,6 +87,10 @@ class VoiceRecorder:
     @property
     def is_recording(self) -> bool:
         return self._recording
+
+    @property
+    def guild_id(self) -> Optional[int]:
+        return self._guild_id
 
     def start(
         self,
@@ -517,33 +520,6 @@ class VoiceRecorder:
         except OSError:  # pragma: no cover - disk errors
             pass
 
-    def install_sigterm_flush(self) -> None:
-        """Install a SIGTERM handler that flushes an in-flight recording.
-
-        Docker sends SIGTERM on ``docker stop`` / compose restarts. The default
-        action would kill the process and leave the session logs + marker on
-        disk (recoverable, but truncated). Instead we run :meth:`stop` so a
-        *clean* shutdown always writes complete WAVs + manifest. Hard crashes
-        (OOM/segfault/power) can't be caught — that's what crash recovery is
-        for. Only installed in the main thread; otherwise it's a no-op.
-        """
-        if threading.current_thread() is not threading.main_thread():
-            log.warning("SIGTERM flush not installed (not on main thread)")
-            return
-        try:
-            signal.signal(signal.SIGTERM, self._sigterm_handler)
-        except (ValueError, OSError) as e:  # pragma: no cover - exotic platforms
-            log.warning("Could not install SIGTERM handler: %s", e)
-
-    def _sigterm_handler(self, signum: int, frame: Any) -> None:
-        log.info("SIGTERM received — flushing in-flight voice recording before exit")
-        try:
-            if self.is_recording:
-                self.stop()
-        except Exception:  # pragma: no cover - defensive
-            log.exception("Error flushing recording on SIGTERM (logs remain recoverable)")
-        os._exit(0)
-
     def _record_stage_error(self, stage: str, detail: str, hexdump: str) -> None:
         """Count a pipeline-stage failure and log the first one loudly."""
         with self._lock:
@@ -668,9 +644,6 @@ def attach_to_bot(bot: discord.Client, out_dir: Path) -> VoiceRecorder:
 
     if not _attached:
         _attached = True
-        # Clean shutdowns (docker stop / compose restart) send SIGTERM — flush
-        # any in-flight recording so we don't leave an orphan on disk.
-        recorder.install_sigterm_flush()
         log.info("Voice recorder attached to bot (out_dir=%s)", out_dir)
 
     return recorder

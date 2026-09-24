@@ -292,6 +292,7 @@ async def handle_start_session(interaction: discord.Interaction, name: str | Non
                 f"📄 **Overview of previous session** ({prev.get('name') or 'untitled'}):\n\n"
                 f"{_truncate(prev['overview'])}",
             )
+            S.mark_overview_delivered(prev)
 
     # Deliver queued next-session reminders to their channels.
     bot = _get_bot()
@@ -468,7 +469,7 @@ async def _add_document_from_attachment(interaction: discord.Interaction, file: 
         )
         return
 
-    if file.size > _SESSION_DOC_MAX_BYTES:
+    if file.size is not None and file.size > _SESSION_DOC_MAX_BYTES:
         await interaction.response.send_message(
             f"⚠️ Document too large: {file.size:,} bytes (max {_SESSION_DOC_MAX_BYTES:,}). "
             f"Trim it or upload in smaller parts.",
@@ -485,6 +486,12 @@ async def _add_document_from_attachment(interaction: discord.Interaction, file: 
 
     if not data:
         await interaction.response.send_message(f"⚠️ `{filename or 'attachment'}` is empty — nothing to add.")
+        return
+    if len(data) > _SESSION_DOC_MAX_BYTES:
+        await interaction.response.send_message(
+            f"⚠️ Document too large: {len(data):,} bytes (max {_SESSION_DOC_MAX_BYTES:,}). "
+            f"Trim it or upload in smaller parts.",
+        )
         return
 
     try:

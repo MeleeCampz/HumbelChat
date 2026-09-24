@@ -14,6 +14,15 @@ from functools import partial
 
 # ──────────────────────────── Helpers ────────────────────────────────
 
+def _is_hidden(kb_root: pathlib.Path, path: pathlib.Path) -> bool:
+    """Dotfiles and files inside dot-directories are internal state, not docs."""
+    try:
+        parts = path.resolve().relative_to(kb_root.resolve()).parts
+    except ValueError:
+        parts = path.parts
+    return any(part.startswith(".") for part in parts)
+
+
 def _extract_ext(name: str) -> str:
     """Extract file extension (lowercased), stripping any query-string suffix."""
     base = name.split("?")[0]
@@ -142,11 +151,16 @@ def read_kb_files(
 
     raw_files: list[tuple[str, str]] = []
     for p in sorted(kb_root.rglob("*")):
-        if not p.is_file() or "?" in p.name:
+        if not p.is_file() or "?" in p.name or _is_hidden(kb_root, p):
             continue
 
         ext = _extract_ext(p.name)
         if ext not in {".txt", ".md", ".csv", ".html", ".xml", ".rtf"}:
+            continue
+        try:
+            if p.stat().st_size > max_bytes_per_file:
+                continue
+        except OSError:
             continue
 
         content_text = p.read_bytes().decode("utf-8", errors="replace")
@@ -158,11 +172,10 @@ def read_kb_files(
         if len(content_text.splitlines()) > max_lines_per_file:
             truncated += "\n... [truncated]"
 
-        base_name = os.path.basename(p.name)
-        stem = p.stem
-        # Strip leading numeric prefix (e.g., "70_Species_Equipment" -> "Species_Equipment")
-        clean_stem = re.sub(r'^\d+', '', stem)
-        display_name = f"{clean_stem}{p.suffix}" if clean_stem else base_name
+        try:
+            display_name = p.resolve().relative_to(kb_root.resolve()).as_posix()
+        except ValueError:
+            display_name = p.name
 
         raw_files.append((display_name, truncated))
 
@@ -211,20 +224,38 @@ def get_relevant_chunks(
     if not doc_names:
         return []
 
-    # Map display name -> actual file path on disk (accept both stem and full name)
+    # Map a name the caller might pass onto the file. The relative path is
+    # always unique. A bare stem or basename is recorded only while it points
+    # at one file — two session notes.md must not collapse onto the later one.
     stem_to_file: dict[str, pathlib.Path] = {}
+    ambiguous: set[str] = set()
     for p in sorted(kb_root.rglob("*")):
-        if not p.is_file() or "?" in p.name:
+        if not p.is_file() or "?" in p.name or _is_hidden(kb_root, p):
             continue
         ext = _extract_ext(p.name)
         if ext not in {".txt", ".md", ".csv", ".html", ".xml", ".rtf"}:
             continue
+        try:
+            if p.stat().st_size > 1024 * 1024:
+                continue
+        except OSError:
+            continue
+        try:
+            rel = p.resolve().relative_to(kb_root.resolve()).as_posix()
+        except ValueError:
+            rel = p.name
+        stem_to_file[rel] = p
         clean_stem = re.sub(r'^\d+', '', p.stem)
-        if clean_stem:
-            stem_to_file[clean_stem] = p
         base_name = os.path.basename(p.name).rsplit("?", 1)[0]
-        if base_name not in {".", ".."}:
-            stem_to_file[base_name] = p
+        for alias in (clean_stem, base_name):
+            if not alias or alias in {".", ".."} or alias in ambiguous:
+                continue
+            prev = stem_to_file.get(alias)
+            if prev is None:
+                stem_to_file[alias] = p
+            elif prev != p:
+                stem_to_file.pop(alias, None)
+                ambiguous.add(alias)
 
     results: list[tuple[str, str]] = []
 
@@ -237,6 +268,11 @@ def get_relevant_chunks(
         if file_path is None:
             continue
 
+        try:
+            if file_path.stat().st_size > 1024 * 1024:
+                continue
+        except OSError:
+            continue
         content_text = file_path.read_bytes().decode("utf-8", errors="replace")
         all_lines = content_text.splitlines()
 

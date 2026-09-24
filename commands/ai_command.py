@@ -45,6 +45,42 @@ if TYPE_CHECKING:  # discord is referenced only in string annotations
 log = logging.getLogger("bot.commands.ai_command")
 
 
+def resolve_turn_character(guild_id, channel_id, character_name: str | None):
+    """Resolve the persona for one turn.
+
+    ``character_name`` is the explicit ``/ai`` choice (a key or display name),
+    or ``None`` to use the channel's active character.
+
+    Returns ``(character, warning)``. ``character`` is ``None`` only when the
+    user named a persona that does not exist. ``warning`` is set when a
+    persisted active key is stale and the turn falls back to the default.
+    """
+    explicit = character_name is not None
+    char_key = character_name
+    if char_key is None:
+        char_key = get_active_char_key(guild_id, channel_id)
+
+    char_obj = get_character(char_key)
+    if char_obj is not None:
+        return char_obj, None
+
+    if explicit:
+        return None, None
+
+    char_obj = default_character()
+    log.info(
+        "persisted active character %r not found for guild=%s channel=%s; "
+        "falling back to default %r.",
+        char_key, guild_id, channel_id, char_obj.key,
+    )
+    warning = (
+        f"⚠️ Your saved character `{char_key}` no longer exists, so I'm using "
+        f"**{char_obj.display}** for this message. Use `/character set` to "
+        "pick a different one."
+    )
+    return char_obj, warning
+
+
 # ─────────────────────────────────────────────────────────────────────────
 #  Generic source helpers (work for both Interaction and Message)
 # ─────────────────────────────────────────────────────────────────────────
@@ -93,7 +129,7 @@ async def _make_placeholder(source) -> object | None:
 
 async def _deliver_streaming(source, user_message: str, model_slug: str,
                              guild_id: int, channel_id, username: str,
-                             user_id, char_name: str) -> None:
+                             user_id, char_name: str, char_key: str | None) -> None:
     """P3 #24: stream the completion, editing one placeholder live.
 
     A ``⌨️ *Thinking…*`` placeholder is posted and edited (throttled) with the
@@ -116,6 +152,7 @@ async def _deliver_streaming(source, user_message: str, model_slug: str,
             channel_id=channel_id,
             username=username,
             user_id=user_id,
+            char_key=char_key,
         ):
             buf = text
             if placeholder is not None and loop.time() - last_edit >= edit_interval:
@@ -157,6 +194,7 @@ async def run_ai_turn(
     username: str = "",
     user_id=None,
     char_name: str,
+    char_key: str | None = None,
 ) -> None:
     """Hold this channel's slot for the ENTIRE request + delivery, then deliver.
 
@@ -164,12 +202,19 @@ async def run_ai_turn(
     messages with this one (Discord orders by send time, not request time —
     see utils/channel_queue.py).
     """
+    channel_key = channel_id if channel_id is not None else 0
     async with channel_slot(channel_id, name="ai-turn"):
+        # Register only once this turn holds the slot. A later /ai in the
+        # same channel is queued here and must not replace this task, or
+        # /ai stop would cancel the waiter instead of the turn in progress.
+        run_task = asyncio.current_task()
+        if run_task is not None:
+            register_run(channel_key, run_task)
         try:
             if _settings.AI_STREAM:
                 await _deliver_streaming(
                     source, user_message, model_slug, guild_id, channel_id,
-                    username, user_id, char_name,
+                    username, user_id, char_name, char_key,
                 )
             else:
                 reply_text, _extra = await ai_client.ask_ai(
@@ -179,6 +224,7 @@ async def run_ai_turn(
                     channel_id=channel_id,
                     username=username,
                     user_id=user_id,
+                    char_key=char_key,
                 )
                 await _deliver_final(source, reply_text, char_name)
         except asyncio.CancelledError:
@@ -188,9 +234,12 @@ async def run_ai_turn(
             # rate-limit / input too long) surface a user-friendly message.
             log.warning("AI request rejected: %s", e)
             await _deliver_error(source, str(e))
-        except Exception as e:
-            log.error("AI request failed: %s", e)
-            await _deliver_error(source, f"❌ {e}")
+        except Exception:
+            log.exception("AI request failed")
+            await _deliver_error(source, "❌ Something went wrong while generating a reply. Please try again.")
+        finally:
+            if run_task is not None:
+                clear_run(channel_key, run_task)
 
 
 async def notify_if_queued(source) -> None:
@@ -229,7 +278,10 @@ def start_typing(source, channel_id) -> asyncio.Task | None:
             typing_loop_task(channel, duration_sec=None),
             name=f"typing-{channel_id}",
         )
-        bot_ref = getattr(source, "bot", None)
+        bot_ref = getattr(source, "client", None)
+        if bot_ref is None:
+            from bot_core.channel_delivery import get_bot
+            bot_ref = get_bot()
         if bot_ref is not None:
             tasks = getattr(bot_ref, "typing_tasks", None)
             if not isinstance(tasks, list):
@@ -261,33 +313,15 @@ async def handle_ai_command(
         log.error("Error deferring interaction: %s", e)
         return
 
-    # 2. Resolve character.
-    #    ``character_name`` is the *explicit* request (None when the user just
-    #    typed /ai with no persona). The fallback is the channel's persisted
-    #    active key, which itself defaults to the default character when no
-    #    per-channel key exists (see bot_core.history.get_active_char_key).
-    char_key = character_name
-    explicit = character_name is not None
-    if char_key is None:
-        char_key = get_active_char_key(interaction.guild_id, interaction.channel_id)
-
-    char_obj = get_character(char_key)
+    # 2. Resolve character (explicit choice, else the channel's active key).
+    char_obj, warning = resolve_turn_character(
+        interaction.guild_id, interaction.channel_id, character_name,
+    )
     if char_obj is None:
-        if explicit:
-            await interaction.followup.send(f"Character `{character_name}` not found.")
-            return
-        # P1 #9: stale persisted key → fall back to default + tell the user.
-        char_obj = default_character()
-        log.info(
-            "/ai: persisted active character %r not found for guild=%s channel=%s; "
-            "falling back to default %r.",
-            char_key, interaction.guild_id, interaction.channel_id, char_obj.key,
-        )
-        await interaction.followup.send(
-            f"⚠️ Your saved character `{char_key}` no longer exists, so I'm using "
-            f"**{char_obj.display}** for this message. Use `/character set` to "
-            "pick a different one."
-        )
+        await interaction.followup.send(f"Character `{character_name}` not found.")
+        return
+    if warning:
+        await interaction.followup.send(warning)
 
     model_slug = char_obj.model or ""
     user_id = getattr(getattr(interaction, "user", None), "id", None)
@@ -314,10 +348,10 @@ async def handle_ai_command(
             username=username,
             user_id=user_id,
             char_name=display,
+            char_key=char_obj.key,
         ),
         name=f"ai-run-{channel_key}",
     )
-    register_run(channel_key, run_task)
     try:
         await run_task
     except asyncio.CancelledError:

@@ -438,8 +438,9 @@ def start_session(name: str | None = None) -> tuple[dict, dict | None]:
         # overview that is due for delivery now.
         pending = _pending_manual_overview()
         if pending is not None:
+            # The flag is set only after Discord accepts the overview message.
+            # Marking it here would drop the overview if the followup never lands.
             closed_info = {"kind": "manual", "session": pending}
-            pending["overview_delivered"] = True
 
     dt = datetime.fromtimestamp(now)
     safe_name = _sanitize_name(name)
@@ -477,6 +478,12 @@ def _end_session_internal(session: dict, overview: str | None) -> dict:
     _index_session_paths(session)
     _save()
     return session
+
+
+def mark_overview_delivered(session: dict) -> None:
+    """Remember that the previous session's overview was posted to Discord."""
+    session["overview_delivered"] = True
+    _save()
 
 
 def end_session(overview: str | None = None, name: str | None = None) -> dict | None:
@@ -717,6 +724,7 @@ async def deliver_queued_reminders(bot) -> int:
         except Exception as e:
             log.error("Failed to deliver next-session reminder in channel %s: %s",
                       r["channel_id"], e)
+            failed.append(r)
 
     if failed:
         # Count attempts per entry; drop ones that keep failing so a

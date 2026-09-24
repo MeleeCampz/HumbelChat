@@ -40,8 +40,12 @@ async def handle_character_command(
                 f"Unknown character ``{name}``. Available: {avail}"
             )
             return
-        if interaction.guild_id is not None:
-            set_active_char_key(interaction.guild_id, interaction.channel_id, char_obj.key)
+        if interaction.guild_id is None or interaction.channel_id is None:
+            await interaction.followup.send(
+                "⚠️ Character selection is stored per server channel, so it can't be saved in a DM.",
+            )
+            return
+        set_active_char_key(interaction.guild_id, interaction.channel_id, char_obj.key)
         await interaction.followup.send(
             f"Switched to **{char_obj.display}** (model: ``{char_obj.model or '(none set)'}``)",
         )
@@ -54,8 +58,12 @@ async def handle_character_command(
         )
 
     elif action == "reset":
-        if interaction.guild_id is not None:
-            set_active_char_key(interaction.guild_id, interaction.channel_id, default_character().key)
+        if interaction.guild_id is None or interaction.channel_id is None:
+            await interaction.followup.send(
+                "⚠️ Character selection is stored per server channel, so it can't be saved in a DM.",
+            )
+            return
+        set_active_char_key(interaction.guild_id, interaction.channel_id, default_character().key)
         default_name = default_character().display or "Default"
         await interaction.followup.send(
             f"Reverted to default character: **{default_name}**"

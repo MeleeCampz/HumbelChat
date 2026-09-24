@@ -124,16 +124,26 @@ async def handle_list_kb_docs(interaction, subfolder_path: str | None = None):
     Otherwise shows only root-level items (files + directories).
     """
     from config.settings import KB_PATH
+    from kb.storage import kb_scan_root
+    from utils.response_splitter import send_long_response
+
+    await interaction.response.defer()
 
     if subfolder_path:
+        try:
+            scan_root = kb_scan_root(KB_PATH, subfolder_path)
+        except ValueError:
+            await interaction.followup.send(
+                "⚠️ That path is outside the knowledge base."
+            )
+            return
         # Subfolder view: recurse into that path (P0 #4: off the event loop)
         docs = await list_kb_files_async(KB_PATH, subfolder=subfolder_path, recursive=True)
         lines: list[str] = [
             f"**Knowledge Base** documents — `{subfolder_path}`",
             "📂 **Subdirectories:**",
         ]
-        # Show nested directories within the subfolder
-        scan_root = pathlib.Path(KB_PATH) / subfolder_path
+        # Show nested directories within the subfolder (already confined to KB_PATH)
         subdirs = await asyncio.to_thread(get_root_directories, scan_root)
         for d in sorted(subdirs):
             lines.append(f"  📂 `{d}`")
@@ -151,7 +161,7 @@ async def handle_list_kb_docs(interaction, subfolder_path: str | None = None):
     if not docs:
         lines.append("")
         lines.append("(no files found)")
-        await interaction.response.send_message("\n".join(lines))
+        await send_long_response(interaction, "\n".join(lines))
         return
 
     # --- unified file listing (same format for both views) ---
@@ -168,7 +178,7 @@ async def handle_list_kb_docs(interaction, subfolder_path: str | None = None):
     if len(docs) > 30:
         lines.append(f"\n… and {len(docs) - 30} more documents.")
 
-    await interaction.response.send_message("\n".join(lines))
+    await send_long_response(interaction, "\n".join(lines))
 
 
 async def handle_reindex_kb(interaction):

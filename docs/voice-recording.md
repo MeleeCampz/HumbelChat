@@ -21,25 +21,23 @@ Stops capturing, writes the WAV files + `manifest.json`, and replies with a per-
 
 When `STT_ENABLED` is on (default) and `transcribe` isn't set to `false`, each speaker's WAV is additionally **transcribed in the background** (see [Speech-to-text](#speech-to-text)) and a second message with the transcript is posted when done. If a session is active, the finished transcript is also appended to that session's notes automatically (see [Session notes](#session-notes)).
 
-> **Note:** each speaker's audio is streamed to disk *as it is captured* (see [Crash recovery](#crash-recovery)), so a crash mid-recording loses at most the last few frames — not hours of audio. The final WAVs + `manifest.json` are written when you stop (or on a clean shutdown, or automatically after a crash). Long recordings can take a moment to write (the command defers to stay under Discord's 15 s response window).
+> **Note:** each speaker's audio is streamed to disk *as it is captured* (see [Crash recovery](#crash-recovery)), so a crash mid-recording loses at most the last few frames — not hours of audio. The final WAVs + `manifest.json` are written when you stop, or rebuilt from those logs the next time the bot starts. Long recordings can take a moment to write (the command defers to stay under Discord's 15 s response window).
 
 ## Crash recovery
 
 A bot crash used to mean **total loss** of an in-progress recording: every decoded frame lived in an unbounded in-memory list (≈96 KB/s per active speaker, ~2 GB/hour for six people) that was only written to disk on `/stop_recording`. The realistic failure mode — an **OOM kill mid-meeting** — wiped all of RAM.
 
-That's fixed. Three mechanisms make a crash non-destructive:
+That's fixed. Two mechanisms make a crash non-destructive:
 
 1. **Stream-to-disk.** Each speaker's decoded frames are appended to an append-only binary log (`<name>_<user_id>.log`) the moment they decode, instead of being held in RAM. A crash now loses only the single frame still in flight (a trailing partial record is detected and dropped on read). The RAM footprint drops to "current frame + file handles", which also removes the OOM growth that was causing the crashes.
-2. **Graceful SIGTERM flush.** Docker sends SIGTERM on `docker stop` / compose restarts. A signal handler runs `stop()` first, so *clean* shutdowns always write complete WAVs + manifest and leave no orphan behind.
-3. **Startup auto-recovery.** On boot the bot scans for *orphans* — recording directories that have a `.recording` marker but no `manifest.json` (i.e. captured to disk but never stopped, because the process died). Each is rebuilt into WAVs + a manifest flagged `"recovered": true`. To avoid silently truncating a still-live meeting (e.g. the bot restarted while a call was ongoing), only orphans whose session started **more than 5 minutes ago** are auto-recovered; newer ones are left alone and can be recovered manually via `bot_core.voice.recover.recover_orphans()`.
+2. **Startup auto-recovery.** On boot the bot scans for *orphans* — recording directories that have a `.recording` marker but no `manifest.json` (i.e. captured to disk but never stopped, because the process died or was stopped mid-recording). Each is rebuilt into WAVs + a manifest flagged `"recovered": true`. To avoid silently truncating a still-live meeting (e.g. the bot restarted while a call was ongoing), only orphans whose session started **more than 5 minutes ago** are auto-recovered; newer ones are left alone and can be recovered manually via `bot_core.voice.recover.recover_orphans()`.
 
 What's durable vs. what can still be lost:
 
 | Shutdown type | Outcome |
 |---|---|
 | `/stop_recording` (normal) | Complete WAVs + manifest; logs cleaned up |
-| `docker stop` / compose restart (SIGTERM) | Complete WAVs + manifest via the flush handler |
-| OOM kill / segfault / power loss | Orphan left on disk → auto-recovered at next startup (if >5 min old). Audio is complete up to the last flushed frame; only in-flight frames at the instant of death are lost. Decode/decrypt failure counts aren't available for recovered runs |
+| Process stop, OOM kill, segfault, or power loss | Orphan left on disk → auto-recovered at next startup (if >5 min old). Audio is complete up to the last flushed frame; only in-flight frames at the instant of death are lost. Decode/decrypt failure counts aren't available for recovered runs |
 
 A recovered `manifest.json` has `"recovered": true` and a `recovery_note`; per-speaker `decode_failures` / `decrypt_failures` are `null` (not known after a crash). Everything else — timeline placement, WAV format, speaker attribution by `user_id` — is identical to a normal stop.
 
@@ -56,7 +54,7 @@ recordings/recording_20260831-014251/
 └── ...                    # one WAV per speaker who produced audio
 ```
 
-While a recording is in progress the directory also holds transient durability files — a `.recording` session marker and one `<name>_<user_id>.log` per speaker (the raw decoded frames, streamed to disk as they arrive). These are removed automatically once the recording is finalized (by `stop()`, a clean shutdown, or crash recovery), so a *finished* directory contains only the WAVs + manifest (+ transcript). If you ever see them left behind, that's an orphan awaiting recovery.
+While a recording is in progress the directory also holds transient durability files — a `.recording` session marker and one `<name>_<user_id>.log` per speaker (the raw decoded frames, streamed to disk as they arrive). These are removed automatically once the recording is finalized (by `stop()` or crash recovery), so a *finished* directory contains only the WAVs + manifest (+ transcript). If you ever see them left behind, that's an orphan awaiting recovery.
 
 WAV files are **48 kHz, mono, 16-bit PCM** — the original source is never re-encoded or touched by STT. The filename is `<sanitized_display_name>_<user_id>.wav` (non-alphanumeric characters become `_`, name truncated to 40 chars; falls back to `user-<id>` if no name could be resolved).
 
@@ -274,7 +272,7 @@ The pipeline is unit-tested end-to-end without a live Discord connection — pac
 python3 -m pytest tests/test_voice_recorder.py -q
 ```
 
-Covers transport decryption (both modes), stereo→mono downmix, Opus decode, SSRC mapping from op-5/11/13, passthrough recovery, the full packet-in → PCM-out path, timeline placement (nominal grid, no-overwrite, jitter diagnostics), `stop()` WAV + manifest output, and crash durability: on-disk frame-log round-trip (incl. a trailing partial record from a simulated crash), `stop()`/`discard()` log cleanup, `recover_orphans()` (old-orphan rebuild, 5-minute threshold skip, completed-recording skip, multi-speaker + empty-log handling), and the SIGTERM flush handler.
+Covers transport decryption (both modes), stereo→mono downmix, Opus decode, SSRC mapping from op-5/11/13, passthrough recovery, the full packet-in → PCM-out path, timeline placement (nominal grid, no-overwrite, jitter diagnostics), `stop()` WAV + manifest output, and crash durability: on-disk frame-log round-trip (incl. a trailing partial record from a simulated crash), `stop()`/`discard()` log cleanup, `recover_orphans()` (old-orphan rebuild, 5-minute threshold skip, completed-recording skip, multi-speaker + empty-log handling).
 
 The STT layer is tested separately with a fake backend client:
 

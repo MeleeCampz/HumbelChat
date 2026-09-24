@@ -80,6 +80,7 @@ class TestStartSessionCommand:
             await handle_start_session(ix, name="Next")
 
         assert any("Overview of previous session" in m and "Did the old stuff." in m for m in ix._sent)
+        assert S._state["last_ended"]["overview_delivered"] is True
         assert any("Delivered 1 queued next-session reminder" in m for m in ix._sent)
         chan.send.assert_awaited_once()
         assert "bring coffee" in chan.send.await_args.args[0]

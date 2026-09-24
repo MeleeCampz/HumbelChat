@@ -141,6 +141,7 @@ class TestTranslateCommand:
 
         assert len(ix._sent) > 0
         assert "Translated" in ix._sent[0]
+        ix.response.defer.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_translate_no_text_available(self, ix):
@@ -148,6 +149,7 @@ class TestTranslateCommand:
         from commands.utility_commands import handle_translate_command
         await handle_translate_command(ix, target_language="Spanish")
         assert "No text to translate" in ix._sent[0]
+        ix.response.defer.assert_awaited()
 
 
 class TestUtilityActiveCharacter:
