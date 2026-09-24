@@ -29,8 +29,13 @@ from config.settings import (
     CHAT_HISTORY_RESET,
 )
 from config.characters import load_characters, default_character, get_character_choices
-from bot_core.ai_runs import register_run, clear_run
-from commands.ai_command import run_ai_turn, start_typing, notify_if_queued
+from bot_core.ai_runs import clear_run
+from commands.ai_command import (
+    notify_if_queued,
+    resolve_turn_character,
+    run_ai_turn,
+    start_typing,
+)
 from bot_core.health import start_backend_health_probe
 from bot_core.reminders import rearm_pending_reminders
 from utils.background_tasks import spawn_tracked_task
@@ -176,42 +181,71 @@ bot.typing_tasks: list[asyncio.Task] = []
 SYNC_MARKER = pathlib.Path(__file__).parent / ".commands_synced"
 
 
-async def _ensure_commands_synced() -> None:
-    """Sync commands once on first run; skip on subsequent restarts.
+_commands_sync_ran = False
 
-    On the first run we do a *full* sync via :mod:`bot_core.command_sync`,
-    which also **purges** any stale guild-scoped / renamed registrations so the
-    ``/`` menu shows each command exactly once. On later restarts we skip the
-    auto-sync entirely — this avoids the duplication problem caused by syncing
-    on every on_ready event (which fires on every reconnect). If commands ever
-    get out of sync afterwards, use the ``/sync`` command.
-    """
-    if SYNC_MARKER.exists():
-        log.info("Commands already synced previously; skipping auto-sync.")
-        return
 
-    log.info("First startup detected; syncing (and purging stale) commands...")
-    try:
-        from bot_core import command_sync
-        report = await command_sync.sync_commands(bot)
-    except Exception as e:
-        # No marker on exception → the next restart retries the sync.
-        log.error("Initial command sync failed (will retry on next restart): %s", e)
-        return
-    if report.get("error"):
-        # The upload was rejected (e.g. bad command payload). Do NOT write the
-        # marker — otherwise every future restart would skip the sync and new
-        # commands would silently never reach Discord.
-        log.error(
-            "Initial command sync FAILED — commands not registered, marker NOT "
-            "written (will retry on next restart): %s", report["error"],
-        )
-        return
-    SYNC_MARKER.touch(exist_ok=True)
-    log.info(
-        "Commands synced and marker written. Removed stale: guilds=%s global=%s",
-        [n for n, _ in report["guild_names"]], report["global_deleted"],
+def _command_fingerprint() -> str:
+    """Stable hash of the locally defined slash commands."""
+    import hashlib
+    parts = sorted(
+        f"{cmd.name}:{getattr(cmd, 'description', '')}"
+        for cmd in bot.tree.get_commands()
     )
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()
+
+
+async def _ensure_commands_synced() -> None:
+    """Sync when the command set changed, and always drop stale guild commands.
+
+    ``on_ready`` runs on every gateway reconnect, so the work itself runs at
+    most once per process. An exclusive lock file keeps two starts from both
+    deciding they are the first run. After the marker matches the current
+    command set, later startups still purge guild-scoped leftovers — those
+    are never part of this bot's registrations, and a global re-upload is
+    skipped so reconnects do not duplicate the menu.
+    """
+    global _commands_sync_ran
+    if _commands_sync_ran:
+        return
+
+    lock_path = SYNC_MARKER.with_name(".commands_sync.lock")
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        log.info("Command sync already in progress; skipping this pass.")
+        return
+    try:
+        os.write(fd, str(os.getpid()).encode())
+        from bot_core import command_sync
+        current = _command_fingerprint()
+        previous = ""
+        if SYNC_MARKER.exists():
+            previous = SYNC_MARKER.read_text(encoding="utf-8").strip()
+        if previous != current:
+            log.info("Syncing slash commands (and purging stale registrations)...")
+            try:
+                report = await command_sync.sync_commands(bot)
+            except Exception as e:
+                log.error("Initial command sync failed (will retry on next restart): %s", e)
+                return
+            if report.get("error"):
+                log.error(
+                    "Initial command sync FAILED — commands not registered, marker NOT "
+                    "written (will retry on next restart): %s", report["error"],
+                )
+                return
+            SYNC_MARKER.write_text(current, encoding="utf-8")
+            log.info(
+                "Commands synced and marker written. Removed stale: guilds=%s global=%s",
+                [n for n, _ in report["guild_names"]], report["global_deleted"],
+            )
+        else:
+            log.info("Command set unchanged; purging stale guild commands only.")
+            await command_sync.purge_guild_commands(bot)
+        _commands_sync_ran = True
+    finally:
+        os.close(fd)
+        lock_path.unlink(missing_ok=True)
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -460,8 +494,8 @@ async def on_ready() -> None:
     if n_rearmed:
         log.info("Re-armed %d pending reminder(s)", n_rearmed)
 
-    # Crash durability: attach the voice recorder (installs the SIGTERM flush
-    # handler) and recover any recording left open by an unclean shutdown.
+    # Crash durability: attach the voice recorder and recover any recording
+    # left open by an unclean shutdown.
     try:
         _recover_crashed_recordings(bot)
     except Exception:  # pragma: no cover - never block startup on recovery
@@ -499,9 +533,11 @@ async def on_app_command_error(
     elif isinstance(error, app_commands.CheckFailure):
         user_msg = "⚠️ You don't have permission to use this command."
     elif isinstance(error, app_commands.CommandInvokeError):
-        user_msg = f"⚠️ {type(original).__name__}: {original}"
+        log.error("Command failed: %s", original, exc_info=original)
+        user_msg = "⚠️ That command failed. Please try again."
     else:
-        user_msg = f"⚠️ {type(error).__name__}: {error}"
+        log.error("Unhandled command error: %s", error, exc_info=error)
+        user_msg = "⚠️ That command failed. Please try again."
 
     # Best-effort: this handler may run after the interaction already responded
     # (deferred → followed up) or not.  Try the primary response first, then
@@ -530,6 +566,8 @@ async def on_shutdown() -> None:
     immediately, so nothing more is needed beyond flushing the in-memory index.
     """
     log.info("Bot shutting down — cleaning up background tasks + vector store")
+    from bot_core.reminders import cancel_pending_tasks
+    cancel_pending_tasks()
     # 1. Stop any per-channel typing indicator loops (tracked as
     #    bot.typing_tasks in the /ai and prefix handlers).
     for t in list(getattr(bot, "typing_tasks", []) or []):
@@ -588,7 +626,11 @@ async def on_message(message: discord.Message) -> None:
         prompt[:80],
     )
 
-    sys_char = default_character()
+    # Same persona resolution as /ai: the channel's active character, with a
+    # warning when that persisted key no longer exists.
+    sys_char, char_warning = resolve_turn_character(message.guild_id, message.channel.id, None)
+    if char_warning:
+        await message.channel.send(char_warning)
     sys_model = sys_char.model if sys_char else DEFAULT_MODEL
 
     # P3 #26: let the user know if other AI requests are already ahead.
@@ -609,10 +651,10 @@ async def on_message(message: discord.Message) -> None:
             username=message.author.display_name or "",
             user_id=message.author.id,
             char_name=str(sys_char.display),
+            char_key=sys_char.key if sys_char else None,
         ),
         name=f"ai-run-{channel_key}",
     )
-    register_run(channel_key, run_task)
     try:
         await run_task
     except asyncio.CancelledError:
@@ -628,30 +670,56 @@ async def on_message(message: discord.Message) -> None:
 
 PIDFILE = pathlib.Path(__file__).parent / ".bot.pid"
 
+def _pid_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def _enforce_single_instance() -> None:
-    """Exit immediately if another instance of this bot is already running."""
-    # PID file check (the port check was removed — nothing ever bound 18765,
-    # so it was dead code; see code review §1.5)
-    if PIDFILE.exists():
-        try:
-            old_pid = int(PIDFILE.read_text().strip())
+    """Exit immediately if another instance of this bot is already running.
 
-            os.kill(old_pid, 0)
-            log.info("Another bot instance (PID %d) is already running. Exiting.", old_pid)
-            sys.exit(0)
-        except (ProcessLookupError, ValueError):
-            PIDFILE.unlink(missing_ok=True)
-
-    # Own PID
-    PIDFILE.write_text(str(os.getpid()))
+    The lock file is created with ``O_EXCL`` so two processes cannot both
+    pass a check-then-write race. A live PID exits with status 1.
+    """
     import atexit as _atexit
 
-    @_atexit.register
-    def _cleanup_lock() -> None:
+    for _ in range(3):
         try:
+            fd = os.open(str(PIDFILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                old_pid = int(PIDFILE.read_text(encoding="utf-8").strip())
+            except (OSError, ValueError):
+                PIDFILE.unlink(missing_ok=True)
+                continue
+            if _pid_is_alive(old_pid):
+                log.error("Another bot instance (PID %d) is already running. Exiting.", old_pid)
+                sys.exit(1)
             PIDFILE.unlink(missing_ok=True)
-        except OSError:
-            pass
+            continue
+        else:
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+
+            @_atexit.register
+            def _cleanup_lock() -> None:
+                try:
+                    if PIDFILE.exists() and PIDFILE.read_text(encoding="utf-8").strip() == str(os.getpid()):
+                        PIDFILE.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return
+    log.error("Could not acquire the single-instance lock.")
+    sys.exit(1)
 
 
 # ── Startup ────────────────────────────────────────────────────────────
@@ -659,16 +727,15 @@ def _enforce_single_instance() -> None:
 def _recover_crashed_recordings(bot_obj) -> None:
     """Attach the voice recorder and recover orphaned recordings at startup.
 
-    Attaching installs the SIGTERM flush handler (so ``docker stop`` / compose
-    restarts always write complete WAVs). :func:`recover_orphans` then rebuilds
-    any recording whose process died mid-capture (OOM/segfault/power) — but
+    :func:`recover_orphans` rebuilds any recording whose process died
+    mid-capture (OOM, segfault, power loss, or a stop while recording) — but
     only if its session marker is at least ~5 minutes old, so a still-live
     recording (bot restarted while a meeting was going) is left untouched.
     """
     from config.settings import RECORDINGS_DIR
     from bot_core.voice_recorder import attach_to_bot, recover_orphans
 
-    attach_to_bot(bot_obj, RECORDINGS_DIR)  # also installs the SIGTERM flush hook
+    attach_to_bot(bot_obj, RECORDINGS_DIR)
     recovered = recover_orphans(RECORDINGS_DIR)
     if recovered:
         log.info("Recovered %d crashed recording(s) at startup", len(recovered))

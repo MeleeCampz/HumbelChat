@@ -197,7 +197,7 @@ def _render_table(header: list[str], rows: list[list[str]]) -> tuple[str, list[s
             lines.append(" | ".join(parts))
         return lines
 
-    name = "**" + " | ".join(h for h in header if h) + "**"[:MAX_FIELD_NAME]
+    name = ("**" + " | ".join(h for h in header if h) + "**")[:MAX_FIELD_NAME]
 
     # Group columns into pieces that fit the target row width.  Greedy: keep
     # adding a column while it fits; a column wider than the whole target gets

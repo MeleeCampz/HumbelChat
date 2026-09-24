@@ -385,6 +385,19 @@ class TestNextSessionReminders:
         assert S.list_queued_reminders() == []
 
     @pytest.mark.asyncio
+    async def test_unexpected_error_counts_as_an_attempt(self, monkeypatch):
+        S.queue_next_session_reminder(111, "boom")
+
+        async def explode(*args, **kwargs):
+            raise RuntimeError("discord down")
+
+        monkeypatch.setattr("bot_core.channel_delivery.send_to_channel", explode)
+        assert await S.deliver_queued_reminders(MagicMock()) == 0
+        remaining = S.list_queued_reminders()
+        assert len(remaining) == 1
+        assert remaining[0].get("attempts") == 1
+
+    @pytest.mark.asyncio
     async def test_deliver_empty_queue(self):
         bot = MagicMock()
         assert await S.deliver_queued_reminders(bot) == 0

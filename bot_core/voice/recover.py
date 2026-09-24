@@ -30,6 +30,40 @@ log = logging.getLogger("bot.voice_recorder")
 
 _RECOVERY_THRESHOLD_S: float = 5 * 60.0   # auto-recover orphans older than this
 
+def find_open_recording(recordings_dir: Path, guild_id: Optional[int] = None) -> Optional[Path]:
+    """Newest directory that has a marker and no manifest, optionally for one guild.
+
+    Age is ignored. ``/stop_recording`` uses this after a restart, when the
+    in-memory recorder is empty but the frame logs are already on disk.
+    """
+    recordings_dir = Path(recordings_dir)
+    if not recordings_dir.is_dir():
+        return None
+    best: tuple[float, Path] | None = None
+    for entry in recordings_dir.iterdir():
+        if not entry.is_dir():
+            continue
+        marker_path = entry / _MARKER_NAME
+        if not marker_path.exists() or (entry / "manifest.json").exists():
+            continue
+        try:
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            started_at = float(marker.get("started_at", 0.0))
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        marker_guild = marker.get("guild_id")
+        if guild_id is not None and marker_guild not in (None, guild_id):
+            continue
+        if best is None or started_at >= best[0]:
+            best = (started_at, entry)
+    return None if best is None else best[1]
+
+
+def recover_recording(rec_dir: Path, *, now: Optional[float] = None) -> Optional[dict]:
+    """Finalize one open recording regardless of how recently it started."""
+    return _recover_one(Path(rec_dir), time.time() if now is None else now)
+
+
 def recover_orphans(
     recordings_dir: Path,
     *,
@@ -41,8 +75,8 @@ def recover_orphans(
     An *orphan* is a directory under ``recordings_dir`` that has a ``.recording``
     marker but no ``manifest.json`` — i.e. the process captured audio (spilling
     it to per-speaker ``*.log`` files) but never ran :meth:`VoiceRecorder.stop`.
-    This happens when the bot is OOM-killed, segfaults, or loses power; a clean
-    SIGTERM shutdown flushes via the signal handler instead and leaves no orphan.
+    This happens when the bot is OOM-killed, segfaults, loses power, or is
+    stopped (including SIGTERM) while a recording is still open.
 
     Only orphans whose marker ``started_at`` is at least ``threshold_s`` in the
     past are recovered — a very recent one might belong to a recording that is

@@ -65,6 +65,7 @@ _RETRY_DELAYS: tuple[int, ...] = (30, 120)
 # user isn't sitting by the channel for it anymore.  Drop instead of dump.
 STALE_GRACE_SEC: int = 5 * 60
 _retry_tasks: dict[str, asyncio.Task] = {}
+_deliver_locks: dict[str, asyncio.Lock] = {}
 
 
 # ── Path resolution ──────────────────────────────────────────────────────
@@ -139,8 +140,9 @@ async def _fire(rid: str, channel_id: int, message: str, delay: int) -> None:
         return
 
     info = _reminders.get(rid)
-    if info is not None and "fires_at" in info and \
-            time.time() - info["fires_at"] > STALE_GRACE_SEC:
+    if info is None or info.get("fired"):
+        return
+    if "fires_at" in info and time.time() - info["fires_at"] > STALE_GRACE_SEC:
         # Re-armed far after the deadline (bot was down, or repeated delivery
         # failures).  The point of a timed reminder has passed — deliver it
         # anyway: users reported "it didn't work" when reminders silently
@@ -150,9 +152,21 @@ async def _fire(rid: str, channel_id: int, message: str, delay: int) -> None:
             "channel: %s", rid, time.time() - info["fires_at"], int(info["fires_at"]),
             channel_id)
 
+    lock = _deliver_locks.setdefault(rid, asyncio.Lock())
+    async with lock:
+        await _deliver_reminder(rid, channel_id, message)
+
+
+async def _deliver_reminder(rid: str, channel_id: int, message: str) -> None:
+    """Send one reminder. Caller holds the per-id lock and has checked ``fired``."""
     from bot_core.channel_delivery import (
         ChannelNotDeliverableError, send_to_channel,
     )
+
+    info = _reminders.get(rid)
+    if info is None or info.get("fired"):
+        return
+
     bot = _resolve_bot()
     if bot is None:
         # get_bot() has already logged WHY nothing usable was found
@@ -258,7 +272,9 @@ def _schedule_retry(rid: str, delay_index: int) -> None:
         return  # no event loop — the restart/reconnect re-arm covers it
     task = loop.create_task(_run())
     _retry_tasks[rid] = task
-    task.add_done_callback(lambda _t, r=rid: _retry_tasks.pop(r, None))
+    task.add_done_callback(
+        lambda t, r=rid: _retry_tasks.pop(r, None) if _retry_tasks.get(r) is t else None
+    )
 
 
 # ── Public API ───────────────────────────────────────────────────────────
@@ -314,7 +330,19 @@ def _start_task(rid: str, delay: int, channel_id: int, message: str) -> None:
         return  # no event loop — task won't start (tests, CLI, etc.)
     task = loop.create_task(_fire(rid, channel_id, message, delay))
     _tasks[rid] = task
-    task.add_done_callback(lambda _t: _tasks.pop(rid, None))
+    task.add_done_callback(lambda t, r=rid: _tasks.pop(r, None) if _tasks.get(r) is t else None)
+
+
+def cancel_pending_tasks() -> None:
+    """Cancel in-process reminder fires and retries. Called on shutdown.
+
+    These tasks are created with ``loop.create_task``, so they are not in the
+    shared background-task set that shutdown already walks.
+    """
+    for mapping in (_tasks, _retry_tasks):
+        for task in list(mapping.values()):
+            if not task.done():
+                task.cancel()
 
 
 def rearm_pending_reminders() -> int:
@@ -333,9 +361,10 @@ def rearm_pending_reminders() -> int:
     for rid, info in list(_reminders.items()):
         if info.get("fired"):
             continue
-        existing = _tasks.get(rid)
-        if existing is not None and not existing.done():
-            existing.cancel()
+        for live in (_tasks, _retry_tasks):
+            existing = live.get(rid)
+            if existing is not None and not existing.done():
+                existing.cancel()
         delay = max(int(info["fires_at"] - now), 0)
         _start_task(rid, delay, info["channel_id"], info["message"])
         count += 1

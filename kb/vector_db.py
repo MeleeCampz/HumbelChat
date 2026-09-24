@@ -46,6 +46,26 @@ class _DocEntry:
         # Legacy entries: display name is "name.md [Section]" — the stem is the file.
         return self.display_name.split(" [")[0]
 
+    def retrieval_name(self) -> str:
+        """Name used to group chunks for a reply.
+
+        The stored display name is often just the basename (``notes.md [Full
+        Document]``). The source path is unique across session folders, so
+        retrieval uses that when it differs from the basename.
+        """
+        source = (self.source_file or "").replace("\\", "/")
+        name = self.display_name
+        if not source:
+            return name
+        if " [" in name:
+            file_part, section = name.split(" [", 1)
+            section = " [" + section
+        else:
+            file_part, section = name, ""
+        if file_part.replace("\\", "/") == source:
+            return name
+        return f"{source}{section}"
+
 
 # ──────────────────────────── Helpers ─────────────────────────────────
 
@@ -270,7 +290,7 @@ class KBVectorIndex:
 
         # P2 #17: numpy matmul ranking (falls back to pure Python internally).
         ranked = self._rank(q_emb, top_n)
-        return [(self._docs[i].display_name, sim) for sim, i in ranked]
+        return [(self._docs[i].retrieval_name(), sim) for sim, i in ranked]
 
     async def query_with_embeddings(
         self,
@@ -296,7 +316,7 @@ class KBVectorIndex:
         # P2 #17: numpy matmul ranking (falls back to pure Python internally).
         ranked = self._rank(q_emb, top_n)
         scored = [
-            (self._docs[i].display_name, self._docs[i].content, sim)
+            (self._docs[i].retrieval_name(), self._docs[i].content, sim)
             for sim, i in ranked
         ]
         return scored, q_emb
@@ -325,7 +345,7 @@ class KBVectorIndex:
                 # P2 #17: numpy matmul ranking (falls back to pure Python internally).
                 ranked = self._rank(emb, top_n)
                 scored = [
-                    (self._docs[i].display_name, self._docs[i].content, sim)
+                    (self._docs[i].retrieval_name(), self._docs[i].content, sim)
                     for sim, i in ranked
                 ]
             else:

@@ -34,8 +34,11 @@ class TestOnAppCommandError:
 
     @pytest.mark.asyncio
     async def test_unhandled_exception_is_friendly_and_ephemeral(self):
-        """The TODO's case: a body exception (CommandInvokeError) -> friendly,
-        names the original cause, ephemeral, and leaks no raw traceback."""
+        """A body exception becomes a friendly ephemeral message.
+
+        The exception type and message stay in the log. They are not repeated
+        to the user, and neither is a traceback.
+        """
         import main
         err = app_commands.CommandInvokeError(_FakeCommand("explode"), ValueError("boom"))
 
@@ -45,7 +48,8 @@ class TestOnAppCommandError:
         ix.followup.send.assert_awaited_once()
         text = ix.followup.send.call_args.args[0]
         assert ix.followup.send.call_args.kwargs.get("ephemeral") is True
-        assert "ValueError" in text and "boom" in text
+        assert "failed" in text.lower()
+        assert "ValueError" not in text and "boom" not in text
         assert "Traceback" not in text
 
     @pytest.mark.asyncio

@@ -99,6 +99,28 @@ class TestListKBDocsCommand:
 
         assert any(s for s in sent if "test_doc" in s or "nested" in s.lower())
 
+    @pytest.mark.asyncio
+    async def test_list_kb_docs_rejects_path_outside_kb(self, temp_kb_dir, tmp_path):
+        """A subfolder of ../ must not list or hash files outside KB_PATH."""
+        from commands.kb_commands import handle_list_kb_docs
+        from kb.storage import list_kb_files
+
+        secret = tmp_path / "secret.txt"
+        secret.write_text("do not list me")
+
+        ix = Interaction()
+        await ix.response.send_message("placeholder")
+        sent = ix._sent
+
+        with patch("config.settings.KB_PATH", temp_kb_dir):
+            await handle_list_kb_docs(ix, subfolder_path="..")
+
+        assert any("outside the knowledge base" in s for s in sent)
+        assert not any("secret" in s for s in sent)
+
+        with pytest.raises(ValueError):
+            list_kb_files(temp_kb_dir, subfolder="..")
+
 
 class TestReindexKBCommand:
     """Test the /reindex_kb slash command."""

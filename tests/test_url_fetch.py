@@ -8,6 +8,7 @@ that both commands route through it.
 """
 from __future__ import annotations
 
+import socket
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -63,6 +64,13 @@ class TestValidateUrl:
         with pytest.raises(UnsafeUrlError):
             url_fetch.validate_url("http://192.168.1.5/doc", block_private=True)
 
+    def test_name_resolving_to_loopback_is_rejected(self, monkeypatch):
+        def fake_getaddrinfo(host, port, *args, **kwargs):
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port or 80))]
+        monkeypatch.setattr(url_fetch.socket, "getaddrinfo", fake_getaddrinfo)
+        with pytest.raises(UnsafeUrlError):
+            url_fetch._checked_connect_ip("public.example", 80, block_private=False)
+
 
 # ─────────────────────────── fetch_url (streaming) ───────────────────────────
 
@@ -96,6 +104,12 @@ def _client_factory(resp):
 
 
 class TestFetchUrlStreaming:
+    @pytest.fixture(autouse=True)
+    def _public_dns(self, monkeypatch):
+        def fake_getaddrinfo(host, port, *args, **kwargs):
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port or 443))]
+        monkeypatch.setattr(url_fetch.socket, "getaddrinfo", fake_getaddrinfo)
+
     @pytest.mark.asyncio
     async def test_returns_small_body(self, monkeypatch):
         resp = MagicMock()

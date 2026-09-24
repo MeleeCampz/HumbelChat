@@ -172,6 +172,21 @@ def _sanitize_filename(name: str) -> str:
     return safe.strip()[:60] or "uploaded_doc"
 
 
+def kb_scan_root(kb_path: str | pathlib.Path, subfolder: str | None = None) -> pathlib.Path:
+    """Resolve the directory a KB listing should scan.
+
+    Raises ``ValueError`` when *subfolder* escapes *kb_path* (for example
+    ``../../``). An empty *subfolder* scans the KB root itself.
+    """
+    kb_root = pathlib.Path(kb_path).resolve()
+    if not subfolder:
+        return kb_root
+    candidate = (kb_root / subfolder).resolve()
+    if not candidate.is_relative_to(kb_root):
+        raise ValueError(f"Invalid subfolder: {subfolder!r}")
+    return candidate
+
+
 def list_kb_files(
     kb_path: str | pathlib.Path,
     subfolder: str | None = None,
@@ -189,13 +204,13 @@ def list_kb_files(
     Hidden entries (dot-prefixed files or directories, e.g. the vector
     index cache) are always excluded — they are internal state, not docs.
     """
-    kb_root = pathlib.Path(kb_path)
+    kb_root = pathlib.Path(kb_path).resolve()
     docs: list[dict] = []
     if not kb_root.exists():
         return docs
 
-    # Determine the scanning root
-    scan_root = kb_root / subfolder if subfolder else kb_root
+    # Reject traversal before any file is opened or hashed.
+    scan_root = kb_scan_root(kb_root, subfolder)
 
     # Determine glob pattern
     pattern = "**/*" if recursive else "*"

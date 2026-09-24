@@ -484,7 +484,10 @@ class TestIterKBFiles:
         (kb / "b.txt").write_text("b")
         (kb / "c.png").write_text("c")
         (kb / "d.py").write_text("d")
-        (kb / "secret?.md").write_text("e")
+        try:
+            (kb / "secret?.md").write_text("e")
+        except OSError:
+            pass  # '?' is not a legal filename on Windows; the filter is still tested where it is
         files = _iter_kb_files(kb)
         names = {p.name for p in files}
         assert names == {"a.md", "b.txt"}

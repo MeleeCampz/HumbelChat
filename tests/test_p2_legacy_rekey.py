@@ -10,7 +10,6 @@ ambiguous basename → left for re-embed).
 from __future__ import annotations
 
 import pathlib
-import pickle
 import sqlite3
 
 import pytest
@@ -22,6 +21,7 @@ from kb.index import (
     _SCHEMA_CREATE_METADATA,
     _SCHEMA_VERSION,
     _content_hash,
+    _pack_embedding,
 )
 
 
@@ -41,7 +41,7 @@ def _write_legacy_db(db_path: pathlib.Path, rows: list[tuple[str, str, str, list
             "(source_file, doc_name, content, content_hash, embedding, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (basename, doc_name, content, _content_hash(content),
-             pickle.dumps(embedding), now),
+             _pack_embedding(embedding), now),
         )
     conn.execute("INSERT OR REPLACE INTO metadata (key,value) VALUES ('schema_version', ?)",
                  (_SCHEMA_VERSION,))

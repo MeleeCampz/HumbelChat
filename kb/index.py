@@ -18,7 +18,7 @@ latency is unaffected.
 
 Blocking IO (P0 #4)
 -------------------
-Filesystem walks, SQLite writes and pickle serialization are offloaded to a
+Filesystem walks, SQLite writes and embedding serialization are offloaded to a
 worker thread (``asyncio.to_thread``) at every async boundary so a large KB
 scan never freezes the event loop (gateway, typing indicators, voice).
 
@@ -58,7 +58,7 @@ import asyncio
 import hashlib
 import logging
 import os
-import pickle
+import array
 import pathlib
 import re
 import sqlite3
@@ -86,7 +86,7 @@ CREATE TABLE IF NOT EXISTS document_index (
     content     TEXT NOT NULL,
     content_hash TEXT NOT NULL,         -- sha256 of content
     file_hash   TEXT,                   -- P2 #19: sha256 of the SOURCE file (skip re-chunk)
-    embedding   BLOB,                   -- pickle'd list[float]
+    embedding   BLOB,                   -- packed float64 vector (not pickle)
     updated_at  REAL DEFAULT (strftime('%s','now'))
 );
 """
@@ -98,7 +98,7 @@ CREATE TABLE IF NOT EXISTS metadata (
 );
 """
 
-_SCHEMA_VERSION = "4"  # v3 content-hash cache + v4 per-file hash (skip re-chunk)
+_SCHEMA_VERSION = "5"  # v4 file hash + v5 packed embeddings and model identity
 
 
 # ──────────────────────────── Helpers ────────────────────────────────────
@@ -122,14 +122,46 @@ def _read_text_sync(path: pathlib.Path) -> str:
     return path.read_bytes().decode("utf-8", errors="replace")
 
 
+def _pack_embedding(values: list[float]) -> bytes:
+    """Store a vector as raw float64 bytes. Pickle is not used: a cache file
+    must not be able to execute code when it is loaded."""
+    buf = array.array("d", (float(v) for v in values))
+    return buf.tobytes()
+
+
+def _unpack_embedding(blob: bytes | memoryview) -> list[float]:
+    raw = bytes(blob)
+    if not raw or len(raw) % 8:
+        raise ValueError("embedding blob is not packed float64")
+    buf = array.array("d")
+    buf.frombytes(raw)
+    return buf.tolist()
+
+
+def _is_hidden_kb_path(kb_path: pathlib.Path, path: pathlib.Path) -> bool:
+    """True when *path* is a dotfile or lives under a dot-directory of the KB."""
+    try:
+        parts = path.resolve().relative_to(kb_path.resolve()).parts
+    except ValueError:
+        parts = path.parts
+    return any(part.startswith(".") for part in parts)
+
+
 def _iter_kb_files(kb_path: pathlib.Path) -> list[pathlib.Path]:
     """All indexable files under *kb_path*, sorted for determinism."""
     files: list[pathlib.Path] = []
     for p in sorted(kb_path.rglob("*")):
         if not p.is_file() or "?" in p.name:
             continue
+        if _is_hidden_kb_path(kb_path, p):
+            continue
         ext = p.suffix.lower()
         if ext not in KB_FILE_EXTENSIONS:
+            continue
+        try:
+            if p.stat().st_size > _MAX_BYTES_PER_FILE:
+                continue
+        except OSError:
             continue
         files.append(p)
     return files
@@ -247,6 +279,13 @@ class KBIndexStore:
                 # Drop the persisted cache so nothing stale is reused.
                 if self._db_path.exists():
                     self._db_path.unlink()
+            self._index = await self._build_fresh()
+        elif not await asyncio.to_thread(self._cache_identity_ok):
+            logger.warning(
+                "Vector cache was built for a different schema or embedding model "
+                "— rebuilding (%s)", self._db_path,
+            )
+            self._db_path.unlink(missing_ok=True)
             self._index = await self._build_fresh()
         else:
             self._index = await self._load_incremental()
@@ -815,7 +854,7 @@ class KBIndexStore:
 
         for source, display, content, content_hash, file_hash, emb_blob in rows:
             try:
-                emb = pickle.loads(emb_blob)
+                emb = _unpack_embedding(emb_blob)
             except Exception:
                 continue
             if not emb:
@@ -837,6 +876,47 @@ class KBIndexStore:
                 "file_hash": file_hash,  # P2 #19 (None on legacy v3 caches)
             })
         return result
+
+    def _embedding_dim(self, idx: KBVectorIndex | None) -> str:
+        if idx is None:
+            return ""
+        for doc in idx._docs:
+            if doc.embedding:
+                return str(len(doc.embedding))
+        return ""
+
+    def _write_metadata(self, conn: sqlite3.Connection, idx: KBVectorIndex | None, now: float) -> None:
+        rows = {
+            "kb_path": str(self.kb_path),
+            "schema_version": _SCHEMA_VERSION,
+            "updated_at": str(now),
+            "embedding_model": self.model_name,
+            "embedding_dim": self._embedding_dim(idx),
+        }
+        conn.executemany(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            list(rows.items()),
+        )
+
+    def _cache_identity_ok(self) -> bool:
+        """False when the on-disk cache was built for another model or schema.
+
+        Old vectors must not be ranked against a new model's query embedding:
+        the same width returns nonsense, and a different width matches nothing.
+        """
+        if not self._db_path.exists():
+            return False
+        try:
+            conn = sqlite3.connect(str(self._db_path))
+            meta = dict(conn.execute("SELECT key, value FROM metadata").fetchall())
+            conn.close()
+        except sqlite3.Error:
+            return False
+        if meta.get("schema_version") != _SCHEMA_VERSION:
+            return False
+        if meta.get("embedding_model") != self.model_name:
+            return False
+        return True
 
     def _persist_index_to_db(self, idx: KBVectorIndex) -> None:
         """Synchronous SQLite persistence — atomic temp-file swap.
@@ -860,7 +940,7 @@ class KBIndexStore:
             for doc in idx._docs:
                 if doc.embedding is None:
                     continue
-                emb_bytes = pickle.dumps(doc.embedding)
+                emb_bytes = _pack_embedding(doc.embedding)
                 rows.append(
                     (doc.source(), doc.display_name, doc.content,
                      _content_hash(doc.content), doc.file_hash,  # P2 #19
@@ -873,18 +953,7 @@ class KBIndexStore:
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 rows,
             )
-            conn.execute(
-                "INSERT OR REPLACE INTO metadata (key, value) VALUES ('kb_path', ?)",
-                (str(self.kb_path),),
-            )
-            conn.execute(
-                "INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', ?)",
-                (_SCHEMA_VERSION,),
-            )
-            conn.execute(
-                "INSERT OR REPLACE INTO metadata (key, value) VALUES ('updated_at', ?)",
-                (str(now),),
-            )
+            self._write_metadata(conn, idx, now)
             conn.commit()
             conn.close()
 
@@ -933,7 +1002,7 @@ class KBIndexStore:
                     file_rows.append(
                         (doc.source(), doc.display_name, doc.content,
                          _content_hash(doc.content), doc.file_hash,  # P2 #19
-                         pickle.dumps(doc.embedding), now)
+                         _pack_embedding(doc.embedding), now)
                     )
                 if file_rows:
                     conn.executemany(
@@ -949,13 +1018,8 @@ class KBIndexStore:
             ).fetchall():
                 if src.lower() not in kept:
                     conn.execute("DELETE FROM document_index WHERE source_file = ?", (src,))
-            # 3. Refresh metadata (schema/kb_path may be unset on a legacy cache).
-            conn.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES ('kb_path', ?)",
-                         (str(self.kb_path),))
-            conn.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', ?)",
-                         (_SCHEMA_VERSION,))
-            conn.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES ('updated_at', ?)",
-                         (str(now),))
+            # 3. Refresh metadata (schema/model may be unset on a legacy cache).
+            self._write_metadata(conn, idx, now)
             conn.commit()
             logger.debug("Incremental save: %d changed file(s) upserted, pruned removed → %s",
                          len(changed), self._db_path)

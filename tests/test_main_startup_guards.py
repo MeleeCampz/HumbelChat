@@ -59,7 +59,7 @@ class TestSingleInstanceLock:
 
     def test_live_pidfile_causes_exit(self, tmp_path, monkeypatch):
         """If the PID file points to a *live* process, the function
-        must call sys.exit(0)."""
+        must call sys.exit(1)."""
         import main
 
         live = tmp_path / ".bot.pid"
@@ -68,7 +68,7 @@ class TestSingleInstanceLock:
 
         with pytest.raises(SystemExit) as exc:
             main._enforce_single_instance()
-        assert exc.value.code == 0
+        assert exc.value.code == 1
 
 
 # ── §1.10  No file-handler pollution in tests ───────────────────────────
@@ -92,10 +92,10 @@ class TestLogHygiene:
 
     def test_bot_no_log_files_env_respected_in_source(self):
         """main.py source must reference BOT_NO_LOG_FILES."""
-        src = (REPO / "main.py").read_text()
+        src = (REPO / "main.py").read_text(encoding="utf-8")
         assert "BOT_NO_LOG_FILES" in src
 
     def test_conftest_sets_bot_no_log_files(self):
         """conftest.py must set BOT_NO_LOG_FILES=1 before importing main."""
-        src = (REPO / "tests" / "conftest.py").read_text()
+        src = (REPO / "tests" / "conftest.py").read_text(encoding="utf-8")
         assert "BOT_NO_LOG_FILES" in src

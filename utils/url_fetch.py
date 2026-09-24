@@ -28,7 +28,8 @@ from __future__ import annotations
 
 import ipaddress
 import logging
-from urllib.parse import urlparse
+import socket
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -89,6 +90,51 @@ def _host_disallowed(host: str, *, block_private: bool) -> bool:
     return False
 
 
+def _address_disallowed(ip: ipaddress._BaseAddress, *, block_private: bool) -> bool:
+    if _ip_disallowed(ip):
+        return True
+    if block_private and (ip.is_private or ip.is_multicast):
+        return True
+    return False
+
+
+def _checked_connect_ip(host: str, port: int, *, block_private: bool) -> str:
+    """Resolve *host* and return one IP that is safe to connect to.
+
+    The hostname string is not enough: a public name can resolve to a
+    loopback, link-local, or private address. Every address is checked, and
+    the caller connects to the returned IP so a later DNS change cannot
+    redirect the request.
+    """
+    if _host_disallowed(host, block_private=block_private):
+        raise UnsafeUrlError(f"URL host {host!r} is not allowed (private/internal range).")
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise UnsafeUrlError(f"Could not resolve host {host!r}.") from exc
+    allowed: list[str] = []
+    for info in infos:
+        raw = info[4][0].split("%", 1)[0]
+        try:
+            ip = ipaddress.ip_address(raw)
+        except ValueError:
+            raise UnsafeUrlError(f"Could not resolve host {host!r}.")
+        if _address_disallowed(ip, block_private=block_private):
+            raise UnsafeUrlError(
+                f"URL host {host!r} resolves to a disallowed address."
+            )
+        allowed.append(str(ip))
+    if not allowed:
+        raise UnsafeUrlError(f"Could not resolve host {host!r}.")
+    return allowed[0]
+
+
+def _port_for(parsed) -> int:
+    if parsed.port:
+        return parsed.port
+    return 443 if (parsed.scheme or "").lower() == "https" else 80
+
+
 def validate_url(url: str, *, block_private: bool = False) -> str:
     """Validate a user-supplied URL; raise :class:`UnsafeUrlError` if unsafe.
 
@@ -129,38 +175,72 @@ def _revalidate_after_redirect(final_url: httpx.URL, *, block_private: bool) -> 
         raise UnsafeUrlError(f"Redirect to disallowed host {host!r}.")
 
 
+def _pinned_request(url: str, *, block_private: bool) -> tuple[str, dict, dict]:
+    """Return ``(ip_url, headers, extensions)`` for a checked connection."""
+    validate_url(url, block_private=block_private)
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    ip = _checked_connect_ip(host, _port_for(parsed), block_private=block_private)
+    pinned = str(httpx.URL(url).copy_with(host=ip))
+    headers = {"Host": host}
+    extensions = {"sni_hostname": host.encode("ascii", "ignore")}
+    return pinned, headers, extensions
+
+
 async def fetch_url(
     url: str,
     *,
     max_bytes: int,
     timeout: float = 30.0,
-    block_private: bool = False,
+    block_private: bool = True,
 ) -> bytes:
     """Stream-GET *url* into at most ``max_bytes``; abort if it would exceed.
+
+    Private and internal addresses are refused by default, including names
+    that only look public until they are resolved. Each redirect hop is
+    checked the same way before a connection is opened.
 
     Raises :class:`UnsafeUrlError` for a bad scheme/host (before or after
     redirects), :class:`UrlTooLargeError` when the body is too big, and the
     underlying :class:`httpx.HTTPError` / ``TimeoutError`` on transport failure.
     """
-    validate_url(url, block_private=block_private)
     if max_bytes <= 0:
         max_bytes = 10 * 1024 * 1024  # sane default if caller passes <= 0
 
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        async with client.stream("GET", url, follow_redirects=True) as resp:
-            # A redirect may land on a disallowed target — re-validate before
-            # we start reading the body.
-            _revalidate_after_redirect(resp.url, block_private=block_private)
-            resp.raise_for_status()
-            buf = bytearray()
-            async for chunk in resp.aiter_bytes():
-                if len(buf) + len(chunk) > max_bytes:
-                    raise UrlTooLargeError(
-                        f"Response is larger than {max_bytes // (1024 * 1024)} MB "
-                        "and was aborted before fully downloading."
+    current = validate_url(url, block_private=block_private)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+        for _hop in range(5):
+            pinned, headers, extensions = _pinned_request(current, block_private=block_private)
+            async with client.stream(
+                "GET", pinned, headers=headers, extensions=extensions, follow_redirects=False,
+            ) as resp:
+                if resp.status_code in {301, 302, 303, 307, 308}:
+                    location = resp.headers.get("location")
+                    if not location:
+                        raise UnsafeUrlError("Redirect had no Location header.")
+                    current = urljoin(current, location)
+                    validate_url(current, block_private=block_private)
+                    continue
+                # A redirect the client already followed (or a test double that
+                # reports a different final URL) is checked before the body.
+                _revalidate_after_redirect(resp.url, block_private=block_private)
+                final_host = getattr(resp.url, "host", None)
+                if final_host and final_host != urlparse(current).hostname:
+                    _checked_connect_ip(
+                        final_host, _port_for(urlparse(str(resp.url))),
+                        block_private=block_private,
                     )
-                buf.extend(chunk)
-    return bytes(buf)
+                resp.raise_for_status()
+                buf = bytearray()
+                async for chunk in resp.aiter_bytes():
+                    if len(buf) + len(chunk) > max_bytes:
+                        raise UrlTooLargeError(
+                            f"Response is larger than {max_bytes // (1024 * 1024)} MB "
+                            "and was aborted before fully downloading."
+                        )
+                    buf.extend(chunk)
+                return bytes(buf)
+    raise UnsafeUrlError("Too many redirects.")
 
 
 __all__ = [

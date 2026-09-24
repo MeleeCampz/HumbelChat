@@ -409,6 +409,7 @@ async def _build_ai_request(
     channel_id: int,
     username: str = "",
     user_id: str | int | None = None,
+    char_key: str | None = None,
 ) -> _AIRequestContext:
     """Resolve model + RAG + messages for one turn, with validation.
 
@@ -446,8 +447,11 @@ async def _build_ai_request(
     from config.characters import get_character, default_character
     from bot_core.history import get_active_char_key
 
-    active_key = get_active_char_key(guild_id, channel_id)
-    char_obj = get_character(active_key) or default_character()
+    # An explicit /ai character (or the prefix path's resolved active key)
+    # must drive the persona, not only the model slug. Fall back to the
+    # channel's active character when the caller did not pass one.
+    lookup_key = char_key or get_active_char_key(guild_id, channel_id)
+    char_obj = get_character(lookup_key) or default_character()
     system_p = getattr(char_obj, "system_prompt", None) or DEFAULT_SYSTEM_PROMPT or "You are a helpful AI assistant."
 
     # ── RAG context ──────────────────────────────────────────────────
@@ -558,6 +562,7 @@ async def ask_ai(
     channel_id: int,
     username: str = "",
     user_id: str | int | None = None,
+    char_key: str | None = None,
 ) -> tuple[str, dict]:
     """AI request with RAG, rate limiting, and input validation.
 
@@ -566,7 +571,7 @@ async def ask_ai(
     async with _ai_slot():
         ctx = await _build_ai_request(
             user_message, model_slug, guild_id, channel_id,
-            username=username, user_id=user_id,
+            username=username, user_id=user_id, char_key=char_key,
         )
 
         from bot_core.errors import AIResponseTruncatedError, extract_reply_text
@@ -629,7 +634,7 @@ async def ask_ai(
         except Exception as e:  # noqa: BLE001 — classified below
             _friendly_ai_error(e, model=ctx.effective_model, backend_url=INFER_URL)
 
-        log.info("RAW_AI_RESPONSE_START\n%s\nRAW_AI_RESPONSE_END", reply_text)
+        log.debug("RAW_AI_RESPONSE_START\n%s\nRAW_AI_RESPONSE_END", reply_text)
 
         # ── Update history (P0 #2) ──────────────────────────────────────
         _persist_turn(guild_id, channel_id, user_message, reply_text)
@@ -645,6 +650,7 @@ async def ask_ai_stream(
     channel_id: int,
     username: str = "",
     user_id: str | int | None = None,
+    char_key: str | None = None,
 ):
     """Streaming variant of :func:`ask_ai` (P3 #24).
 
@@ -672,7 +678,7 @@ async def ask_ai_stream(
     async with _ai_slot():
         ctx = await _build_ai_request(
             user_message, model_slug, guild_id, channel_id,
-            username=username, user_id=user_id,
+            username=username, user_id=user_id, char_key=char_key,
         )
 
         collected: list[str] = []
@@ -739,7 +745,7 @@ async def ask_ai_stream(
                 model=ctx.effective_model, backend_url=INFER_URL,
             )
 
-        log.info("RAW_AI_RESPONSE_START\n%s\nRAW_AI_RESPONSE_END", reply_text)
+        log.debug("RAW_AI_RESPONSE_START\n%s\nRAW_AI_RESPONSE_END", reply_text)
         _persist_turn(guild_id, channel_id, user_message, reply_text)
         # Final value: the complete reply (also the last delta).
         yield reply_text

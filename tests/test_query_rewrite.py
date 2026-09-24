@@ -264,6 +264,20 @@ class TestSameModelRewrite:
                 "xyzzy dungeon", "kb", top_n=4, rewrite_model="qwen3:8b"
             )
         assert captured["model_slug"] == "qwen3:8b"
+        assert "max_expansions" not in captured
+
+    def test_factory_accepts_model_slug_only(self):
+        """The retriever calls create_query_rewriter(model_slug=...). The
+        factory reads RAG_QUERY_MAX_EXPANSIONS itself; passing that name
+        used to TypeError and silently disable rewriting."""
+        import inspect
+
+        from kb.query_rewriter import create_query_rewriter
+
+        bound = inspect.signature(create_query_rewriter).bind(model_slug="rewrite-model")
+        assert bound.arguments["model_slug"] == "rewrite-model"
+        with pytest.raises(TypeError):
+            create_query_rewriter(max_expansions=3, model_slug="rewrite-model")
 
     @pytest.mark.asyncio
     async def test_ask_ai_passes_its_effective_model_to_rag(self, monkeypatch):

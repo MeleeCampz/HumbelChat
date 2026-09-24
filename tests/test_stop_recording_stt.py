@@ -163,6 +163,26 @@ class TestStartRecordingOrdering:
         await rc.handle_start_recording(ix)
         assert order == ["start", "connect"], f"recorder must arm before the voice join: {order}"
 
+    @pytest.mark.asyncio
+    async def test_second_start_does_not_replace_the_active_recording(self, env, monkeypatch):
+        _, ix, bot, _ = env
+
+        class _Busy:
+            is_recording = True
+            started = False
+
+            def start(self, **kw):
+                self.started = True
+
+        busy = _Busy()
+        monkeypatch.setattr(rc, "_get_recorder", lambda b: busy)
+        from types import SimpleNamespace
+        ix.user = SimpleNamespace(voice=SimpleNamespace(channel=SimpleNamespace(id=7, name="vc")))
+
+        await rc.handle_start_recording(ix)
+        assert busy.started is False
+        assert any("already in progress" in m for m in ix._sent)
+
 
 class TestRunTranscriptionDelivery:
     @pytest.mark.asyncio

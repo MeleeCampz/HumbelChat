@@ -317,6 +317,27 @@ class TestReminderRearm:
         R._tasks.pop(rid, None)
         R._reminders.pop(rid, None)
 
+    @pytest.mark.asyncio
+    async def test_rearm_cancels_pending_retry(self):
+        """A reconnect must not leave a retry task running beside the new fire."""
+        from bot_core import reminders as R
+
+        rid = R.schedule_reminder(999, "wake up", delay_sec=60)
+        R._schedule_retry(rid, 0)
+        retry = R._retry_tasks.get(rid)
+        assert retry is not None and not retry.done()
+
+        R.rearm_pending_reminders()
+        await asyncio.sleep(0)
+        assert retry.cancelled()
+
+        new_task = R._tasks.get(rid)
+        if new_task is not None:
+            new_task.cancel()
+        R._tasks.pop(rid, None)
+        R._retry_tasks.pop(rid, None)
+        R._reminders.pop(rid, None)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

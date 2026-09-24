@@ -175,8 +175,7 @@ re-process a finished recording. The returned manifest carries an absolute
 | Shutdown | What happens | Result |
 |---|---|---|
 | `/stop_recording` (normal) | `stop()` runs | complete WAVs + manifest; logs removed |
-| `docker stop` / compose restart (**SIGTERM**) | `install_sigterm_flush()` handler runs `stop()` first, then exits | complete WAVs + manifest; no orphan |
-| OOM / segfault / power loss | nothing runs → orphan left on disk | rebuilt at next startup |
+| Process stop, OOM, segfault, or power loss | nothing runs → orphan left on disk | rebuilt at next startup (if the session marker is more than 5 minutes old) |
 
 **Orphan** = a directory under `RECORDINGS_DIR` that has a `.recording` marker
 but **no** `manifest.json` (captured to disk, never stopped). On startup
@@ -372,7 +371,7 @@ The `__stt_input_16k.wav` files are written only when STT actually runs (see D5)
 | Slash commands | `commands/recording_commands.py` | `handle_start_recording`, `handle_stop_recording`, `_run_transcription` |
 | Capture pipeline | `bot_core/voice/session.py` | `VoiceRecorder.start/stop`, `handle_packet`, `_process_mapped_packet` |
 | Decrypt (transport/DAVE) | `bot_core/voice/dave.py` | `_decrypt_transport`, `_decrypt_dave`, `_extract_passthrough_opus` |
-| Crash durability | `bot_core/voice/capture.py` + `voice/recover.py` | `_SpeakerLog`, `recover_orphans`, `install_sigterm_flush` |
+| Crash durability | `bot_core/voice/capture.py` + `voice/recover.py` | `_SpeakerLog`, `recover_orphans` |
 | Timeline / WAV writing | `bot_core/voice/capture.py` | `_write_timeline_wav_from_frames` |
 | STT pipeline | `bot_core/transcriber.py` | `transcribe_wav`, `transcribe_recording`, `_trim_silence`, `_plan_chunks`, `_merge_segments` |
 | STT provenance + model RAM | `bot_core/transcriber.py` | `save_stt_converted`, `unload_stt_model` |
