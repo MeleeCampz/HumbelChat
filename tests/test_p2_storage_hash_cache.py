@@ -24,7 +24,9 @@ def kb(tmp_path) -> pathlib.Path:
     root = tmp_path / "kb18"
     root.mkdir()
     (root / "a.txt").write_text("alpha content one")
-    (root / "b.md").write_text("# beta\nsecond doc")
+    # newline="\n" keeps bytes identical on Windows (write_text would
+    # otherwise translate to CRLF and change the expected hash).
+    (root / "b.md").write_text("# beta\nsecond doc", newline="\n")
     sub = root / "sub"
     sub.mkdir()
     (sub / "c.txt").write_text("nested doc three")
