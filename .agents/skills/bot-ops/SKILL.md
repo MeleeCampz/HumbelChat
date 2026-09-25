@@ -1,9 +1,9 @@
 ---
 name: bot-ops
-description: Operate the HumbelChat Discord bot — start/stop/restart via tmux, read logs, check status, debug startup failures. Use when asked to start, stop, restart, or troubleshoot the running bot.
+description: Operate the Discord bot — start/stop/restart via tmux, read logs, check status, debug startup failures. Use when asked to start, stop, restart, or troubleshoot the running bot.
 ---
 
-# Bot operations (HumbelChat)
+# Bot operations
 
 ## Control (tmux-based, survives terminal close)
 
@@ -16,20 +16,17 @@ description: Operate the HumbelChat Discord bot — start/stop/restart via tmux,
 tmux attach -t bot     # watch live output directly (Ctrl-b d detaches)
 ```
 
-`tmux` is installed via winget (`arndawg.tmux-windows`, linked into
-`%LOCALAPPDATA%\Microsoft\WinGet\Links`). If `tmux: command not found`, the
-terminal was opened before install — reopen it.
-
 ## Python environment gotcha
 
-`start_bot.sh` runs bare `python`, which on this machine is **system Python 3.10**,
-not the venv (3.12, where deps live). If startup fails with ImportError:
+`start_bot.sh` runs bare `python`, which may resolve to a system interpreter
+instead of the venv where dependencies live. If startup fails with
+ImportError:
 
 ```bash
 source .venv/activate && python main.py     # foreground dev run
 ```
 
-(or patch `start_bot.sh` to use `.venv/Scripts/python.exe`).
+(or patch `start_bot.sh` to call the venv's python explicitly).
 
 ## Logs
 
@@ -48,5 +45,6 @@ it has the full traceback context.
 
 ## Required config
 
-`.env` must define at minimum: `DISCORD_BOT_TOKEN`, `INFER_URL`, `INFER_API_KEY`.
-Missing/invalid token → discord login error at startup, visible in `dev.log`.
+`.env` must define at minimum: `DISCORD_BOT_TOKEN`, `INFER_URL`,
+`INFER_API_KEY`. Missing/invalid values → login/startup error, visible in
+`dev.log`. Never print or commit `.env` contents.
