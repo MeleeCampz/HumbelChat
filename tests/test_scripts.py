@@ -15,13 +15,21 @@ records every call it receives.
 from __future__ import annotations
 
 import os
-import pty
+
+try:
+    import pty  # Unix only
+except ImportError:  # pragma: no cover - Windows
+    pty = None
 import shutil
 import subprocess
 import time
 from pathlib import Path
 
 import pytest
+
+pytestmark = pytest.mark.skipif(
+    pty is None, reason="requires pty (Unix only; botctl/start_bot are shell scripts)"
+)
 
 REPO = Path(__file__).resolve().parent.parent
 BOTCTL = REPO / "botctl.sh"
