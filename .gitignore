@@ -73,6 +73,8 @@ secrets/
 ISSUES_AND_TODOS.md
 TODOs.txt
 characters.json
+# Personal pi agent config/extensions (force-add with `git add -f` to share)
+.pi/
 
 # AI model artifacts - local only, may contain private data
 .qwen/
