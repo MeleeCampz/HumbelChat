@@ -8,6 +8,14 @@ P2 additions:
 P3 additions:
   - Streaming completions (:func:`ask_ai_stream`) for live progress display
   - Live queue-depth tracking on the global AI slot (:func:`ai_queue_depth`)
+
+P5 additions:
+  - Streaming is the default delivery path for /ai (``AI_STREAM=1``)
+  - Streamed responses get three explicit time budgets: a larger initial
+    wait (prompt processing + thinking), a per-chunk gap timeout, and a
+    hard cap on the whole response (all overridable in the config)
+  - The shared client is created with ``max_retries=0`` so the bot's own
+    policy (exactly ONE retry on transient failure) is the only retry layer
 """
 from __future__ import annotations
 
@@ -36,6 +44,9 @@ from config.settings import (
     MAX_INPUT_CHARS,
     AI_RATE_LIMIT_MAX,
     AI_RATE_LIMIT_WINDOW,
+    AI_STREAM_INITIAL_TIMEOUT_S,
+    AI_STREAM_CHUNK_TIMEOUT_S,
+    AI_STREAM_TOTAL_TIMEOUT_S,
 )
 
 log = logging.getLogger("bot.bot_core")
@@ -47,7 +58,15 @@ _shared_client: AsyncOpenAI | None = None
 def _make_client() -> AsyncOpenAI:
     global _shared_client
     if _shared_client is None:
-        _shared_client = AsyncOpenAI(api_key=INFER_API_KEY, base_url=INFER_URL)
+        # max_retries=0: the bot owns its retry policy —
+        # ``_call_completion_with_retry`` does exactly ONE bounded retry.
+        # With the SDK default (3 retries) every timed-out request was
+        # actually 3×145s of SDK-level retries inside a single "attempt",
+        # tripling the worst-case latency before the bot's own retry logic
+        # was even asked to step in.
+        _shared_client = AsyncOpenAI(
+            api_key=INFER_API_KEY, base_url=INFER_URL, max_retries=0
+        )
     return _shared_client
 
 
@@ -660,6 +679,16 @@ async def ask_ai_stream(
     persists history exactly once, at the end, so a mid-stream failure (or a
     cancelled consumer) leaves no partial turn in the history.
 
+    Time budgets (all overridable in the config / .env):
+
+    * ``AI_STREAM_INITIAL_TIMEOUT_S`` (default 90 s) — maximum wait for the
+      FIRST visible chunk; covers prompt processing plus the model's hidden
+      thinking phase, which emits no tokens.
+    * ``AI_STREAM_CHUNK_TIMEOUT_S`` (default 60 s) — maximum gap between
+      two consecutive chunks once generation has started.
+    * ``AI_STREAM_TOTAL_TIMEOUT_S`` (default 300 s) — hard cap for the whole
+      response, request start to final chunk.
+
     Yields
     ------
     str
@@ -683,10 +712,24 @@ async def ask_ai_stream(
 
         collected: list[str] = []
         try:
-            # The streaming call is NOT retried: a mid-stream transient failure
-            # is ambiguous (we may have already emitted tokens), so we surface
-            # it immediately rather than risk a duplicated partial reply. The
-            # non-streaming path keeps its one bounded retry.
+            # The streaming call is NOT retried: a mid-stream transient
+            # failure is ambiguous (we may have already emitted tokens), so
+            # we surface it immediately rather than risk a duplicated partial
+            # reply. The non-streaming path keeps its one bounded retry.
+            #
+            # Time budgets: the SDK ``timeout=`` on a streamed request only
+            # bounds the time until the HTTP response (stream object)
+            # arrives — it does NOT bound how long the model takes to emit
+            # chunks. So each budget is enforced here around the chunk reads
+            # (config.settings, overridable via env):
+            #   * AI_STREAM_INITIAL_TIMEOUT_S — wait for the FIRST visible
+            #     chunk. This deliberately covers the larger silent window:
+            #     prompt processing PLUS the model's hidden thinking phase
+            #     (Qwen3 emits no tokens while reasoning).
+            #   * AI_STREAM_CHUNK_TIMEOUT_S — maximum gap between two
+            #     consecutive chunks once generation has started.
+            #   * AI_STREAM_TOTAL_TIMEOUT_S — hard cap for the WHOLE
+            #     response, request start to final chunk.
             from openai import AsyncStream
             from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 
@@ -697,23 +740,72 @@ async def ask_ai_stream(
                     temperature=ctx.temperature,
                     max_tokens=ctx.max_tokens,
                     stream=True,
-                    timeout=ctx.timeout_sec,
+                    timeout=AI_STREAM_INITIAL_TIMEOUT_S,
                 )
-            async for chunk in stream:
-                # Track the server-side finish reason (set on the final
-                # chunk) so a truncated-but-silent stream can be told apart
-                # from an ordinary empty answer (P4).
-                if getattr(chunk, "choices", None):
-                    fr = getattr(chunk.choices[0], "finish_reason", None)
-                    if fr:
-                        setattr(stream, "_final_finish_reason", fr)
+            loop = asyncio.get_running_loop()
+            started_at = loop.time()
+            hard_deadline = started_at + AI_STREAM_TOTAL_TIMEOUT_S
+            try:
+                while True:
+                    gap_budget = (
+                        AI_STREAM_INITIAL_TIMEOUT_S if not collected
+                        else AI_STREAM_CHUNK_TIMEOUT_S
+                    )
+                    next_deadline = min(loop.time() + gap_budget, hard_deadline)
+                    wait_s = next_deadline - loop.time()
+                    if wait_s <= 0:
+                        from bot_core.errors import TimeoutError as _AITimeout
+
+                        raise _AITimeout(
+                            f"Streamed response exceeded the "
+                            f"{AI_STREAM_TOTAL_TIMEOUT_S:.0f}s total time budget."
+                        )
+                    try:
+                        chunk = await asyncio.wait_for(
+                            stream.__anext__(), timeout=wait_s
+                        )
+                    except StopAsyncIteration:
+                        break
+                    except asyncio.TimeoutError:
+                        from bot_core.errors import TimeoutError as _AITimeout
+
+                        if loop.time() >= hard_deadline:
+                            raise _AITimeout(
+                                f"Streamed response exceeded the "
+                                f"{AI_STREAM_TOTAL_TIMEOUT_S:.0f}s total time budget."
+                            ) from None
+                        if not collected:
+                            raise _AITimeout(
+                                f"The AI backend did not start responding "
+                                f"within the {AI_STREAM_INITIAL_TIMEOUT_S:.0f}s "
+                                f"initial timeout."
+                            ) from None
+                        raise _AITimeout(
+                            f"No chunk from the AI backend within the "
+                            f"{AI_STREAM_CHUNK_TIMEOUT_S:.0f}s per-chunk timeout."
+                        ) from None
+                    # Track the server-side finish reason (set on the final
+                    # chunk) so a truncated-but-silent stream can be told
+                    # apart from an ordinary empty answer (P4).
+                    if getattr(chunk, "choices", None):
+                        fr = getattr(chunk.choices[0], "finish_reason", None)
+                        if fr:
+                            setattr(stream, "_final_finish_reason", fr)
+                    try:
+                        delta = chunk.choices[0].delta.content
+                    except (IndexError, AttributeError, KeyError, TypeError):
+                        continue
+                    if delta:
+                        collected.append(delta)
+                        yield "".join(collected)
+            finally:
+                # Release the HTTP connection when the loop ends for any
+                # reason (success, timeout, cancellation); idempotent in the
+                # openai SDK.
                 try:
-                    delta = chunk.choices[0].delta.content
-                except (IndexError, AttributeError, KeyError, TypeError):
-                    continue
-                if delta:
-                    collected.append(delta)
-                    yield "".join(collected)
+                    stream.close()
+                except Exception:
+                    pass
         except asyncio.CancelledError:
             # Abandoned (e.g. /ai stop, P3 #25). Do not persist a partial turn.
             log.info(

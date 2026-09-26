@@ -317,11 +317,26 @@ RAG_QUERY_MAX_EXPANSIONS: int = _safe_int(os.getenv("RAG_QUERY_MAX_EXPANSIONS"),
 # setups, but a couple of Discord/local-backend edge cases (and the very long
 # reply paths that re-deliver as multi-message chunks) are simpler with the
 # proven non-streaming path, so it defaults to off.
-AI_STREAM: bool = _safe_bool(os.getenv("AI_STREAM"), False)
+AI_STREAM: bool = _safe_bool(os.getenv("AI_STREAM"), True)
 # Minimum wall-clock seconds between successive message edits while streaming.
 # Discord rate-limits message edits; keeping a small floor avoids hammering the
 # API for very fast (short) generations while still giving live feedback.
 AI_STREAM_EDIT_INTERVAL_S: float = _safe_float(os.getenv("AI_STREAM_EDIT_INTERVAL_S"), 2.5)
+# ── Streaming response time budgets (seconds) ───────────────────────────
+# A streamed response has three distinct clock phases, each with its own
+# configurable budget:
+#   1. AI_STREAM_INITIAL_TIMEOUT_S — how long the backend may take BEFORE
+#      the first chunk arrives (prompt processing + first token; for
+#      thinking models this includes the whole reasoning phase, so it is
+#      deliberately a bit larger than the per-chunk timeout).
+#   2. AI_STREAM_CHUNK_TIMEOUT_S — maximum gap between two consecutive
+#      chunks once generation has started (the SSE read timeout).
+#   3. AI_STREAM_TOTAL_TIMEOUT_S — hard cap for the WHOLE response, from
+#      request start to the final chunk (guards against a slow backend
+#      dribbling out chunks forever).
+AI_STREAM_INITIAL_TIMEOUT_S: float = _safe_float(os.getenv("AI_STREAM_INITIAL_TIMEOUT_S"), 90.0)
+AI_STREAM_CHUNK_TIMEOUT_S: float = _safe_float(os.getenv("AI_STREAM_CHUNK_TIMEOUT_S"), 60.0)
+AI_STREAM_TOTAL_TIMEOUT_S: float = _safe_float(os.getenv("AI_STREAM_TOTAL_TIMEOUT_S"), 300.0)
 # Wall-clock budget (seconds) for the LLM rewrite call itself.
 RAG_REWRITE_BUDGET_SECONDS: int = _safe_int(os.getenv("RAG_REWRITE_BUDGET_SECONDS"), 10)
 

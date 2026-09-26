@@ -8,6 +8,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _pin_non_streaming(monkeypatch):
+    """These tests exercise the NON-streaming delivery wiring (they mock
+    ``ask_ai``). Streaming is the default since P5 and is covered separately
+    in tests/test_p5_streaming.py — pin it off here so the command takes the
+    ``ask_ai`` branch these tests assert on.
+    """
+    import config.settings as settings
+    monkeypatch.setattr(settings, "AI_STREAM", False)
+
+
 class TestAICommand:
 
     @pytest.mark.asyncio
