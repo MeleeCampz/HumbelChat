@@ -148,14 +148,21 @@ class Embedder:
         model_name: str = _DEFAULT_MODEL,
         *,
         batch_size: int = _BATCH_SIZE,
+        backend: str = "auto",
+        fallback_local: bool = False,
     ) -> None:
         self.model_name = model_name
         self.batch_size = max(1, batch_size)
-        # Decide the active backend once. "local" requires sentence-transformers;
-        # if it's missing we warn and fall back to remote so retrieval still works.
+        # Decide the active backend once. ``backend`` overrides the global
+        # EMBED_BACKEND when it is not "auto": "local" forces in-process CPU
+        # encoding; "remote" forces the HTTP /embeddings path (used for GPU index
+        # builds). "local" requires sentence-transformers; if it's missing we warn
+        # and fall back to remote so retrieval still works.
         self._use_local = False
+        self._fallback_local = fallback_local
         from config.settings import EMBED_BACKEND, LOCAL_EMBED_MODEL
-        if EMBED_BACKEND == "local":
+        chosen = EMBED_BACKEND if backend == "auto" else backend
+        if chosen == "local":
             if importlib.util.find_spec("sentence_transformers") is not None:
                 self._use_local = True
                 # Reflect the local model in metadata so the index cache rebuilds.
@@ -173,6 +180,9 @@ class Embedder:
 
         Handles batching automatically and raises :class:`EmbeddingError` on
         persistent backend failure (caller should fall back to keyword search).
+        When constructed with ``fallback_local=True`` a backend failure instead
+        transparently re-encodes in-process on CPU, so batch index builds never
+        hard-fail on a downed backend.
         """
         if not texts:
             return []
@@ -182,6 +192,19 @@ class Embedder:
         if self._use_local:
             return await asyncio.to_thread(self._local_encode, list(texts))
 
+        try:
+            return await self._remote_encode(list(texts))
+        except EmbeddingError as exc:
+            if self._fallback_local and importlib.util.find_spec("sentence_transformers") is not None:
+                logger.warning(
+                    "Backend /embeddings failed (%s); falling back to local CPU for %d text(s).",
+                    exc, len(texts),
+                )
+                return await asyncio.to_thread(self._local_encode, list(texts))
+            raise
+
+    async def _remote_encode(self, texts: list[str]) -> list[list[float]]:
+        """Encode *texts* via the HTTP /embeddings endpoint (batched + deduped)."""
         # Deduplicate while preserving order for result alignment
         seen: dict[str, int] = {}
         unique_texts: list[str] = []

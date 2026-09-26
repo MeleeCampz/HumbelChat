@@ -1,19 +1,32 @@
-# P3 #27: proper packaging metadata.
+# ─────────────────────────────────────────────────────────────────────────────
+#  pyproject.toml — what this file is for
+# ─────────────────────────────────────────────────────────────────────────────
 #
-#   * Base install:        pip install -e .
-#   * With local STT:      pip install -e .[stt]
-#   * With vector RAG:     pip install -e .[rag-vector]
-#   * Everything:          pip install -e .[all]
-#   * Dev / test tooling:  pip install -e .[dev]
+# This is the project's PEP 621 packaging + tooling configuration (the modern
+# replacement for setup.py / setup.cfg). It tells `pip` how to build and install
+# the package, which dependencies it needs, and how the dev tools (pytest, ruff,
+# mypy, coverage) should run. Nothing here is read at runtime by the bot — it
+# only matters when you `pip install` the project or run the tooling.
 #
-# Heavy STT (faster-whisper) and vector (fastembed) deps are optional extras —
-# they were previously labelled "optional" in requirements.txt comments but
-# were always installed. Both are imported lazily by the code (see
-# bot_core/transcriber.py and kb/vector_db.py), so a base-only install imports
-# and runs cleanly; they are only required when the corresponding feature is
-# enabled.
+#   [project]                        name, version, required runtime deps, entry point
+#   [project.optional-dependencies]  optional "extras" (see below)
+#   [project.scripts]                the `discord-ai-bot` console command
+#   [tool.*]                         pytest / coverage / ruff / mypy configuration
 #
-# requirements.txt is retained for pin compatibility / `pip install -r`.
+# Install matrix (each line is a full, working install):
+#   * Base only:          pip install -e .
+#   * + local STT:        pip install -e .[stt]
+#   * + vector RAG:       pip install -e .[rag-vector]
+#   * Everything:         pip install -e .[all]
+#   * Dev / test tooling: pip install -e .[dev]
+#
+# The heavy STT (faster-whisper) and vector (fastembed / sentence-transformers)
+# deps are OPTIONAL extras, not base dependencies. They are imported lazily by
+# the code (bot_core/transcriber.py, kb/vector_db.py, kb/embedder.py), so a
+# base-only install imports and runs cleanly; an extra is only required when its
+# feature is enabled. `requirements.txt` is retained alongside for pin
+# compatibility / plain `pip install -r`.
+# ─────────────────────────────────────────────────────────────────────────────
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

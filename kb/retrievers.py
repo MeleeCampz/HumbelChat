@@ -438,9 +438,24 @@ async def _retrieve_vector(
         query, top_scores[0], top_scores[len(top_scores) // 2], top_scores[-1], len(ranked),
     )
 
-    from config.settings import RAG_REWRITE_MIN_SCORE
+    from config.settings import RAG_REWRITE_MIN_SCORE, RAG_MIN_ATTACH_SCORE
 
-    if ranked[0][2] < RAG_REWRITE_MIN_SCORE:
+    # ── Min-attachment relevance floor (opt-in) ───────────────────────
+    # When RAG_MIN_ATTACH_SCORE > 0, drop dense chunks scoring below the floor
+    # BEFORE hybrid fusion so low-relevance dense hits don't crowd out good BM25
+    # matches. Default 0 = off (keep all). Only the dense leg is filtered here,
+    # so lexical-only matches still survive via the hybrid step below.
+    if RAG_MIN_ATTACH_SCORE > 0:
+        kept = [t for t in ranked if t[2] >= RAG_MIN_ATTACH_SCORE]
+        dropped = len(ranked) - len(kept)
+        if dropped:
+            logger.info(
+                "Min-attach floor %.2f: dropped %d/%d dense chunk(s) below threshold",
+                RAG_MIN_ATTACH_SCORE, dropped, len(ranked),
+            )
+        ranked = kept
+
+    if ranked and ranked[0][2] < RAG_REWRITE_MIN_SCORE:
         expansion_rankings, elapsed = await _expand_low_confidence_query(
             idx, query, top_n, rewrite_model=rewrite_model
         )

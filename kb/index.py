@@ -233,7 +233,10 @@ class KBIndexStore:
 
         self._db_path = self.persist_dir / "vector_index.db"
         self._index: KBVectorIndex | None = None
-        self._embedder = Embedder(model_name=model_name)
+        # Index WRITES (build / update / sync) use a dedicated embedder that can run
+        # on the GPU backend for speed while QUERIES stay on local CPU. Both must be
+        # the same model (bge-m3) so their vectors are interchangeable.
+        self._embedder = self._make_index_embedder()
         # P0 #3: serializes every index mutation (read → embed → merge →
         # persist) so concurrent updates can't lose each other's chunks.
         # Created lazily; asyncio primitives resolve the running loop on
@@ -241,6 +244,26 @@ class KBIndexStore:
         # (Do NOT recreate it per call — two distinct Lock objects never
         # exclude each other.  Python ≥3.10 locks carry no loop binding.)
         self._mut_lock: asyncio.Lock | None = None
+
+    def _make_index_embedder(self) -> Embedder:
+        """Embedder used for index WRITES (build / update / sync).
+
+        ``INDEX_EMBED_BACKEND`` selects the source: ``"backend"`` builds via
+        INFER_URL's /embeddings (GPU — fast for one-time reindexes); ``"local"``
+        builds in-process on CPU. Either way it falls back to local CPU if the
+        backend is down so a reindex never hard-fails. The build model must match
+        the query embedder or similarity breaks.
+        """
+        from config.settings import INDEX_EMBED_BACKEND, INDEX_EMBED_MODEL, LOCAL_EMBED_MODEL
+        if INDEX_EMBED_BACKEND == "backend":
+            if INDEX_EMBED_MODEL != LOCAL_EMBED_MODEL:
+                logger.warning(
+                    "INDEX_EMBED_MODEL (%s) differs from the query model LOCAL_EMBED_MODEL "
+                    "(%s); index and query vectors may be incompatible.",
+                    INDEX_EMBED_MODEL, LOCAL_EMBED_MODEL,
+                )
+            return Embedder(model_name=INDEX_EMBED_MODEL, backend="remote", fallback_local=True)
+        return Embedder(model_name=self.model_name, backend="local")
 
     def _mutation_lock(self) -> asyncio.Lock:
         """Return this store's mutation lock (created once, lazily)."""

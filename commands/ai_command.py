@@ -35,7 +35,6 @@ from utils.channel_queue import channel_slot
 from utils.response_splitter import (
     send_long_response,
     send_long_response_embedded,
-    DISCORD_SAFE_CHUNK,
 )
 from utils.typing_loop import typing_loop_task
 
@@ -116,68 +115,29 @@ async def _deliver_final(source, reply_text: str, char_name: str) -> None:
         await send_long_response(source, reply_text, char_name)
 
 
-async def _make_placeholder(source) -> object | None:
-    """Post the initial streaming placeholder, or None on failure."""
-    try:
-        if hasattr(source, "followup"):
-            return await source.followup.send("⌨️ *Thinking…*")
-        return await source.channel.send("⌨️ *Thinking…*")
-    except Exception as e:
-        log.warning("streaming placeholder send failed: %s", e)
-        return None
-
-
 async def _deliver_streaming(source, user_message: str, model_slug: str,
                              guild_id: int, channel_id, username: str,
                              user_id, char_name: str, char_key: str | None) -> None:
-    """P3 #24: stream the completion, editing one placeholder live.
+    """P3 #24: consume the streamed completion, then deliver it through the normal
+    (embed/chunk) path.
 
-    A ``⌨️ *Thinking…*`` placeholder is posted and edited (throttled) with the
-    growing text. On completion the placeholder is removed and the reply is
-    delivered through the normal (embed/chunk) path so formatting is
-    consistent with the non-streaming path. On any failure the placeholder is
-    removed and the error propagates to the caller.
+    The stream is consumed internally for timing + mid-flight cancellation, but NO
+    placeholder message is posted — so the original slash command stays visible and
+    the reply appears exactly like the non-streaming path (one final embed). This
+    avoids Discord hiding the command when a bot follow-up is sent first.
     """
-    edit_interval = _settings.AI_STREAM_EDIT_INTERVAL_S
-    placeholder = await _make_placeholder(source)
     buf = ""
-    deleted = False
-    try:
-        loop = asyncio.get_running_loop()
-        last_edit = 0.0
-        async for text in ai_client.ask_ai_stream(
-            user_message=user_message,
-            model_slug=model_slug,
-            guild_id=guild_id,
-            channel_id=channel_id,
-            username=username,
-            user_id=user_id,
-            char_key=char_key,
-        ):
-            buf = text
-            if placeholder is not None and loop.time() - last_edit >= edit_interval:
-                last_edit = loop.time()
-                preview = buf[: DISCORD_SAFE_CHUNK - 10]
-                try:
-                    await placeholder.edit(content=preview)
-                except Exception:
-                    pass
-
-        reply_text = buf
-        if placeholder is not None:
-            try:
-                await placeholder.delete()
-                deleted = True
-            except Exception:
-                pass
-        await _deliver_final(source, reply_text, char_name)
-    except BaseException:
-        if placeholder is not None and not deleted:
-            try:
-                await placeholder.delete()
-            except Exception:
-                pass
-        raise
+    async for text in ai_client.ask_ai_stream(
+        user_message=user_message,
+        model_slug=model_slug,
+        guild_id=guild_id,
+        channel_id=channel_id,
+        username=username,
+        user_id=user_id,
+        char_key=char_key,
+    ):
+        buf = text
+    await _deliver_final(source, buf, char_name)
 
 
 # ─────────────────────────────────────────────────────────────────────────
