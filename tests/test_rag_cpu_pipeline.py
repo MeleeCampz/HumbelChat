@@ -399,7 +399,8 @@ async def test_min_attach_score_drops_low_chunks(monkeypatch):
 @pytest.mark.asyncio
 async def test_min_attach_score_off_keeps_all(monkeypatch):
     import kb.retrievers as R
-    monkeypatch.setattr("config.settings.RAG_MIN_ATTACH_SCORE", 0.0)  # off
+    monkeypatch.setattr("config.settings.RAG_MIN_ATTACH_SCORE", 0.0)  # pre-fusion floor off
+    monkeypatch.setattr("config.settings.RAG_ATTACH_FLOOR", 0.0)     # attach floor off (isolate pre-fusion knob)
     monkeypatch.setattr("config.settings.RAG_HYBRID_ENABLED", False)
     monkeypatch.setattr("config.settings.RAG_REWRITE_MIN_SCORE", 0.0)
     monkeypatch.setattr("kb.reranker.is_available", lambda: False)
@@ -412,4 +413,26 @@ async def test_min_attach_score_off_keeps_all(monkeypatch):
     monkeypatch.setattr(R, "_ensure_index_store", fake_ensure)
     docs = await R._retrieve_vector("q", "/tmp/kb", top_n=5)
     names = [n for n, _ in docs]
-    assert "a.md" in names and "b.md" in names  # all kept when off
+    assert "a.md" in names and "b.md" in names  # all kept when both floors off
+
+
+@pytest.mark.asyncio
+async def test_attach_floor_drops_weak_keeps_strong(monkeypatch):
+    """RAG_ATTACH_FLOOR gates at ATTACH time on the original dense score."""
+    import kb.retrievers as R
+    monkeypatch.setattr("config.settings.RAG_MIN_ATTACH_SCORE", 0.0)  # pre-fusion off
+    monkeypatch.setattr("config.settings.RAG_ATTACH_FLOOR", 0.5)
+    monkeypatch.setattr("config.settings.RAG_HYBRID_ENABLED", False)
+    monkeypatch.setattr("config.settings.RAG_REWRITE_MIN_SCORE", 0.0)
+    monkeypatch.setattr("kb.reranker.is_available", lambda: False)
+
+    ranked = [("a.md", "hi", 0.9), ("b.md", "lo", 0.1)]
+
+    async def fake_ensure(kb_path):
+        return _fake_store_with_ranked(ranked)
+
+    monkeypatch.setattr(R, "_ensure_index_store", fake_ensure)
+    docs = await R._retrieve_vector("q", "/tmp/kb", top_n=5)
+    names = [n for n, _ in docs]
+    assert "a.md" in names   # dense 0.9 >= 0.5 attached
+    assert "b.md" not in names  # dense 0.1 < 0.5 dropped at attach time

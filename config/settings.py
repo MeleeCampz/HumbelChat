@@ -343,6 +343,20 @@ RAG_QUERY_MAX_EXPANSIONS: int = _safe_int(os.getenv("RAG_QUERY_MAX_EXPANSIONS"),
 # 0 = OFF (keep everything). Tune from the "Vector scores for ..." log lines.
 RAG_MIN_ATTACH_SCORE: float = _safe_float(os.getenv("RAG_MIN_ATTACH_SCORE"), 0.0)
 
+# ── Per-file chunk budget + attach-time relevance floor ───────────────────
+# RAG_MAX_CHUNKS_PER_FILE caps how many of a file's ranked chunks are attached
+# (they're joined into one per-file entry). Lower = tighter context, less
+# "whole file" bloat; higher = more surrounding sections. Default 3.
+RAG_MAX_CHUNKS_PER_FILE: int = _safe_int(os.getenv("RAG_MAX_CHUNKS_PER_FILE"), 3)
+# RAG_ATTACH_FLOOR is a per-chunk relevance gate applied at ATTACH time (after
+# hybrid fusion / rerank). A ranked chunk whose DENSE cosine similarity is below
+# this floor is skipped, so only genuinely relevant sections are attached. This
+# uses the original dense score (not the rank-based RRF score), and lexical-only
+# chunks (exact-term BM25 hits with no dense score) are always kept. Default 0.50;
+# set to 0 to disable. A safety net in the retriever guarantees an over-aggressive
+# floor can never yield an empty context (it falls back to unfiltered selection).
+RAG_ATTACH_FLOOR: float = _safe_float(os.getenv("RAG_ATTACH_FLOOR"), 0.50)
+
 # ── Streaming AI responses (P3 #24) ────────────────────────────────────────
 # When on, /ai streams the completion token-by-token and progressively edits a
 # single Discord message as the text grows (instead of the user staring at a

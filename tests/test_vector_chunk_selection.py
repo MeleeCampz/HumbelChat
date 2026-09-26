@@ -123,6 +123,82 @@ class TestSelectRankedChunks:
         assert len(docs) <= 3
 
 
+class TestAttachFloor:
+    """Per-chunk relevance gate (RAG_ATTACH_FLOOR) at attach time."""
+
+    def test_floor_drops_weak_dense_keeps_strong(self):
+        ranked = _ranked(
+            ("spells.md [Fireball]", "fireball text", 0.7),   # dense 0.7 -> keep
+            ("spells.md [Necklace of Fireballs]", "necklace", 0.4),  # dense 0.4 -> drop
+        )
+        dense_scores = {"spells.md [Fireball]": 0.7, "spells.md [Necklace of Fireballs]": 0.4}
+        docs = dict(select_ranked_chunks(
+            ranked, top_n=5, attach_min_score=0.5, dense_scores=dense_scores,
+        ))
+        assert "fireball text" in docs["spells.md"]
+        assert "necklace" not in docs["spells.md"]
+
+    def test_lexical_only_chunk_is_kept(self):
+        # A chunk with no dense score (pure BM25 hit) must survive the floor.
+        ranked = _ranked(
+            ("equipment.md [Weapons]", "longsword +1d4", 0.3),  # not in dense_scores
+        )
+        docs = dict(select_ranked_chunks(
+            ranked, top_n=5, attach_min_score=0.5, dense_scores={},
+        ))
+        assert "longsword +1d4" in docs["equipment.md"]
+
+    def test_weak_chunk_does_not_consume_file_slot(self):
+        # top_n=2: a weak file must not claim a distinct-file slot and block
+        # two genuinely relevant files behind it.
+        ranked = _ranked(
+            ("filler.md [Intro]", "irrelevant", 0.9),   # dense 0.4 -> dropped first
+            ("good1.md [A]", "alpha", 0.8),             # dense 0.7
+            ("good2.md [B]", "beta", 0.7),              # dense 0.6
+        )
+        dense_scores = {
+            "filler.md [Intro]": 0.4,
+            "good1.md [A]": 0.7,
+            "good2.md [B]": 0.6,
+        }
+        docs = dict(select_ranked_chunks(
+            ranked, top_n=2, attach_min_score=0.5, dense_scores=dense_scores,
+        ))
+        assert "filler.md" not in docs
+        assert set(docs) == {"good1.md", "good2.md"}
+
+    def test_no_empty_entries_emitted(self):
+        # Every chunk of a file is below the floor -> that file is absent, not empty.
+        ranked = _ranked(
+            ("weak.md [A]", "x", 0.9),
+            ("weak.md [B]", "y", 0.8),
+            ("strong.md [C]", "z", 0.7),
+        )
+        dense_scores = {"weak.md [A]": 0.2, "weak.md [B]": 0.3, "strong.md [C]": 0.8}
+        docs = select_ranked_chunks(
+            ranked, top_n=5, attach_min_score=0.5, dense_scores=dense_scores,
+        )
+        names = [n for n, _ in docs]
+        assert "weak.md" not in names
+        assert all(len(c) > 0 for _, c in docs)
+
+    def test_floor_zero_is_off(self):
+        ranked = _ranked(
+            ("a.md [A]", "one", 0.9),
+            ("a.md [B]", "two", 0.8),
+        )
+        dense_scores = {"a.md [A]": 0.2, "a.md [B]": 0.3}
+        docs = dict(select_ranked_chunks(ranked, top_n=5, attach_min_score=0.0, dense_scores=dense_scores))
+        # Floor off -> both kept despite low dense scores.
+        assert docs["a.md"] == "one\n\ntwo"
+
+    def test_floor_with_no_dense_scores_is_off(self):
+        # dense_scores=None means there is nothing to gate on -> keep everything.
+        ranked = _ranked(("a.md [A]", "one", 0.9))
+        docs = dict(select_ranked_chunks(ranked, top_n=5, attach_min_score=0.5, dense_scores=None))
+        assert docs["a.md"] == "one"
+
+
 class TestRetrievalName:
     def test_basename_label_uses_source_path(self):
         doc = _DocEntry(
