@@ -168,3 +168,6 @@ These are the expected file types for KB use. Storage itself does not strictly e
 | `RAG_MIN_ATTACH_SCORE` | Opt-in dense-similarity floor before fusion (`0` = off) |
 | `RAG_MAX_CHUNKS_PER_FILE` | Max chunks attached per file (default `3`) |
 | `RAG_ATTACH_FLOOR` | Per-chunk dense-score gate at attach time (`0` = off, default `0.50`) |
+| `RAG_DENSE_TOP_K` | Candidate pool size for the dense leg before RRF fusion (default `48`; larger = better recall for hard lookups) |
+| `RAG_LEXICAL_TOP_K` | Candidate pool size for the BM25 leg before RRF fusion (default `48`) |
+| `RAG_EMBED_BATCH_SIZE` | Docs per `/embeddings` call during index builds (default `8`; the backend pads each batch to its longest sequence, so keep it modest for long/mixed content — raise only for short uniform chunks after measuring) |

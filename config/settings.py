@@ -325,12 +325,13 @@ RAG_WINDOW_LINES: int = _safe_int(os.getenv("RAG_WINDOW_LINES"), 80)
 RAG_DENSE_TOP_K: int = _safe_int(os.getenv("RAG_DENSE_TOP_K"), 48)
 RAG_LEXICAL_TOP_K: int = _safe_int(os.getenv("RAG_LEXICAL_TOP_K"), 48)
 
-# Embedding batch size (documents per /embeddings call). Larger batches are much
-# faster for index builds because the per-request overhead amortizes — a dedicated
-# backend handled 40-in-one at ~7 chunks/s vs ~1.3/s at the old fixed batch of 8.
-# Very large batches risk hitting backend token/memory limits on long chunks, so the
-# default stays conservative at 8; raise it (e.g. 32-64) for faster reindexes once
-# you've confirmed your backend copes. Queries are single-text, so this never affects them.
+# Embedding batch size (documents per /embeddings call) for index builds. Bigger
+# batches amortize per-request overhead, which helps SHORT/uniform chunks — but on
+# long or mixed-length content they can be SLOWER, because the backend pads every
+# sequence in a batch to the longest one (wasted compute). A real KB with long
+# sections measured ~1.4 chunks/s at 8 vs ~0.2 chunks/s at 32-longest, so 8 is a good
+# default; only raise it if your content is short and you've measured a win.
+# Queries are single-text, so this never affects them.
 RAG_EMBED_BATCH_SIZE: int = _safe_int(os.getenv("RAG_EMBED_BATCH_SIZE"), 8)
 
 # ── Last-session context (continuity) ────────────────────────────────────
