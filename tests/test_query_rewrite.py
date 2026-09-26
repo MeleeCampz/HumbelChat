@@ -175,6 +175,9 @@ class TestLowConfidenceRewrite:
     async def test_low_confidence_query_rewrites_and_merges(self, monkeypatch):
         idx = build_index()
         self._patch_store(monkeypatch, idx)
+        # Isolate the rewrite+RRF path: disable the hybrid lexical leg so this
+        # test verifies only how expansion rankings are merged (its original intent).
+        monkeypatch.setattr("config.settings.RAG_HYBRID_ENABLED", False)
         # "xyzzy dungeon" partially matches two chunks (top ≈ 0.707 < 0.9).
         monkeypatch.setattr("config.settings.RAG_REWRITE_MIN_SCORE", 0.9)
 

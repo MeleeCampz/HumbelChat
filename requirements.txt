@@ -12,6 +12,9 @@ aiohttp==3.14.1
 numpy==1.26.4
 faster-whisper==1.2.1   # local STT backend (STT_BACKEND=local): segment timestamps -> interleaved transcript
 fastembed==0.8.0   # optional — enable vector retrieval (RAG_RETRIEVAL_METHOD=vector)
+# optional — in-process CPU embeddings + reranker (EMBED_BACKEND=local / RERANK_ENABLED);
+# pulls torch. See the `rag-cpu` extra in pyproject.toml.
+sentence-transformers>=3.0,<5
 
 # Test dependencies
 pytest==9.1.1

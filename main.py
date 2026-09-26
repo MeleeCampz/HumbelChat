@@ -484,6 +484,17 @@ async def on_ready() -> None:
 
     log_top_kb_files(KB_PATH)
 
+    # Warm in-process CPU models (embedding + optional reranker) if enabled, so the
+    # first /ai RAG request isn't cold. No-ops when EMBED_BACKEND != "local" or when
+    # reranking is disabled; idempotent on gateway reconnects (singletons).
+    try:
+        from kb.embedder import preload_local_embedder
+        from kb.reranker import preload_reranker
+        preload_local_embedder()
+        preload_reranker()
+    except Exception:  # pragma: no cover - never block startup on model warmup
+        log.exception("Local model preload failed (continuing)")
+
     char_names = [c.name for c in _CHAR_CHOICES]
     log.info("Characters loaded: %s", ", ".join(char_names) or "(none)")
 

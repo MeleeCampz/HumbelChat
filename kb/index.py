@@ -222,10 +222,13 @@ class KBIndexStore:
             self.persist_dir = pathlib.Path(persist_dir)
             if not self.persist_dir.is_absolute():
                 self.persist_dir = (pathlib.Path(__file__).resolve().parent.parent / persist_dir)
-        # Fall back to the configured embedding model (env var) when none given.
+        # Default to the *effective* embedding model (backend-aware) when none is
+        # given. This name is recorded in the index metadata, so switching between
+        # the remote and local backends invalidates the cache and triggers a
+        # one-time reindex (their vectors are incompatible).
         if not model_name:
-            from config.settings import EMBEDDING_MODEL
-            model_name = EMBEDDING_MODEL
+            from config.settings import effective_embedding_model
+            model_name = effective_embedding_model()
         self.model_name = model_name
 
         self._db_path = self.persist_dir / "vector_index.db"

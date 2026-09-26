@@ -166,6 +166,44 @@ EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "nomic-embed-text:latest")
 # shared across batches (keep-alive), so only this per-request timeout applies.
 EMBED_TIMEOUT: int = _safe_int(os.getenv("EMBED_TIMEOUT"), 30)
 
+# ── Embedding backend selection (CPU RAG) ────────────────────────────────
+# "remote" (default) = current behaviour: embed via the OpenAI-compatible
+#   /embeddings endpoint on INFER_URL (the chat backend). This is what causes
+#   the per-request model swap on a single-model local backend.
+# "local" = embed in-process on CPU with sentence-transformers (no backend
+#   round-trip, no swap). Requires the `rag-cpu` extra (sentence-transformers).
+EMBED_BACKEND: str = os.getenv("EMBED_BACKEND", "remote").strip().lower()
+# In-process embedding model used when EMBED_BACKEND == "local". bge-m3 is a
+# strong hybrid dense/sparse, multilingual embedder that runs well on CPU.
+LOCAL_EMBED_MODEL: str = os.getenv("LOCAL_EMBED_MODEL", "BAAI/bge-m3")
+
+
+def effective_embedding_model() -> str:
+    """Model name used for embedding AND stored in the index metadata.
+
+    Returning a *different* name per backend is deliberate: ``kb.index`` records
+    this in its SQLite metadata and rebuilds the cache when it changes, so
+    switching between the remote and local backends (which produce incompatible
+    vectors) automatically triggers a one-time reindex on next load.
+    """
+    if EMBED_BACKEND == "local":
+        return LOCAL_EMBED_MODEL
+    return EMBEDDING_MODEL
+
+
+# ── Cross-encoder reranker (CPU, RAG quality boost) ────────────────────────
+# Reranks the top-K retrieved chunks against the query with a cross-encoder
+# before they are injected into the prompt. Runs in-process on CPU; falls back
+# to plain vector order on any failure/timeout so retrieval never breaks.
+RERANK_ENABLED: bool = _safe_bool(os.getenv("RERANK_ENABLED"), False)
+RERANK_MODEL: str = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
+# Number of candidate chunks handed to the reranker (was hardcoded 6*4=24).
+RERANK_TOP_K: int = _safe_int(os.getenv("RAG_VECTOR_TOP_K"), 15)
+RERANK_TIMEOUT_SECONDS: int = _safe_int(os.getenv("RERANK_TIMEOUT_SECONDS"), 8)
+# Enable the hybrid lexical (BM25) leg that is RRF-fused with dense vectors.
+# On by default (part of the high-quality pipeline); set to 0 to use dense-only.
+RAG_HYBRID_ENABLED: bool = _safe_bool(os.getenv("RAG_HYBRID_ENABLED"), True)
+
 # ════════════════════════════════════
 #  KNOWLEDGE BASE
 # ════════════════════════════════════
