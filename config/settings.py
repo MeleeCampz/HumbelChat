@@ -177,6 +177,25 @@ EMBED_BACKEND: str = os.getenv("EMBED_BACKEND", "remote").strip().lower()
 # strong hybrid dense/sparse, multilingual embedder that runs well on CPU.
 LOCAL_EMBED_MODEL: str = os.getenv("LOCAL_EMBED_MODEL", "BAAI/bge-m3")
 
+# ── Index-build embedding source (GPU reindex) ─────────────────────────────
+# Per-request QUERIES always embed in-process on CPU (EMBED_BACKEND=local: fast,
+# no model swap). Building/rebuilding the vector INDEX is a one-time batch job,
+# so it can instead run on the GPU backend: point INDEX_EMBED_BACKEND at the
+# inference backend (INFER_URL) which has bge-m3 loaded, and index builds use its
+# /embeddings endpoint. Same model (bge-m3) on both sides => vectors are
+# interchangeable, so a GPU-built index works with CPU query embeddings (and an
+# index already built on CPU stays valid — no forced rebuild on the switch).
+#   "backend" (default) = build the index via INFER_URL's /embeddings (GPU).
+#   "local"             = build the index in-process on CPU (previous behaviour).
+# If the backend is unreachable during a build, indexing falls back to local CPU
+# automatically so a reindex never hard-fails.
+INDEX_EMBED_BACKEND: str = os.getenv("INDEX_EMBED_BACKEND", "backend").strip().lower()
+# Model slug sent to the backend when INDEX_EMBED_BACKEND == "backend". It must
+# be the SAME model as the query embedder (LOCAL_EMBED_MODEL) or similarity
+# breaks; it defaults to that so the two stay in lockstep. Override only if your
+# backend names the loaded bge-m3 differently.
+INDEX_EMBED_MODEL: str = os.getenv("INDEX_EMBED_MODEL", LOCAL_EMBED_MODEL)
+
 
 def effective_embedding_model() -> str:
     """Model name used for embedding AND stored in the index metadata.
@@ -295,6 +314,15 @@ RAG_RETRIEVAL_METHOD: str = os.getenv("RAG_RETRIEVAL_METHOD", "vector").lower()
 RAG_MAX_CHARS: int = _safe_int(os.getenv("RAG_MAX_CHARS"), 24000)
 RAG_WINDOW_LINES: int = _safe_int(os.getenv("RAG_WINDOW_LINES"), 80)
 
+# ── Last-session context (continuity) ────────────────────────────────────
+# Attach the previous (last ended) session as a compact context block so the AI
+# has continuity across sessions. Uses the stored overview when present, else a
+# tail of notes; size-capped by LAST_SESSION_MAX_CHARS. Only a genuinely
+# *previous* (ended) session is attached — never the still-active one (already in
+# history). Set LAST_SESSION_CONTEXT_ENABLED=0 to disable.
+LAST_SESSION_CONTEXT_ENABLED: bool = _safe_bool(os.getenv("LAST_SESSION_CONTEXT_ENABLED"), True)
+LAST_SESSION_MAX_CHARS: int = _safe_int(os.getenv("LAST_SESSION_MAX_CHARS"), 4000)
+
 # ── Low-confidence query rewriting (vector path only) ─────────────────────
 # When the top vector similarity score for a query is below RAG_REWRITE_MIN_SCORE,
 # the rewriter asks the LLM for up to RAG_QUERY_MAX_EXPANSIONS alternative phrasings,
@@ -307,6 +335,13 @@ RAG_QUERY_REWRITER: bool = _safe_bool(os.getenv("RAG_QUERY_REWRITER"), True)
 # ``float(...) or 0.35`` never guarded against an unparseable string.)
 RAG_REWRITE_MIN_SCORE: float = _safe_float(os.getenv("RAG_REWRITE_MIN_SCORE"), 0.35)
 RAG_QUERY_MAX_EXPANSIONS: int = _safe_int(os.getenv("RAG_QUERY_MAX_EXPANSIONS"), 3)
+
+# ── Min-attachment relevance floor (opt-in) ───────────────────────────────
+# When > 0, dense chunks scoring below this cosine-similarity floor are dropped
+# BEFORE hybrid fusion so low-relevance hits don't crowd out good matches. Only
+# the dense leg is filtered — BM25-only (lexical) matches are preserved. Default
+# 0 = OFF (keep everything). Tune from the "Vector scores for ..." log lines.
+RAG_MIN_ATTACH_SCORE: float = _safe_float(os.getenv("RAG_MIN_ATTACH_SCORE"), 0.0)
 
 # ── Streaming AI responses (P3 #24) ────────────────────────────────────────
 # When on, /ai streams the completion token-by-token and progressively edits a

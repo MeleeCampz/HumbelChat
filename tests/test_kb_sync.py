@@ -19,9 +19,12 @@ from tests._shared import Interaction
 class FakeEmbedder:
     """Drop-in for kb.embedder.Embedder — deterministic, no network."""
 
-    def __init__(self, model_name: str = "fake", *, batch_size: int = 8) -> None:
+    def __init__(self, model_name: str = "fake", *, batch_size: int = 8,
+                 backend: str = "auto", fallback_local: bool = False) -> None:
         self.model_name = model_name
         self.batch_size = batch_size
+        self.backend = backend
+        self.fallback_local = fallback_local
         self.calls: list[list[str]] = []
 
     async def encode(self, texts: list[str]) -> list[list[float]]:

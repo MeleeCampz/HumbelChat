@@ -40,6 +40,8 @@ from config.settings import (
     RAG_MAX_DOCS,
     RAG_MAX_CHARS,
     RAG_WINDOW_LINES,
+    LAST_SESSION_CONTEXT_ENABLED,
+    LAST_SESSION_MAX_CHARS,
     RAG_RETRIEVAL_METHOD,
     MAX_INPUT_CHARS,
     AI_RATE_LIMIT_MAX,
@@ -403,8 +405,50 @@ class _AIRequestContext:
         self.timeout_sec = timeout_sec
 
 
-def _append_user_message(username: str, user_message: str, rag_context: str) -> str:
-    """Build the *final* user-turn content: username decoration + RAG context.
+def _session_field(session, key, default=None):
+    """Read *key* from a session that may be a dict (live) or an object (tests)."""
+    if isinstance(session, dict):
+        return session.get(key, default)
+    return getattr(session, key, default)
+
+
+def _build_last_session_context(session) -> str:
+    """Format the previous session as a compact, size-capped context block.
+
+    Uses the stored overview when present (cheap + stable); otherwise a tail of
+    the session's notes. Returns "" when there is no usable content or the feature
+    is disabled. Never raises — continuity must never break a turn.
+    """
+    if not LAST_SESSION_CONTEXT_ENABLED:
+        return ""
+    try:
+        if session is None:
+            return ""
+        overview = (_session_field(session, "overview") or "").strip()
+        if overview:
+            body = f"Overview:\n{overview}"
+        else:
+            notes = _session_field(session, "notes") or []
+            # notes are [epoch, text] pairs; keep the most recent few non-empty.
+            texts = [str(n[1]).strip() for n in notes if len(n) > 1 and str(n[1]).strip()]
+            if not texts:
+                return ""
+            body = "Recent notes:\n" + "\n".join(f"- {t}" for t in texts[-6:])
+        name = _session_field(session, "name") or "the previous session"
+        block = f"[Previous session — {name}]\n{body}"
+        max_chars = LAST_SESSION_MAX_CHARS
+        if len(block) > max_chars:
+            block = block[:max_chars].rstrip() + "\n…(truncated)"
+        return block
+    except Exception as e:
+        log.warning("last-session context build failed: %s", e)
+        return ""
+
+
+def _append_user_message(username: str, user_message: str, rag_context: str,
+                         session_context: str = "") -> str:
+    """Build the *final* user-turn content: username decoration + optional
+    previous-session + RAG context blocks.
 
     P3 #37: the username is stripped of Discord markdown emphasis characters
     so a display name like ``**bold**`` can't break the ``**{username}:**``
@@ -412,12 +456,13 @@ def _append_user_message(username: str, user_message: str, rag_context: str) -> 
     """
     safe_username = (username or "").replace("*", "")
     base = f"**{safe_username}:** {user_message}" if safe_username else user_message
+    blocks: list[str] = []
+    if session_context:
+        blocks.append(f"[Previous session context]\n{session_context}")
     if rag_context:
-        base = (
-            f"[Relevant knowledge-base context]\n{rag_context}\n\n"
-            f"---\n\n"
-            f"{base}"
-        )
+        blocks.append(f"[Relevant knowledge-base context]\n{rag_context}")
+    if blocks:
+        base = "---\n\n".join(blocks) + "\n\n---\n\n" + base
     return base
 
 
@@ -488,6 +533,19 @@ async def _build_ai_request(
     if kb_docs:
         rag_context, included_names = _build_rag_context(kb_docs)
 
+    # ── Last-session context (continuity) ────────────────────────────────
+    session_ctx = ""
+    if LAST_SESSION_CONTEXT_ENABLED:
+        from bot_core import sessions as _sessions
+        try:
+            last = _sessions.get_last_session()
+            # Only attach a genuinely *previous* (ended) session; get_last_session
+            # returns the still-active one when it exists (already in history) → skip.
+            if last is not None and _session_field(last, "ended_at") is not None:
+                session_ctx = _build_last_session_context(last)
+        except Exception as e:
+            log.warning("last-session context lookup failed: %s", e)
+
     # ── Build messages ─────────────────────────────────────────────────
     messages: list[dict] = []
     # P2-3: system prompt is persona-only (no RAG)
@@ -498,7 +556,7 @@ async def _build_ai_request(
     messages.extend(recent_history)
 
     # P2-3: RAG context injected into the user message, right before the question
-    messages.append({"role": "user", "content": _append_user_message(username, user_message, rag_context)})
+    messages.append({"role": "user", "content": _append_user_message(username, user_message, rag_context, session_ctx)})
 
     _total_chars = sum(len(m.get("content", "")) for m in messages)
     _approx_tokens = int(_total_chars / 4)
