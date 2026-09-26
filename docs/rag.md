@@ -6,17 +6,66 @@ The bot can attach relevant local knowledge-base content to AI prompts. This is 
 
 1. Documents are stored in `KB_PATH`.
 2. Files are chunked using the smart chunker.
-3. A retrieval strategy selects the most relevant chunks for a query.
+3. A retrieval strategy (hybrid dense + BM25 by default) selects the most relevant chunks for a query.
 4. Selected context is included in the AI request, up to `RAG_MAX_CHARS`.
+
+## Embedding strategy (CPU queries, GPU index builds)
+
+The pipeline deliberately **splits the two sides of embedding** so that per-request
+RAG never has to swap models on the chat backend:
+
+- **Query embeddings — in-process on CPU.** Each user query is embedded locally by
+  `sentence-transformers` (`EMBED_BACKEND=local`, model `LOCAL_EMBED_MODEL`, default
+  `BAAI/bge-m3`). This runs inside the bot process and never touches the inference
+  backend, so there is no per-request model swap with the chat model. It requires the
+  `rag-cpu` extra (sentence-transformers).
+- **Index builds — on the GPU backend.** Building or rebuilding the vector index is a
+  one-time, batch-heavy job. By default it runs on the inference backend's `/embeddings`
+  endpoint (`INDEX_EMBED_BACKEND=backend`, model `INDEX_EMBED_MODEL`), which uses the
+  GPU and finishes in well under a minute for a few thousand chunks (versus ~20 min on
+  pure CPU). The backend must have the **same** embedding model loaded. If the backend is
+  unreachable, index builds fall back to local CPU so a reindex never hard-fails.
+
+### Why mixing CPU and GPU embeddings is safe
+
+Both sides use the **same model** (bge-m3), so their vectors are interchangeable —
+cosine similarity between a CPU query vector and a GPU-built index vector is valid. We
+verified this empirically: rebuilding the full 1314-chunk index on the GPU backend and
+re-running identical queries produced rankings that were **identical to 5-decimal
+precision** (mean `|score|` delta ≈ 0, top-1 and top-3 matches for every query; only
+near-tied chunks deep in the top-10 swapped). The practical consequence: build the index
+once on the GPU for speed, serve queries in-process on CPU with zero backend round-trips,
+and either side can be rebuilt later without invalidating the other.
 
 ## Retrieval methods
 
 Controlled by `RAG_RETRIEVAL_METHOD`:
 
-- `vector` (default): semantic search using embeddings from the configured inference backend. A SQLite-backed index in `<KB_PATH>/.vector_index_cache/` caches embeddings so restarts do not require re-embedding.
+- `vector` (default): semantic search over the embedding index. A SQLite-backed index in `<KB_PATH>/.vector_index_cache/` caches embeddings so restarts do not require re-embedding.
 - `keyword`: TF-IDF-style heuristic scoring based on filenames, headers, and body text overlap. Works without a vector backend.
 
 If vector search is unavailable, keyword search can be used as a fallback.
+
+### Hybrid dense + BM25 retrieval
+
+By default (`RAG_HYBRID_ENABLED=1`) the vector path fuses **two** signals with reciprocal
+rank fusion (RRF):
+
+- **Dense** — cosine similarity between the query embedding and each chunk (captures
+  meaning / paraphrase).
+- **Lexical (BM25)** — an exact-term index over every chunk (captures names, spell titles,
+  stat blocks, proper nouns that dense vectors can under-weight).
+
+RRF merges the two orderings without needing score calibration, so a query still finds the
+right chunk when the player's phrasing differs from the KB's vocabulary. Set
+`RAG_HYBRID_ENABLED=0` to use dense-only retrieval.
+
+### Min-attachment relevance floor (opt-in)
+
+`RAG_MIN_ATTACH_SCORE` (default `0` = off) drops **dense** chunks whose cosine similarity
+is below the threshold *before* hybrid fusion, so weak vector hits cannot crowd out strong
+BM25 matches. Lexical-only matches still survive via the hybrid step. Tune it from the
+`Vector scores for ...: top=... median=... min=...` log line.
 
 ## Low-confidence query rewriting (vector path)
 
@@ -94,4 +143,9 @@ These are the expected file types for KB use. Storage itself does not strictly e
 | `RAG_REWRITE_MIN_SCORE` | Similarity threshold below which the rewriter triggers |
 | `RAG_QUERY_MAX_EXPANSIONS` | Max alternative phrasings generated per rewrite |
 | `RAG_REWRITE_BUDGET_SECONDS` | Wall-clock cap for the LLM rewrite call |
-| `EMBEDDING_MODEL` | Embedding model used for vector search (set to match your inference backend's model) |
+| `EMBED_BACKEND` | `local` (in-process CPU query embeddings, recommended) or `remote` (legacy backend `/embeddings`) |
+| `LOCAL_EMBED_MODEL` | In-process query-embedding model (default `BAAI/bge-m3`) |
+| `INDEX_EMBED_BACKEND` | Where index builds run: `backend` (GPU, default) or `local` (CPU) |
+| `INDEX_EMBED_MODEL` | Model slug sent to the backend for index builds (must match `LOCAL_EMBED_MODEL`) |
+| `RAG_HYBRID_ENABLED` | Fuse dense + BM25 via RRF (`1`/`0`, default on) |
+| `RAG_MIN_ATTACH_SCORE` | Opt-in dense-similarity floor before fusion (`0` = off) |
