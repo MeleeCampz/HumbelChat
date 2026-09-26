@@ -387,10 +387,6 @@ RAG_ATTACH_FLOOR: float = _safe_float(os.getenv("RAG_ATTACH_FLOOR"), 0.50)
 # reply paths that re-deliver as multi-message chunks) are simpler with the
 # proven non-streaming path, so it defaults to off.
 AI_STREAM: bool = _safe_bool(os.getenv("AI_STREAM"), True)
-# Minimum wall-clock seconds between successive message edits while streaming.
-# Discord rate-limits message edits; keeping a small floor avoids hammering the
-# API for very fast (short) generations while still giving live feedback.
-AI_STREAM_EDIT_INTERVAL_S: float = _safe_float(os.getenv("AI_STREAM_EDIT_INTERVAL_S"), 2.5)
 # ── Streaming response time budgets (seconds) ───────────────────────────
 # A streamed response has three distinct clock phases, each with its own
 # configurable budget:
