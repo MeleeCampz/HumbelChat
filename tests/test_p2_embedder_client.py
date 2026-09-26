@@ -132,5 +132,59 @@ class TestCloseClient:
         await E.close_client()  # no-op, must not raise
 
 
+class TestPerBatchFallback:
+    """A single failing batch degrades only itself to local CPU; other batches
+    still use the backend. This is what makes a large RAG_EMBED_BATCH_SIZE safe.
+    """
+
+    @staticmethod
+    def _flaky_factory(recorded):
+        import httpx
+
+        class _FlakyClient(_FakeClient):
+            async def post(self, url, json=None, headers=None):
+                inputs = json.get("input", []) if json else []
+                # Any batch containing "c" or "d" (the 2nd batch) fails with a 4xx
+                # (breaks the retry loop fast); everything else succeeds via backend.
+                if any(t in ("c", "d") for t in inputs):
+                    req = httpx.Request("POST", "http://x")
+                    resp = httpx.Response(400, request=req)
+                    raise httpx.HTTPStatusError("boom", request=req, response=resp)
+                return _Resp([[0.1] * 8 for _ in inputs])
+
+        def factory(*a, **k):
+            recorded.append(k)
+            return _FlakyClient(*a, **k)
+
+        return factory
+
+    @pytest.mark.asyncio
+    async def test_one_bad_batch_falls_back_locally_others_remote(self):
+        recorded: list[dict] = []
+        emb = E.Embedder(model_name="m", batch_size=2, fallback_local=True)
+        texts = ["a", "b", "c", "d"]  # batch1=[a,b] remote, batch2=[c,d] -> local
+        with patch.object(E.httpx, "AsyncClient", self._flaky_factory(recorded)), \
+                patch.object(E, "_local_available", return_value=True), \
+                patch.object(
+                    E.Embedder, "_local_encode",
+                    lambda self, texts: [[0.9] * 8 for _ in texts],
+                ):
+            vecs = await emb.encode(texts)
+        assert len(vecs) == 4
+        # batch1 came from the backend; batch2 fell back to local.
+        assert vecs[0] == [0.1] * 8 and vecs[1] == [0.1] * 8
+        assert vecs[2] == [0.9] * 8 and vecs[3] == [0.9] * 8
+
+    @pytest.mark.asyncio
+    async def test_bad_batch_without_fallback_raises(self):
+        import pytest as _pt
+
+        recorded: list[dict] = []
+        emb = E.Embedder(model_name="m", batch_size=2, fallback_local=False)
+        with patch.object(E.httpx, "AsyncClient", self._flaky_factory(recorded)):
+            with _pt.raises(E.EmbeddingError):
+                await emb.encode(["a", "b", "c", "d"])
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
