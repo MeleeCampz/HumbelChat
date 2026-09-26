@@ -9,22 +9,31 @@ The bot can attach relevant local knowledge-base content to AI prompts. This is 
 3. A retrieval strategy (hybrid dense + BM25 by default) selects the most relevant chunks for a query.
 4. Selected context is included in the AI request, up to `RAG_MAX_CHARS`.
 
-## Embedding strategy (CPU queries, GPU index builds)
+## Embedding strategy — no per-request model swap
 
-The pipeline deliberately **splits the two sides of embedding** so that per-request
-RAG never has to swap models on the chat backend:
+The single biggest problem this design solves: with one inference backend serving both
+chat and embeddings, a naive setup would have to **swap the chat model for the embedding
+model on every RAG query** (and back) — adding seconds of latency to every message. We
+avoid that entirely by putting the two sides of embedding on different paths:
 
-- **Query embeddings — in-process on CPU.** Each user query is embedded locally by
-  `sentence-transformers` (`EMBED_BACKEND=local`, model `LOCAL_EMBED_MODEL`, default
-  `BAAI/bge-m3`). This runs inside the bot process and never touches the inference
-  backend, so there is no per-request model swap with the chat model. It requires the
-  `rag-cpu` extra (sentence-transformers).
-- **Index builds — on the GPU backend.** Building or rebuilding the vector index is a
-  one-time, batch-heavy job. By default it runs on the inference backend's `/embeddings`
-  endpoint (`INDEX_EMBED_BACKEND=backend`, model `INDEX_EMBED_MODEL`), which uses the
-  GPU and finishes in well under a minute for a few thousand chunks (versus ~20 min on
-  pure CPU). The backend must have the **same** embedding model loaded. If the backend is
-  unreachable, index builds fall back to local CPU so a reindex never hard-fails.
+| Side | Where it runs | Config | When |
+|---|---|---|---|
+| **Query embeddings** (prompt processing) | In-process, **CPU** | `EMBED_BACKEND=local`, `LOCAL_EMBED_MODEL` (bge-m3) | Every `/ai` request — fast, no backend round-trip |
+| **Index build / rebuild** | On the **GPU** backend | `INDEX_EMBED_BACKEND=backend`, `INDEX_EMBED_MODEL` (GGUF bge-m3) | One-time batch job (`/reindex_kb`) |
+
+Key consequences:
+
+- **Prompt processing never touches the inference backend.** Each query is embedded in the
+  bot process on CPU, so the chat model can stay loaded at all times and query latency is
+  independent of whatever is running on the GPU. There is no model swapping — ever.
+- **The heavy work (embedding thousands of chunks) happens once, on the GPU**, where a full
+  reindex finishes in a couple of minutes instead of ~20–60 min on pure CPU.
+- Both sides use the **same model** (bge-m3), so their vectors are interchangeable — see
+  "Why mixing CPU and GPU embeddings is safe" below.
+
+The in-process query path requires the `rag-cpu` extra (sentence-transformers). If the
+backend is unreachable during an index build, that build falls back to local CPU so a
+reindex never hard-fails.
 
 ### Fast GPU reindex flow (Unsloth)
 
