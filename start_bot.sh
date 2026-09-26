@@ -31,9 +31,19 @@ echo "  File logs:    $LOG_DIR/bot.log (INFO)"
 echo "                    $LOG_DIR/dev.log (DEBUG)"
 echo "─────────────────────────────────────"
 
+# Run from the project virtualenv (created by ./setup_venv.sh) so the bot's
+# heavy ML deps stay isolated from the system Python. Fail clearly if the
+# venv is missing rather than silently running on the wrong interpreter.
+VENV_PY="$SCRIPT_DIR/.venv/bin/python"
+if [ ! -x "$VENV_PY" ]; then
+    echo "ERROR: virtualenv not found at $VENV_PY" >&2
+    echo "Run ./setup_venv.sh first, then start the bot." >&2
+    exit 1
+fi
+
 # Run in the foreground so signals (Ctrl-C) reach the bot directly and its
 # exit code propagates. main.py already writes logs/bot.log + dev.log via
 # RotatingFileHandler, so no tee copy is needed. (The old `exec cmd | tee`
 # form didn't actually exec — the pipe kept a subshell in charge, which
 # mangled exit codes and signal handling.)
-exec python -u "$SCRIPT_DIR/main.py"
+exec "$VENV_PY" -u "$SCRIPT_DIR/main.py"
