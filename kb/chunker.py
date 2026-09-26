@@ -123,14 +123,16 @@ class Chunker:
     def _split_by_headers(
         cls, content: str, display_name: str, source_file: str
     ) -> list[ChunkInfo]:
-        """Split content by Markdown headers with minimum-size merging.
+        """Split content by Markdown headers — one chunk per section.
 
-        Collects all header-based sections, then merges adjacent small chunks together
-        so no chunk falls below MIN_CHUNK_SIZE. This prevents the "tiny fragment" problem
-        where lots of ## headers break a document into unusable pieces.
+        Each header-delimited section that is at least MIN_CHUNK_SIZE becomes its own
+        chunk, so individually meaningful entries (spells, monsters, items) are each
+        retrievable on their own. Only tiny fragments below MIN_CHUNK_SIZE are folded
+        into a neighbouring section to avoid unusably small orphans, and any single
+        oversized section is hard-split to respect MAX_CHUNK_SIZE.
 
-        Headers are split at every level (# through ######) to capture full context,
-        but merged when necessary.
+        Headers are split at every level (# through ######) so the finest meaningful
+        unit of structure is preserved.
         """
         # Step 1: Collect all header regions (each includes its header line + content until next header)
         headers = list(cls.HEADER_RE.finditer(content))
@@ -163,41 +165,36 @@ class Chunker:
         if not raw_chunks:
             return []
 
-        # Step 2: Merge adjacent chunks if current chunk is below MIN_CHUNK_SIZE.
-        # We accumulate into 'merged' until adding the next chunk would exceed MAX_CHUNK_SIZE.
+        # Step 2: Emit each real section (>= MIN_CHUNK_SIZE) as its OWN chunk so every
+        # self-contained entry (a spell, a monster, an item) stays individually retrievable.
+        # Tiny fragments (< MIN_CHUNK_SIZE) are folded into the next real section — or the
+        # previous one if they trail the document — so we never emit unusably small orphans.
+        # A single section that is itself oversized is hard-split so no chunk exceeds
+        # MAX_CHUNK_SIZE (the embedder context safety margin).
         merged: list[str] = []
-        accumulator: str = ""
+        pending_small: str = ""
 
         for text, size in raw_chunks:
-            if size >= cls.MIN_CHUNK_SIZE and not accumulator:
-                # This chunk is large enough on its own — emit immediately
-                merged.append(text)
-                continue
+            if size >= cls.MIN_CHUNK_SIZE:
+                pieces = cls._hard_split(text)
+                if pending_small:
+                    pieces[0] = pending_small + "\n---\n" + pieces[0]
+                    pending_small = ""
+                merged.extend(pieces)
+            else:
+                pending_small = (pending_small + "\n---\n" + text) if pending_small else text
 
-            if accumulator:
-                # Try to merge with the current accumulated content
-                combined_size = len(accumulator) + size
-                if combined_size <= cls.MAX_CHUNK_SIZE:
-                    # Merge: insert a separator between old and new section
-                    accumulator += "\n---\n" + text
-                    continue
-                else:
-                    # Would exceed max — emit accumulator, start new one
-                    merged.append(accumulator)
-                    accumulator = text
-                    continue
-
-            # First chunk or nothing accumulated yet
-            accumulator = text
-
-        # Flush any remaining accumulator
-        if accumulator:
-            merged.append(accumulator)
+        # Flush trailing tiny fragments: attach to the last real chunk, or emit alone.
+        if pending_small:
+            if merged:
+                merged[-1] = merged[-1] + "\n---\n" + pending_small
+            else:
+                merged.append(pending_small)
 
         if not merged:
             return []
 
-        logger.debug("Header split + merge produced %d chunk(s)", len(merged))
+        logger.debug("Header split produced %d chunk(s)", len(merged))
 
         # Step 3: Convert to ChunkInfo objects
         result: list[ChunkInfo] = []
@@ -221,6 +218,32 @@ class Chunker:
                 )
             )
         return result
+
+    @classmethod
+    def _hard_split(cls, text: str) -> list[str]:
+        """Split *text* into pieces each <= MAX_CHUNK_SIZE (used for oversized sections).
+
+        Splits on lines so structural content (lists/tables) stays intact as far as
+        possible; the first piece keeps the section's header line.
+        """
+        if len(text) <= cls.MAX_CHUNK_SIZE:
+            return [text]
+        pieces: list[str] = []
+        cur = ""
+        size = 0
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            add = len(line) + (1 if cur else 0)
+            if cur and size + add > cls.MAX_CHUNK_SIZE:
+                pieces.append(cur)
+                cur, size = line, len(line)
+            else:
+                cur = f"{cur}\n{line}" if cur else line
+                size += add
+        if cur:
+            pieces.append(cur)
+        return [p for p in pieces if p.strip()]
 
     @classmethod
     def _split_by_paragraphs(
