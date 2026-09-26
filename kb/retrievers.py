@@ -344,7 +344,8 @@ async def _expand_low_confidence_query(
         return [], 0.0
 
     try:
-        rankings = await idx.rank_texts(extra, top_n=min(top_n * 4, 32))
+        from config.settings import RAG_DENSE_TOP_K
+        rankings = await idx.rank_texts(extra, top_n=RAG_DENSE_TOP_K)
     except Exception as exc:
         logger.warning("Expansion embedding failed (%s); using original ranking only", exc)
         return [], time.monotonic() - t0
@@ -447,7 +448,10 @@ async def _retrieve_vector(
         return await _keyword_fallback(query, kb_path, top_n, window_lines)
 
     # One embedding call: rank the in-memory chunks AND keep the query vector.
-    ranked, _q_emb = await idx.query_with_embeddings(query, top_n=min(top_n * 4, 32))
+    # Pool size is tunable (RAG_DENSE_TOP_K) — a larger candidate set improves
+    # recall for hard lookups at negligible cost while the reranker is off.
+    from config.settings import RAG_DENSE_TOP_K
+    ranked, _q_emb = await idx.query_with_embeddings(query, top_n=RAG_DENSE_TOP_K)
     if not ranked:
         logger.warning("Vector query returned no hits for '%s'; falling back to keyword", kb_path)
         return await _keyword_fallback(query, kb_path, top_n, window_lines)
@@ -502,7 +506,8 @@ async def _retrieve_vector(
     hybrid_ranked = ranked
     from config.settings import RAG_HYBRID_ENABLED
     if RAG_HYBRID_ENABLED:
-        candidate_limit = max(top_n * 4, 32)
+        from config.settings import RAG_LEXICAL_TOP_K
+        candidate_limit = RAG_LEXICAL_TOP_K
         try:
             lex = await asyncio.to_thread(_lexical_ranking, idx, query, candidate_limit)
             if lex:

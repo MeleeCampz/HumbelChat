@@ -314,6 +314,17 @@ RAG_RETRIEVAL_METHOD: str = os.getenv("RAG_RETRIEVAL_METHOD", "vector").lower()
 RAG_MAX_CHARS: int = _safe_int(os.getenv("RAG_MAX_CHARS"), 24000)
 RAG_WINDOW_LINES: int = _safe_int(os.getenv("RAG_WINDOW_LINES"), 80)
 
+# ── Candidate pool sizing (retrieval recall) ───────────────────────────────
+# How many candidate chunks each retrieval leg pulls before RRF fusion. Larger
+# pools improve RECALL for hard lookups (exact names, rare terms): the right
+# chunk is more likely to land in the candidate set so it can win the ranking.
+# The final attached context is still bounded by RAG_MAX_DOCS / RAG_MAX_CHARS /
+# RAG_ATTACH_FLOOR, so a bigger pool does NOT bloat the prompt. Cost is
+# negligible while the cross-encoder reranker is disabled (no per-candidate
+# scoring). Defaults raised from the old hardcoded 16 (dense) / 32 (lexical).
+RAG_DENSE_TOP_K: int = _safe_int(os.getenv("RAG_DENSE_TOP_K"), 48)
+RAG_LEXICAL_TOP_K: int = _safe_int(os.getenv("RAG_LEXICAL_TOP_K"), 48)
+
 # ── Last-session context (continuity) ────────────────────────────────────
 # Attach the previous (last ended) session as a compact context block so the AI
 # has continuity across sessions. Uses the stored overview when present, else a
