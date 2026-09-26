@@ -26,6 +26,23 @@ RAG never has to swap models on the chat backend:
   pure CPU). The backend must have the **same** embedding model loaded. If the backend is
   unreachable, index builds fall back to local CPU so a reindex never hard-fails.
 
+### Fast GPU reindex flow (Unsloth)
+
+A full reindex is fastest when the embedding model runs on the GPU with the chat model
+out of the way:
+
+1. **Unload the chat model** in Unsloth Studio — this frees the VRAM the embedding model needs.
+2. **Load bge-m3 on the GPU.** Set its batch/ubatch (physical batch) to at least 8192 so long
+   KB chunks don't overflow the context. `INDEX_EMBED_MODEL` must be the *exact* name your
+   backend serves for `/embeddings` — on an Unsloth host that is the GGUF server name
+   (e.g. `gpustack/bge-m3-GGUF`), which routes to the GPU llama.cpp path. A bare HF id such as
+   `BAAI/bge-m3` may instead resolve to a CPU sentence-transformers path, which is far slower
+   for a full reindex (and can time out on long chunks).
+3. **Run `/reindex_kb`.** With the model on the GPU this finishes in minutes rather than the
+   ~20-60 min a pure-CPU build takes.
+4. **Reload the chat model.** The bot's per-request query embeddings are unaffected (they run
+   in-process on CPU via `EMBED_BACKEND=local`), so retrieval keeps working throughout.
+
 ### Why mixing CPU and GPU embeddings is safe
 
 Both sides use the **same model** (bge-m3), so their vectors are interchangeable —
@@ -163,7 +180,7 @@ These are the expected file types for KB use. Storage itself does not strictly e
 | `EMBED_BACKEND` | `local` (in-process CPU query embeddings, recommended) or `remote` (legacy backend `/embeddings`) |
 | `LOCAL_EMBED_MODEL` | In-process query-embedding model (default `BAAI/bge-m3`) |
 | `INDEX_EMBED_BACKEND` | Where index builds run: `backend` (GPU, default) or `local` (CPU) |
-| `INDEX_EMBED_MODEL` | Model slug sent to the backend for index builds (must match `LOCAL_EMBED_MODEL`) |
+| `INDEX_EMBED_MODEL` | Exact name your backend serves for `/embeddings` during index builds (same model as `LOCAL_EMBED_MODEL`; on Unsloth use the GGUF server name, e.g. `gpustack/bge-m3-GGUF`, to hit the GPU path) |
 | `RAG_HYBRID_ENABLED` | Fuse dense + BM25 via RRF (`1`/`0`, default on) |
 | `RAG_MIN_ATTACH_SCORE` | Opt-in dense-similarity floor before fusion (`0` = off) |
 | `RAG_MAX_CHUNKS_PER_FILE` | Max chunks attached per file (default `3`) |
