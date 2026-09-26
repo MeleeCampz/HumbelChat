@@ -17,7 +17,9 @@ Usage
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import logging
+import threading
 from typing import Any
 
 import httpx
@@ -28,6 +30,57 @@ logger = logging.getLogger("kb.embedder")
 
 from config.settings import EMBEDDING_MODEL as _DEFAULT_MODEL
 from config.settings import EMBED_TIMEOUT
+
+# ── In-process (CPU) embedding backend ─────────────────────────────────────
+# When EMBED_BACKEND == "local" we embed with a sentence-transformers model that
+# lives *inside* the bot process instead of round-tripping to the chat backend.
+# This removes the per-request model swap entirely: the llama.cpp backend only
+# ever loads the chat model. The model is loaded once (lazy) and kept resident,
+# so per-query cost is just a small CPU encode of the short text.
+_local_model: Any = None
+_local_model_lock: threading.Lock | None = None
+
+
+def _get_local_model() -> Any:
+    """Return the shared in-process embedding model, loading it on first use.
+
+    Guarded by a plain ``threading`` lock (not asyncio) because ``encode`` runs
+    this inside ``asyncio.to_thread`` — the load is blocking and thread-safe.
+    """
+    global _local_model, _local_model_lock
+    if _local_model is not None:
+        return _local_model
+    if _local_model_lock is None:
+        _local_model_lock = threading.Lock()
+    with _local_model_lock:
+        if _local_model is None:
+            from sentence_transformers import SentenceTransformer
+            from config.settings import LOCAL_EMBED_MODEL
+            logger.info("Loading in-process embedding model '%s' (CPU)", LOCAL_EMBED_MODEL)
+            _local_model = SentenceTransformer(LOCAL_EMBED_MODEL)
+    return _local_model
+
+
+def preload_local_embedder() -> None:
+    """Warm the in-process embedding model at startup (no-op unless local).
+
+    Called from bot startup so the first /ai request isn't cold. Never raises —
+    a failure just means the first real encode will retry the load.
+    """
+    from config.settings import EMBED_BACKEND
+    if EMBED_BACKEND != "local":
+        return
+    try:
+        _get_local_model()
+        logger.info("Preloaded local embedding model")
+    except Exception as exc:  # noqa: BLE001 — startup must not crash on this
+        logger.warning("Failed to preload local embedder: %s", exc)
+
+
+def reset_local_model() -> None:
+    """Test helper: drop the in-process model singleton between event loops."""
+    global _local_model
+    _local_model = None
 _BATCH_SIZE = 8  # documents per batch (conservative for shared inference backends)
 _RETRY_ATTEMPTS = 3          # per endpoint — transient 5xx / connection errors are common
 _RETRY_BACKOFF_SECONDS = 1.5 # base delay; multiplied by the attempt number
@@ -98,6 +151,20 @@ class Embedder:
     ) -> None:
         self.model_name = model_name
         self.batch_size = max(1, batch_size)
+        # Decide the active backend once. "local" requires sentence-transformers;
+        # if it's missing we warn and fall back to remote so retrieval still works.
+        self._use_local = False
+        from config.settings import EMBED_BACKEND, LOCAL_EMBED_MODEL
+        if EMBED_BACKEND == "local":
+            if importlib.util.find_spec("sentence_transformers") is not None:
+                self._use_local = True
+                # Reflect the local model in metadata so the index cache rebuilds.
+                self.model_name = LOCAL_EMBED_MODEL
+            else:
+                logger.warning(
+                    "EMBED_BACKEND=local but sentence-transformers is not installed; "
+                    "falling back to remote /embeddings (install the rag-cpu extra)."
+                )
 
     # ── Public API ─────────────────────────────────────────────────────
 
@@ -109,6 +176,11 @@ class Embedder:
         """
         if not texts:
             return []
+
+        # Local (in-process CPU) backend: encode off the event loop. Deterministic
+        # and fast, so no HTTP batching/endpoint probing is needed.
+        if self._use_local:
+            return await asyncio.to_thread(self._local_encode, list(texts))
 
         # Deduplicate while preserving order for result alignment
         seen: dict[str, int] = {}
@@ -132,6 +204,23 @@ class Embedder:
         return result
 
     # ── HTTP helpers ───────────────────────────────────────────────────
+
+    def _local_encode(self, texts: list[str]) -> list[list[float]]:
+        """Embed *texts* with the in-process model. Synchronous — call via to_thread.
+
+        Vectors are L2-normalized so they match the cosine ranking used by
+        ``KBVectorIndex`` (identical geometry to the remote path's expectations).
+        """
+        import numpy as np
+        model = _get_local_model()
+        vecs = model.encode(
+            list(texts),
+            batch_size=self.batch_size,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )
+        arr = np.asarray(vecs, dtype="float32")
+        return [row.tolist() for row in arr]
 
     async def _call_api(self, texts: list[str]) -> list[list[float]]:
         """Send a batch to the configured /embeddings endpoint."""

@@ -50,9 +50,16 @@ rag-vector = [
     "fastembed==0.8.0",
     "numpy==1.26.4",
 ]
+# In-process CPU embeddings + cross-encoder reranking (EMBED_BACKEND=local /
+# RERANK_ENABLED). Removes the per-request model swap on a single-model backend.
+rag-cpu = [
+    "sentence-transformers>=3.0,<5",
+    "numpy==1.26.4",
+]
 all = [
     "faster-whisper==1.2.1",
     "fastembed==0.8.0",
+    "sentence-transformers>=3.0,<5",
     "numpy==1.26.4",
 ]
 dev = [

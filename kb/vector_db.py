@@ -88,8 +88,8 @@ class KBVectorIndex:
         # _docs is *replaced* (tracked by object identity + length). None until
         # first query.
         self._mat_cache: tuple | None = None
-        from config.settings import EMBEDDING_MODEL
-        self._embedder = Embedder(model_name=EMBEDDING_MODEL)
+        from config.settings import effective_embedding_model
+        self._embedder = Embedder(model_name=effective_embedding_model())
 
     # ── Construction ────────────────────────────────────────────────
 
@@ -160,8 +160,8 @@ class KBVectorIndex:
     ) -> KBVectorIndex:
         """Build an index from pre-embedded entries (no API calls)."""
         index = cls.__new__(cls)
-        from config.settings import EMBEDDING_MODEL
-        index._embedder = Embedder(model_name=EMBEDDING_MODEL)
+        from config.settings import effective_embedding_model
+        index._embedder = Embedder(model_name=effective_embedding_model())
         index._mat_cache = None  # P2 #17
         docs: list[_DocEntry] = []
         for (n, c, s), e in zip(entries, embeddings):

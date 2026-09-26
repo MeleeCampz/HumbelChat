@@ -367,6 +367,41 @@ async def _retrieve_keyword(
     return chunks
 
 
+# ── Hybrid lexical (BM25) leg ─────────────────────────────────────────────
+# A BM25 index over every chunk's content, cached by identity of ``idx._docs`` so it is
+# built once and reused across queries (rebuilt automatically when the doc list object is
+# replaced). Provides an exact-term signal to fuse with dense vectors via RRF.
+_bm25_cache: tuple | None = None  # (BM25, docs_ref, count)
+
+
+def _get_bm25(idx):
+    """Return a cached BM25 index for *idx*, building it on first use."""
+    global _bm25_cache
+    docs = idx._docs
+    if _bm25_cache is not None and _bm25_cache[1] is docs and _bm25_cache[2] == len(docs):
+        return _bm25_cache[0]
+    from kb.lexical import BM25
+    bm25 = BM25([d.content for d in docs])
+    _bm25_cache = (bm25, docs, len(docs))
+    return bm25
+
+
+def _lexical_ranking(idx, query: str, limit: int) -> list[tuple[str, str, float]]:
+    """BM25 ranking of all chunks for *query* as ``[(name, content, score), ...]``.
+
+    Synchronous (CPU) — call via ``asyncio.to_thread``.
+    """
+    bm25 = _get_bm25(idx)
+    scores = bm25.scores(query)
+    docs = idx._docs
+    ranked = [
+        (docs[i].retrieval_name(), docs[i].content, float(s))
+        for i, s in enumerate(scores) if s > 0
+    ]
+    ranked.sort(key=lambda t: -t[2])
+    return ranked[:limit]
+
+
 async def _retrieve_vector(
     query: str,
     kb_path: str | pathlib.Path,
@@ -417,11 +452,45 @@ async def _retrieve_vector(
             )
             ranked = merged
 
-    docs = select_ranked_chunks(ranked, top_n=top_n)
+    # ── Hybrid lexical (BM25) leg, fused with dense via RRF ───────────────
+    # Dense vectors capture semantics; BM25 captures exact terms (names, stats,
+    # spell names). Merging both with RRF improves recall when phrasing differs.
+    # Toggleable via RAG_HYBRID_ENABLED (default on) so dense-only behaviour is
+    # still available and the rewrite path can be tested in isolation.
+    hybrid_ranked = ranked
+    from config.settings import RAG_HYBRID_ENABLED
+    if RAG_HYBRID_ENABLED:
+        candidate_limit = max(top_n * 4, 32)
+        try:
+            lex = await asyncio.to_thread(_lexical_ranking, idx, query, candidate_limit)
+            if lex:
+                hybrid_ranked = reciprocal_rank_fusion([ranked, lex])
+                logger.info(
+                    "Hybrid retrieval: dense(%d) + lexical(%d) → RRF-merged %d chunk(s)",
+                    len(ranked), len(lex), len(hybrid_ranked),
+                )
+        except Exception as exc:  # noqa: BLE001 — the lexical leg is a pure enhancement
+            logger.warning("Hybrid lexical leg failed (%s); using dense ranking only", exc)
+
+    # ── Cross-encoder rerank of the top candidates (quality boost) ─────────
+    from kb.reranker import rerank, is_available as _rerank_available
+    final_ranked = hybrid_ranked
+    if _rerank_available():
+        from config.settings import RERANK_TOP_K
+        cands = hybrid_ranked[:RERANK_TOP_K]  # (name, content, score)
+        contents = [c for _, c, _ in cands]
+        name_map: dict[str, str] = {}
+        for name, content, _ in cands:
+            name_map.setdefault(content, name)
+        scored = await rerank(query, contents)  # [(content, score), ...]; original order on fallback
+        final_ranked = [(name_map.get(c, ""), c, s) for c, s in scored]
+        logger.info("Reranked top %d candidate(s)", len(final_ranked))
+
+    docs = select_ranked_chunks(final_ranked, top_n=top_n)
 
     logger.info(
         "Vector retrieval: %d ranked chunk(s) → %d file(s) with ~%.0f chars",
-        len(ranked), len(docs),
+        len(final_ranked), len(docs),
         sum(len(c) for _, c in docs) if docs else 0,
     )
     return docs
