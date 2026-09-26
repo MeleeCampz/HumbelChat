@@ -76,6 +76,9 @@ characters.json
 # Personal pi agent config/extensions (force-add with `git add -f` to share)
 .pi/
 
+# Local-only open-terminal usage skill (references the deployment host); keep out of the repo
+.agents/skills/openterminal/
+
 # AI model artifacts - local only, may contain private data
 .qwen/
 
