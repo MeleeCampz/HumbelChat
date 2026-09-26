@@ -81,6 +81,11 @@ def reset_local_model() -> None:
     """Test helper: drop the in-process model singleton between event loops."""
     global _local_model
     _local_model = None
+
+
+def _local_available() -> bool:
+    """True when sentence-transformers is importable (local CPU fallback possible)."""
+    return importlib.util.find_spec("sentence_transformers") is not None
 _BATCH_SIZE = 8  # documents per batch (conservative for shared inference backends)
 _RETRY_ATTEMPTS = 3          # per endpoint — transient 5xx / connection errors are common
 _RETRY_BACKOFF_SECONDS = 1.5 # base delay; multiplied by the attempt number
@@ -216,7 +221,20 @@ class Embedder:
         all_embeddings: dict[int, list[float]] = {}
         for i in range(0, len(unique_texts), self.batch_size):
             batch = unique_texts[i : i + self.batch_size]
-            vectors = await self._call_api(batch)
+            try:
+                vectors = await self._call_api(batch)
+            except EmbeddingError as exc:
+                # Per-batch fallback: a single bad batch (e.g. very long chunks that
+                # time out) degrades only itself to local CPU instead of forcing the
+                # whole build off the backend. Local vectors are geometrically
+                # identical to the backend's (same model, L2-normalized), so mixing is safe.
+                if not (self._fallback_local and _local_available()):
+                    raise
+                logger.warning(
+                    "Backend failed for a %d-text batch (%s); embedding that batch locally.",
+                    len(batch), exc,
+                )
+                vectors = await asyncio.to_thread(self._local_encode, list(batch))
             for idx, vec in enumerate(vectors):
                 all_embeddings[seen[batch[idx]]] = vec
 

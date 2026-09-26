@@ -254,7 +254,12 @@ class KBIndexStore:
         backend is down so a reindex never hard-fails. The build model must match
         the query embedder or similarity breaks.
         """
-        from config.settings import INDEX_EMBED_BACKEND, INDEX_EMBED_MODEL, LOCAL_EMBED_MODEL
+        from config.settings import (
+            INDEX_EMBED_BACKEND,
+            INDEX_EMBED_MODEL,
+            LOCAL_EMBED_MODEL,
+            RAG_EMBED_BATCH_SIZE,
+        )
         if INDEX_EMBED_BACKEND == "backend":
             if INDEX_EMBED_MODEL != LOCAL_EMBED_MODEL:
                 logger.warning(
@@ -262,8 +267,17 @@ class KBIndexStore:
                     "(%s); index and query vectors may be incompatible.",
                     INDEX_EMBED_MODEL, LOCAL_EMBED_MODEL,
                 )
-            return Embedder(model_name=INDEX_EMBED_MODEL, backend="remote", fallback_local=True)
-        return Embedder(model_name=self.model_name, backend="local")
+            return Embedder(
+                model_name=INDEX_EMBED_MODEL,
+                backend="remote",
+                fallback_local=True,
+                batch_size=RAG_EMBED_BATCH_SIZE,
+            )
+        return Embedder(
+            model_name=self.model_name,
+            backend="local",
+            batch_size=RAG_EMBED_BATCH_SIZE,
+        )
 
     def _mutation_lock(self) -> asyncio.Lock:
         """Return this store's mutation lock (created once, lazily)."""
