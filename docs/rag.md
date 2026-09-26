@@ -67,6 +67,23 @@ is below the threshold *before* hybrid fusion, so weak vector hits cannot crowd 
 BM25 matches. Lexical-only matches still survive via the hybrid step. Tune it from the
 `Vector scores for ...: top=... median=... min=...` log line.
 
+### Per-file chunk budget + attach-time relevance floor
+
+Two knobs control how much of each matched file actually reaches the prompt:
+
+- **`RAG_MAX_CHUNKS_PER_FILE`** (default `3`) caps how many of a file's ranked
+  chunks are attached. They're joined into one per-file entry, so lowering this
+  trims the "whole file" bloat — e.g. a spell query no longer drags in four
+  neighbouring sections when one is enough.
+- **`RAG_ATTACH_FLOOR`** (default `0.50`, `0` = off) is a per-chunk relevance gate
+  applied at *attach* time (after hybrid fusion / rerank). A ranked chunk whose
+  original **dense cosine similarity** is below the floor is skipped, so only
+  genuinely relevant sections are attached. It gates on the raw dense score — not
+  the rank-based RRF score — and **lexical-only chunks** (exact-term BM25 hits with
+  no dense score) are always kept. A safety net guarantees an over-aggressive floor
+  can never produce an empty context: if it would drop everything, selection falls
+  back to the unfiltered ranking.
+
 ## Low-confidence query rewriting (vector path)
 
 Vector search alone can miss the right chunk when a player's phrasing differs
@@ -149,3 +166,5 @@ These are the expected file types for KB use. Storage itself does not strictly e
 | `INDEX_EMBED_MODEL` | Model slug sent to the backend for index builds (must match `LOCAL_EMBED_MODEL`) |
 | `RAG_HYBRID_ENABLED` | Fuse dense + BM25 via RRF (`1`/`0`, default on) |
 | `RAG_MIN_ATTACH_SCORE` | Opt-in dense-similarity floor before fusion (`0` = off) |
+| `RAG_MAX_CHUNKS_PER_FILE` | Max chunks attached per file (default `3`) |
+| `RAG_ATTACH_FLOOR` | Per-chunk dense-score gate at attach time (`0` = off, default `0.50`) |
