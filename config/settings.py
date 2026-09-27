@@ -314,6 +314,12 @@ RAG_RETRIEVAL_METHOD: str = os.getenv("RAG_RETRIEVAL_METHOD", "vector").lower()
 RAG_MAX_CHARS: int = _safe_int(os.getenv("RAG_MAX_CHARS"), 24000)
 RAG_WINDOW_LINES: int = _safe_int(os.getenv("RAG_WINDOW_LINES"), 80)
 
+# ── Prompt budget (Phase 3 — decision Q3a, 2026-09-23) ───────────────────
+# Soft cap on total prompt size, in chars (≈ tokens × 4). When the estimate
+# exceeds it, oldest history is trimmed first, then lowest-ranked RAG docs
+# (see ai_client._apply_prompt_budget). Tune to the model's real context window.
+PROMPT_BUDGET_CHARS: int = _safe_int(os.getenv("PROMPT_BUDGET_CHARS"), 100000)
+
 # ── Candidate pool sizing (retrieval recall) ───────────────────────────────
 # How many candidate chunks each retrieval leg pulls before RRF fusion. Larger
 # pools improve RECALL for hard lookups (exact names, rare terms): the right

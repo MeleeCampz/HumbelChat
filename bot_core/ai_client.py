@@ -49,6 +49,7 @@ from config.settings import (
     AI_STREAM_INITIAL_TIMEOUT_S,
     AI_STREAM_CHUNK_TIMEOUT_S,
     AI_STREAM_TOTAL_TIMEOUT_S,
+    PROMPT_BUDGET_CHARS,
 )
 
 log = logging.getLogger("bot.bot_core")
@@ -217,6 +218,101 @@ def _scaled_timeout(total_chars: int, max_tokens: int | None = None) -> float:
     if max_tokens:
         extra += (max_tokens / 1000) * 0.5
     return min(REQUEST_TIMEOUT + extra, REQUEST_TIMEOUT * 8)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  Phase 3: prompt budget (decision Q3a, 2026-09-23)
+# ─────────────────────────────────────────────────────────────────────────
+# Keeps the *estimated* prompt size (chars/4 ≈ tokens) under
+# PROMPT_BUDGET_CHARS so large RAG contexts can't push the whole prompt past
+# the model's context window. Trim policy (in order):
+#   1. Drop oldest history messages first (from the front of the history;
+#      the last user turn + RAG context are NEVER trimmed).
+#   2. Only if history is exhausted: drop lowest-ranked RAG docs from the
+#      END of the list (keep the highest-ranked ones — answer quality beats
+#      history).
+# RAG context is therefore always preserved over history (the answer
+# quality target). Logs one line when any trimming actually happens so the
+# budget can be tuned from real traffic.
+
+
+def _apply_prompt_budget(
+    recent_history: list[dict],
+    kb_docs: list[tuple[str, str]],
+    rag_context: str,
+    included_names: list[str],
+    system_p: str,
+    username: str,
+    user_message: str,
+) -> tuple[list[dict], list[tuple[str, str]], str, list[str]]:
+    """Trim *recent_history* / *kb_docs* until the estimated prompt fits.
+
+    The estimate uses the *exact* same message shapes that
+    ``_build_ai_request`` assembles (system prompt + history + the final user
+    message with RAG), so no part of the prompt is under-counted.  Returns
+    the possibly-reduced ``(history, kb_docs, rag_context, included_names)``.
+    The last user turn + RAG context are never trimmed; history is dropped
+    oldest-first, then lowest-ranked RAG docs (see the policy note above).
+    """
+    history = list(recent_history)
+    docs = list(kb_docs)
+    context = rag_context
+    names = list(included_names)
+
+    def _est(hist: list[dict], ctx: str) -> int:
+        total = (len(system_p) if system_p else 0)
+        total += sum(len(m.get("content", "")) for m in hist)
+        total += len(_append_user_message(username, user_message, ctx))
+        return total
+
+    if _est(history, context) <= PROMPT_BUDGET_CHARS:
+        return history, docs, context, names  # fits — no trimming
+
+    # Step 1: drop oldest history messages (from the front) until it fits.
+    over = _est(history, context) - PROMPT_BUDGET_CHARS
+    trimmed = 0
+    while over > 0 and history:
+        history = history[1:]
+        trimmed += 1
+        over = _est(history, context) - PROMPT_BUDGET_CHARS
+    if trimmed:
+        log.info(
+            "Prompt budget: trimmed %d oldest history message(s) (history now %d msg(s)).",
+            trimmed, len(history),
+        )
+    if over <= 0:
+        return history, docs, context, names  # fits now
+
+    # Step 2: still over (history exhausted or empty) — drop lowest-ranked
+    # RAG docs from the END of the ranked list, rebuilding the context.
+    if not docs:
+        log.warning(
+            "Prompt budget: prompt is %.1fK chars over the %d-char budget with no "
+            "history or RAG docs left to trim — sending as-is.",
+            _est(history, context) / 1024, PROMPT_BUDGET_CHARS,
+        )
+        return history, docs, context, names
+
+    dropped = 0
+    while over > 0 and docs:
+        docs = docs[:-1]
+        if names:
+            names = names[:-1]
+        dropped += 1
+        context, _ = _build_rag_context(docs)
+        over = _est(history, context) - PROMPT_BUDGET_CHARS
+    log.info(
+        "Prompt budget: dropped %d lowest-ranked RAG doc(s); %d doc(s) remain "
+        "(~%.1fK chars total, budget %d chars).",
+        dropped, len(docs), _est(history, context) / 1024, PROMPT_BUDGET_CHARS,
+    )
+    if over > 0:
+        # Even with no docs the base prompt alone exceeds the budget.
+        log.warning(
+            "Prompt budget: base prompt alone is %.1fK chars over the %d-char budget.",
+            over / 1024, PROMPT_BUDGET_CHARS,
+        )
+    return history, docs, context, names
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -547,12 +643,21 @@ async def _build_ai_request(
             log.warning("last-session context lookup failed: %s", e)
 
     # ── Build messages ─────────────────────────────────────────────────
+    recent_history = history[-(2 * max_messages):] if max_messages else []
+
+    # ── Phase 3: prompt budget (decision Q3a) ────────────────────────────
+    # If the estimated prompt exceeds PROMPT_BUDGET_CHARS, trim oldest
+    # history first, then lowest-ranked RAG docs (see _apply_prompt_budget).
+    if kb_docs or recent_history:
+        recent_history, _kept_docs, rag_context, included_names = _apply_prompt_budget(
+            recent_history, kb_docs, rag_context, included_names,
+            system_p, username, user_message,
+        )
+
     messages: list[dict] = []
     # P2-3: system prompt is persona-only (no RAG)
     if system_p:
         messages.append({"role": "system", "content": system_p})
-
-    recent_history = history[-(2 * max_messages):] if max_messages else []
     messages.extend(recent_history)
 
     # P2-3: RAG context injected into the user message, right before the question
