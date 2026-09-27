@@ -35,11 +35,68 @@ class ChunkInfo:
     header_hash: str = ""  # hash of header text for deduplication
 
 
+# ── HTML table → plain text ───────────────────────────────────────────────
+# The SRD KB is full of HTML <table> blocks (armor/weapon tables, monster stat
+# blocks, class progression). Raw markup is embedding noise: tag tokens dilute
+# the real content and item names ("Chain Mail", "Goblin") never appear as
+# clean tokens for BM25. Converting tables to plain text BEFORE chunking makes
+# both dense and lexical retrieval substantially stronger (measured: armor
+# lookups 0.47 → 0.56+ cosine, see docs/RAG_ANALYSIS_2026-09-27.md).
+_TABLE_RE = re.compile(r"<table.*?</table>", re.S | re.I)
+_TR_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.S | re.I)
+_CELL_RE = re.compile(r"<t[hd][^>]*>(.*?)</t[hd]>", re.S | re.I)
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _cell_text(cell_html: str) -> str:
+    """Strip tags from one cell and collapse whitespace."""
+    return re.sub(r"\s+", " ", _TAG_RE.sub("", cell_html)).strip()
+
+
+def _table_to_plain_text(table_html: str) -> str:
+    """Render one HTML table as plain text lines.
+
+    - A header row (cells made of <th>) becomes a single ``Columns: a, b, c``
+      legend line (skipped when it carries no labels).
+    - Body rows become ``cell1 | cell2 | ...`` with empty cells dropped.
+    - Single-cell rows spanning columns (category separators like
+      ``Light Armor (...)``) are kept as ``[label]`` so the grouping survives.
+    """
+    lines: list[str] = []
+    for row_html in _TR_RE.findall(table_html):
+        cells = [_cell_text(c) for c in _CELL_RE.findall(row_html)]
+        non_empty = [c for c in cells if c]
+        if not non_empty:
+            continue
+        # A colspan single-cell <th> row is a category separator, not a legend.
+        is_header_row = (
+            "<th" in row_html.lower()
+            and "<td" not in row_html.lower()
+            and "colspan" not in row_html.lower()
+        )
+        if is_header_row:
+            lines.append("Columns: " + ", ".join(non_empty))
+        elif len(non_empty) == 1 and 'colspan' in row_html.lower():
+            lines.append(f"[{non_empty[0]}]")
+        else:
+            lines.append(" | ".join(non_empty))
+    return "\n".join(lines)
+
+
+def html_tables_to_plain_text(content: str) -> str:
+    """Replace every HTML table in *content* with a plain-text rendering."""
+    if "<table" not in content.lower():
+        return content
+    return _TABLE_RE.sub(lambda m: _table_to_plain_text(m.group(0)), content)
+
+
 class Chunker:
     """Split documents into semantic chunks for better embedding quality.
 
     Uses Full Document strategy for small files and Smart Header Splitting with
     minimum-size merging for larger docs to prevent tiny, semantically broken chunks.
+    HTML tables are converted to plain text first (see ``html_tables_to_plain_text``)
+    so embeddings/BM25 see item names and values instead of markup.
     """
 
     MIN_CHUNK_SIZE = 80   # chars — below this, merge with neighbor
@@ -88,6 +145,10 @@ class Chunker:
         content_text = root.read_bytes().decode("utf-8", errors="replace")
         if not content_text:
             return []
+
+        # Convert HTML tables to plain text before any splitting strategy runs,
+        # so every chunk (header/paragraph/adaptive) embeds clean item data.
+        content_text = html_tables_to_plain_text(content_text)
 
         source_name = root.name
         display_name = _normalize_display_name(root, source_name)
