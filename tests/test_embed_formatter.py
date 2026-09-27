@@ -884,7 +884,10 @@ class TestAICommandEmbedWiring:
         load_characters(Path("characters.json.example"))
         ix = self._make_ix()
 
+        # AI_STREAM defaults to True (P3 #24), which would route through the
+        # REAL ask_ai_stream — these tests exercise the delivery path only.
         with patch.object(settings, "EMBED_FORMAT", True), \
+             patch.object(settings, "AI_STREAM", False), \
              patch("bot_core.ai_client.ask_ai", new_callable=AsyncMock,
                    return_value=(CHARACTER_SHEET, {})):
             await handle_ai_command(ix, message="sheet please")
@@ -907,6 +910,7 @@ class TestAICommandEmbedWiring:
         ix = self._make_ix()
 
         with patch.object(settings, "EMBED_FORMAT", False), \
+             patch.object(settings, "AI_STREAM", False), \
              patch("bot_core.ai_client.ask_ai", new_callable=AsyncMock,
                    return_value=("A plain text reply.", {})):
             await handle_ai_command(ix, message="hi")
@@ -929,6 +933,7 @@ class TestAICommandEmbedWiring:
         ix = self._make_ix()
 
         with patch.object(settings, "EMBED_FORMAT", True), \
+             patch.object(settings, "AI_STREAM", False), \
              patch("bot_core.ai_client.ask_ai", new_callable=AsyncMock,
                    return_value=("ok.", {})):
             await handle_ai_command(ix, message="hi")
