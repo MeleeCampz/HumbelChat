@@ -140,3 +140,40 @@ non-obvious invariants a future maintainer should not break:
 
 Three real bugs fixed, four regression tests added, zero behaviour changes
 beyond the fixes, zero new test failures.
+
+## Addendum — backlog item #4 (same day): the 7 pre-existing failures
+
+Working through the 7 baseline failures surfaced one more production bug:
+
+### B4 — Stream total-cap timeout misclassified at the boundary · `bot_core/ai_client.py`
+
+**Severity: low.** The streaming loop caps each chunk wait at
+`min(gap_deadline, hard_deadline)` and, after an `asyncio.TimeoutError`,
+decides between "total time budget" and "per-chunk timeout" by re-comparing
+`loop.time() >= hard_deadline`. On Windows the event-loop timer can fire a
+few ms **early** (reproduced: up to ~6 ms), so a wait that was bounded by the
+total cap could be classified as a per-chunk timeout — wrong error detail in
+logs and user messages right at the budget boundary.
+
+**Fix:** record up front which budget bound the wait
+(`total_cap_binding = gap_deadline >= hard_deadline`) and use that flag for
+the classification; the `loop.time()` comparison remains as a second guard.
+
+The other six failures were test-side staleness / environment pollution, no
+product bugs:
+
+- **path-resolution ×2** — `main.py` runs `load_dotenv()` at import and `.env`
+  sets `KB_PATH=./data/knowledge` (Docker-relative). Any later
+  `importlib.reload(config.settings)` (used by two test files) re-read the
+  polluted environment. Fixed in `tests/conftest.py`: pre-set absolute
+  `KB_PATH` before anything imports `main` (`load_dotenv` never overrides
+  existing variables).
+- **embed-wiring ×3** — written before streaming became the default
+  (`AI_STREAM=1`); they patched `ask_ai` but the command now routes through
+  the real `ask_ai_stream`. Fixed by pinning `AI_STREAM=False` in those
+  tests (they exercise the delivery path, not streaming).
+- **ai-command persona ×1** — asserted an exact system-prompt match; the
+  global `<stat-block-format>` appendix is now added to every character.
+  Fixed to assert prefix + appendix presence.
+
+Final state after #4: **0 failed / 728 passed / 6 skipped**, ruff clean.
