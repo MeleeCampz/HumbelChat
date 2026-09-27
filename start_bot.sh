@@ -34,9 +34,12 @@ echo "────────────────────────�
 # Run from the project virtualenv (created by ./setup_venv.sh) so the bot's
 # heavy ML deps stay isolated from the system Python. Fail clearly if the
 # venv is missing rather than silently running on the wrong interpreter.
+# Unix venv layout first, Windows (Scripts/) second — the same checkout is
+# used for local dev on both.
 VENV_PY="$SCRIPT_DIR/.venv/bin/python"
+[ -x "$VENV_PY" ] || VENV_PY="$SCRIPT_DIR/.venv/Scripts/python.exe"
 if [ ! -x "$VENV_PY" ]; then
-    echo "ERROR: virtualenv not found at $VENV_PY" >&2
+    echo "ERROR: virtualenv not found (.venv/bin/python or .venv/Scripts/python.exe)" >&2
     echo "Run ./setup_venv.sh first, then start the bot." >&2
     exit 1
 fi
@@ -46,4 +49,10 @@ fi
 # RotatingFileHandler, so no tee copy is needed. (The old `exec cmd | tee`
 # form didn't actually exec — the pipe kept a subshell in charge, which
 # mangled exit codes and signal handling.)
+# Dev runs happen ON the host, where the docker-only INFER_URL from .env
+# (host.docker.internal:8888) does not resolve.  load_dotenv() does not
+# override real environment variables, so this host-local default wins;
+# set BOT_DEV_INFER_URL to point at a different backend.
+export INFER_URL="${BOT_DEV_INFER_URL:-http://127.0.0.1:8888/v1}"
+
 exec "$VENV_PY" -u "$SCRIPT_DIR/main.py"
