@@ -37,3 +37,9 @@ messages if needed — so the user always gets an answer.
 
 Set `EMBED_FORMAT=0` in `.env` to restore classic plain-text delivery for all
 replies. Default: on.
+
+## D&D content formatting
+
+Stat blocks, armor/item comparisons and other tabular D&D content have
+dedicated rules and safety nets (prompt steering + deterministic formatter
+guards) — see [`formatting.md`](formatting.md).
