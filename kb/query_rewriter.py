@@ -43,11 +43,13 @@ class QueryRewriter:
     MAX_EXPANSIONS = 3
     REWRITE_TIMEOUT_SEC = 10
     REWRITE_PROMPT_TEMPLATE = """\
-You are a search query expansion assistant. Your task is to generate additional search terms that capture related concepts, synonyms, and contextual meanings of the user's original query — all within the domain of {kb_domain}.
+You are a search query expansion assistant. The knowledge base is written in ENGLISH (official D&D 5e SRD text plus campaign lore) about {kb_domain}. Your task is to generate additional search terms that capture related concepts, synonyms, and contextual meanings of the user's original query.
 
 Rules:
 - Generate exactly {max_expansions} alternative queries (one per line)
 - Each expansion should be a short phrase (3-8 words) suitable for keyword/semantic search
+- Write EVERY expansion in ENGLISH using standard D&D 5e terminology
+- If the original query is in another language (e.g. German), translate its key terms into English D&D 5e vocabulary first (e.g. "Rüstung" → "armor", "Zauberspruch" → "spell", "Heiltrank" → "potion of healing", "Statblock" → "stat block")
 - Focus on synonyms, related concepts, and contextual meanings — not rephrasing the entire question
 - Stay strictly within the domain: {kb_domain}
 - DO NOT include the original query in your output
@@ -114,25 +116,39 @@ Expansions:
             original_query=original_query,
         )
 
+        create_kwargs = dict(
+            model=self.model_slug,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,  # Low for consistent, focused expansions
+            max_tokens=256,
+            timeout=self.REWRITE_TIMEOUT_SEC,
+        )
+        # Qwen3-style hybrid-thinking models spend their ENTIRE 256-token budget on
+        # reasoning and return no content ("full token budget on reasoning"). This is
+        # a short utility call — disable thinking. Measured: 0.5s with it off vs
+        # 5.7s of pure thinking (see docs/RAG_ANALYSIS_2026-09-27.md).
         try:
             response = await self._client.chat.completions.create(
-                model=self.model_slug,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,  # Low for consistent, focused expansions
-                max_tokens=256,
-                timeout=self.REWRITE_TIMEOUT_SEC,
+                extra_body={"enable_thinking": False}, **create_kwargs
             )
+        except Exception:
+            # Backend rejected the extra param (or transient failure) — retry plain.
+            try:
+                response = await self._client.chat.completions.create(**create_kwargs)
+            except Exception as exc:
+                logger.warning("Query rewrite attempt failed (%s); returning no expansions", exc)
+                return []
 
-            # P1 #8: empty `choices` raises AIBackendError → caught below →
-            # no expansions (instead of an IndexError from `choices[0]`).
+        # P1 #8: empty `choices` raises AIBackendError → caught below →
+        # no expansions (instead of an IndexError from `choices[0]`).
+        try:
             from bot_core.errors import extract_reply_text
             content = extract_reply_text(response, default="")
-            lines = [line.strip() for line in content.split("\n") if line.strip()]
-            return lines[: self.max_expansions]  # type: ignore[arg-type]
-
         except Exception as exc:
             logger.warning("Query rewrite attempt failed (%s); returning no expansions", exc)
             return []
+        lines = [line.strip() for line in content.split("\n") if line.strip()]
+        return lines[: self.max_expansions]  # type: ignore[arg-type]
 
 
 # ── Module-level convenience ───────────────────────────────────────────

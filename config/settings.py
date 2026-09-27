@@ -437,6 +437,13 @@ RAG_QUERY_REWRITER: bool = _safe_bool(os.getenv("RAG_QUERY_REWRITER"), True)
 # ``float(...) or 0.35`` never guarded against an unparseable string.)
 RAG_REWRITE_MIN_SCORE: float = _safe_float(os.getenv("RAG_REWRITE_MIN_SCORE"), 0.35)
 RAG_QUERY_MAX_EXPANSIONS: int = _safe_int(os.getenv("RAG_QUERY_MAX_EXPANSIONS"), 3)
+# Rewrite/expand EVERY query, not just German or low-confidence ones. With
+# thinking disabled on the rewrite call (see kb/query_rewriter.py) the extra LLM
+# call costs ~0.5-1s — negligible next to answer generation — and removes the
+# language-detection edge cases (German without umlauts slips past detection;
+# mangled English like "wizzard" or "armor stat block" gets no help otherwise).
+# Set RAG_REWRITE_ALL_QUERIES=0 to fall back to German/low-confidence-only.
+RAG_REWRITE_ALL_QUERIES: bool = _safe_bool(os.getenv("RAG_REWRITE_ALL_QUERIES"), True)
 
 # ── Min-attachment relevance floor (opt-in) ───────────────────────────────
 # When > 0, dense chunks scoring below this cosine-similarity floor are dropped

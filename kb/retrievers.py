@@ -31,6 +31,7 @@ Both strategies return ``list[tuple[str, str]]`` of ``(display_name, content)``.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 import logging
 import os
@@ -270,6 +271,33 @@ def select_ranked_chunks(
 
 _RRF_K = 60  # standard RRF constant (Cormack et al. 2009)
 
+# ── Non-English (German) query detection ───────────────────────────────
+# The KB is written in English; German game queries only score ~0.45-0.58
+# against it even on direct hits, so the RAG_REWRITE_MIN_SCORE threshold
+# (calibrated for confident matches) never fires and the LLM rewriter — the
+# one component that can bridge the language gap by translating key terms
+# into English D&D 5e vocabulary — stays dormant. Detect German queries
+# explicitly and always route them through the expansion path.
+_UMLAUT_RE = re.compile(r"[äöüßÄÖÜ]")
+_GERMAN_STOPWORDS = frozenset({
+    "der", "die", "das", "und", "ist", "sind", "war", "waren", "von", "dem",
+    "den", "mit", "für", "wie", "was", "wer", "wenn", "dass", "nicht", "oder",
+    "gib", "gibt", "zeig", "zeige", "erkläre", "erklärt", "kann", "können",
+    "muss", "müssen", "willst", "will", "kostet", "kosten", "welche",
+    "welcher", "welches", "vielen", "viel", "mehr", "beim", "über", "unter",
+    "nach", "auch", "sich", "einen", "eine", "einem", "einer", "mein",
+    "meine", "dein", "ihre", "seine", "unsere", "stufe", "würfel",
+})
+
+
+def _looks_german(query: str) -> bool:
+    """Cheap heuristic: umlauts or ≥2 German stopwords ⇒ treat as German."""
+    if _UMLAUT_RE.search(query):
+        return True
+    tokens = re.findall(r"[a-zäöüß]+", query.lower())
+    hits = {t for t in tokens if t in _GERMAN_STOPWORDS}
+    return len(hits) >= 2
+
 
 def reciprocal_rank_fusion(
     rankings: list[list[tuple[str, str, float]]],
@@ -305,13 +333,15 @@ async def _expand_low_confidence_query(
     query: str,
     top_n: int,
     rewrite_model: str = "",
-) -> tuple[list[list[tuple[str, str, float]]], float]:
+) -> tuple[list[list[tuple[str, str, float]]], float, list[str]]:
     """Generate expansion rankings for a low-confidence query.
 
     Runs the LLM rewriter (bounded by ``RAG_REWRITE_BUDGET_SECONDS``), embeds
     all expansions in one batched call via ``idx.rank_texts()``, and returns
-    ``(expansion_rankings, elapsed_seconds)`` — one ranked list per expansion.
-    Returns ``([], 0.0)`` when rewriting is disabled or produces nothing.
+    ``(expansion_rankings, elapsed_seconds, expansion_texts)`` — one ranked list
+    per expansion plus the expansion strings themselves (the hybrid lexical leg
+    scores them too, so BM25 benefits from the translated English terms).
+    Returns ``([], 0.0, [])`` when rewriting is disabled or produces nothing.
     Never raises: callers fall back to the original ranking alone.
     """
     from config.settings import (
@@ -320,7 +350,7 @@ async def _expand_low_confidence_query(
     )
 
     if not RAG_QUERY_REWRITER:
-        return [], 0.0
+        return [], 0.0, []
 
     t0 = time.monotonic()
     try:
@@ -338,19 +368,19 @@ async def _expand_low_confidence_query(
         extra = [e for e in expanded[1:] if e and e.strip()]
     except Exception as exc:
         logger.warning("Low-confidence rewrite failed (%s); using original ranking only", exc)
-        return [], time.monotonic() - t0
+        return [], time.monotonic() - t0, []
 
     if not extra:
-        return [], 0.0
+        return [], 0.0, []
 
     try:
         from config.settings import RAG_DENSE_TOP_K
         rankings = await idx.rank_texts(extra, top_n=RAG_DENSE_TOP_K)
     except Exception as exc:
         logger.warning("Expansion embedding failed (%s); using original ranking only", exc)
-        return [], time.monotonic() - t0
+        return [], time.monotonic() - t0, []
 
-    return [r for r in rankings if r], time.monotonic() - t0
+    return [r for r in rankings if r], time.monotonic() - t0, extra
 
 
 # ───────────────────────────── Strategies ─────────────────────────────
@@ -437,9 +467,11 @@ async def _retrieve_vector(
     Pure cosine-similarity ranking over the in-memory index (which the
     disk-backed store keeps fully hydrated at load time).  Falls back to
     keyword-only if the vector index is unavailable or the query returns
-    no hits.  Confident queries cost exactly one embedding call; when the
-    top score is below ``RAG_REWRITE_MIN_SCORE`` a bounded LLM rewrite adds
-    expansion rankings merged via RRF (see ``_expand_low_confidence_query``).
+    no hits.  By default every query gets a bounded LLM rewrite/expansion pass
+    (``RAG_REWRITE_ALL_QUERIES``, thinking disabled on the call) whose ranked
+    lists are merged via RRF; with the flag off, only German or low-confidence
+    (top score below ``RAG_REWRITE_MIN_SCORE``) queries do (see
+    ``_expand_low_confidence_query``).
     """
     store = await _ensure_index_store(kb_path)
     idx = store.get_index() if store is not None else None
@@ -469,7 +501,11 @@ async def _retrieve_vector(
         query, top_scores[0], top_scores[len(top_scores) // 2], top_scores[-1], len(ranked),
     )
 
-    from config.settings import RAG_REWRITE_MIN_SCORE, RAG_MIN_ATTACH_SCORE
+    from config.settings import (
+        RAG_REWRITE_ALL_QUERIES,
+        RAG_REWRITE_MIN_SCORE,
+        RAG_MIN_ATTACH_SCORE,
+    )
 
     # ── Min-attachment relevance floor (opt-in) ───────────────────────
     # When RAG_MIN_ATTACH_SCORE > 0, drop dense chunks scoring below the floor
@@ -486,15 +522,26 @@ async def _retrieve_vector(
             )
         ranked = kept
 
-    if ranked and ranked[0][2] < RAG_REWRITE_MIN_SCORE:
-        expansion_rankings, elapsed = await _expand_low_confidence_query(
+    expansion_texts: list[str] = []
+    low_confidence = bool(ranked) and ranked[0][2] < RAG_REWRITE_MIN_SCORE
+    german_query = _looks_german(query)
+    # Default: expand EVERY query (RAG_REWRITE_ALL_QUERIES=1) — with thinking off
+    # the rewrite call costs ~0.5-1s and fixes both German queries and mangled
+    # English alike. Fallback mode: only German or low-confidence queries.
+    if RAG_REWRITE_ALL_QUERIES or low_confidence or german_query:
+        expansion_rankings, elapsed, expansion_texts = await _expand_low_confidence_query(
             idx, query, top_n, rewrite_model=rewrite_model
         )
         if expansion_rankings:
             merged = reciprocal_rank_fusion([ranked] + expansion_rankings)
+            reason = (
+                "all-queries"
+                if RAG_REWRITE_ALL_QUERIES
+                else ("german" if german_query else f"low-confidence < {RAG_REWRITE_MIN_SCORE:.2f}")
+            )
             logger.info(
-                "Low-confidence query (top=%.3f < %.2f): rewrite added %d expansion list(s) in %.1fs; RRF-merged to %d chunks",
-                ranked[0][2], RAG_REWRITE_MIN_SCORE, len(expansion_rankings), elapsed, len(merged),
+                "Query rewrite triggered (%s, top=%.3f): added %d expansion list(s) in %.1fs; RRF-merged to %d chunks",
+                reason, ranked[0][2] if ranked else 0.0, len(expansion_rankings), elapsed, len(merged),
             )
             ranked = merged
 
@@ -503,18 +550,31 @@ async def _retrieve_vector(
     # spell names). Merging both with RRF improves recall when phrasing differs.
     # Toggleable via RAG_HYBRID_ENABLED (default on) so dense-only behaviour is
     # still available and the rewrite path can be tested in isolation.
+    #
+    # IMPORTANT: score EVERY query variant (original + expansions), not just the
+    # raw query. BM25 on the raw German query alone matches "stat block" monster
+    # text and German session notes verbatim, which drowned out the expansion-
+    # fused dense ranking (see docs/RAG_ANALYSIS_2026-09-27.md). The translated
+    # English expansions let BM25 exact-match KB terms like "Chain Mail".
     hybrid_ranked = ranked
     from config.settings import RAG_HYBRID_ENABLED
     if RAG_HYBRID_ENABLED:
         from config.settings import RAG_LEXICAL_TOP_K
         candidate_limit = RAG_LEXICAL_TOP_K
         try:
-            lex = await asyncio.to_thread(_lexical_ranking, idx, query, candidate_limit)
-            if lex:
-                hybrid_ranked = reciprocal_rank_fusion([ranked, lex])
+            lex_lists: list[list[tuple[str, str, float]]] = []
+            for variant in [query, *expansion_texts]:
+                lr = await asyncio.to_thread(_lexical_ranking, idx, variant, candidate_limit)
+                if lr:
+                    lex_lists.append(lr)
+            if lex_lists:
+                lex_merged = (
+                    reciprocal_rank_fusion(lex_lists) if len(lex_lists) > 1 else lex_lists[0]
+                )
+                hybrid_ranked = reciprocal_rank_fusion([ranked, lex_merged])
                 logger.info(
-                    "Hybrid retrieval: dense(%d) + lexical(%d) → RRF-merged %d chunk(s)",
-                    len(ranked), len(lex), len(hybrid_ranked),
+                    "Hybrid retrieval: dense(%d) + lexical(%d list(s), %d chunk(s)) → RRF-merged %d chunk(s)",
+                    len(ranked), len(lex_lists), len(lex_merged), len(hybrid_ranked),
                 )
         except Exception as exc:  # noqa: BLE001 — the lexical leg is a pure enhancement
             logger.warning("Hybrid lexical leg failed (%s); using dense ranking only", exc)

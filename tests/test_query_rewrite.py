@@ -160,6 +160,8 @@ class TestLowConfidenceRewrite:
         self._patch_store(monkeypatch, idx)
         # High threshold: only an exact-keyword match (top = 1.0) counts as confident.
         monkeypatch.setattr("config.settings.RAG_REWRITE_MIN_SCORE", 0.9)
+        # This test verifies the FALLBACK trigger logic — disable rewrite-all.
+        monkeypatch.setattr("config.settings.RAG_REWRITE_ALL_QUERIES", False)
 
         p, rw = self._patch_rewriter(["menu food"])
         with p:
