@@ -122,6 +122,29 @@ class TestAskAiBudgetRetry:
         assert second_kwargs["max_tokens"] == 4096
 
     @pytest.mark.asyncio
+    async def test_retry_timeout_scales_with_retry_budget(self, monkeypatch):
+        """The truncation retry generates up to 4× more tokens, so its wall-clock
+        timeout must be re-scaled for the RETRY budget — reusing the original
+        (smaller-budget) timeout would time out exactly the thinking-model case
+        P4 targets (a model that needed more tokens also needs more time)."""
+        client = _stub_ask_ai_env(
+            monkeypatch,
+            [_resp(None, finish_reason="length"), _resp("REAL ANSWER")],
+            initial_budget=1024, hard_cap=4096,
+        )
+        reply, _ = await _ask(guild_id=7, channel_id=8)
+
+        assert reply == "REAL ANSWER"
+        first_kwargs = client.chat.completions.create.call_args_list[0].kwargs
+        second_kwargs = client.chat.completions.create.call_args_list[1].kwargs
+        # Both timeouts share the same prompt-size term; only the output-budget
+        # term differs: (4096 - 1024) / 1000 * 0.5 s (well under the 8× cap).
+        assert second_kwargs["timeout"] > first_kwargs["timeout"]
+        assert second_kwargs["timeout"] - first_kwargs["timeout"] == pytest.approx(
+            (4096 - 1024) / 1000 * 0.5
+        )
+
+    @pytest.mark.asyncio
     async def test_persistent_truncation_surfaces_real_error_not_placeholder(
             self, monkeypatch):
         """Two truncated calls → friendly error; no placeholder is returned."""
