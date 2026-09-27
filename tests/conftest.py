@@ -18,6 +18,16 @@ import pytest
 # suite imports it (code review §1.10). Must be set before `import main`.
 os.environ["BOT_NO_LOG_FILES"] = "1"
 #
+# main.py also runs load_dotenv() at import time, and .env sets
+# KB_PATH=./data/knowledge (a Docker-relative path). load_dotenv() does not
+# override pre-existing variables, so pinning the absolute repo default here
+# keeps os.environ clean: tests that re-import config.settings
+# (importlib.reload in test_p5_streaming / test_path_resolution) must never
+# observe a relative KB_PATH.
+os.environ.setdefault(
+    "KB_PATH", str(pathlib.Path(__file__).resolve().parent.parent / "data" / "knowledge")
+)
+#
 # NOTE: .env is intentionally NOT loaded here (a full load_dotenv() would
 # leak KB_PATH/CHUNK_SIZE/etc. into every test and break the assumptions of
 # tests that monkeypatch env explicitly).  A few modules bake env values at

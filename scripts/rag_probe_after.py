@@ -11,15 +11,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import sys
 import time
 
 sys.path.insert(0, "/app")
 pass  # keep the LIVE rewriter enabled (after-fix validation)
-
-import config.settings as S  # noqa: E402
-pass  # live rewriter on
 
 from kb.index import KBIndexStore  # noqa: E402
 from kb.retrievers import (  # noqa: E402
