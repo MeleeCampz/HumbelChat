@@ -88,6 +88,9 @@ data/
 # HuggingFace model cache for the Docker deployment (bge-m3, faster-whisper)
 hf-cache/
 
+# One-off migration staging dir (data transfer from the old box)
+.migrate-staging/
+
 # Bot runtime files (local only)
 .bot.pid
 .bot.sock
