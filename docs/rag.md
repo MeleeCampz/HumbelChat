@@ -166,6 +166,50 @@ The knowledge base accepts and meaningfully reads/indexes:
 
 These are the expected file types for KB use. Storage itself does not strictly enforce only these extensions — uploaded files use MIME-based inference and fall back to `.txt` when the extension or MIME type is unknown — but files whose extensions are not in the set above are generally not read or indexed by the same path.
 
+## Session notes — one RAG document per session (#11)
+
+Each session folder under `<KB_PATH>/session_notes/<date>_<idx>[_<name>]/` holds
+exactly ONE RAG-indexed file — `notes.md` — which combines:
+
+- the timestamped session notes (`## Notes`),
+- the **full text** of every uploaded document and voice transcript
+  (`## Documents`, one `### <filename>` subsection per file, so each upload
+  keeps its own semantic chunks inside the single file),
+- the AI overview written when the session ended.
+
+The raw uploads/transcripts are kept on disk in **hidden dot-dirs**
+(`.attachments/`, `.transcripts/`) purely as the verbatim record (and as the
+source for the end-of-session overview). The indexer skips dot-dirs and
+dot-files, so they can never be re-indexed by `/sync_kb` or a startup rebuild
+— which is what previously let near-identical session uploads get attached
+multiple times by retrieval.
+
+Legacy folders with visible `attachments/` / `transcripts/` sub-folders are
+migrated automatically at startup (rename to dot-dirs + append the combined
+section to `notes.md`); the vector index then self-heals on its next load
+(stale per-file rows pruned, recombined notes re-embedded once).
+
+Note: manual edits to the `## Documents` section of a `notes.md` are
+overwritten on the next session change (it is regenerated from the dot-dirs);
+edits to real notes in `## Notes` survive via re-parsing.
+
+## Last-session context (#7)
+
+Continuity across sessions does not rely on RAG at all: when a session has
+ended, every AI turn automatically gets a `[Previous session — <name> …]`
+block (before the RAG block) containing the session's **overview and its
+notes**. The block is a pure function of the ended session's data — no
+per-turn timestamps or randomness — so it renders **byte-identical on every
+turn** (stable context, unlike query-dependent RAG chunks). Over the char
+budget, oldest notes are dropped first (with a deterministic omission marker),
+then the overview is truncated from the tail. An active session is never
+attached this way (its content is already in the channel history).
+
+| Variable | Purpose |
+|---|---|
+| `LAST_SESSION_CONTEXT_ENABLED` | Attach the last-session block at all (`1`/`0`, default on) |
+| `LAST_SESSION_MAX_CHARS` | Char budget for the block (default `4000`) |
+
 ## Commands
 
 - `/upload_kb` — add files to the knowledge base

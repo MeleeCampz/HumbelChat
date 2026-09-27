@@ -443,10 +443,11 @@ async def _add_document_from_attachment(interaction: discord.Interaction, file: 
     """Store an uploaded ``.txt``/``.md`` file in the active session.
 
     Reads the attachment, validates its type and size, decodes it as UTF-8 text
-    and hands it to ``sessions.add_document`` — which saves it as a standalone
-    ``.md`` file under the session's ``attachments/`` folder (one file per
-    upload; the KB indexer chunks it on its own).  Any validation failure is
-    reported back to the user and the session is left untouched.
+    and hands it to ``sessions.add_document`` — which saves it as a raw
+    ``.md`` file under the session's hidden ``.attachments/`` folder (one file
+    per upload, never indexed directly) and re-renders the combined
+    ``notes.md`` with its full text.  Any validation failure is reported back
+    to the user and the session is left untouched.
     """
     from bot_core import sessions as S
 
@@ -514,14 +515,16 @@ async def _add_document_from_attachment(interaction: discord.Interaction, file: 
         await interaction.response.send_message("⚠️ Could not add the document.")
         return
 
-    # The document is one standalone file under the session's attachments/ folder.
+    # The raw document lives in the hidden .attachments/ folder; its full
+    # text is combined into notes.md — the session's single RAG document.
     from bot_core import sessions as _S
     att_dir = pathlib.Path(_S._session_dir(updated)) / _S._SUBDIR_ATTACHMENTS
     files = sorted(att_dir.iterdir()) if att_dir.exists() else []
     fname = files[-1].name if files else title
     await interaction.response.send_message(
         f"📎 Document **{title}** added to session **{updated.get('name') or '(untitled)'}**\n"
-        f"📄 Saved as `attachments/{fname}` (one file, RAG-enabled).",
+        f"📄 Saved as `{_S._SUBDIR_ATTACHMENTS}/{fname}` (kept on disk; full text combined "
+        f"into the session notes file, which is RAG-enabled).",
     )
     return
 
@@ -550,9 +553,10 @@ def _chunk_display(text: str, limit: int = _VIEW_MSG_LIMIT) -> list[str]:
 def _build_view_parts(session: dict) -> list[str]:
     """Build the display-only /session_notes messages for one session.
 
-    Notes are shown in full (word-wrapped across messages when long); the
-    standalone documents (attachments / transcripts) are listed as pointers to
-    their own files — that is where the full text lives and is indexed.
+    Notes are shown in full (word-wrapped across messages when long); the raw
+    documents (attachments / transcripts) are listed as pointers to their
+    hidden dot-dir files — their full text is combined into notes.md, the
+    session's single RAG document.
     """
     from bot_core import sessions as S
 
@@ -579,7 +583,8 @@ def _build_view_parts(session: dict) -> list[str]:
             for name in docs:
                 lines.append(f"- `{subdir}/{name}`")
     lines.append("")
-    lines.append(f"📄 Folder: `{pathlib.Path(session['dir']).name}/` (notes.md + files, RAG-enabled)")
+    lines.append(f"📄 Folder: `{pathlib.Path(session['dir']).name}/` (notes.md = single RAG document; "
+                 f"raw files kept in hidden folders)")
     lines.append("(long notes are split across messages; full text is in the session folder)")
 
     return _chunk_display("\n".join(lines))

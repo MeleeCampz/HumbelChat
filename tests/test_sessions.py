@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pathlib
+import re
 import time
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
@@ -163,8 +164,9 @@ class TestNotes:
 
 
 class TestAddDocument:
-    """sessions.add_document() — an uploaded .txt/.md file → its own file in the
-    session's attachments/ folder (no pre-chunking; KB chunks it on its own)."""
+    """sessions.add_document() — an uploaded .txt/.md file → raw file in the
+    session's hidden .attachments/ folder (out of RAG) + full text combined
+    into notes.md, the session's single RAG document."""
 
     def test_no_active_session_returns_none(self):
         session, n = S.add_document("hello")
@@ -180,24 +182,27 @@ class TestAddDocument:
         S.start_session(name="D")
         session, n = S.add_document("the answer is 42", title="answer.txt")
         assert n == 1
-        # A standalone .md file exists under the session's attachments/ folder
-        att_dir = pathlib.Path(session["dir"]) / "attachments"
+        # A raw .md file exists under the session's HIDDEN .attachments/ folder
+        att_dir = pathlib.Path(session["dir"]) / ".attachments"
         files = [f for f in att_dir.iterdir() if f.is_file()]
         assert len(files) == 1
         body = files[0].read_text(encoding="utf-8")
         assert "the answer is 42" in body
         # The notes state is unchanged (no pre-chunking, no pointer stored).
         assert S.get_notes(session) == []
-        # notes.md lists the attachment under a pointer section
+        # notes.md combines the FULL text under a Documents section
         content = pathlib.Path(session["file"]).read_text(encoding="utf-8")
-        assert "## Attachments" in content
+        assert "## Documents" in content
         assert files[0].name in content
+        assert "the answer is 42" in content
+        # Only notes.md is indexable for the session
+        assert S._session_index_paths(session) == [pathlib.Path(session["file"])]
 
     def test_default_title_used(self):
         S.start_session(name="D")
         session, n = S.add_document("just words")
         assert n == 1
-        att_dir = pathlib.Path(session["dir"]) / "attachments"
+        att_dir = pathlib.Path(session["dir"]) / ".attachments"
         assert len(list(att_dir.iterdir())) == 1
         assert "just words" in att_dir.iterdir().__next__().read_text(encoding="utf-8")
 
@@ -206,12 +211,14 @@ class TestAddDocument:
         long_text = ("word " * 2000).strip()  # ~10k chars — stays in ONE file
         session, n = S.add_document(long_text, title="big.md")
         assert n == 1  # one file, not several bullets
-        att_dir = pathlib.Path(session["dir"]) / "attachments"
+        att_dir = pathlib.Path(session["dir"]) / ".attachments"
         files = [f for f in att_dir.iterdir() if f.is_file()]
         assert len(files) == 1
         body = files[0].read_text(encoding="utf-8")
         # The whole document is preserved verbatim (KB will chunk it).
         assert long_text in body
+        # ...and combined verbatim into notes.md as well.
+        assert long_text in pathlib.Path(session["file"]).read_text(encoding="utf-8")
 
     def test_pins_to_given_session(self):
         """*session* pins the target — the document lands in THAT session's folder."""
@@ -223,24 +230,39 @@ class TestAddDocument:
 
         session, n = S.add_document("pinned doc", title="doc.md", session=old)
         assert n == 1 and session is old
-        att_dir = pathlib.Path(old["dir"]) / "attachments"
+        att_dir = pathlib.Path(old["dir"]) / ".attachments"
         assert any("pinned doc" in f.read_text(encoding="utf-8") for f in att_dir.iterdir())
+        # The pinned doc is combined into the OLD session's notes.md only
+        assert "pinned doc" in pathlib.Path(old["file"]).read_text(encoding="utf-8")
+        new_file = pathlib.Path(S.get_current_session()["file"]).read_text(encoding="utf-8")
+        assert "pinned doc" not in new_file
         # The new active session's folder has no attachment
-        new_dir = pathlib.Path(S.get_current_session()["dir"]) / "attachments"
+        new_dir = pathlib.Path(S.get_current_session()["dir"]) / ".attachments"
         assert not new_dir.exists() or len(list(new_dir.iterdir())) == 0
 
     def test_repeated_uploads_get_distinct_files(self):
         S.start_session(name="D")
         S.add_document("one", title="same.txt")
         S.add_document("two", title="same.txt")
-        att_dir = pathlib.Path(S.get_current_session()["dir"]) / "attachments"
+        att_dir = pathlib.Path(S.get_current_session()["dir"]) / ".attachments"
         names = sorted(f.name for f in att_dir.iterdir())
         assert len(names) == 2  # unique_path disambiguates duplicates
 
+    def test_rerender_is_idempotent(self):
+        """Same state + same dot-dir contents ⇒ byte-identical notes.md."""
+        S.start_session(name="D")
+        S.add_document("stable content", title="doc.md")
+        session = S.get_current_session()
+        first = pathlib.Path(session["file"]).read_text(encoding="utf-8")
+        S._write_session_file(session)
+        second = pathlib.Path(session["file"]).read_text(encoding="utf-8")
+        assert first == second
+
 
 class TestAddTranscript:
-    """sessions.add_transcript() — a finished transcript → its own file in the
-    session's transcripts/ folder (no pre-chunking; KB chunks it on its own)."""
+    """sessions.add_transcript() — a finished transcript → raw file in the
+    session's hidden .transcripts/ folder (out of RAG) + full text combined
+    into notes.md, the session's single RAG document."""
 
     def test_no_active_session_returns_none(self):
         session, n = S.add_transcript("hello")
@@ -257,26 +279,28 @@ class TestAddTranscript:
         session, n = S.add_transcript("hello there\nsecond line",
                                       title="Voice channel transcript — #vc (2026-08-31 22:00, 10s)")
         assert n == 1
-        tdir = pathlib.Path(session["dir"]) / "transcripts"
+        tdir = pathlib.Path(session["dir"]) / ".transcripts"
         files = [f for f in tdir.iterdir() if f.is_file()]
         assert len(files) == 1
         body = files[0].read_text(encoding="utf-8")
         assert "hello there" in body and "second line" in body
         assert "Voice channel transcript" in body
-        # notes state unchanged; notes.md lists the transcript pointer
+        # notes state unchanged; notes.md combines the full transcript text
         assert S.get_notes(session) == []
         content = pathlib.Path(session["file"]).read_text(encoding="utf-8")
-        assert "## Transcripts" in content and files[0].name in content
+        assert "## Documents" in content and files[0].name in content
+        assert "hello there" in content and "second line" in content
 
     def test_long_transcript_not_chunked(self):
         S.start_session(name="T")
         long_text = ("word " * 2000).strip()  # ~10k chars — stays in ONE file
         session, n = S.add_transcript(long_text, title="Voice channel transcript")
         assert n == 1
-        tdir = pathlib.Path(session["dir"]) / "transcripts"
+        tdir = pathlib.Path(session["dir"]) / ".transcripts"
         files = [f for f in tdir.iterdir() if f.is_file()]
         assert len(files) == 1
         assert long_text in files[0].read_text(encoding="utf-8")
+        assert long_text in pathlib.Path(session["file"]).read_text(encoding="utf-8")
 
     def test_pins_to_ended_session_when_pinned(self):
         S.start_session(name="Old")
@@ -288,8 +312,100 @@ class TestAddTranscript:
         session, n = S.add_transcript("pinned words", title="Voice channel transcript",
                                       session=old)
         assert n == 1 and session is old
-        tdir = pathlib.Path(old["dir"]) / "transcripts"
+        tdir = pathlib.Path(old["dir"]) / ".transcripts"
         assert any("pinned words" in f.read_text(encoding="utf-8") for f in tdir.iterdir())
+        assert "pinned words" in pathlib.Path(old["file"]).read_text(encoding="utf-8")
+
+
+class TestLegacyMigration:
+    """migrate_legacy_session_dirs() — visible attachments/ + transcripts/
+    (indexed file-by-file) → hidden dot-dirs + combined notes.md."""
+
+    def _legacy_folder(self, name: str = "2026-01-01_01_Legacy") -> pathlib.Path:
+        folder = S.notes_dir() / name
+        (folder / "attachments").mkdir(parents=True)
+        (folder / "transcripts").mkdir()
+        (folder / "attachments" / "old_doc.md").write_text(
+            "# old doc\n\nlegacy upload text\n", encoding="utf-8")
+        (folder / "transcripts" / "transcript_01.md").write_text(
+            "# Voice channel transcript\n\nlegacy words\n", encoding="utf-8")
+        (folder / "notes.md").write_text(
+            "# Session: Legacy\n\n## Notes\n\n(no notes)\n",
+            encoding="utf-8")
+        return folder
+
+    def test_visible_subdirs_renamed_and_notes_combined(self):
+        folder = self._legacy_folder()
+        changed = S.migrate_legacy_session_dirs()
+        assert changed == 1
+        assert not (folder / "attachments").exists()
+        assert not (folder / "transcripts").exists()
+        assert (folder / ".attachments" / "old_doc.md").is_file()
+        assert (folder / ".transcripts" / "transcript_01.md").is_file()
+        content = (folder / "notes.md").read_text(encoding="utf-8")
+        assert "## Documents" in content
+        assert "legacy upload text" in content
+        assert "legacy words" in content
+
+    def test_migration_is_idempotent(self):
+        folder = self._legacy_folder()
+        S.migrate_legacy_session_dirs()
+        first = (folder / "notes.md").read_text(encoding="utf-8")
+        assert S.migrate_legacy_session_dirs() == 0
+        # No double-appended Documents section.
+        second = (folder / "notes.md").read_text(encoding="utf-8")
+        assert first == second
+        assert second.count("## Documents") == 1
+
+    def test_merge_when_dot_dir_already_exists(self):
+        folder = self._legacy_folder()
+        dot = folder / ".attachments"
+        dot.mkdir()
+        (dot / "old_doc.md").write_text("# old doc\n\nalready migrated\n", encoding="utf-8")
+        (dot / "new_doc.md").write_text("# new doc\n\ndot-dir only\n", encoding="utf-8")
+        S.migrate_legacy_session_dirs()
+        assert not (folder / "attachments").exists()
+        names = {f.name for f in dot.iterdir()}
+        assert names == {"old_doc.md", "new_doc.md"}
+
+    def test_noop_without_legacy_folders(self):
+        folder = S.notes_dir() / "2026-01-02_01_Modern"
+        (folder / ".attachments").mkdir(parents=True)
+        assert S.migrate_legacy_session_dirs() == 0
+
+
+class TestNotesSectionParsing:
+    """refresh_notes_from_disk re-parses ONLY the ## Notes section — bullet-
+    looking lines inside ## Documents must never become notes."""
+
+    def test_document_bullets_not_parsed_as_notes(self):
+        S.start_session(name="P")
+        session = S.get_current_session()
+        path = pathlib.Path(session["file"])
+        path.write_text(
+            "# Session: P\n\n## Notes\n"
+            "- (2026-01-01 12:00) real note\n"
+            "\n## Documents (combined uploads + transcripts — full text)\n\n"
+            "### doc.md\n"
+            "- (2026-01-01 13:00) looks like a note but is document text\n",
+            encoding="utf-8")
+        notes = S.refresh_notes_from_disk(session)
+        assert len(notes) == 1
+        assert notes[0][1] == "real note"
+
+    def test_user_edited_notes_still_reparsed(self):
+        S.start_session(name="P")
+        session = S.get_current_session()
+        S.add_note("first")
+        path = pathlib.Path(session["file"])
+        text = path.read_text(encoding="utf-8")
+        # Insert a hand-added bullet right after the existing one (still inside ## Notes)
+        m = re.search(r"^(- \([^)]+\) first)$", text, flags=re.MULTILINE)
+        assert m, "expected the 'first' note bullet in notes.md"
+        text = text[:m.end()] + "\n- (2026-01-01 09:00) hand-added" + text[m.end():]
+        path.write_text(text, encoding="utf-8")
+        notes = S.refresh_notes_from_disk(session)
+        assert [t for _ts, t in notes] == ["first", "hand-added"]
 
 
 class TestNextSessionReminders:

@@ -7,8 +7,6 @@ tests pass whether or not `sentence-transformers` is installed in the venv.
 """
 from __future__ import annotations
 
-import math
-
 import pytest
 
 
@@ -293,7 +291,22 @@ def test_build_last_session_context_uses_overview(monkeypatch):
     assert "Overview:" in out and "dragons" in out and "Session 1" in out
 
 
-def test_build_last_session_context_falls_back_to_notes(monkeypatch):
+def test_build_last_session_context_includes_overview_and_notes(monkeypatch):
+    """#7: the block carries BOTH the overview and the notes (not either/or)."""
+    from bot_core import ai_client as A
+    monkeypatch.setattr(A, "LAST_SESSION_CONTEXT_ENABLED", True)
+
+    class S:
+        name = "S"
+        overview = "Dragons were slain."
+        notes = [[1, "first note"], [2, "second note"]]
+
+    out = A._build_last_session_context(S())
+    assert "Overview:" in out and "Dragons were slain." in out
+    assert "Notes:" in out and "first note" in out and "second note" in out
+
+
+def test_build_last_session_context_notes_only(monkeypatch):
     from bot_core import ai_client as A
     monkeypatch.setattr(A, "LAST_SESSION_CONTEXT_ENABLED", True)
 
@@ -303,7 +316,49 @@ def test_build_last_session_context_falls_back_to_notes(monkeypatch):
         notes = [[1, "first"], [2, "second"]]
 
     out = A._build_last_session_context(S())
-    assert "Recent notes:" in out and "second" in out
+    assert "Notes:" in out and "first" in out and "second" in out
+    assert "Overview:" not in out
+
+
+def test_build_last_session_context_is_byte_stable(monkeypatch):
+    """#7: same session data ⇒ byte-identical block on every call (stable
+    across turns, unlike query-dependent RAG chunks)."""
+    from bot_core import ai_client as A
+    monkeypatch.setattr(A, "LAST_SESSION_CONTEXT_ENABLED", True)
+
+    class S:
+        name = "S"
+        overview = "Stable overview."
+        notes = [[1, "a"], [2, "b"], [3, "c"]]
+        started_at = 1000000.0
+        ended_at = 2000000.0
+
+    assert A._build_last_session_context(S()) == A._build_last_session_context(S())
+
+
+def test_build_last_session_context_drops_oldest_notes_over_budget(monkeypatch):
+    """#7: over the char budget, OLDEST notes are dropped first (the kept set
+    is a chronological suffix) with a deterministic marker; newest notes and
+    the overview survive."""
+    import re as _re
+    from bot_core import ai_client as A
+    monkeypatch.setattr(A, "LAST_SESSION_CONTEXT_ENABLED", True)
+    monkeypatch.setattr(A, "LAST_SESSION_MAX_CHARS", 180)
+
+    class S:
+        name = "S"
+        overview = "Ov."
+        notes = [[i, f"note {i} " + "x" * 20] for i in range(1, 6)]
+
+    out = A._build_last_session_context(S())
+    assert len(out) <= 180
+    assert "Ov." in out                      # overview kept
+    assert "note 5" in out                   # newest note kept
+    assert "omitted" in out                  # deterministic omission marker
+    kept = [int(m) for m in _re.findall(r"note (\d)", out)]
+    assert len(kept) < 5                     # something was dropped
+    assert kept == list(range(kept[0], 6))   # chronological suffix, no holes
+    assert A._build_last_session_context(S()) == out  # still byte-stable
 
 
 def test_build_last_session_context_dict_shape(monkeypatch):
@@ -330,17 +385,21 @@ def test_build_last_session_context_disabled_or_none(monkeypatch):
 
 
 def test_build_last_session_context_capped(monkeypatch):
+    """Huge overview vs. small budget: notes are dropped first (phase 1), then
+    the overview is truncated from the tail (phase 2) — always ≤ cap."""
     from bot_core import ai_client as A
     monkeypatch.setattr(A, "LAST_SESSION_CONTEXT_ENABLED", True)
-    monkeypatch.setattr(A, "LAST_SESSION_MAX_CHARS", 20)
+    monkeypatch.setattr(A, "LAST_SESSION_MAX_CHARS", 150)
 
     class S:
         name = "S"
-        overview = "A" * 100
-        notes = []
+        overview = "A" * 120
+        notes = [[1, "keep me"]]
 
     out = A._build_last_session_context(S())
-    assert len(out) <= 40 and "truncated" in out
+    assert len(out) <= 150
+    assert "truncated" in out     # overview truncated from the tail
+    assert "omitted" in out       # note dropped with the deterministic marker
 
 
 def test_append_user_message_includes_session_block():

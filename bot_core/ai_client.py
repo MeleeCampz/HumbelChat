@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime
 
 import asyncio
 from contextlib import asynccontextmanager
@@ -511,31 +512,82 @@ def _session_field(session, key, default=None):
 def _build_last_session_context(session) -> str:
     """Format the previous session as a compact, size-capped context block.
 
-    Uses the stored overview when present (cheap + stable); otherwise a tail of
-    the session's notes. Returns "" when there is no usable content or the feature
-    is disabled. Never raises — continuity must never break a turn.
+    Includes the stored overview (when present) AND the session's notes —
+    both, not either/or.  The block is a pure function of the session data:
+    no per-turn timestamps, no randomness — the same ended session renders to
+    BYTE-IDENTICAL output on every turn ("smart context": stable across the
+    conversation, unlike query-dependent RAG chunks).  Budget policy under
+    ``LAST_SESSION_MAX_CHARS``: header + overview first (overview truncated
+    from the tail if it alone exceeds the budget), then notes chronologically,
+    dropping OLDEST notes until it fits with a deterministic omission marker.
+
+    Returns "" when there is no usable content or the feature is disabled.
+    Never raises — continuity must never break a turn.
     """
     if not LAST_SESSION_CONTEXT_ENABLED:
         return ""
     try:
         if session is None:
             return ""
-        overview = (_session_field(session, "overview") or "").strip()
-        if overview:
-            body = f"Overview:\n{overview}"
-        else:
-            notes = _session_field(session, "notes") or []
-            # notes are [epoch, text] pairs; keep the most recent few non-empty.
-            texts = [str(n[1]).strip() for n in notes if len(n) > 1 and str(n[1]).strip()]
-            if not texts:
-                return ""
-            body = "Recent notes:\n" + "\n".join(f"- {t}" for t in texts[-6:])
         name = _session_field(session, "name") or "the previous session"
-        block = f"[Previous session — {name}]\n{body}"
+        started = _session_field(session, "started_at")
+        ended = _session_field(session, "ended_at")
+
+        def _fmt_ts(ts) -> str:
+            try:
+                return datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M")
+            except (TypeError, ValueError, OSError):
+                return ""
+
+        when = " → ".join(t for t in (_fmt_ts(started), _fmt_ts(ended)) if t)
+        header = f"[Previous session — {name}" + (f" ({when})" if when else "") + "]"
+
+        overview = str(_session_field(session, "overview") or "").strip()
+        notes_raw = _session_field(session, "notes") or []
+        note_lines = [str(n[1]).strip() for n in notes_raw
+                      if len(n) > 1 and str(n[1]).strip()]
+        if not overview and not note_lines:
+            return ""
+
         max_chars = LAST_SESSION_MAX_CHARS
-        if len(block) > max_chars:
-            block = block[:max_chars].rstrip() + "\n…(truncated)"
-        return block
+        marker = "- …(earlier note(s) omitted — context limit)"
+
+        def _assemble(overview_text: str, keep: list[str], omit_marker: bool) -> str:
+            parts = [header]
+            if overview_text:
+                parts.append(f"Overview:\n{overview_text}")
+            if keep or omit_marker:
+                parts.append("Notes:")
+                if omit_marker:
+                    parts.append(marker)
+                parts.extend(f"- {t}" for t in keep)
+            return "\n".join(parts)
+
+        # Phase 1: everything in; over budget → drop OLDEST notes first.
+        keep = list(note_lines)
+        omit_marker = False
+        while len(_assemble(overview, keep, omit_marker)) > max_chars and keep:
+            keep = keep[1:]  # drop the oldest remaining note
+            omit_marker = True
+
+        block = _assemble(overview, keep, omit_marker)
+        if len(block) <= max_chars:
+            return block
+
+        # Phase 2: still over (notes exhausted or none) → truncate the overview
+        # from the tail to whatever room the header + notes leave.
+        if not overview:
+            suffix = "\n…(truncated)"
+            cut = max(0, max_chars - len(suffix))
+            return block[:cut].rstrip() + suffix
+        without_ov = _assemble("", keep, omit_marker)
+        suffix = " …(truncated)"
+        # +1: the newline that joins the Overview part into the rest.
+        take = max_chars - len(without_ov) - len("Overview:\n") - len(suffix) - 1
+        if take <= 0:
+            return without_ov  # no room for the overview — notes win the budget
+        truncated = overview[:take].rstrip() + suffix
+        return _assemble(truncated, keep, omit_marker)
     except Exception as e:
         log.warning("last-session context build failed: %s", e)
         return ""

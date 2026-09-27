@@ -249,7 +249,7 @@ class TestTranscriptSessionWiring:
 
         # The transcript is stored as its own file in the active session's folder.
         session = S.get_current_session()
-        tdir = Path(session["dir"]) / "transcripts"
+        tdir = Path(session["dir"]) / ".transcripts"
         assert any("hello there" in f.read_text(encoding="utf-8") for f in tdir.iterdir() if f.is_file())
         done_msgs = [m for m in ix._sent if "Transcription done" in m]
         assert done_msgs and any("Added to the active session" in m for m in done_msgs)
@@ -314,10 +314,10 @@ class TestTranscriptSessionWiring:
         await rc._run_transcription(ix, manifest, session_at_stop=old)
 
         # transcript went to the OLD (ended) session's transcripts/ folder...
-        old_tdir = Path(old["dir"]) / "transcripts"
+        old_tdir = Path(old["dir"]) / ".transcripts"
         assert any("hello there" in f.read_text(encoding="utf-8") for f in old_tdir.iterdir() if f.is_file())
         # ...and NOT into the new active session
-        new_tdir = Path(S.get_current_session()["dir"]) / "transcripts"
+        new_tdir = Path(S.get_current_session()["dir"]) / ".transcripts"
         assert not new_tdir.exists() or not any(
             "hello there" in f.read_text(encoding="utf-8") for f in new_tdir.iterdir() if f.is_file()
         )
