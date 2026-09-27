@@ -1,0 +1,21 @@
+# Keep the image lean: no VCS, no venvs, no runtime state (all bind-mounted).
+.git
+.venv
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pi/
+.agents/
+data/
+logs/
+hf-cache/
+.env
+.env.*
+!.env.example
+.migrate-staging/
+discord_ai_bot.egg-info/
+tests/
+.coverage
+coverage.xml
+htmlcov/
+*.log

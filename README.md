@@ -23,7 +23,15 @@ pip install -e '.[rag-vector]'  # + vector retrieval (fastembed)
 pip install -e '.[all]'         # everything
 ```
 
-Or use a startup script (the bot runs in a detached tmux session so it survives browser/terminal shutdowns):
+**Docker (production):** the bot runs in its own container with all runtime
+data bind-mounted from the repo — see [Docker deployment](./docs/docker.md).
+```bash
+docker compose up -d --build   # build + start (also the update flow after git pull)
+docker compose logs -f bot     # live logs
+docker compose down            # stop
+```
+
+Or run without Docker — a startup script keeps the bot in a detached tmux session so it survives browser/terminal shutdowns:
 ```bash
 ./botctl.sh start      # or: restart | stop | status | logs
 ```
@@ -31,6 +39,7 @@ Or use a startup script (the bot runs in a detached tmux session so it survives 
 
 ## Docs
 
+- [Docker deployment](./docs/docker.md) — production container setup, ops commands, KB database access
 - [Configuration](./docs/configuration.md) — env vars, response-length/token defaults, and fallback behavior
 - [Embeds](./docs/embeds.md) — structured Discord-embed rendering for /ai replies
 - [Characters](./docs/characters.md) — `characters.json` format and per-character settings
