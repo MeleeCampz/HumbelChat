@@ -506,6 +506,105 @@ class TestOverviewSourceAssembly:
         assert len(refs) == 2
 
 
+class TestMergedSessionLog:
+    """#11 follow-up: at end, the AI merges all player logs into ONE canonical
+    session log that replaces the mechanical full-text copy in notes.md."""
+
+    @pytest.mark.asyncio
+    async def test_no_documents_returns_none(self):
+        from commands.session_commands import _generate_merged_log
+        S.start_session(name="Empty")
+        assert await _generate_merged_log(S.get_current_session(), None, 1) is None
+
+    @pytest.mark.asyncio
+    async def test_ai_failure_returns_none(self):
+        """Backend down → None → the mechanical fallback section is kept."""
+        from commands.session_commands import _generate_merged_log
+        S.start_session(name="Down")
+        S.add_document("some log body", title="a.md")
+        p1, p2 = _mock_ai(fail=True)
+        with p1, p2:
+            assert await _generate_merged_log(S.get_current_session(), None, 1) is None
+
+    @pytest.mark.asyncio
+    async def test_success_returns_merged_text(self):
+        from commands.session_commands import _generate_merged_log
+        S.start_session(name="Merge")
+        S.add_document("Player A: we looted the cave.", title="a.md")
+        p1, p2 = _mock_ai(content="## The Cave\nCombined log text.")
+        with p1, p2:
+            out = await _generate_merged_log(S.get_current_session(), None, 1)
+        assert out == "## The Cave\nCombined log text."
+
+    @pytest.mark.asyncio
+    async def test_custom_merge_prompt_respected(self, monkeypatch):
+        import commands.session_commands as sc
+        from commands.session_commands import _generate_merged_log
+        S.start_session(name="CustomMerge")
+        S.add_document("body", title="a.md")
+        inst = MagicMock()
+        resp = MagicMock()
+        resp.choices = [MagicMock(message=MagicMock(content="merged"))]
+        inst.chat.completions.create = AsyncMock(return_value=resp)
+        monkeypatch.setattr(sc, "_make_client", lambda: inst)
+        monkeypatch.setattr(sc, "_validate_model", AsyncMock(return_value="test-model"))
+        monkeypatch.setattr(sc, "SESSION_MERGE_PROMPT", "MY MERGE PROMPT")
+
+        await _generate_merged_log(S.get_current_session(), None, 1)
+
+        sys_msg = inst.chat.completions.create.await_args.kwargs["messages"][0]
+        assert sys_msg["content"] == "MY MERGE PROMPT"
+
+    @pytest.mark.asyncio
+    async def test_end_session_writes_merged_log_into_notes(self, ix):
+        from commands.session_commands import handle_end_session
+        S.start_session(name="EndMerge")
+        S.add_document("Player A: we looted the cave.", title="a.md")
+        # overview call first, merge call second — distinguish by content
+        inst = MagicMock()
+        resp_ov = MagicMock()
+        resp_ov.choices = [MagicMock(message=MagicMock(content="Short overview."))]
+        resp_mg = MagicMock()
+        resp_mg.choices = [MagicMock(message=MagicMock(
+            content="## The Cave\nCombined: we looted the cave."))]
+        inst.chat.completions.create = AsyncMock(
+            side_effect=[resp_ov, resp_mg])
+        import commands.session_commands as sc
+        with patch.object(sc, "_make_client", return_value=inst), \
+             patch.object(sc, "_validate_model", new=AsyncMock(return_value="test-model")):
+            await handle_end_session(ix)
+
+        ended = S.get_last_session()
+        assert ended["merged_log"].startswith("## The Cave")
+        content = pathlib.Path(ended["file"]).read_text(encoding="utf-8")
+        assert "## Session Log (combined from all uploads — AI-merged)" in content
+        assert "Combined: we looted the cave." in content
+        assert "## Documents" not in content  # mechanical copy replaced
+        assert any("📜" in m for m in ix._sent)
+
+    @pytest.mark.asyncio
+    async def test_end_session_merge_failure_keeps_mechanical(self, ix):
+        from commands.session_commands import handle_end_session
+        S.start_session(name="EndMergeFail")
+        S.add_document("Player A: we looted the cave.", title="a.md")
+        inst = MagicMock()
+        resp_ov = MagicMock()
+        resp_ov.choices = [MagicMock(message=MagicMock(content="Short overview."))]
+        inst.chat.completions.create = AsyncMock(
+            side_effect=[resp_ov, RuntimeError("merge backend down")])
+        import commands.session_commands as sc
+        with patch.object(sc, "_make_client", return_value=inst), \
+             patch.object(sc, "_validate_model", new=AsyncMock(return_value="test-model")):
+            await handle_end_session(ix)
+
+        ended = S.get_last_session()
+        assert ended["merged_log"] is None
+        content = pathlib.Path(ended["file"]).read_text(encoding="utf-8")
+        # fallback: the raw document text is still indexed via ## Documents
+        assert "## Documents" in content
+        assert "Player A: we looted the cave." in content
+
+
 class TestOverviewPromptIncludesSources:
     """Regression: the AI prompt must contain the session's own documents, and the
     system prompt (not hard-coded bot logic) must make the model determine the
@@ -546,7 +645,9 @@ class TestOverviewPromptIncludesSources:
 
         await handle_end_session(ix)
 
-        messages = inst.chat.completions.create.await_args.kwargs["messages"]
+        # First AI call is the overview (the second, when documents exist,
+        # is the session-log merge — a different prompt/user message).
+        messages = inst.chat.completions.create.await_args_list[0].kwargs["messages"]
         system_content = messages[0]["content"]
         user_content = messages[1]["content"]
         # 1) the session document's verbatim text feeds the overview

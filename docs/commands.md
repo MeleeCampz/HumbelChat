@@ -85,7 +85,7 @@ Schedule a one-time reminder (minimum 10 seconds ahead); the bot posts a `⏰ Re
 
 ### Sessions
 
-Sessions are a global (bot-wide) bookkeeping concept: at most one session is active at a time. Each session gets its own folder under `<KB_PATH>/session_notes/` whose `notes.md` combines notes + the full text of all uploaded documents/transcripts + the overview — that single file is part of the RAG-enabled knowledge base and can be edited on disk at any time (raw uploads/transcripts are kept in hidden `.attachments/` / `.transcripts/` folders, out of RAG). When a session has ended, its overview + notes are also attached to every AI turn as a stable last-session context block (see `docs/rag.md`).
+Sessions are a global (bot-wide) bookkeeping concept: at most one session is active at a time. Each session gets its own folder under `<KB_PATH>/session_notes/` whose `notes.md` combines notes + the AI-merged session log (all player uploads combined into one de-duplicated record at `/end_session`) + the overview — that single file is part of the RAG-enabled knowledge base and can be edited on disk at any time (raw uploads/transcripts are kept in hidden `.attachments/` / `.transcripts/` folders, out of RAG). When a session has ended, its overview + notes are also attached to every AI turn as a stable last-session context block (see `docs/rag.md`).
 
 ### `/start_session`
 
@@ -106,7 +106,7 @@ On success the bot also delivers: the AI overview of a previously ended session 
 /end_session [name: <custom_name>]
 ```
 
-End the current session. The bot generates an AI overview from the session's own documents (the raw files in `.attachments/` and `.transcripts/`), its notes, and the recent chat in this channel (using the active character's model), appends it to the session file, and posts it here. The overview is written in the language of the session's own sources — the model determines this itself from the language rule in the system prompt (the built-in default prompt is written in English). The optional `name` renames the session in its file. If the AI backend is unavailable, a plain-text overview listing the notes is written instead.
+End the current session. The bot (1) generates an AI overview from the session's own documents (the raw files in `.attachments/` and `.transcripts/`), its notes, and the recent chat in this channel, and (2) merges all player uploads/transcripts into ONE de-duplicated, chronological **session log** that becomes the session's RAG content in `notes.md` (AI down → the mechanical full-text copy is kept instead). The overview (using the active character's model), appends it to the session file, and posts it here. The overview is written in the language of the session's own sources — the model determines this itself from the language rule in the system prompt (the built-in default prompt is written in English). The optional `name` renames the session in its file. If the AI backend is unavailable, a plain-text overview listing the notes is written instead.
 
 The system prompt that drives the overview is customizable via `SESSION_SUMMARY_PROMPT` in `.env` (see [Configuration](./configuration.md)) — leave it empty to use the built-in default.
 
@@ -135,7 +135,7 @@ Queue a reminder that is delivered when the **next** session starts (in the chan
 /session_notes action: add file: <.txt or .md file>
 ```
 
-The whole document is stored as one raw file in the session's hidden `.attachments/` folder (out of RAG) and its full text is combined into the session's single RAG-indexed `notes.md` — same treatment as voice transcripts (`.transcripts/`). Only `.txt` / `.md` are accepted (other types are rejected), the file must be valid UTF-8 and ≤ 2 MB, and a file takes precedence over an inline `note` when both are supplied.
+The whole document is stored as one raw file in the session's hidden `.attachments/` folder (out of RAG); at `/end_session` the AI merges all such uploads into the session's single combined log inside the RAG-indexed `notes.md` — same treatment as voice transcripts (`.transcripts/`). Only `.txt` / `.md` are accepted (other types are rejected), the file must be valid UTF-8 and ≤ 2 MB, and a file takes precedence over an inline `note` when both are supplied.
 
 ### Voice recording
 
