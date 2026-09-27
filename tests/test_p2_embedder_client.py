@@ -186,5 +186,52 @@ class TestPerBatchFallback:
                 await emb.encode(["a", "b", "c", "d"])
 
 
+class TestMalformedResponseLength:
+    """A backend that returns FEWER vectors than inputs (malformed /embeddings
+    response) must raise EmbeddingError — not an unclassified KeyError at
+    reconstruction — so the normal failure paths apply: per-batch local CPU
+    fallback when enabled, keyword-only retrieval otherwise.
+    """
+
+    @staticmethod
+    def _short_factory(recorded):
+        class _ShortClient(_FakeClient):
+            async def post(self, url, json=None, headers=None):
+                # Malformed: return only ONE vector for every batch, no matter
+                # how many inputs were sent.
+                return _Resp([[0.2] * 8])
+
+        def factory(*a, **k):
+            recorded.append(k)
+            return _ShortClient(*a, **k)
+
+        return factory
+
+    @pytest.mark.asyncio
+    async def test_short_response_without_fallback_raises_embedding_error(self):
+        recorded: list[dict] = []
+        emb = E.Embedder(model_name="m", batch_size=4, fallback_local=False)
+        with patch.object(E.httpx, "AsyncClient", self._short_factory(recorded)):
+            with pytest.raises(E.EmbeddingError) as ei:
+                await emb.encode(["a", "b"])
+        # Classified error with a useful message — not a KeyError.
+        assert "malformed" in str(ei.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_short_response_falls_back_locally(self):
+        recorded: list[dict] = []
+        emb = E.Embedder(model_name="m", batch_size=4, fallback_local=True)
+        with patch.object(E.httpx, "AsyncClient", self._short_factory(recorded)), \
+                patch.object(E, "_local_available", return_value=True), \
+                patch.object(
+                    E.Embedder, "_local_encode",
+                    lambda self, texts: [[0.9] * 8 for _ in texts],
+                ):
+            vecs = await emb.encode(["a", "b"])
+        # Both vectors came from the local fallback, order preserved.
+        assert len(vecs) == 2
+        assert vecs[0] == [0.9] * 8 and vecs[1] == [0.9] * 8
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

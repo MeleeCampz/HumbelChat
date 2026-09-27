@@ -223,11 +223,22 @@ class Embedder:
             batch = unique_texts[i : i + self.batch_size]
             try:
                 vectors = await self._call_api(batch)
+                # A malformed backend response (fewer ``data`` entries than
+                # inputs) would otherwise surface as an unclassified KeyError at
+                # reconstruction — classifying it here routes it through the same
+                # failure path as a failed call: per-batch local CPU fallback when
+                # enabled, EmbeddingError otherwise.
+                if len(vectors) != len(batch):
+                    raise EmbeddingError(
+                        f"Embedding backend returned {len(vectors)} vector(s) for "
+                        f"{len(batch)} input(s) — malformed /embeddings response"
+                    )
             except EmbeddingError as exc:
                 # Per-batch fallback: a single bad batch (e.g. very long chunks that
-                # time out) degrades only itself to local CPU instead of forcing the
-                # whole build off the backend. Local vectors are geometrically
-                # identical to the backend's (same model, L2-normalized), so mixing is safe.
+                # time out, or a malformed short response) degrades only itself to
+                # local CPU instead of forcing the whole build off the backend.
+                # Local vectors are geometrically identical to the backend's (same
+                # model, L2-normalized), so mixing is safe.
                 if not (self._fallback_local and _local_available()):
                     raise
                 logger.warning(
