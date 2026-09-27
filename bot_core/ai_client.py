@@ -510,18 +510,18 @@ def _session_field(session, key, default=None):
 
 
 def _build_last_session_context(session) -> str:
-    """Format the previous session as a compact, size-capped context block.
+    """Format the previous session as a BRIEF, size-capped context block.
 
-    Includes the stored overview (when present) AND the session's notes —
-    both, not either/or.  The block is a pure function of the session data:
-    no per-turn timestamps, no randomness — the same ended session renders to
-    BYTE-IDENTICAL output on every turn ("smart context": stable across the
-    conversation, unlike query-dependent RAG chunks).  Budget policy under
-    ``LAST_SESSION_MAX_CHARS``: header + overview first (overview truncated
-    from the tail if it alone exceeds the budget), then notes chronologically,
-    dropping OLDEST notes until it fits with a deterministic omission marker.
+    Overview only — deliberately NO notes / merged log: detailed session
+    content is retrieved on demand by RAG from the indexed ``notes.md``
+    (one file per session), so the proactive block only orients the model.
+    The block is a pure function of the session data: no per-turn timestamps,
+    no randomness — the same ended session renders to BYTE-IDENTICAL output
+    on every turn ("smart context": stable across the conversation, unlike
+    query-dependent RAG chunks).  If the overview alone exceeds
+    ``LAST_SESSION_MAX_CHARS`` it is truncated from the tail.
 
-    Returns "" when there is no usable content or the feature is disabled.
+    Returns "" when there is no stored overview or the feature is disabled.
     Never raises — continuity must never break a turn.
     """
     if not LAST_SESSION_CONTEXT_ENABLED:
@@ -543,51 +543,19 @@ def _build_last_session_context(session) -> str:
         header = f"[Previous session — {name}" + (f" ({when})" if when else "") + "]"
 
         overview = str(_session_field(session, "overview") or "").strip()
-        notes_raw = _session_field(session, "notes") or []
-        note_lines = [str(n[1]).strip() for n in notes_raw
-                      if len(n) > 1 and str(n[1]).strip()]
-        if not overview and not note_lines:
+        if not overview:
             return ""
 
+        block = f"{header}\nOverview:\n{overview}"
         max_chars = LAST_SESSION_MAX_CHARS
-        marker = "- …(earlier note(s) omitted — context limit)"
-
-        def _assemble(overview_text: str, keep: list[str], omit_marker: bool) -> str:
-            parts = [header]
-            if overview_text:
-                parts.append(f"Overview:\n{overview_text}")
-            if keep or omit_marker:
-                parts.append("Notes:")
-                if omit_marker:
-                    parts.append(marker)
-                parts.extend(f"- {t}" for t in keep)
-            return "\n".join(parts)
-
-        # Phase 1: everything in; over budget → drop OLDEST notes first.
-        keep = list(note_lines)
-        omit_marker = False
-        while len(_assemble(overview, keep, omit_marker)) > max_chars and keep:
-            keep = keep[1:]  # drop the oldest remaining note
-            omit_marker = True
-
-        block = _assemble(overview, keep, omit_marker)
         if len(block) <= max_chars:
             return block
-
-        # Phase 2: still over (notes exhausted or none) → truncate the overview
-        # from the tail to whatever room the header + notes leave.
-        if not overview:
-            suffix = "\n…(truncated)"
-            cut = max(0, max_chars - len(suffix))
-            return block[:cut].rstrip() + suffix
-        without_ov = _assemble("", keep, omit_marker)
         suffix = " …(truncated)"
-        # +1: the newline that joins the Overview part into the rest.
-        take = max_chars - len(without_ov) - len("Overview:\n") - len(suffix) - 1
+        # +1: the newline that joins the header and the Overview part.
+        take = max_chars - len(header) - 1 - len("Overview:\n") - len(suffix)
         if take <= 0:
-            return without_ov  # no room for the overview — notes win the budget
-        truncated = overview[:take].rstrip() + suffix
-        return _assemble(truncated, keep, omit_marker)
+            return header[:max_chars]  # pathological: name alone fills budget
+        return f"{header}\nOverview:\n{overview[:take].rstrip()}{suffix}"
     except Exception as e:
         log.warning("last-session context build failed: %s", e)
         return ""

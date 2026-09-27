@@ -291,8 +291,10 @@ def test_build_last_session_context_uses_overview(monkeypatch):
     assert "Overview:" in out and "dragons" in out and "Session 1" in out
 
 
-def test_build_last_session_context_includes_overview_and_notes(monkeypatch):
-    """#7: the block carries BOTH the overview and the notes (not either/or)."""
+def test_build_last_session_context_is_overview_only(monkeypatch):
+    """#7: the block is a BRIEF orientation — overview only.  Notes / merged
+    log are deliberately NOT attached; RAG retrieves session detail on demand
+    from the indexed notes.md."""
     from bot_core import ai_client as A
     monkeypatch.setattr(A, "LAST_SESSION_CONTEXT_ENABLED", True)
 
@@ -303,10 +305,13 @@ def test_build_last_session_context_includes_overview_and_notes(monkeypatch):
 
     out = A._build_last_session_context(S())
     assert "Overview:" in out and "Dragons were slain." in out
-    assert "Notes:" in out and "first note" in out and "second note" in out
+    assert "Notes:" not in out
+    assert "first note" not in out and "second note" not in out
 
 
-def test_build_last_session_context_notes_only(monkeypatch):
+def test_build_last_session_context_no_overview_returns_empty(monkeypatch):
+    """#7: without a stored overview there is nothing brief to attach
+    (notes alone no longer produce a block)."""
     from bot_core import ai_client as A
     monkeypatch.setattr(A, "LAST_SESSION_CONTEXT_ENABLED", True)
 
@@ -315,9 +320,7 @@ def test_build_last_session_context_notes_only(monkeypatch):
         overview = None
         notes = [[1, "first"], [2, "second"]]
 
-    out = A._build_last_session_context(S())
-    assert "Notes:" in out and "first" in out and "second" in out
-    assert "Overview:" not in out
+    assert A._build_last_session_context(S()) == ""
 
 
 def test_build_last_session_context_is_byte_stable(monkeypatch):
@@ -336,28 +339,24 @@ def test_build_last_session_context_is_byte_stable(monkeypatch):
     assert A._build_last_session_context(S()) == A._build_last_session_context(S())
 
 
-def test_build_last_session_context_drops_oldest_notes_over_budget(monkeypatch):
-    """#7: over the char budget, OLDEST notes are dropped first (the kept set
-    is a chronological suffix) with a deterministic marker; newest notes and
-    the overview survive."""
-    import re as _re
+def test_build_last_session_context_truncates_overview_over_budget(monkeypatch):
+    """#7: over the char budget the overview is truncated from the TAIL with a
+    deterministic marker; the block stays within budget and byte-stable."""
     from bot_core import ai_client as A
     monkeypatch.setattr(A, "LAST_SESSION_CONTEXT_ENABLED", True)
-    monkeypatch.setattr(A, "LAST_SESSION_MAX_CHARS", 180)
+    monkeypatch.setattr(A, "LAST_SESSION_MAX_CHARS", 120)
 
     class S:
         name = "S"
-        overview = "Ov."
-        notes = [[i, f"note {i} " + "x" * 20] for i in range(1, 6)]
+        overview = "Head. " + "x" * 200 + " Tail."
+        notes = [[1, "note"]]
 
     out = A._build_last_session_context(S())
-    assert len(out) <= 180
-    assert "Ov." in out                      # overview kept
-    assert "note 5" in out                   # newest note kept
-    assert "omitted" in out                  # deterministic omission marker
-    kept = [int(m) for m in _re.findall(r"note (\d)", out)]
-    assert len(kept) < 5                     # something was dropped
-    assert kept == list(range(kept[0], 6))   # chronological suffix, no holes
+    assert len(out) <= 120
+    assert out.startswith("[Previous session — S")
+    assert "Head." in out            # head of the overview kept
+    assert "Tail." not in out        # tail truncated away
+    assert "…(truncated)" in out     # deterministic marker
     assert A._build_last_session_context(S()) == out  # still byte-stable
 
 
@@ -385,8 +384,8 @@ def test_build_last_session_context_disabled_or_none(monkeypatch):
 
 
 def test_build_last_session_context_capped(monkeypatch):
-    """Huge overview vs. small budget: notes are dropped first (phase 1), then
-    the overview is truncated from the tail (phase 2) — always ≤ cap."""
+    """Huge overview vs. small budget: the overview is truncated from the
+    tail — always ≤ cap, notes never attached."""
     from bot_core import ai_client as A
     monkeypatch.setattr(A, "LAST_SESSION_CONTEXT_ENABLED", True)
     monkeypatch.setattr(A, "LAST_SESSION_MAX_CHARS", 150)
@@ -399,7 +398,7 @@ def test_build_last_session_context_capped(monkeypatch):
     out = A._build_last_session_context(S())
     assert len(out) <= 150
     assert "truncated" in out     # overview truncated from the tail
-    assert "omitted" in out       # note dropped with the deterministic marker
+    assert "keep me" not in out   # notes are no longer attached at all
 
 
 def test_append_user_message_includes_session_block():
