@@ -58,17 +58,43 @@ class TestSingleInstanceLock:
         assert int(stale.read_text()) == os.getpid()
 
     def test_live_pidfile_causes_exit(self, tmp_path, monkeypatch):
-        """If the PID file points to a *live* process, the function
+        """If the PID file points to a *live* process (not us), the function
         must call sys.exit(1)."""
+        import subprocess
+        import sys as _sys
+
         import main
 
-        live = tmp_path / ".bot.pid"
-        live.write_text(str(os.getpid()))  # our own PID is alive
-        monkeypatch.setattr(main, "PIDFILE", live)
+        # A genuinely different live process (our own PID is treated as a
+        # stale self-file — see test_own_pidfile_is_treated_as_stale).
+        proc = subprocess.Popen([_sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            live = tmp_path / ".bot.pid"
+            live.write_text(str(proc.pid))
+            monkeypatch.setattr(main, "PIDFILE", live)
 
-        with pytest.raises(SystemExit) as exc:
-            main._enforce_single_instance()
-        assert exc.value.code == 1
+            with pytest.raises(SystemExit) as exc:
+                main._enforce_single_instance()
+            assert exc.value.code == 1
+        finally:
+            proc.terminate()
+            proc.wait()
+
+    def test_own_pidfile_is_treated_as_stale(self, tmp_path, monkeypatch):
+        """Container PID-1 regression: when the bot runs as PID 1 and the
+        writable layer survives a `docker compose restart`, the stale file
+        holds our OWN pid — os.kill(pid, 0) would always 'succeed' against
+        ourselves and the bot would exit-loop forever.  The file must be
+        treated as stale and the lock (re-)acquired."""
+        import main
+
+        own = tmp_path / ".bot.pid"
+        own.write_text(str(os.getpid()))
+        monkeypatch.setattr(main, "PIDFILE", own)
+
+        main._enforce_single_instance()  # must NOT raise SystemExit
+
+        assert int(own.read_text()) == os.getpid()
 
 
 # ── §1.10  No file-handler pollution in tests ───────────────────────────

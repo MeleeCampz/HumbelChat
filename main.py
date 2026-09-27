@@ -712,6 +712,15 @@ def _enforce_single_instance() -> None:
             except (OSError, ValueError):
                 PIDFILE.unlink(missing_ok=True)
                 continue
+            if old_pid == os.getpid():
+                # Stale file from a previous life of THIS process identity —
+                # only possible in a container where the bot runs as PID 1
+                # and the writable layer (with .bot.pid) survives a
+                # `docker compose restart`: os.kill(1, 0) would always
+                # "succeed" against ourselves and loop forever.
+                log.info("PID file holds our own PID (%d) — treating as stale.", old_pid)
+                PIDFILE.unlink(missing_ok=True)
+                continue
             if _pid_is_alive(old_pid):
                 log.error("Another bot instance (PID %d) is already running. Exiting.", old_pid)
                 sys.exit(1)
