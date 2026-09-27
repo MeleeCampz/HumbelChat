@@ -263,6 +263,50 @@ def _render_table(header: list[str], rows: list[list[str]]) -> tuple[str, list[s
     return name, pieces
 
 
+_HTML_TAG_RE = re.compile(r"</?[a-zA-Z][^>]*>")
+
+
+def _html_to_pipe_table(region: str) -> str:
+    """Convert an HTML ``<table>`` region into a GFM pipe table.
+
+    Models emit HTML tables when told not to use pipe tables; Discord renders
+    raw HTML as literal text.  Re-emitting the data as a pipe table lets the
+    normal pipeline render it (column groups that fit the device).
+    """
+    rows: list[list[str]] = []
+    for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", region, flags=re.S | re.I):
+        cells = [re.sub(r"<[^>]+>", "", c).strip()
+                 for c in re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", tr,
+                                     flags=re.S | re.I)]
+        if any(cells):
+            rows.append(cells)
+    if len(rows) < 2:
+        return _HTML_TAG_RE.sub("", region).strip()
+    width = max(len(r) for r in rows)
+    lines = []
+    for i, r in enumerate(rows):
+        r = r + [""] * (width - len(r))
+        lines.append("| " + " | ".join(r) + " |")
+        if i == 0:
+            lines.append("|" + " --- |" * width)
+    return "\n".join(lines)
+
+
+def _sanitize_html(text: str) -> str:
+    """Convert HTML tables to pipe tables; strip any other stray tags.
+
+    Discord has no HTML support — anything left would render as raw markup.
+    """
+    if "<table" not in text.lower():
+        if _HTML_TAG_RE.search(text):
+            return _HTML_TAG_RE.sub("", text)
+        return text
+    out = re.sub(r"<table.*?</table>", lambda m: _html_to_pipe_table(m.group(0)),
+                 text, flags=re.S | re.I)
+    # Unclosed/malformed <table> (no closing tag): strip whatever remains.
+    return _HTML_TAG_RE.sub("", out)
+
+
 def _fenced_table_payload(
     code: str,
 ) -> tuple[list[str], list[list[str]]] | None:
@@ -553,6 +597,7 @@ def _build_embed_impl(
     if not text or not text.strip():
         return None
 
+    text = _sanitize_html(text)
     blocks = _extract_blocks(text)
     if not blocks:
         return None

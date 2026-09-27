@@ -656,6 +656,44 @@ class TestFencedPipeTableSafetyNet:
         assert "print(roll_dice(20, 3))" in blob and "```" in blob
 
 
+class TestHtmlTableSafetyNet:
+    """When pipe tables are forbidden the model falls back to raw HTML
+    (<table>...), which Discord renders as literal markup.  HTML tables must
+    be converted to pipe tables (→ proper rendering); stray tags stripped."""
+
+    HTML_TABLE = (
+        "<table>\n<thead><tr><th>Armor</th><th>AC</th><th>Cost</th></tr></thead>\n"
+        "<tbody>\n"
+        "<tr><td>Hide Armor</td><td>12 + Dex (max 2)</td><td>10 GP</td></tr>\n"
+        "<tr><td>Chain Shirt</td><td>13 + Dex (max 2)</td><td>50 GP</td></tr>\n"
+        "</tbody>\n</table>"
+    )
+
+    def test_html_table_converted_and_rendered(self):
+        from utils.embed_formatter import build_embeds_for_channel
+        embeds = build_embeds_for_channel(
+            "Medium armor:\n\n" + self.HTML_TABLE, title_override="Marvin #12")
+        assert embeds
+        blob = "\n".join(
+            [(e.description or "") for e in embeds]
+            + [f.value for e in embeds for f in e.fields]
+        )
+        assert "Hide Armor" in blob and "Chain Shirt" in blob
+        assert "<table" not in blob.lower() and "<td" not in blob.lower()
+
+    def test_stray_tags_stripped(self):
+        from utils.embed_formatter import build_embeds_for_channel
+        text = ("Some <b>bold-ish</b> reply with stray tags. "
+                "Second line here to clear the usefulness gate of the embed.")
+        embeds = build_embeds_for_channel(text, title_override="Marvin #12")
+        assert embeds
+        blob = "\n".join(
+            [(e.description or "") for e in embeds]
+            + [f.value for e in embeds for f in e.fields]
+        )
+        assert "<b>" not in blob and "bold-ish" in blob
+
+
 class TestNoEmptyFieldNames:
     """Discord's API SILENTLY DROPS fields with an empty name — stat-block
     tables (fenced code after prose) and unheaded bullet lists vanished from
