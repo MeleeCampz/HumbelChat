@@ -33,6 +33,7 @@ from config.settings import (
     INFER_API_KEY,
     DEFAULT_MODEL,
     DEFAULT_SYSTEM_PROMPT,
+    STAT_BLOCK_FORMAT_RULES,
     CONTEXT_WINDOW,
     REQUEST_TIMEOUT,
     MAX_TOKENS,
@@ -502,6 +503,18 @@ class _AIRequestContext:
         self.timeout_sec = timeout_sec
 
 
+def _compose_system_prompt(char_obj) -> str:
+    """Persona prompt + the global response-format appendix (stat blocks).
+
+    The appendix lives in settings (env-overridable via ``STAT_BLOCK_FORMAT_RULES``)
+    so characters.json stays pure persona; every character gets the same
+    formatting rules.
+    """
+    base = getattr(char_obj, "system_prompt", None) or DEFAULT_SYSTEM_PROMPT \
+        or "You are a helpful AI assistant."
+    return base + STAT_BLOCK_FORMAT_RULES
+
+
 def _session_field(session, key, default=None):
     """Read *key* from a session that may be a dict (live) or an object (tests)."""
     if isinstance(session, dict):
@@ -632,7 +645,7 @@ async def _build_ai_request(
     # channel's active character when the caller did not pass one.
     lookup_key = char_key or get_active_char_key(guild_id, channel_id)
     char_obj = get_character(lookup_key) or default_character()
-    system_p = getattr(char_obj, "system_prompt", None) or DEFAULT_SYSTEM_PROMPT or "You are a helpful AI assistant."
+    system_p = _compose_system_prompt(char_obj)
 
     # ── RAG context ──────────────────────────────────────────────────
     rag_context = ""

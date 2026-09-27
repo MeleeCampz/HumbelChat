@@ -401,6 +401,26 @@ def test_build_last_session_context_capped(monkeypatch):
     assert "keep me" not in out   # notes are no longer attached at all
 
 
+def test_compose_system_prompt_appends_stat_block_rules(monkeypatch):
+    """Every character's system prompt gets the stat-block format appendix;
+    missing persona falls back to the default, rules still appended."""
+    from bot_core import ai_client as A
+
+    class C:
+        system_prompt = "You are Marvin."
+
+    out = A._compose_system_prompt(C())
+    assert out.startswith("You are Marvin.")
+    assert "<stat-block-format>" in out and out.endswith("</stat-block-format>")
+    assert out == C().system_prompt + A.STAT_BLOCK_FORMAT_RULES  # byte-exact append
+
+    class Bare:  # no system_prompt attribute at all
+        pass
+
+    fallback = A._compose_system_prompt(Bare())
+    assert "helpful AI assistant" in fallback and "<stat-block-format>" in fallback
+
+
 def test_append_user_message_includes_session_block():
     from bot_core import ai_client as A
     out = A._append_user_message("Bob", "hi", rag_context="RAG", session_context="SESS")
