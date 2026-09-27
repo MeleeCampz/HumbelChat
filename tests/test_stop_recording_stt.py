@@ -183,6 +183,28 @@ class TestStartRecordingOrdering:
         assert busy.started is False
         assert any("already in progress" in m for m in ix._sent)
 
+    @pytest.mark.asyncio
+    async def test_get_recorder_failure_does_not_raise_nameerror(self, env, monkeypatch):
+        """If _get_recorder() itself raises (e.g. Forbidden), the except handler
+        must not blow up on an unbound ``recorder`` — the user should get the
+        real error message, not a NameError."""
+        _, ix, bot, _ = env
+
+        from types import SimpleNamespace
+
+        def boom(b):
+            # discord.py 2.x: HTTPException(response, message) — response must
+            # carry a .status attribute.
+            resp = SimpleNamespace(status=403, reason="Forbidden")
+            raise rc.discord.Forbidden(resp, "no perms")
+
+        monkeypatch.setattr(rc, "_get_recorder", boom)
+        ix.user = SimpleNamespace(voice=SimpleNamespace(channel=SimpleNamespace(id=7, name="vc")))
+
+        # Must NOT raise NameError (or anything) — just a friendly message.
+        await rc.handle_start_recording(ix)
+        assert any("permission" in m for m in ix._sent)
+
 
 class TestRunTranscriptionDelivery:
     @pytest.mark.asyncio

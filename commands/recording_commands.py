@@ -137,6 +137,10 @@ async def handle_start_recording(interaction: discord.Interaction) -> None:
     # Joining voice can take a few seconds; defer so we don't blow the 15 s window.
     await interaction.response.defer()
 
+    # Initialise BEFORE the try: both except handlers call recorder.discard(),
+    # and if _get_recorder() itself raises, an unbound name would turn the real
+    # error into a confusing NameError in the handler.
+    recorder = None
     try:
         recorder = _get_recorder(bot)
         if recorder.is_recording:
@@ -161,14 +165,16 @@ async def handle_start_recording(interaction: discord.Interaction) -> None:
 
         await _ensure_bot_in_channel(bot, interaction.guild_id, channel)
     except discord.Forbidden:
-        recorder.discard()
+        if recorder is not None:
+            recorder.discard()
         await interaction.followup.send(
             "⚠️ I don't have permission to join that voice channel (need **Connect** and **Speak**).",
         )
         return
     except Exception as e:  # pragma: no cover - defensive
         log.exception("Failed to start voice recording")
-        recorder.discard()
+        if recorder is not None:
+            recorder.discard()
         await interaction.followup.send(f"⚠️ Failed to start recording: {e}")
         return
 
