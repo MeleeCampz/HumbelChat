@@ -263,6 +263,33 @@ def _render_table(header: list[str], rows: list[list[str]]) -> tuple[str, list[s
     return name, pieces
 
 
+def _fenced_table_payload(
+    code: str,
+) -> tuple[list[str], list[list[str]]] | None:
+    """Detect a pipe table smuggled inside a code fence → ``(header, rows)``.
+
+    Models often fence tables to "preserve alignment", but fenced code is
+    rendered verbatim — wide lines wrap mid-column and the result is
+    unreadable.  Re-routing such blocks through ``_render_table`` gives
+    column-group splitting that fits the device width.  Returns ``None`` for
+    genuine code (fewer than half the lines are pipe rows).
+    """
+    lines = [l for l in code.splitlines() if l.strip()]
+    piped = [l for l in lines if l.count("|") >= 2]
+    if len(piped) < 2 or len(piped) * 2 < len(lines):
+        return None
+    data: list[list[str]] = []
+    for l in piped:
+        if _is_separator_row(l):
+            continue
+        cells = _split_table_row(l)
+        if any(c for c in cells):
+            data.append(cells)
+    if len(data) < 2:
+        return None
+    return data[0], data[1:]
+
+
 def _split_code_block(code: str, limit: int = MAX_FIELD_VALUE) -> list[str]:
     """Split a fenced code block into self-contained fenced pieces.
 
@@ -644,6 +671,16 @@ def _build_embed_impl(
             continue
         elif kind == "code":
             code = str(payload)
+            smuggled = _fenced_table_payload(code)
+            if smuggled is not None:
+                # A fenced PIPE TABLE — re-render it properly (column groups
+                # that fit the device) instead of shipping it verbatim.
+                header, rows = smuggled
+                name, pieces = _render_table(list(header), [list(r) for r in rows])
+                for idx, value in enumerate(pieces):
+                    nm = _fold_name(name if idx == 0 else f"{name} (cont.)")
+                    add_field(nm, value, False)
+                continue
             # Preserve the verbatim block as self-contained fenced piece(s);
             # a long block splits into continuation fields instead of being
             # cut mid-fence (which would render as raw Markdown).
