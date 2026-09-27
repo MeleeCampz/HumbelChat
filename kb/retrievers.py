@@ -291,7 +291,13 @@ _GERMAN_STOPWORDS = frozenset({
 
 
 def _looks_german(query: str) -> bool:
-    """Cheap heuristic: umlauts or ≥2 German stopwords ⇒ treat as German."""
+    """Cheap heuristic: umlauts or ≥2 German stopwords ⇒ treat as German.
+
+    Note (2026-09-27): with the default ``RAG_REWRITE_ALL_QUERIES=1`` every
+    query is rewritten, so this heuristic only matters behind the
+    ``RAG_REWRITE_ALL_QUERIES=0`` kill-switch — there it re-enables the old
+    German/low-confidence-only rewrite trigger.
+    """
     if _UMLAUT_RE.search(query):
         return True
     tokens = re.findall(r"[a-zäöüß]+", query.lower())
