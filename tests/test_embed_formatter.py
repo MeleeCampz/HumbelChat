@@ -612,6 +612,50 @@ class TestCodeBlockSplitting:
 #  send_long_response_embedded — delivery helper
 # ════════════════════════════════════════════════════════════════════════
 
+class TestFencedPipeTableSafetyNet:
+    """Models often fence pipe tables to 'preserve alignment'; fenced code is
+    verbatim and wraps unreadably.  Such blocks must be re-routed through the
+    table renderer (column-group pieces), genuine code stays verbatim."""
+
+    WIDE_TABLE = (
+        "```\n"
+        "Armor            | Armor Class (AC)          | Stealth      | Weight | Cost  \n"
+        "---------------- | ------------------------- | ------------ | ------ | ------\n"
+        "Hide Armor       | 12 + Dex modifier (max 2) | —            | 12 lb. | 10 GP \n"
+        "Chain Shirt      | 13 + Dex modifier (max 2) | —            | 20 lb. | 50 GP \n"
+        "Scale Mail       | 14 + Dex modifier (max 2) | Disadvantage | 45 lb. | 50 GP \n"
+        "```"
+    )
+
+    def test_fenced_pipe_table_is_re_rendered(self):
+        from utils.embed_formatter import build_embeds_for_channel
+        embeds = build_embeds_for_channel(
+            "Medium armor:\n\n" + self.WIDE_TABLE, title_override="Marvin #12")
+        assert embeds
+        fields = [f for e in embeds for f in e.fields]
+        assert fields, "table must land in field(s)"
+        blob = "\n".join(f.value for f in fields)
+        assert "Hide Armor" in blob and "Scale Mail" in blob
+        # No verbatim 95-char line survives — every line fits device width.
+        for f in fields:
+            for line in f.value.splitlines():
+                assert len(line) <= 80, f"line too wide: {len(line)}"
+
+    def test_genuine_code_stays_verbatim(self):
+        from utils.embed_formatter import build_embeds_for_channel
+        # Long enough to clear the "too small for an embed" usefulness gate.
+        code = ("```python\ndef roll_dice(sides, count):\n    total = 0\n"
+                "    for _ in range(count):\n        total += sides\n"
+                "    return total\nprint(roll_dice(20, 3))\n```")
+        embeds = build_embeds_for_channel("Code:\n\n" + code, title_override="Marvin #12")
+        assert embeds
+        blob = "\n".join(
+            [(e.description or "") for e in embeds]
+            + [f.value for e in embeds for f in e.fields]
+        )
+        assert "print(x)" in blob and "```" in blob
+
+
 class TestNoEmptyFieldNames:
     """Discord's API SILENTLY DROPS fields with an empty name — stat-block
     tables (fenced code after prose) and unheaded bullet lists vanished from
