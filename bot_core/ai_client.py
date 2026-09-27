@@ -954,8 +954,14 @@ async def ask_ai_stream(
                         AI_STREAM_INITIAL_TIMEOUT_S if not collected
                         else AI_STREAM_CHUNK_TIMEOUT_S
                     )
-                    next_deadline = min(loop.time() + gap_budget, hard_deadline)
+                    gap_deadline = loop.time() + gap_budget
+                    next_deadline = min(gap_deadline, hard_deadline)
                     wait_s = next_deadline - loop.time()
+                    # Which budget bound THIS wait. On Windows the event-loop
+                    # timer can fire a few ms early, so re-comparing
+                    # loop.time() against hard_deadline after the timeout is
+                    # racy — the binding budget computed up front is not.
+                    total_cap_binding = gap_deadline >= hard_deadline
                     if wait_s <= 0:
                         from bot_core.errors import TimeoutError as _AITimeout
 
@@ -972,7 +978,7 @@ async def ask_ai_stream(
                     except asyncio.TimeoutError:
                         from bot_core.errors import TimeoutError as _AITimeout
 
-                        if loop.time() >= hard_deadline:
+                        if total_cap_binding or loop.time() >= hard_deadline:
                             raise _AITimeout(
                                 f"Streamed response exceeded the "
                                 f"{AI_STREAM_TOTAL_TIMEOUT_S:.0f}s total time budget."
