@@ -208,18 +208,21 @@ re-parsing.
 
 Continuity across sessions does not rely on RAG at all: when a session has
 ended, every AI turn automatically gets a `[Previous session — <name> …]`
-block (before the RAG block) containing the session's **overview and its
-notes**. The block is a pure function of the ended session's data — no
-per-turn timestamps or randomness — so it renders **byte-identical on every
-turn** (stable context, unlike query-dependent RAG chunks). Over the char
-budget, oldest notes are dropped first (with a deterministic omission marker),
-then the overview is truncated from the tail. An active session is never
-attached this way (its content is already in the channel history).
+block (before the RAG block) containing **only the session's overview** —
+a brief orientation, deliberately nothing more. Detailed session content is
+retrieved *on demand* by RAG from the indexed `notes.md` (one file per
+session), so the proactive block stays small and the two mechanisms do not
+duplicate each other. The block is a pure function of the ended session's
+data — no per-turn timestamps or randomness — so it renders **byte-identical
+on every turn** (stable context, unlike query-dependent RAG chunks). If the
+overview alone exceeds the char budget it is truncated from the tail. A
+session without a stored overview produces no block. An active session is
+never attached this way (its content is already in the channel history).
 
 | Variable | Purpose |
 |---|---|
 | `LAST_SESSION_CONTEXT_ENABLED` | Attach the last-session block at all (`1`/`0`, default on) |
-| `LAST_SESSION_MAX_CHARS` | Char budget for the block (default `4000`) |
+| `LAST_SESSION_MAX_CHARS` | Char budget for the block (default `4000`; keep it small — overview only) |
 | `SESSION_MERGE_PROMPT` | Override the AI session-log merge prompt at `/end_session` (empty = built-in default) |
 
 ## Commands
