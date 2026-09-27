@@ -86,6 +86,9 @@
 ### 23. Move `import pickle` out of the hot loop
 - [x] **Verified (2026-09-22).** `kb/index.py` — already satisfied: there is a single top-level `import pickle` (line 61) and **no** in-loop import (grep confirms the only `pickle.*` uses are `pickle.loads`/`pickle.dumps` in `_read_cache_rows`/`_persist_index_to_db`/`_persist_upsert`, all referencing the module-level import). No change needed.
 
+### 38. Session uploads/transcripts indexed file-by-file → near-duplicate RAG attachments (backlog #11)
+- [x] **Fixed (2026-09-27).** **Where:** `bot_core/sessions.py`, `commands/session_commands.py`. **Problem:** every per-session file (`notes.md` + each `attachments/*.md` + each `transcripts/*.md`) was indexed separately; real sessions held several variants of the *same* session log, so RAG attached near-identical content multiple times. **Fix:** one RAG document per session — raw uploads/transcripts now live in hidden dot-dirs (`.attachments/`, `.transcripts/`), which the KB indexer skips by design (`_is_hidden_kb_path`), and `notes.md` is re-rendered on every change with a combined `## Documents` section carrying each file's FULL text under its own `### <filename>` subsection (per-document chunk granularity preserved). `_session_index_paths` returns only `notes.md`; note re-parsing is scoped to the `## Notes` section so document text can't be mistaken for notes. Overview generation keeps reading the raw dot-dir files. Legacy folders are migrated idempotently at startup (`migrate_legacy_session_dirs`: rename → merge → append combined section), and the vector index self-heals on its next load (missing-file row pruning + one re-embed of each changed `notes.md`). **Verify:** `tests/test_sessions.py` (dot-dir layout, combined notes.md, idempotent re-render, `_session_index_paths == [notes.md]`, `TestLegacyMigration`, `TestNotesSectionParsing`), `tests/test_session_commands.py` + `tests/test_stop_recording_stt.py` (updated to the new layout), `tests/test_kb_vector_index.py::TestIterKBFiles::test_hidden_dot_dirs_are_skipped`. Full suite: 680 passed.
+
 ---
 
 ## P3 — UX / features / DX / docs
@@ -174,6 +177,9 @@
 - **Problem:** A display name containing `**` etc. breaks the prompt formatting.
 - **Fix:** Sanitize/escape the username in the prefix (or use a plain-text marker).
 - **Verify:** Test with a name containing `**bold**`.
+
+### 39. Last-session context: richer, byte-stable default attachment (backlog #7)
+- [x] **Done (2026-09-27).** **Where:** `bot_core/ai_client.py` (`_build_last_session_context`). **Problem:** the existing last-session block was thin (overview *or* only the last 6 notes) — players often reference the previous session and the context should be a stable "smart context", not query-dependent fragments. **Fix:** the default-attached block now carries the overview **and** all session notes under a deterministic header (`[Previous session — <name> (<start> → <end>)]`); it is a pure function of the ended session's data (no per-turn timestamps/randomness) so it renders byte-identical on every turn. Budget policy under `LAST_SESSION_MAX_CHARS`: drop OLDEST notes first with a deterministic omission marker, then truncate the overview from the tail; an active session is never attached (already in history). Pairs with #38: session content no longer also arrives as fluctuating RAG chunks. **Verify:** `tests/test_rag_cpu_pipeline.py` — `test_build_last_session_context_includes_overview_and_notes`, `..._is_byte_stable`, `..._drops_oldest_notes_over_budget` (chronological suffix + marker), `..._capped` (≤ cap, overview truncated). Full suite: 680 passed.
 
 ---
 

@@ -492,6 +492,21 @@ class TestIterKBFiles:
         names = {p.name for p in files}
         assert names == {"a.md", "b.txt"}
 
+    def test_hidden_dot_dirs_are_skipped(self, tmp_path):
+        """#11: session raw uploads/transcripts live in hidden dot-dirs and
+        must NEVER be picked up by the indexer (their content reaches RAG only
+        via the combined notes.md)."""
+        kb = tmp_path / "kb_hidden"
+        sess = kb / "session_notes" / "2026-01-01_01_X"
+        (sess / ".attachments").mkdir(parents=True)
+        (sess / ".transcripts").mkdir()
+        (sess / "notes.md").write_text("combined")
+        (sess / ".attachments" / "upload.md").write_text("raw upload")
+        (sess / ".transcripts" / "transcript_01.md").write_text("raw transcript")
+        (sess / ".hidden_file.md").write_text("dotfile")
+        files = _iter_kb_files(kb)
+        assert [p.name for p in files] == ["notes.md"]
+
 
 # ─────────────────── 11. Per-session folders (basename collision) ─────────
 # Regression guard for the original bug that made /session_notes split

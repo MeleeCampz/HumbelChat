@@ -308,7 +308,7 @@ class TestSessionNotesDocumentUpload:
         assert any("Document" in m and "notes.txt" in m for m in ix._sent)
         # the document is stored as its OWN file in the session's attachments/ folder
         session = S.get_current_session()
-        att_dir = pathlib.Path(session["dir"]) / "attachments"
+        att_dir = pathlib.Path(session["dir"]) / ".attachments"
         assert any("ship the API key fix" in f.read_text(encoding="utf-8")
                    for f in att_dir.iterdir() if f.is_file())
         # …and shows up in the view as a pointer
@@ -377,7 +377,7 @@ class TestSessionNotesDocumentUpload:
         await handle_session_notes(ix, action="add", note="inline note",
                                    file=_doc_attachment("doc.txt", "from the file"))
         session = S.get_current_session()
-        att_dir = pathlib.Path(session["dir"]) / "attachments"
+        att_dir = pathlib.Path(session["dir"]) / ".attachments"
         # the file's content is stored (in attachments/), the inline note is not
         assert any("from the file" in f.read_text(encoding="utf-8") for f in att_dir.iterdir())
         assert S.get_notes(session) == []
@@ -389,7 +389,7 @@ class TestSessionNotesDocumentUpload:
         await handle_session_notes(ix, action="add", note=None,
                                    file=_doc_attachment("long.md", ("word " * 2000).strip()))
         session = S.get_current_session()
-        att_dir = pathlib.Path(session["dir"]) / "attachments"
+        att_dir = pathlib.Path(session["dir"]) / ".attachments"
         files = [f for f in att_dir.iterdir() if f.is_file()]
         # one file, not pre-chunked bullets; the whole doc is preserved verbatim
         assert len(files) == 1
@@ -405,7 +405,7 @@ class TestAddTranscript:
         session, n = S.add_transcript("hello there", title="Voice channel transcript — #vc (2026-08-31 22:00, 10s)")
         assert n == 1
         # A standalone transcript file is created in the session's folder.
-        tdir = pathlib.Path(session["dir"]) / "transcripts"
+        tdir = pathlib.Path(session["dir"]) / ".transcripts"
         files = [f for f in tdir.iterdir() if f.is_file()]
         assert len(files) == 1
         body = files[0].read_text(encoding="utf-8")
@@ -419,7 +419,7 @@ class TestAddTranscript:
         long_text = ("word " * 2000).strip()  # ~10k chars — stays in ONE file
         session, n = S.add_transcript(long_text, title="Voice channel transcript")
         assert n == 1
-        tdir = pathlib.Path(session["dir"]) / "transcripts"
+        tdir = pathlib.Path(session["dir"]) / ".transcripts"
         files = [f for f in tdir.iterdir() if f.is_file()]
         assert len(files) == 1
         assert long_text in files[0].read_text(encoding="utf-8")
@@ -446,7 +446,7 @@ class TestAddTranscript:
         session, n = S.add_transcript("pinned words", title="Voice channel transcript",
                                       session=old)
         assert n == 1 and session is old
-        tdir = pathlib.Path(old["dir"]) / "transcripts"
+        tdir = pathlib.Path(old["dir"]) / ".transcripts"
         assert any("pinned words" in f.read_text(encoding="utf-8") for f in tdir.iterdir())
 
     @pytest.mark.asyncio
@@ -455,12 +455,12 @@ class TestAddTranscript:
         S.start_session(name="T")
         S.add_transcript("the key is under the bridge", title="Voice channel transcript — #vc")
         session = S.get_current_session()
-        tdir = pathlib.Path(session["dir"]) / "transcripts"
+        tdir = pathlib.Path(session["dir"]) / ".transcripts"
         files = [f for f in tdir.iterdir() if f.is_file()]
         assert files and "under the bridge" in files[0].read_text(encoding="utf-8")
         # notes.md lists the transcript pointer …
         on_disk = pathlib.Path(session["file"]).read_text(encoding="utf-8")
-        assert "## Transcripts" in on_disk and files[0].name in on_disk
+        assert "## Documents" in on_disk and files[0].name in on_disk
         # … and /session_notes view lists it
         await handle_session_notes(ix, action="view")
         view_msgs = [m for m in ix._sent if "Session notes" in m]
@@ -481,14 +481,14 @@ class TestOverviewSourceAssembly:
                          title="Voice transcript")
         session = S.get_current_session()
         text, refs = _session_documents_text(session)
-        assert "Source: attachments/session3.md" in text
-        assert "Source: transcripts/" in text
+        assert "Source: .attachments/session3.md" in text
+        assert "Source: .transcripts/" in text
         # the verbatim document bodies are present, not just pointers
         assert "über die Brücke" in text
         assert "Colum erzählt" in text
         # refs are <subdir>/<filename> labels
-        assert any(r.startswith("attachments/session3.md") for r in refs)
-        assert any(r.startswith("transcripts/") for r in refs)
+        assert any(r.startswith(".attachments/session3.md") for r in refs)
+        assert any(r.startswith(".transcripts/") for r in refs)
 
     def test_session_documents_text_respects_budget(self, monkeypatch):
         import commands.session_commands as sc
