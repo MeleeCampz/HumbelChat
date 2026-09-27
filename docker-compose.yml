@@ -1,0 +1,28 @@
+# ──────────────────────────────────────────────────────────────
+# HumbelChat Discord bot — production deployment (see docs/docker.md)
+#
+#   docker compose up -d --build    # build (if needed) + start
+#   docker compose logs -f bot      # live logs
+#   docker compose restart bot      # graceful-ish restart
+#   docker compose down             # stop
+#
+# All runtime state lives in the bind-mounted host directories next to this
+# file: data/ (KB + vector index + recordings + history), logs/, hf-cache/
+# (HuggingFace model cache). Nothing important is inside the image.
+# ──────────────────────────────────────────────────────────────
+services:
+  bot:
+    build: .
+    container_name: humbelchat-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Pin runtime data paths to the bind mounts (defaults in config/settings.py
+      # resolve relative to /app, which is equivalent — explicit for clarity).
+      KB_PATH: /app/data/knowledge
+      RECORDINGS_DIR: /app/data/recordings
+      CHARACTERS_FILE: /app/characters.json
+    volumes:
+      - ./data:/app/data        # KB docs + .vector_index_cache + recordings + history.json
+      - ./logs:/app/logs        # RotatingFileHandler output, readable from host
+      - ./hf-cache:/models/hf   # bge-m3 + whisper models (downloaded once)
