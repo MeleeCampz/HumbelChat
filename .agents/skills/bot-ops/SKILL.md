@@ -5,35 +5,20 @@ description: Operate the Discord bot — production via docker compose, local de
 
 # Bot operations
 
-## Production (Docker Desktop, docker compose)
+## Production (Docker Desktop)
 
-The live bot runs as a container from this repo's checkout
-(`C:\Repos\GitHub_Me\HumbelChat`), defined in `docker-compose.yml`. All runtime
-state is bind-mounted from the repo: `data/` (KB + vector index + recordings +
-history.json), `logs/`, `hf-cache/` (HF model cache). Full docs: `docs/docker.md`.
+The live bot runs as a container from this repo's checkout — see the
+**docker-ops** skill for start/stop/restart/update, health checks and the
+knowledge database. Short version:
 
 ```bash
-docker compose up -d --build   # start; also the update flow after git pull
-docker compose ps              # status
+docker compose up -d --build   # start / update (after git pull)
 docker compose logs -f bot     # live stdout
-docker compose restart bot     # restart
 docker compose down            # stop (host data untouched)
 ```
 
-- `restart: unless-stopped` — crashes/reboots recover automatically.
-- No healthcheck (no HTTP endpoint): judge from logs — "logged in as …", and
-  the backend probe settling UP. Give ~10–20 s after a start; bge-m3 loads from
-  cache in seconds and the first backend-health probe can log a transient
-  `DOWN (timeout)` that recovers on its own.
-- No published ports (outbound WebSocket + UDP only).
-- **One process at a time:** never run a local dev session while the container
-  is up — same Discord token, shared `data/`.
-
-## Knowledge database (direct host access)
-
-`data\knowledge\.vector_index_cache\vector_index.db` — plain SQLite on the
-host. Reading while the bot runs is fine; don't write to it live (stop the
-container or work on a copy). New `/upload_kb` rows appear immediately.
+**One process at a time:** never run a local dev session while the container is
+up — same Discord token, shared `data/`.
 
 ## Local dev (no Docker) — tmux-based, survives terminal close
 
