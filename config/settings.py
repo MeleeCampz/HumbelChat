@@ -102,7 +102,7 @@ STAT_BLOCK_FORMAT_RULES: str = os.getenv(
         "**Hide Armor** — AC 12 + Dex (max 2) · 12 lb. · 10 GP\n"
         "**Chain Shirt** — AC 13 + Dex (max 2) · 20 lb. · 50 GP\n"
         "This wraps gracefully on any device.\n"
-        "</stat-block-format>\n"
+        "</stat-block-format>"
     ),
 )
 CONTEXT_WINDOW: int = _safe_int(os.getenv("CONTEXT_WINDOW"), 10)
