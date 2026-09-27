@@ -30,7 +30,6 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv(override=False)
 
 import config.settings  # noqa: E402,F401  (reads env at import time)
-from bot_core import sessions as S  # noqa: E402
 from commands.session_commands import _generate_merged_log  # noqa: E402
 
 ROOT = pathlib.Path("data/knowledge/session_notes")
