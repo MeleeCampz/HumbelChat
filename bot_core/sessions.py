@@ -310,10 +310,13 @@ def _documents_section_lines(session: dict) -> list[str]:
 def _session_file_content(session: dict) -> str:
     """Render the session's ``notes.md`` from its state + raw dot-dir files.
 
-    Real notes are timestamped bullets under ``## Notes``; uploaded documents
-    and transcripts appear with their FULL text under ``## Documents`` (this
-    file is the session's single RAG document).  The overview, when present,
-    closes the file.
+    Real notes are timestamped bullets under ``## Notes``.  The session's RAG
+    content is the AI-merged canonical log (``## Session Log``, written at end
+    when the AI combined all player uploads into one de-duplicated record);
+    without it — AI unavailable, stale auto-end, legacy sessions — uploaded
+    documents and transcripts appear with their FULL text under ``##
+    Documents`` instead, so content stays reachable either way.  The overview,
+    when present, closes the file.
     """
     started = datetime.fromtimestamp(session["started_at"]).strftime("%Y-%m-%d %H:%M")
     ended = (datetime.fromtimestamp(session["ended_at"]).strftime("%Y-%m-%d %H:%M")
@@ -331,7 +334,15 @@ def _session_file_content(session: dict) -> str:
         lines.append(f"- ({t}) {text}")
     if not session.get("notes"):
         lines.append("(no notes)")
-    lines += _documents_section_lines(session)
+    # The AI-merged canonical log (written at end) replaces the mechanical
+    # full-text copy — it is the de-duplicated combination of all uploads.
+    # Without it (AI unavailable, stale auto-end, legacy sessions) the
+    # mechanical section keeps every document's content reachable via RAG.
+    if session.get("merged_log"):
+        lines += ["", "## Session Log (combined from all uploads — AI-merged)",
+                  "", str(session["merged_log"]).strip()]
+    else:
+        lines += _documents_section_lines(session)
     if session.get("overview"):
         lines += ["", "## Overview (written when the session ended)", "", str(session["overview"]).strip()]
     return "\n".join(lines) + "\n"
@@ -614,6 +625,7 @@ def start_session(name: str | None = None) -> tuple[dict, dict | None]:
         "ended_at": None,
         "notes": [],          # [[epoch, text], ...] — full, un-split text
         "overview": None,     # AI overview written on end (or None)
+        "merged_log": None,   # AI-merged canonical session log (or None → mechanical fallback)
         "dir": str(file_path.parent),
         "file": str(file_path),
     }
@@ -626,7 +638,8 @@ def start_session(name: str | None = None) -> tuple[dict, dict | None]:
     return session, closed_info
 
 
-def _end_session_internal(session: dict, overview: str | None) -> dict:
+def _end_session_internal(session: dict, overview: str | None,
+                          merged_log: str | None = None) -> dict:
     """Shared end logic — sets ended_at, moves to last_ended, persists."""
     session["ended_at"] = time.time()
     if overview is not None:
@@ -634,6 +647,8 @@ def _end_session_internal(session: dict, overview: str | None) -> dict:
         session["overview_delivered"] = False  # delivered at the NEXT start
     else:
         session["overview_delivered"] = True   # nothing to deliver (stale end)
+    if merged_log is not None:
+        session["merged_log"] = merged_log
     _state["last_ended"] = session
     _state["session"] = None
     _write_session_file(session)
@@ -648,11 +663,14 @@ def mark_overview_delivered(session: dict) -> None:
     _save()
 
 
-def end_session(overview: str | None = None, name: str | None = None) -> dict | None:
+def end_session(overview: str | None = None, name: str | None = None,
+                merged_log: str | None = None) -> dict | None:
     """End the current session.
 
     *name* (optional) renames the session in its file/state; *overview* is
-    stored in the session file and returned to the caller for delivery.
+    stored in the session file and returned to the caller for delivery;
+    *merged_log* is the AI-merged canonical session log that becomes the
+    session's RAG content (None → the mechanical full-text copy is kept).
     Returns the ended session dict, or None when no session was active.
     """
     session = get_current_session()
@@ -662,7 +680,7 @@ def end_session(overview: str | None = None, name: str | None = None) -> dict | 
         safe = _sanitize_name(name)
         if safe:
             session["name"] = safe
-    return _end_session_internal(session, overview=overview)
+    return _end_session_internal(session, overview=overview, merged_log=merged_log)
 
 
 # ── Public API — notes ───────────────────────────────────────────────────

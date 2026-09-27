@@ -19,7 +19,9 @@ from bot_core.errors import extract_reply_text
 from config.characters import get_character
 from config.settings import (
     DEFAULT_MODEL,
+    DEFAULT_SESSION_MERGE_PROMPT,
     DEFAULT_SESSION_SUMMARY_PROMPT,
+    SESSION_MERGE_PROMPT,
     SESSION_SUMMARY_PROMPT,
 )
 
@@ -59,6 +61,15 @@ def _summary_prompt() -> str:
     falls back to the built-in default when unset/empty.
     """
     return SESSION_SUMMARY_PROMPT.strip() or DEFAULT_SESSION_SUMMARY_PROMPT
+
+
+def _merge_prompt() -> str:
+    """System prompt for the /end_session AI session-log merge.
+
+    Customizable via SESSION_MERGE_PROMPT in .env (see config/settings.py);
+    falls back to the built-in default when unset/empty.
+    """
+    return SESSION_MERGE_PROMPT.strip() or DEFAULT_SESSION_MERGE_PROMPT
 
 
 # ── Overview source assembly ────────────────────────────────────────────
@@ -255,6 +266,66 @@ async def _generate_overview(session: dict, guild_id: int | None, channel_id: in
         return _fallback_overview(session, notes)
 
 
+#: Output budget for the AI-merged session log. Larger than the overview's
+#: 4096 — the merged log is a full narrative record, not a ~250-word summary.
+#: Backends that cap lower clamp or reject; a rejection falls back to the
+#: mechanical full-text copy (see _generate_merged_log).
+_MERGED_LOG_MAX_TOKENS = 8192
+
+
+async def _generate_merged_log(session: dict, guild_id: int | None, channel_id: int) -> str | None:
+    """AI-merged canonical session log from the session's own documents.
+
+    Every player log / transcript of the session covers the same chronological
+    events with heavy overlap.  The merge combines them into ONE complete,
+    well-formatted, de-duplicated session log — that single text replaces the
+    mechanical full-text copy as the session's RAG content (see
+    ``sessions._session_file_content``).
+
+    Returns None when there are no documents or the AI is unavailable — the
+    caller then keeps the mechanical fallback so document content stays
+    reachable via RAG even with a dead backend.
+    """
+    docs_text, doc_names = _session_documents_text(session)
+    if not doc_names:
+        return None
+    model = await _validate_model(_make_client(), _resolve_overview_model(guild_id, channel_id))
+    if not model:
+        log.warning("No model available for session-log merge — keeping mechanical document copy")
+        return None
+
+    source_listing = ", ".join(doc_names)
+    log.info(
+        "Merging session log for %r: %d document(s) [%s], %d chars docs",
+        session.get("name"), len(doc_names), source_listing, len(docs_text),
+    )
+
+    user_content = (
+        f"Session name: {session.get('name') or 'Untitled'}\n"
+        f"Session files included: {source_listing}\n\n"
+        f"## Session files (the only sources — one log per player)\n{docs_text}"
+    )
+
+    client = _make_client()
+    try:
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": _merge_prompt()},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0.2,
+            max_tokens=_MERGED_LOG_MAX_TOKENS,
+        )
+        merged = extract_reply_text(resp, default="")
+        if not merged.strip():
+            raise ValueError("empty merged log")
+        return merged.strip()
+    except Exception as e:
+        log.error("Session-log merge AI request failed (%s): %s", model, e)
+        return None
+
+
 def _truncate(text: str, limit: int = _OVERVIEW_POST_LIMIT) -> str:
     if len(text) <= limit:
         return text
@@ -330,15 +401,18 @@ async def handle_end_session(interaction: discord.Interaction, name: str | None 
     S.refresh_notes_from_disk(session)
 
     overview = await _generate_overview(session, interaction.guild_id, channel_id)
-    ended = S.end_session(overview=overview, name=name)
+    merged_log = await _generate_merged_log(session, interaction.guild_id, channel_id)
+    ended = S.end_session(overview=overview, name=name, merged_log=merged_log)
     if ended is None:  # defensive — should not happen
         await interaction.followup.send("⚠️ Could not end the session.")
         return
 
     fname = pathlib.Path(ended["file"]).name
+    merge_line = ("\n📜 Session log combined from all uploads."
+                  if merged_log else "")
     await interaction.followup.send(
         f"🔚 **Session ended:** {ended.get('name') or '(untitled)'}\n"
-        f"📄 Overview saved to `{fname}`.\n\n"
+        f"📄 Overview saved to `{fname}`.{merge_line}\n\n"
         f"{_truncate(overview)}",
     )
 

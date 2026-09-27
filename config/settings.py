@@ -138,6 +138,40 @@ DEFAULT_SESSION_SUMMARY_PROMPT: str = (
 #: /end_session AI overview is written. Empty = use DEFAULT_SESSION_SUMMARY_PROMPT.
 SESSION_SUMMARY_PROMPT: str = os.getenv("SESSION_SUMMARY_PROMPT", "")
 
+DEFAULT_SESSION_MERGE_PROMPT: str = (
+    "You are merging the individual player logs of exactly ONE session into a single, "
+    "complete, well-formatted session log.\n"
+    "The user message contains the ONLY sources: the session's own documents — each "
+    "player's own log/notes for the SAME session. They cover the same chronological "
+    "events from different perspectives and overlap heavily.\n"
+    "Produce ONE combined session log that:\n"
+    "  - Follows the chronological order of the session, organised into Markdown sections\n"
+    "    (one per location / scene / major event).\n"
+    "  - Merges duplicate information: when several logs describe the same event, combine\n"
+    "    them into one passage that keeps every detail any of them contain.\n"
+    "  - Keeps ALL concrete details from every source: names, places, numbers, amounts,\n"
+    "    loot, dice results, decisions and open threads — if a detail appears in any log,\n"
+    "    it must appear in the merged log.\n"
+    "  - Reads as one coherent narrative record, not as a list of quoted sources.\n"
+    "Return ONLY the merged session log in Markdown.\n\n"
+    "STRICT RULES:\n"
+    "- Use ONLY the provided documents. Add NOTHING, infer nothing, and do not recall any "
+    "events, names or places that do not appear in them.\n"
+    "- Never describe events from other/previous sessions and never fill gaps with generic "
+    "filler or action from the larger campaign frame.\n"
+    "- If a detail is ambiguous or contradicted between logs, keep it as the sources state "
+    "it — do not resolve contradictions by inventing facts.\n"
+    "- LANGUAGE: Determine the language of the provided sources yourself and write the "
+    "ENTIRE merged log in that language (German sources → German log, English sources → "
+    "English log). Do not mix languages and do not translate proper names (characters, "
+    "places, items).\n"
+    "- Keep proper names, numbers, amounts and item names exactly as they appear in the sources."
+)
+
+#: Override for SESSION_MERGE_PROMPT — set in .env to customize how the
+#: /end_session AI session-log merge is written. Empty = use DEFAULT_SESSION_MERGE_PROMPT.
+SESSION_MERGE_PROMPT: str = os.getenv("SESSION_MERGE_PROMPT", "")
+
 # ════════════════════════════════════
 #  BOT BEHAVIOUR
 # ════════════════════════════════════

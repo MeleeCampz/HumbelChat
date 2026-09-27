@@ -123,6 +123,50 @@ class TestEndSession:
         content = pathlib.Path(session["file"]).read_text(encoding="utf-8")
         assert "# Session: New name" in content
 
+    def test_end_stores_merged_log(self):
+        session, _ = S.start_session(name="M1")
+        S.add_document("Player A log: we looted the cave.", title="a.md")
+        ended = S.end_session(overview="Short overview.",
+                              merged_log="## The Cave\nWe looted the cave together.")
+        assert ended["merged_log"].startswith("## The Cave")
+
+    def test_merged_log_replaces_mechanical_documents_section(self):
+        """#11 follow-up: the AI-merged canonical log is the session's RAG
+        content — the mechanical full-text copy must NOT also be rendered."""
+        session, _ = S.start_session(name="M2")
+        S.add_document("Player A log: we looted the cave.", title="a.md")
+        S.end_session(overview=None,
+                      merged_log="## The Cave\nCombined: we looted the cave.")
+        content = pathlib.Path(session["file"]).read_text(encoding="utf-8")
+        assert "## Session Log (combined from all uploads — AI-merged)" in content
+        assert "Combined: we looted the cave." in content
+        # no mechanical copy of the raw upload next to the merged log
+        assert "## Documents" not in content
+
+    def test_without_merged_log_mechanical_section_stays(self):
+        """AI unavailable / stale end / legacy session → the mechanical
+        full-text copy keeps document content reachable via RAG."""
+        session, _ = S.start_session(name="M3")
+        S.add_document("Player A log: we looted the cave.", title="a.md")
+        S.end_session(overview=None)  # no merged log
+        content = pathlib.Path(session["file"]).read_text(encoding="utf-8")
+        assert "## Documents" in content
+        assert "Player A log: we looted the cave." in content
+        assert "## Session Log" not in content
+
+    def test_merged_log_survives_persistence_reload(self):
+        session, _ = S.start_session(name="M4")
+        S.add_document("raw upload body", title="a.md")
+        S.end_session(overview=None, merged_log="merged canonical log text")
+        assert S.get_last_session()["merged_log"] == "merged canonical log text"
+        S.load_persisted()
+        reloaded = S.get_last_session()
+        assert reloaded["merged_log"] == "merged canonical log text"
+        # and a fresh render from the reloaded state still uses the merged log
+        S._write_session_file(reloaded)
+        content = pathlib.Path(session["file"]).read_text(encoding="utf-8")
+        assert "## Session Log" in content and "## Documents" not in content
+
 
 class TestNotes:
 
