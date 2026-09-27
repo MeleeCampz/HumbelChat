@@ -73,6 +73,24 @@ INFER_API_KEY: str = os.getenv("INFER_API_KEY", "")  # sometimes empty for local
 # ════════════════════════════════════
 DEFAULT_MODEL: str | None = os.getenv("MODEL_NAME")
 DEFAULT_SYSTEM_PROMPT: str = os.getenv("SYSTEM_PROMPT", "")
+# Global response-format appendix, added to EVERY character's system prompt
+# (kept out of characters.json so persona files stay clean).  Fixes the model
+# compressing D&D stat blocks into one semicolon-separated run-on sentence.
+STAT_BLOCK_FORMAT_RULES: str = os.getenv(
+    "STAT_BLOCK_FORMAT_RULES",
+    (
+        "\n\n<stat-block-format>\n"
+        "When quoting a D&D 5e stat block, never compress it into one long "
+        "semicolon-separated sentence. Render it as a compact multi-line "
+        "block with real newlines:\n"
+        "line 1: **Name** *(type, alignment)* — CR X\n"
+        "line 2: AC x · HP x (formula) · Speed x ft.\n"
+        "line 3: STR x (+m) · DEX x (+m) · CON x (+m) · INT x (+m) · WIS x (+m) · CHA x (+m)\n"
+        "line 4: only notable traits (vulnerabilities, resistances, key "
+        "abilities), kept short.\n"
+        "</stat-block-format>"
+    ),
+)
 CONTEXT_WINDOW: int = _safe_int(os.getenv("CONTEXT_WINDOW"), 10)
 REQUEST_TIMEOUT: int = _safe_int(os.getenv("AI_REQUEST_TIMEOUT"), 120)
 # §3.9: lightweight backend liveness probe. 0 = only probe once on startup;
