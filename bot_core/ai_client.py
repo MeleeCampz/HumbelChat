@@ -831,6 +831,13 @@ async def ask_ai(
                 "retrying once with max_tokens=%d",
                 ctx.max_tokens, retry_budget,
             )
+            # The retry generates up to 4× more tokens than the original call,
+            # so it needs a proportionally bigger wall-clock budget: re-scale
+            # the timeout for the RETRY budget (the old code reused
+            # ctx.timeout_sec, which was sized for the smaller original budget
+            # — a thinking model that needed more tokens also needs more time,
+            # so the retry would time out in exactly the case P4 targets).
+            retry_timeout = _scaled_timeout(ctx.total_chars, retry_budget)
             try:
                 resp = await _call_completion_with_retry(
                     ctx.client,
@@ -839,7 +846,7 @@ async def ask_ai(
                     temperature=ctx.temperature,
                     max_tokens=retry_budget,
                     stream=False,
-                    timeout=ctx.timeout_sec,
+                    timeout=retry_timeout,
                 )
                 reply_text = extract_reply_text(resp)
             except Exception as e:  # noqa: BLE001 — classified below
