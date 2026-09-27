@@ -266,11 +266,13 @@ async def _generate_overview(session: dict, guild_id: int | None, channel_id: in
         return _fallback_overview(session, notes)
 
 
-#: Output budget for the AI-merged session log. Larger than the overview's
-#: 4096 — the merged log is a full narrative record, not a ~250-word summary.
+#: Output budget for the AI-merged session log. Much larger than the overview's
+#: 4096 — the merged log is a full narrative record, not a ~250-word summary,
+#: and thinking models (Qwen3) spend several thousand tokens on reasoning
+#: BEFORE any answer token: 8192 was exhausted by the thinking phase alone.
 #: Backends that cap lower clamp or reject; a rejection falls back to the
 #: mechanical full-text copy (see _generate_merged_log).
-_MERGED_LOG_MAX_TOKENS = 8192
+_MERGED_LOG_MAX_TOKENS = 24576
 
 
 async def _generate_merged_log(session: dict, guild_id: int | None, channel_id: int) -> str | None:
