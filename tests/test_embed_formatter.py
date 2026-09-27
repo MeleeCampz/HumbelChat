@@ -653,7 +653,7 @@ class TestFencedPipeTableSafetyNet:
             [(e.description or "") for e in embeds]
             + [f.value for e in embeds for f in e.fields]
         )
-        assert "print(x)" in blob and "```" in blob
+        assert "print(roll_dice(20, 3))" in blob and "```" in blob
 
 
 class TestNoEmptyFieldNames:
