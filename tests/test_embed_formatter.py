@@ -612,6 +612,47 @@ class TestCodeBlockSplitting:
 #  send_long_response_embedded — delivery helper
 # ════════════════════════════════════════════════════════════════════════
 
+class TestNoEmptyFieldNames:
+    """Discord's API SILENTLY DROPS fields with an empty name — stat-block
+    tables (fenced code after prose) and unheaded bullet lists vanished from
+    replies.  Nothing may ever be emitted as an empty-named field, and the
+    content must survive in desc or a named field."""
+
+    @staticmethod
+    def _all_fields(embeds):
+        return [f for e in embeds for f in e.fields]
+
+    @staticmethod
+    def _blob(embeds):
+        fields = TestNoEmptyFieldNames._all_fields(embeds)
+        return "\n".join(
+            [(e.description or "") for e in embeds] + [f.value for f in fields]
+        )
+
+    def test_code_block_after_prose_survives(self):
+        from utils.embed_formatter import build_embeds_for_channel
+        text = ("Intro line.\n\n**Awakened Tree** *(Huge Plant)* — CR 2\n"
+                "```\nAC 13    HP 59 (7d12+14)\nSTR 19 (+4)  DEX 6 (-2)\n```")
+        embeds = build_embeds_for_channel(text, title_override="Marvin #12")
+        assert embeds
+        fields = self._all_fields(embeds)
+        # A single-space placeholder name is fine (renders as an invisible
+        # header); only the literally-empty name gets dropped by Discord.
+        assert all(f.name for f in fields), "empty field name emitted"
+        blob = self._blob(embeds)
+        assert "AC 13" in blob and "```" in blob
+
+    def test_unheaded_bullet_list_survives(self):
+        from utils.embed_formatter import build_embeds_for_channel
+        text = "Loot found:\n\n- Potion of Healing\n- Magic staff\n- A letter"
+        embeds = build_embeds_for_channel(text, title_override="Marvin #12")
+        assert embeds
+        fields = self._all_fields(embeds)
+        assert all(f.name for f in fields), "empty field name emitted"
+        blob = self._blob(embeds)
+        assert "Potion of Healing" in blob and "Magic staff" in blob
+
+
 class _FakeInteraction:
     """Minimal stand-in for discord.Interaction (has followup.send)."""
 
