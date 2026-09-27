@@ -412,6 +412,7 @@ def test_compose_system_prompt_appends_stat_block_rules(monkeypatch):
     out = A._compose_system_prompt(C())
     assert out.startswith("You are Marvin.")
     assert "<stat-block-format>" in out and out.endswith("</stat-block-format>")
+    assert "```" in out  # table is rendered as a fenced (monospace) code block
     assert out == C().system_prompt + A.STAT_BLOCK_FORMAT_RULES  # byte-exact append
 
     class Bare:  # no system_prompt attribute at all
