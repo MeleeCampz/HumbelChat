@@ -656,6 +656,19 @@ class TestFencedPipeTableSafetyNet:
         assert "print(roll_dice(20, 3))" in blob and "```" in blob
 
 
+class _FakeFollowup:
+    def __init__(self, sink: list):
+        self.sink = sink
+
+    async def send(self, text: str):
+        self.sink.append(text)
+
+
+class _FakeSource:
+    def __init__(self, sink: list):
+        self.followup = _FakeFollowup(sink)
+
+
 class TestHtmlTableSafetyNet:
     """When pipe tables are forbidden the model falls back to raw HTML
     (<table>...), which Discord renders as literal markup.  HTML tables must
@@ -680,6 +693,25 @@ class TestHtmlTableSafetyNet:
         )
         assert "Hide Armor" in blob and "Chain Shirt" in blob
         assert "<table" not in blob.lower() and "<td" not in blob.lower()
+
+    def test_plain_text_chunk_path_sanitizes_html(self):
+        """The plain-text fallback (send_long_response) must sanitize too —
+        raw <td> markup reached Discord through this path on 2026-09-27."""
+        import asyncio
+        from utils.response_splitter import send_long_response
+        sink: list[str] = []
+        html = (
+            "<table><thead><tr><th>Armor</th><th>AC</th></tr></thead>"
+            "<tbody><tr><td>Hide Armor</td><td>12 + Dex (max 2)</td></tr>"
+            "<tr><td>Chain Shirt</td><td>13 + Dex (max 2)</td></tr>"
+            "</tbody></table>"
+        )
+        asyncio.run(send_long_response(_FakeSource(sink), "Armor:\n\n" + html,
+                                       "Marvin #12"))
+        assert sink, "chunks must be sent"
+        blob = "\n".join(sink)
+        assert "<td>" not in blob and "<table" not in blob.lower()
+        assert "Hide Armor" in blob and "Chain Shirt" in blob
 
     def test_stray_tags_stripped(self):
         from utils.embed_formatter import build_embeds_for_channel

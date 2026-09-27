@@ -115,6 +115,12 @@ async def send_long_response(source, reply_text: str, char_name: str = "") -> No
         reply_text: The full reply content.
         char_name: Display name for header metadata.
     """
+    # Discord has no HTML support.  The model occasionally emits <table>
+    # markup — convert it to a readable pipe table and strip any other stray
+    # tags BEFORE chunking, so raw markup can never ship on this path either.
+    from utils.embed_formatter import _sanitize_html
+    reply_text = _sanitize_html(reply_text)
+
     chunks = _split_long_message(reply_text, f"--- {char_name} ---" if char_name else "")
 
     for idx, chunk in enumerate(chunks, 1):
