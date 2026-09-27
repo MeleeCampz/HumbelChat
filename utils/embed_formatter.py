@@ -572,6 +572,11 @@ def _build_embed_impl(
         nonlocal field_count, degraded
         if not name and not value:
             return
+        if not name.strip():
+            # Discord's API SILENTLY DROPS fields with an empty name — the
+            # content would vanish without a trace.  A single space renders
+            # as an (invisible) header line and keeps the value intact.
+            name = " "
         if field_count >= MAX_FIELDS:
             # Out of fields — park it for the multi-embed path.
             degraded = True
@@ -646,7 +651,14 @@ def _build_embed_impl(
                 if len(piece) > MAX_FIELD_VALUE:
                     degraded = True  # defensive — splitter already bounds it
                 nm = _fold_name("" if idx == 0 else "(continued)")
-                add_field(nm, piece, False)
+                if not structured and not embed.fields and not nm:
+                    # Prose reply + unheaded code block (e.g. a stat-block
+                    # table right under its name line): keep it in the
+                    # description so the table stays glued to the text above
+                    # instead of floating in a separate field.
+                    _append_desc(piece)
+                else:
+                    add_field(nm, piece, False)
         elif kind == "table":
             header, rows = payload  # type: ignore[misc]
             name, pieces = _render_table(list(header), [list(r) for r in rows])
