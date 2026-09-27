@@ -14,10 +14,23 @@ cd "$SCRIPT_DIR"
 LOG_DIR="$SCRIPT_DIR/logs"
 mkdir -p "$LOG_DIR"
 
-# Kill any existing bot (PID file)
+# Kill any existing bot (PID file).
+# NOTE: on Windows, bash 'kill -0' cannot see processes in other console
+# sessions (e.g. a tmux-hosted bot), so use tasklist there instead.
+pid_alive() {
+    case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*|CYGWIN*)
+            tasklist //NH //FI "PID eq $1" 2>/dev/null | grep -qv "^INFO:"
+            ;;
+        *)
+            kill -0 "$1" 2>/dev/null
+            ;;
+    esac
+}
+
 if [ -f ".bot.pid" ]; then
     old_pid=$(cat .bot.pid | tr -d '[:space:]')
-    if kill -0 "$old_pid" 2>/dev/null; then
+    if pid_alive "$old_pid"; then
         echo "Bot already running (PID $old_pid). Use ./botctl.sh stop first."
         exit 1
     else

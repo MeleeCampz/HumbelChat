@@ -26,7 +26,28 @@ cmd_start() {
     mkdir -p "$LOG_DIR"
     # Detached session; start_bot.sh refuses to double-start via .bot.pid,
     # so a stale session cannot spawn a second bot instance.
-    tmux new-session -d -s "$SESSION" -c "$SCRIPT_DIR" "./start_bot.sh"
+    #
+    # The Windows build of tmux (arndawg/tmux-windows) cannot run compound
+    # command strings: an explicit command's first token is CreateProcess'd
+    # directly (so "cd ... && ..." never executes) and `-c` fails to spawn
+    # outright.  A BARE session does start its default shell (cmd.exe there,
+    # bash on Unix), so create it empty and type the start command in with
+    # send-keys — which works on every tmux build.
+    tmux new-session -d -s "$SESSION"
+    sleep 1
+    case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*|CYGWIN*)
+            # Session shell is cmd.exe — invoke Git Bash explicitly with a
+            # Windows path (cygpath), since cmd cannot cd to /c/... paths.
+            local bash_exe dir_win
+            bash_exe="$(cygpath -w "$(command -v bash)")"
+            dir_win="$(cygpath -m "$SCRIPT_DIR")"
+            tmux send-keys -t "$SESSION" "\"$bash_exe\" -c \"cd $dir_win && exec ./start_bot.sh\"" C-m
+            ;;
+        *)
+            tmux send-keys -t "$SESSION" "cd '$SCRIPT_DIR' && exec ./start_bot.sh" C-m
+            ;;
+    esac
     echo "Bot starting in detached tmux session '$SESSION'."
     echo "  Live output:  ./botctl.sh logs   (TTY: attaches; piped: last 2000 lines)"
     echo "  File logs:    $LOG_DIR/bot.log, $LOG_DIR/dev.log"
@@ -50,12 +71,25 @@ cmd_stop() {
     echo "Bot stopped."
 }
 
+# bash 'kill -0' cannot see processes in other console sessions on Windows
+# (the tmux session runs the bot in its own console), so use tasklist there.
+pid_alive() {
+    case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*|CYGWIN*)
+            tasklist //NH //FI "PID eq $1" 2>/dev/null | grep -qv "^INFO:"
+            ;;
+        *)
+            kill -0 "$1" 2>/dev/null
+            ;;
+    esac
+}
+
 cmd_status() {
     local pid=""
     if [ -f "$PIDFILE" ]; then
         pid="$(tr -d '[:space:]' < "$PIDFILE")"
     fi
-    if tmux has-session -t "$SESSION" 2>/dev/null && [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    if tmux has-session -t "$SESSION" 2>/dev/null && [ -n "$pid" ] && pid_alive "$pid"; then
         echo "RUNNING (PID $pid, tmux session '$SESSION')"
         echo "  Attach to watch output:  tmux attach -t $SESSION   (detach: Ctrl-b d)"
     else
