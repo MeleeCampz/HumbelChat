@@ -8,8 +8,10 @@ import logging
 import mimetypes
 import pathlib
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timezone
 from functools import partial
+from typing import Any, TypeVar, cast
 
 from config.settings import KB_PATH
 
@@ -20,6 +22,9 @@ MAX_FILE_SIZE: int = 20 * 1024 * 1024  # 20 MB
 # File extensions accepted for KB storage (mirrors what the KB reader
 # indexes). Anything else is rejected before it touches disk.
 ALLOWED_EXTENSIONS: set[str] = {".txt", ".md", ".csv", ".html", ".xml", ".rtf"}
+
+# One entry of the .sha256_cache.json sidecar (see _load_sha256_cache).
+_CacheEntry = dict[str, int | float | str]
 
 # P2 #18: sidecar cache for /list_kb_docs SHA-256s.  The listing used to read
 # every file fully on each call (O(total KB size)); now the hash is cached
@@ -60,7 +65,7 @@ def _cache_path_for(kb_root: pathlib.Path) -> pathlib.Path:
     return kb_root / SHA256_CACHE_FILENAME
 
 
-def _load_sha256_cache(kb_root: pathlib.Path) -> dict[str, dict]:
+def _load_sha256_cache(kb_root: pathlib.Path) -> dict[str, _CacheEntry]:
     """Load the sidecar sha256 cache (P2 #18). Returns {} on missing/corrupt.
 
     Shape: ``{ relpath: {"size": int, "mtime": float, "sha256": str} }``.
@@ -69,13 +74,14 @@ def _load_sha256_cache(kb_root: pathlib.Path) -> dict[str, dict]:
         with open(_cache_path_for(kb_root), "r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict):
-            return data
+            # JSON is unvalidated on disk; trust the shape we wrote.
+            return cast(dict[str, _CacheEntry], data)
     except (OSError, ValueError):
         pass
     return {}
 
 
-def _save_sha256_cache(kb_root: pathlib.Path, cache: dict[str, dict]) -> None:
+def _save_sha256_cache(kb_root: pathlib.Path, cache: dict[str, _CacheEntry]) -> None:
     """Persist the sha256 cache (P2 #18). Best-effort — a failure to write the
     cache just means the next listing re-hashes; it never breaks the listing."""
     try:
@@ -90,7 +96,7 @@ def validate_upload(
     filename: str | None = "uploaded",
     kb_path: pathlib.Path | None = None,
     subfolder: str | None = None,
-) -> tuple[pathlib.Path, dict]:
+) -> tuple[pathlib.Path, dict[str, str | int]]:
     """Write uploaded content to KB storage.
 
     Returns (dest_path, summary_dict) where summary has:
@@ -191,7 +197,7 @@ def list_kb_files(
     kb_path: str | pathlib.Path,
     subfolder: str | None = None,
     recursive: bool = True,
-) -> list[dict]:
+) -> list[dict[str, str | int]]:
     """Scan the KB directory and return metadata for each file.
 
     Args:
@@ -205,7 +211,7 @@ def list_kb_files(
     index cache) are always excluded — they are internal state, not docs.
     """
     kb_root = pathlib.Path(kb_path).resolve()
-    docs: list[dict] = []
+    docs: list[dict[str, str | int]] = []
     if not kb_root.exists():
         return docs
 
@@ -243,7 +249,7 @@ def list_kb_files(
         hit = cache.get(key)
         if hit is not None and hit.get("size") == stat.st_size \
                 and hit.get("mtime") == stat.st_mtime:
-            sha: str = hit["sha256"]
+            sha: str = cast(str, hit["sha256"])  # cache entries always store hex strings
         else:
             try:
                 raw = entry.read_bytes()
@@ -284,7 +290,11 @@ def list_kb_files(
 # the whole bot while a large KB was scanned.  These wrappers run the
 # identical blocking work in the default thread pool.
 
-async def _run_in_thread(func, *args, **kwargs):
+_R = TypeVar("_R")
+
+
+async def _run_in_thread(func: Callable[..., _R], *args: Any,
+                         **kwargs: Any) -> _R:
     """Run *func* in the default executor (stub-friendly for tests)."""
     loop = asyncio.get_running_loop()
     future = loop.run_in_executor(None, partial(func, *args, **kwargs))
@@ -296,7 +306,7 @@ async def validate_upload_async(
     filename: str | None = "uploaded",
     kb_path: pathlib.Path | None = None,
     subfolder: str | None = None,
-) -> tuple[pathlib.Path, dict]:
+) -> tuple[pathlib.Path, dict[str, str | int]]:
     """Thread-pool wrapper around :func:`validate_upload` (P0 #4).
 
     Raises the same ``ValueError`` / ``FileNotFoundError`` as the sync version.
@@ -310,7 +320,7 @@ async def list_kb_files_async(
     kb_path: str | pathlib.Path,
     subfolder: str | None = None,
     recursive: bool = True,
-) -> list[dict]:
+) -> list[dict[str, str | int]]:
     """Thread-pool wrapper around :func:`list_kb_files` (P0 #4)."""
     return await _run_in_thread(
         list_kb_files, kb_path,
