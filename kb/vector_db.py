@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 import pathlib
 from dataclasses import dataclass, field
+from typing import Any, Sequence
 
 
 # ──────────────────────────── Chunking provider ──────────────────────
@@ -87,7 +88,9 @@ class KBVectorIndex:
         # P2 #17: lazily-built numpy (matrix, norms) cache, invalidated whenever
         # _docs is *replaced* (tracked by object identity + length). None until
         # first query.
-        self._mat_cache: tuple | None = None
+        # (matrix, norms, docs, n) — the two arrays are numpy (Any: numpy is
+        # imported lazily inside _ensure_matrix); invalidated on _docs replace.
+        self._mat_cache: tuple[Any, Any, list[_DocEntry], int] | None = None
         from config.settings import effective_embedding_model
         self._embedder = Embedder(model_name=effective_embedding_model())
 
@@ -143,7 +146,7 @@ class KBVectorIndex:
             try:
                 embeddings = await index._embedder.encode(list(contents))
                 index._docs = [
-                    _DocEntry(display_name=n, content=c, embedding=e, source_file=s)  # type: ignore[arg-type]
+                    _DocEntry(display_name=n, content=c, embedding=e, source_file=s)
                     for n, c, e, s in zip(names, contents, embeddings, sources)
                 ]
             except Exception as exc:
@@ -154,9 +157,9 @@ class KBVectorIndex:
     @classmethod
     def from_entries(
         cls,
-        entries: list[tuple[str, str, str]],  # (display_name, content, source_file)
-        embeddings: list[list[float]],
-        file_hashes: list[str | None] | None = None,  # P2 #19
+        entries: Sequence[tuple[str, str, str]],  # (display_name, content, source_file)
+        embeddings: Sequence[list[float] | None],
+        file_hashes: Sequence[str | None] | None = None,  # P2 #19
     ) -> KBVectorIndex:
         """Build an index from pre-embedded entries (no API calls)."""
         index = cls.__new__(cls)
@@ -179,7 +182,7 @@ class KBVectorIndex:
 
     # ── P2 #17: numpy-accelerated ranking (pure-Python fallback) ──
 
-    def _ensure_matrix(self) -> tuple:
+    def _ensure_matrix(self) -> tuple[Any, Any, int]:
         """Build (matrix, norms, n) from ``_docs``, caching the result.
 
         *matrix* is a float32 ``(n, D)`` array holding every document's
@@ -283,8 +286,8 @@ class KBVectorIndex:
             return []
 
         try:
-            q_emb = await self._embedder.encode([text])
-            q_emb = q_emb[0]
+            q_embs = await self._embedder.encode([text])
+            q_emb = q_embs[0]
         except Exception:
             return []
 

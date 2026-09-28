@@ -25,5 +25,6 @@ __all__ = [
     "set_history",
 ]
 
-# Backward-compat alias
-_chat_history = {}  # type: ignore[assignment]  # deprecated: use get_history()
+# Backward-compat alias (deprecated: use get_history()/set_history()).
+# Mirrors the runtime shape of bot_core.history._chat_history.
+_chat_history: dict[int | None, dict[int | None, list[dict[str, str]]]] = {}

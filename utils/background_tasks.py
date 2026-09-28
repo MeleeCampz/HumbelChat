@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Coroutine
+from typing import Any
 
 log = logging.getLogger("bot.utils.background_tasks")
 
-_ACTIVE_BACKGROUND_TASKS: set[asyncio.Task] = set()
+_ACTIVE_BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 
 
-def _handle_done_task(task: asyncio.Task) -> None:
+def _handle_done_task(task: asyncio.Task[Any]) -> None:
     """Discard the task and retrieve any exception so it is not silently lost."""
     _ACTIVE_BACKGROUND_TASKS.discard(task)
     if task.cancelled():
@@ -25,7 +27,7 @@ def _handle_done_task(task: asyncio.Task) -> None:
         log.warning("Background task %s failed: %s", task.get_name(), exc, exc_info=exc)
 
 
-def spawn_tracked_task(coro, *, name: str | None = None) -> asyncio.Task:
+def spawn_tracked_task(coro: Coroutine[Any, Any, Any], *, name: str | None = None) -> asyncio.Task[Any]:
     """Create a task and retain a strong reference until it finishes."""
     task = asyncio.create_task(coro, name=name)
     _ACTIVE_BACKGROUND_TASKS.add(task)

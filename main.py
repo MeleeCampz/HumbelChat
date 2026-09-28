@@ -52,7 +52,7 @@ log = logging.getLogger("bot")
 log.propagate = False
 
 
-def _configure_discord_logger(dev_handler=None) -> None:
+def _configure_discord_logger(dev_handler: logging.Handler | None = None) -> None:
     """Configure the discord.py logger (P3 #34).
 
     The discord logger is kept console-only and stop-propagating. Its level is
@@ -173,7 +173,9 @@ bot = commands.Bot(
 )
 # §4.4: Strong references to background tasks live in utils/background_tasks.
 # This list exists only for diagnostics and direct cancellation if needed.
-bot.typing_tasks: list[asyncio.Task] = []
+# Dynamic attribute on the live bot (list[asyncio.Task[Any]]); commands.Bot
+# has no such field, so mypy cannot see the declaration.
+bot.typing_tasks = []  # type: ignore[attr-defined]
 
 # ── One-time command sync on first startup ──────────────────────────────
 # Track whether we've synced commands to avoid duplicate registrations.
@@ -467,6 +469,7 @@ async def stop_recording_command(
 
 @bot.event
 async def on_ready() -> None:
+    assert bot.user is not None  # on_ready only fires after login
     log.info("Logged in as %s (ID: %s)", bot.user, bot.user.id)
 
     # One-time sync on first run only — avoids command duplication from
@@ -628,18 +631,20 @@ async def on_message(message: discord.Message) -> None:
         await message.channel.send(f"Usage: {BOT_PREFIX} <your question>")
         return
 
-    guild_id = message.guild_id or 0
+    # NOTE: discord.Message has no .guild_id attribute (only Interaction does);
+    # the old code crashed every prefix command with AttributeError.
+    guild_id = message.guild.id if message.guild else 0
     log.info(
         "%s (%s) in #%s: %s",
         message.author,
         message.author.id,
-        message.channel.name,
+        getattr(message.channel, "name", "?"),
         prompt[:80],
     )
 
     # Same persona resolution as /ai: the channel's active character, with a
     # warning when that persisted key no longer exists.
-    sys_char, char_warning = resolve_turn_character(message.guild_id, message.channel.id, None)
+    sys_char, char_warning = resolve_turn_character(guild_id, message.channel.id, None)
     if char_warning:
         await message.channel.send(char_warning)
     sys_model = sys_char.model if sys_char else DEFAULT_MODEL
@@ -661,7 +666,9 @@ async def on_message(message: discord.Message) -> None:
             channel_id=message.channel.id,
             username=message.author.display_name or "",
             user_id=message.author.id,
-            char_name=str(sys_char.display),
+            # Implicit resolution (character_name=None) always falls back to
+            # the default character, so sys_char is never None here.
+            char_name=str(sys_char.display) if sys_char else "Default",
             char_key=sys_char.key if sys_char else None,
         ),
         name=f"ai-run-{channel_key}",
@@ -744,7 +751,7 @@ def _enforce_single_instance() -> None:
 
 # ── Startup ────────────────────────────────────────────────────────────
 
-def _recover_crashed_recordings(bot_obj) -> None:
+def _recover_crashed_recordings(bot_obj: commands.Bot) -> None:
     """Attach the voice recorder and recover orphaned recordings at startup.
 
     :func:`recover_orphans` rebuilds any recording whose process died

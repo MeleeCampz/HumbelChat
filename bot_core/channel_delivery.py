@@ -18,6 +18,9 @@ actually write to (fail fast, at schedule time).
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from types import ModuleType
+from typing import Any, cast
 
 import discord
 
@@ -61,8 +64,8 @@ def get_bot() -> discord.Client | None:
     """
     import sys
 
-    def _cached():
-        seen = set()
+    def _cached() -> Iterator[tuple[str, ModuleType]]:
+        seen: set[int] = set()
         for name in ("__main__", "main"):
             mod = sys.modules.get(name)
             if mod is not None and id(mod) not in seen:
@@ -73,9 +76,9 @@ def get_bot() -> discord.Client | None:
     # the "this is the real, live client" signal — a stray fresh duplicate
     # produced by a mid-process re-import has user == None and is skipped.
     for name, mod in _cached():
-        b = getattr(mod, "bot", None)
-        if b is not None and getattr(b, "user", None) is not None:
-            return b
+        cached_bot: discord.Client | None = getattr(mod, "bot", None)
+        if cached_bot is not None and getattr(cached_bot, "user", None) is not None:
+            return cached_bot
 
     # Pass 2 (startup window): nothing logged in yet.  In production the ENTRY
     # module (__main__, i.e. `python main.py`) unambiguously hosts the live bot
@@ -85,9 +88,9 @@ def get_bot() -> discord.Client | None:
     # duplicate would hide.
     for name, mod in _cached():
         if name == "__main__":
-            b = getattr(mod, "bot", None)
-            if b is not None:
-                return b
+            main_bot: discord.Client | None = getattr(mod, "bot", None)
+            if main_bot is not None:
+                return main_bot
             break
         log.warning("get_bot(): '%s.bot' exists but is not logged in yet (user=None) — ignoring secondary copy",
                     name)
@@ -95,9 +98,9 @@ def get_bot() -> discord.Client | None:
     # Pass 3: exotic hosts that haven't cached main at all.
     try:
         import main as _m
-        b = getattr(_m, "bot", None)
-        if b is not None:
-            return b
+        imported_bot: discord.Client | None = getattr(_m, "bot", None)
+        if imported_bot is not None:
+            return imported_bot
     except Exception:
         log.exception("get_bot(): could not import 'main' to find the bot — "
                       "delivery will fail for this event")
@@ -114,7 +117,11 @@ def get_bot() -> discord.Client | None:
 _get_bot = get_bot
 
 
-async def send_to_channel(bot, channel_id: int, content: str):
+async def send_to_channel(
+    bot: discord.Client | None,
+    channel_id: int,
+    content: str,
+) -> discord.abc.Messageable:
     """Send ``content`` to ``channel_id`` with a REST fallback.
 
     Resolution order:
@@ -128,7 +135,11 @@ async def send_to_channel(bot, channel_id: int, content: str):
     item queued rather than silently dropping it.  Returns the channel
     object that was used for the send.
     """
-    chan = None
+    # NOTE: Any on purpose — discord.py's declared get_channel() return union
+    # and its inferred one disagree (concrete classes don't visibly subclass
+    # the ABCs), so no explicit union type-checks. Every concrete channel that
+    # can reach the send supports .send() at runtime.
+    chan: Any = None
     if bot is not None:
         try:
             chan = bot.get_channel(channel_id)
@@ -176,7 +187,8 @@ async def send_to_channel(bot, channel_id: int, content: str):
         ) from None
 
     log.info("Delivered message to channel %s via %s", channel_id, via)
-    return chan
+    # Whatever concrete channel class got resolved above supports .send().
+    return cast(discord.abc.Messageable, chan)
 
 
 async def can_post_in_channel(interaction: discord.Interaction) -> bool:

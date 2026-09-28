@@ -14,6 +14,10 @@ import pathlib
 import threading
 import time
 import uuid
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # only for the _resolve_bot return annotation
+    import discord
 
 log = logging.getLogger("bot.reminders")
 
@@ -24,11 +28,11 @@ _DEFAULT_PATH = _REPO_ROOT / "data" / "reminders.json"
 _store_path: pathlib.Path | None = None
 _lock = threading.Lock()
 
-# rid -> dict  (in-memory cache of the file)
-_reminders: dict[str, dict] = {}
+# rid -> reminder info dict  (in-memory cache of the file)
+_reminders: dict[str, dict[str, Any]] = {}
 
 # rid -> live asyncio.Task  (not persisted)
-_tasks: dict[str, asyncio.Task] = {}
+_tasks: dict[str, asyncio.Task[Any]] = {}
 
 
 # How many failed delivery attempts are tolerated before a reminder is
@@ -64,7 +68,7 @@ _RETRY_DELAYS: tuple[int, ...] = (30, 120)
 # A reminder re-armed this far (or more) past its deadline is stale — the
 # user isn't sitting by the channel for it anymore.  Drop instead of dump.
 STALE_GRACE_SEC: int = 5 * 60
-_retry_tasks: dict[str, asyncio.Task] = {}
+_retry_tasks: dict[str, asyncio.Task[Any]] = {}
 _deliver_locks: dict[str, asyncio.Lock] = {}
 
 
@@ -111,7 +115,7 @@ def _load() -> None:
         log.warning("Could not load reminders file: %s", e)
 
 
-def _resolve_bot():
+def _resolve_bot() -> discord.Client | None:
     """The running logged-in bot, or None (see :func:`bot_core.channel_delivery.get_bot`).
 
     Delegates to the shared resolver so every delivery path uses ONE lookup
@@ -272,8 +276,9 @@ def _schedule_retry(rid: str, delay_index: int) -> None:
         return  # no event loop — the restart/reconnect re-arm covers it
     task = loop.create_task(_run())
     _retry_tasks[rid] = task
+    # No default-arg capture needed: rid is stable for this closure (not a loop).
     task.add_done_callback(
-        lambda t, r=rid: _retry_tasks.pop(r, None) if _retry_tasks.get(r) is t else None
+        lambda t: _retry_tasks.pop(rid, None) if _retry_tasks.get(rid) is t else None
     )
 
 
@@ -317,7 +322,7 @@ def cancel_reminder(rid: str) -> bool:
     return existed
 
 
-def list_reminders() -> list[dict]:
+def list_reminders() -> list[dict[str, Any]]:
     """Return all non-fired reminders."""
     return [r for r in _reminders.values() if not r.get("fired")]
 
@@ -330,7 +335,8 @@ def _start_task(rid: str, delay: int, channel_id: int, message: str) -> None:
         return  # no event loop — task won't start (tests, CLI, etc.)
     task = loop.create_task(_fire(rid, channel_id, message, delay))
     _tasks[rid] = task
-    task.add_done_callback(lambda t, r=rid: _tasks.pop(r, None) if _tasks.get(r) is t else None)
+    # No default-arg capture needed: rid is stable for this closure (not a loop).
+    task.add_done_callback(lambda t: _tasks.pop(rid, None) if _tasks.get(rid) is t else None)
 
 
 def cancel_pending_tasks() -> None:

@@ -59,10 +59,11 @@ import time
 import wave
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
-if TYPE_CHECKING:  # numpy is imported lazily; needed only for these annotations
+if TYPE_CHECKING:  # numpy/openai are imported lazily; needed only for annotations
     import numpy as np
+    from openai import AsyncOpenAI
 
 log = logging.getLogger("bot.transcriber")
 
@@ -73,7 +74,7 @@ class TranscriptionError(Exception):
     """Raised when a WAV cannot be prepared for upload (bad format etc.)."""
 
 
-_shared_stt_client = None
+_shared_stt_client: "AsyncOpenAI | None" = None
 
 # ── Local backend (faster-whisper) state ─────────────────────────────────────
 _local_models: dict[str, object] = {}      # model name -> WhisperModel
@@ -81,7 +82,7 @@ _local_models_lock = threading.Lock()
 _inference_lock = threading.Lock()          # serialize CPU transcriptions
 
 
-def _stt_client():
+def _stt_client() -> "AsyncOpenAI":
     """Shared AsyncOpenAI client for the STT backend.
 
     Uses ``STT_URL`` (falls back to ``INFER_URL`` when unset) so the STT
@@ -99,7 +100,7 @@ def _stt_client():
     return _shared_stt_client
 
 
-def _load_to_16k_mono(wav_path: Path) -> tuple[np.ndarray, int]:
+def _load_to_16k_mono(wav_path: Path) -> tuple["np.ndarray[Any, np.dtype[np.int16]]", int]:
     """Read a WAV and return ``(int16 mono samples, rate)`` at 16 kHz.
 
     The recorder writes 48 kHz mono; Whisper-class models want 16 kHz, so we
@@ -121,7 +122,9 @@ def _load_to_16k_mono(wav_path: Path) -> tuple[np.ndarray, int]:
     if sample_width != 2:
         raise TranscriptionError(f"Unsupported WAV bit depth {sample_width * 8} in {wav_path.name}")
 
-    samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
+    # Wide annotation: the array changes dtype along the way (int16 -> float32
+    # -> float64 after np.interp) before being cast back to int16 at the end.
+    samples: "np.ndarray[Any, Any]" = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
     if channels > 1:
         samples = samples.reshape(-1, channels).mean(axis=1)
 
@@ -155,8 +158,8 @@ def _to_16k_mono_wav(wav_path: Path) -> bytes:
 
 
 def _trim_silence(
-    pcm: np.ndarray, *, rate: int = TARGET_SAMPLE_RATE, silence_dbfs: float = -45.0,
-) -> tuple[np.ndarray, int]:
+    pcm: "np.ndarray[Any, Any]", *, rate: int = TARGET_SAMPLE_RATE, silence_dbfs: float = -45.0,
+) -> tuple["np.ndarray[Any, Any]", int]:
     """Trim leading/trailing samples quieter than *silence_dbfs*.
 
     Returns ``(trimmed_pcm, trim_start_samples)`` where the offset is in the
@@ -178,7 +181,7 @@ def _trim_silence(
     return pcm[first:last + 1], first
 
 
-def _pcm_to_wav_bytes(pcm: np.ndarray, rate: int = TARGET_SAMPLE_RATE) -> bytes:
+def _pcm_to_wav_bytes(pcm: "np.ndarray[Any, Any]", rate: int = TARGET_SAMPLE_RATE) -> bytes:
     """Encode an int16 mono array as a minimal RIFF/WAVE file (44-byte header)."""
     import struct
 
@@ -216,7 +219,7 @@ def _plan_chunks(n_samples: int, *, rate: int = TARGET_SAMPLE_RATE,
     return [(i, min(i + step, n_samples)) for i in range(0, n_samples, step)]
 
 
-def _merge_segments(segs: list[dict], *, t_start: float) -> list[dict]:
+def _merge_segments(segs: list[dict[str, Any]], *, t_start: float) -> list[dict[str, Any]]:
     """Shift per-chunk segments back onto the shared timeline.
 
     Each chunk was transcribed independently, so its segment times are relative
@@ -243,7 +246,7 @@ class SpeakerResult:
     # Per-segment timestamps (local backend only): [{"start", "end", "text"}]
     # with times relative to the start of this speaker's WAV — which the
     # recorder aligns to the recording start, i.e. the shared timeline.
-    segments: list[dict] = field(default_factory=list)
+    segments: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -274,7 +277,7 @@ def _error_message(exc: Exception) -> str:
     return getattr(exc, "message", None) or str(exc)
 
 
-def _extract_segments(resp) -> tuple[str, str | None, list[dict]]:
+def _extract_segments(resp: Any) -> tuple[str, str | None, list[dict[str, Any]]]:
     """Pull ``(text, language, segments)`` out of a verbose_json response.
 
     The OpenAI SDK may hand back an object (``.segments`` / ``.start`` ...) or a
@@ -283,7 +286,7 @@ def _extract_segments(resp) -> tuple[str, str | None, list[dict]]:
     """
     text = ""
     lang: str | None = None
-    segs: list[dict] = []
+    segs: list[dict[str, Any]] = []
     if isinstance(resp, dict):
         text = resp.get("text") or ""
         lang = resp.get("language")
@@ -304,7 +307,7 @@ def _extract_segments(resp) -> tuple[str, str | None, list[dict]]:
     return text.strip(), lang, segs
 
 
-def _local_model(name: str):
+def _local_model(name: str) -> Any:
     """Lazily load (and cache) a faster-whisper model by name.
 
     First call downloads the model (~1.6 GB for large-v3-turbo) and takes
@@ -375,7 +378,8 @@ def save_stt_converted(wav_path: Path, out_dir: Path) -> Path | None:
         return None
 
 
-def _local_transcribe(wav_path: Path, model_name: str, language: str) -> tuple[str, str | None, list[dict]]:
+def _local_transcribe(wav_path: Path, model_name: str,
+                      language: str) -> tuple[str, str | None, list[dict[str, Any]]]:
     """Run faster-whisper on one WAV *synchronously* (call via to_thread).
 
     Returns ``(text, detected_language, segments)`` where each segment is
@@ -388,7 +392,7 @@ def _local_transcribe(wav_path: Path, model_name: str, language: str) -> tuple[s
     from config.settings import STT_VAD_FILTER
 
     model = _local_model(model_name)
-    kwargs: dict = {"vad_filter": STT_VAD_FILTER}
+    kwargs: dict[str, Any] = {"vad_filter": STT_VAD_FILTER}
     if language:
         kwargs["language"] = language
     with _inference_lock:
@@ -474,7 +478,7 @@ async def transcribe_wav(wav_path: Path, *, model: str, language: str = "") -> S
     except ValueError as e:
         return SpeakerResult(user_id=0, display_name="", wav_file=wav_path.name, error=str(e))
 
-    fields: dict = {
+    fields: dict[str, Any] = {
         "model": model,
         "timeout": STT_TIMEOUT,
         "response_format": "verbose_json",
@@ -485,13 +489,16 @@ async def transcribe_wav(wav_path: Path, *, model: str, language: str = "") -> S
 
     client = _stt_client()
     text_parts: list[str] = []
-    lang: str | None = None
-    all_segs: list[dict] = []
-    for i, (s, e) in enumerate(ranges):
+    result_lang: str | None = None
+    all_segs: list[dict[str, Any]] = []
+    # Loop vars are named chunk_start/chunk_end: 'e' would shadow the
+    # except-as names earlier in this function (mypy no-redef).
+    for i, (chunk_start, chunk_end) in enumerate(ranges):
         chunk_name = wav_path.name if len(ranges) == 1 else f"{wav_path.stem}__chunk{i + 1:02d}.wav"
         try:
             resp = await client.audio.transcriptions.create(
-                file=(chunk_name, _pcm_to_wav_bytes(pcm16[s:e]), "audio/wav"), **fields,
+                file=(chunk_name, _pcm_to_wav_bytes(pcm16[chunk_start:chunk_end]), "audio/wav"),
+                **fields,
             )
         except Exception as exc:  # noqa: BLE001 - surface backend errors per-speaker
             msg = _error_message(exc)
@@ -500,20 +507,20 @@ async def transcribe_wav(wav_path: Path, *, model: str, language: str = "") -> S
             return SpeakerResult(user_id=0, display_name="", wav_file=wav_path.name, error=msg)
         c_text, c_lang, c_segs = _extract_segments(resp)
         text_parts.append(c_text)
-        if lang is None and c_lang:
-            lang = c_lang
-        all_segs.extend(_merge_segments(c_segs, t_start=t_start + s / rate))
+        if result_lang is None and c_lang:
+            result_lang = c_lang
+        all_segs.extend(_merge_segments(c_segs, t_start=t_start + chunk_start / rate))
 
     merged_text = " ".join(p for p in text_parts if p).strip()
     elapsed = time.monotonic() - started
     log.info("STT done: %s -> %d chars, %d segment(s) over %d chunk(s) in %.1fs (model=%s)",
              wav_path.name, len(merged_text), len(all_segs), len(ranges), elapsed, model)
     return SpeakerResult(user_id=0, display_name="", wav_file=wav_path.name,
-                         text=merged_text, language=lang,
+                         text=merged_text, language=result_lang,
                          elapsed_s=round(elapsed, 2), segments=all_segs)
 
 
-def resolve_recording_dir(manifest: dict) -> Path | None:
+def resolve_recording_dir(manifest: dict[str, Any]) -> Path | None:
     """Locate the recording directory that holds the speakers' WAV files.
 
     In production the manifest comes from ``VoiceRecorder.stop()`` and always
@@ -541,7 +548,7 @@ def resolve_recording_dir(manifest: dict) -> Path | None:
     return None
 
 
-async def transcribe_recording(manifest: dict) -> TranscriptionReport:
+async def transcribe_recording(manifest: dict[str, Any]) -> TranscriptionReport:
     """Transcribe every speaker in a recording manifest.
 
     Files are processed sequentially (one local backend = one slot, same
@@ -632,7 +639,8 @@ def build_interleaved_transcript(report: TranscriptionReport) -> str:
     return "\n".join(lines).rstrip() + ("\n" if lines else "")
 
 
-def write_transcript(out_dir: Path, manifest: dict, report: TranscriptionReport) -> Path:
+def write_transcript(out_dir: Path, manifest: dict[str, Any],
+                     report: TranscriptionReport) -> Path:
     """Write ``transcript.json`` + interleaved ``transcript.txt`` into the
     recording directory and update the on-disk manifest with pointers to them.
     Returns the transcript.json path."""
