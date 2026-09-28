@@ -96,7 +96,8 @@ def _source_channel(source: Source | None) -> discord.TextChannel | None:
     """Best-effort TextChannel for a source (interaction or message)."""
     if source is None:
         return None
-    return cast(discord.TextChannel | None, getattr(source, "channel", None))
+    # String form: discord is a TYPE_CHECKING-only import.
+    return cast("discord.TextChannel | None", getattr(source, "channel", None))
 
 
 async def _deliver_error(source: Source, text: str) -> None:
