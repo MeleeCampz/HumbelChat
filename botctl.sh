@@ -204,6 +204,12 @@ cmd_run() {
     # set BOT_DEV_INFER_URL to point at a different backend.
     export INFER_URL="${BOT_DEV_INFER_URL:-http://127.0.0.1:8888/v1}"
 
+    # Point sentence-transformers / HuggingFace at the repo's shared model cache so
+    # local runs reuse the bge-m3 (and whisper) models Docker already downloaded,
+    # instead of re-fetching ~2GB into the default ~/.cache/huggingface. Only matters
+    # when EMBED_BACKEND=local or STT needs a model; harmless otherwise.
+    export HF_HOME="${BOT_DEV_HF_HOME:-$SCRIPT_DIR/hf-cache}"
+
     exec "$vpy" -u "$SCRIPT_DIR/main.py"
 }
 
