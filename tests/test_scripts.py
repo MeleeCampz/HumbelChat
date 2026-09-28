@@ -1,14 +1,19 @@
-"""Regression tests for P1 #5 and P1 #14 (shell scripts).
+"""Regression tests for the botctl.sh local-dev control script.
 
-P1 #5  — ``./botctl.sh logs`` used to call the nonexistent ``tmux follow``
-         command and error out.  Now: a TTY gets ``tmux attach`` (interactive
-         live output) and a piped/redirected call gets a one-shot
-         ``tmux capture-pane`` dump of the last 2000 lines.
+botctl.sh is the single local-dev entry point (setup / start / stop / restart /
+status / logs). It launches the bot in a detached tmux session by typing an
+internal ``_run`` command into the session; ``_run`` carries the foreground
+launch (PID fast-fail guard, venv resolution, dev INFER_URL default).
 
-P1 #14 — ``start_bot.sh``'s already-running message pointed at
-         ``./stop_bot.sh``, which does not exist.  Stop is ``./botctl.sh stop``.
+Covered regressions:
+  P1 #5  — ``botctl.sh logs`` used to call the nonexistent ``tmux follow``.
+           Now: a TTY gets ``tmux attach``; a piped/redirected call gets a
+           one-shot ``tmux capture-pane`` dump of the last 2000 lines.
+  P1 #14 — the already-running message must point at ``./botctl.sh stop``
+           (never the nonexistent ``stop_bot.sh``), and a stale PID file is
+           cleaned up so startup can continue.
 
-These tests copy the scripts into a temp dir (so ``SCRIPT_DIR``/``.bot.pid``
+These tests copy botctl.sh into a temp dir (so ``SCRIPT_DIR``/``.bot.pid``
 point at the temp dir, never the repo) and put a stub ``tmux`` on PATH that
 records every call it receives.
 """
@@ -28,12 +33,11 @@ from pathlib import Path
 import pytest
 
 pytestmark = pytest.mark.skipif(
-    pty is None, reason="requires pty (Unix only; botctl/start_bot are shell scripts)"
+    pty is None, reason="requires pty (Unix only; botctl is a shell script)"
 )
 
 REPO = Path(__file__).resolve().parent.parent
 BOTCTL = REPO / "botctl.sh"
-START_BOT = REPO / "start_bot.sh"
 
 STUB_TMUX = """#!/usr/bin/env bash
 # Stub tmux for tests — records argv, emulates a live session.
@@ -49,9 +53,8 @@ esac
 
 
 def _setup(tmp_path: Path) -> dict[str, Path]:
-    """Copy the scripts into *tmp_path* and install the stub tmux on PATH."""
+    """Copy botctl.sh into *tmp_path* and install the stub tmux on PATH."""
     shutil.copy(BOTCTL, tmp_path / "botctl.sh")
-    shutil.copy(START_BOT, tmp_path / "start_bot.sh")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     stub = bin_dir / "tmux"
@@ -60,7 +63,6 @@ def _setup(tmp_path: Path) -> dict[str, Path]:
     (tmp_path / ".stub_tmux.log").touch()
     return {
         "botctl": tmp_path / "botctl.sh",
-        "start": tmp_path / "start_bot.sh",
         "stub_log": tmp_path / ".stub_tmux.log",
         "env": {
             **os.environ,
@@ -85,8 +87,7 @@ def _dead_pid() -> int:
 class TestBotctlLogs:
 
     def test_syntax_ok(self):
-        for script in (BOTCTL, START_BOT):
-            subprocess.run(["bash", "-n", str(script)], check=True)
+        subprocess.run(["bash", "-n", str(BOTCTL)], check=True)
 
     @pytest.mark.parametrize("has_session", [True, False], ids=["session-alive", "no-session"])
     def test_logs_non_tty(self, tmp_path, has_session: bool):
@@ -150,12 +151,12 @@ class TestBotctlLogs:
         assert "capture-pane" not in calls, "TTY logs must not do the one-shot capture"
 
 
-# ───────────────────────── P1 #14: start_bot.sh stop hint ─────────────────────────
+# ─────────────── P1 #14: botctl.sh _run stop hint + stale-PID cleanup ───────────────
 
-class TestStartBotStopHint:
+class TestRunGuard:
 
     def test_no_stop_bot_sh_reference_anywhere(self, tmp_path):
-        """Neither script may mention the nonexistent stop_bot.sh anymore.
+        """botctl.sh must never mention the nonexistent stop_bot.sh.
 
         (The stale-PID path also must not mention it — a stale pid is cleaned
         up and startup continues, so this doubles as the stale-pid smoke test.)
@@ -163,12 +164,11 @@ class TestStartBotStopHint:
         s = _setup(tmp_path)
         (tmp_path / ".bot.pid").write_text(f"{_dead_pid()}\n")
 
-        assert "stop_bot.sh" not in s["start"].read_text()
         assert "stop_bot.sh" not in s["botctl"].read_text()
 
-        # Stale pid → guard cleans up, script proceeds to start (no stop hint).
+        # Stale pid → guard cleans up, _run proceeds past the guard (no stop hint).
         proc = subprocess.run(
-            ["bash", str(s["start"])],
+            ["bash", str(s["botctl"]), "_run"],
             cwd=tmp_path, env=s["env"],
             capture_output=True, text=True, timeout=20,
         )
@@ -177,13 +177,13 @@ class TestStartBotStopHint:
         assert not (tmp_path / ".bot.pid").exists(), "stale pid file must be cleaned up"
 
     def test_running_pid_message_same_hint(self, tmp_path):
-        """With a LIVE pid the guard must fire with the same correct hint."""
+        """With a LIVE pid the guard must fire with the correct stop hint."""
         s = _setup(tmp_path)
         # os.getpid() is alive — the guard path is identical (kill -0 succeeds).
         (tmp_path / ".bot.pid").write_text(f"{os.getpid()}\n")
 
         proc = subprocess.run(
-            ["bash", str(s["start"])],
+            ["bash", str(s["botctl"]), "_run"],
             cwd=tmp_path, env=s["env"],
             capture_output=True, text=True, timeout=20,
         )
