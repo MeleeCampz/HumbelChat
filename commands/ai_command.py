@@ -23,10 +23,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import config.settings as _settings
-from config.characters import get_character, default_character
+from config.characters import Character, get_character, default_character
 from bot_core import ai_client
 from bot_core.history import get_active_char_key
 from bot_core.ai_runs import register_run, clear_run
@@ -41,10 +41,18 @@ from utils.typing_loop import typing_loop_task
 if TYPE_CHECKING:  # discord is referenced only in string annotations
     import discord
 
+    # A turn can be triggered from a slash interaction or a prefix message;
+    # the delivery helpers duck-type over both.
+    Source = discord.Interaction | discord.Message
+
 log = logging.getLogger("bot.commands.ai_command")
 
 
-def resolve_turn_character(guild_id, channel_id, character_name: str | None):
+def resolve_turn_character(
+    guild_id: int | None,
+    channel_id: int | None,
+    character_name: str | None,
+) -> tuple[Character | None, str | None]:
     """Resolve the persona for one turn.
 
     ``character_name`` is the explicit ``/ai`` choice (a key or display name),
@@ -84,19 +92,21 @@ def resolve_turn_character(guild_id, channel_id, character_name: str | None):
 #  Generic source helpers (work for both Interaction and Message)
 # ─────────────────────────────────────────────────────────────────────────
 
-def _source_channel(source):
+def _source_channel(source: Source | None) -> discord.TextChannel | None:
     """Best-effort TextChannel for a source (interaction or message)."""
     if source is None:
         return None
-    return getattr(source, "channel", None)
+    return cast(discord.TextChannel | None, getattr(source, "channel", None))
 
 
-async def _deliver_error(source, text: str) -> None:
+async def _deliver_error(source: Source, text: str) -> None:
     """Send an error to the user, tolerating already-responded interactions."""
     try:
-        if hasattr(source, "followup") and getattr(source, "response", None) is not None \
-                and not source.response.is_done():
-            await source.response.send_message(text)
+        # Only slash Interactions have a deferred ``response``; prefix
+        # Messages go straight to followup/channel sends.
+        response = getattr(source, "response", None)
+        if response is not None and not response.is_done():
+            await response.send_message(text)
         elif hasattr(source, "followup"):
             await source.followup.send(text)
         else:
@@ -105,7 +115,7 @@ async def _deliver_error(source, text: str) -> None:
         log.warning("Error follow-up send failed: %s", e)
 
 
-async def _deliver_final(source, reply_text: str, char_name: str) -> None:
+async def _deliver_final(source: Source, reply_text: str, char_name: str) -> None:
     """Standard delivery: embed when enabled, else paragraph-aware chunks."""
     if _settings.EMBED_FORMAT:
         delivered = await send_long_response_embedded(source, reply_text, char_name)
@@ -115,9 +125,10 @@ async def _deliver_final(source, reply_text: str, char_name: str) -> None:
         await send_long_response(source, reply_text, char_name)
 
 
-async def _deliver_streaming(source, user_message: str, model_slug: str,
-                             guild_id: int, channel_id, username: str,
-                             user_id, char_name: str, char_key: str | None) -> None:
+async def _deliver_streaming(source: Source, user_message: str, model_slug: str,
+                             guild_id: int, channel_id: int | None, username: str,
+                             user_id: int | None, char_name: str,
+                             char_key: str | None) -> None:
     """P3 #24: consume the streamed completion, then deliver it through the normal
     (embed/chunk) path.
 
@@ -145,14 +156,14 @@ async def _deliver_streaming(source, user_message: str, model_slug: str,
 # ─────────────────────────────────────────────────────────────────────────
 
 async def run_ai_turn(
-    source,
+    source: Source,
     *,
     user_message: str,
     model_slug: str,
     guild_id: int,
-    channel_id,
+    channel_id: int | None,
     username: str = "",
-    user_id=None,
+    user_id: int | None = None,
     char_name: str,
     char_key: str | None = None,
 ) -> None:
@@ -202,7 +213,7 @@ async def run_ai_turn(
                 clear_run(channel_key, run_task)
 
 
-async def notify_if_queued(source) -> None:
+async def notify_if_queued(source: Source) -> None:
     """P3 #26: let the user know how many AI requests are ahead of them."""
     ahead = ai_client.ai_queue_depth() + (1 if ai_client.ai_slot_busy() else 0)
     if ahead <= 0:
@@ -212,9 +223,9 @@ async def notify_if_queued(source) -> None:
         "starting yours next. (Use `/ai stop` to bail.)"
     )
     try:
-        if hasattr(source, "followup") and getattr(source, "response", None) is not None \
-                and not source.response.is_done():
-            await source.response.send_message(text)
+        response = getattr(source, "response", None)
+        if response is not None and not response.is_done():
+            await response.send_message(text)
         elif hasattr(source, "followup"):
             await source.followup.send(text)
         else:
@@ -223,7 +234,7 @@ async def notify_if_queued(source) -> None:
         log.warning("AI queue notify failed: %s", e)
 
 
-def start_typing(source, channel_id) -> asyncio.Task | None:
+def start_typing(source: Source, channel_id: int | None) -> asyncio.Task[Any] | None:
     """Start an until-cancelled typing loop; keep a strong ref + diagnostics.
 
     P3 #24: ``duration_sec=None`` runs the loop until it is cancelled, so it
@@ -238,7 +249,7 @@ def start_typing(source, channel_id) -> asyncio.Task | None:
             typing_loop_task(channel, duration_sec=None),
             name=f"typing-{channel_id}",
         )
-        bot_ref = getattr(source, "client", None)
+        bot_ref: Any = getattr(source, "client", None)
         if bot_ref is None:
             from bot_core.channel_delivery import get_bot
             bot_ref = get_bot()
@@ -247,6 +258,7 @@ def start_typing(source, channel_id) -> asyncio.Task | None:
             if not isinstance(tasks, list):
                 tasks = []
                 setattr(bot_ref, "typing_tasks", tasks)
+            # Dynamic bookkeeping attribute on the live client (see docstring).
             bot_ref.typing_tasks = [t for t in tasks if not t.done()]
             bot_ref.typing_tasks.append(task)
         return task
