@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 import pathlib
 from dataclasses import dataclass, field
+from typing import Sequence
 
 
 # ──────────────────────────── Chunking provider ──────────────────────
@@ -154,9 +155,9 @@ class KBVectorIndex:
     @classmethod
     def from_entries(
         cls,
-        entries: list[tuple[str, str, str]],  # (display_name, content, source_file)
-        embeddings: list[list[float]],
-        file_hashes: list[str | None] | None = None,  # P2 #19
+        entries: Sequence[tuple[str, str, str]],  # (display_name, content, source_file)
+        embeddings: Sequence[list[float] | None],
+        file_hashes: Sequence[str | None] | None = None,  # P2 #19
     ) -> KBVectorIndex:
         """Build an index from pre-embedded entries (no API calls)."""
         index = cls.__new__(cls)

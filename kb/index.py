@@ -63,9 +63,13 @@ import pathlib
 import re
 import sqlite3
 import time
+from typing import TYPE_CHECKING, TypedDict
 
 from kb.vector_db import KBVectorIndex, _DocEntry
 from kb.embedder import Embedder
+
+if TYPE_CHECKING:  # only for the _rechunk return annotation
+    from kb.chunker import ChunkInfo
 
 logger = logging.getLogger("kb.index")
 
@@ -99,6 +103,19 @@ CREATE TABLE IF NOT EXISTS metadata (
 """
 
 _SCHEMA_VERSION = "5"  # v4 file hash + v5 packed embeddings and model identity
+
+
+class _CacheRow(TypedDict):
+    """One cached chunk row, keyed by source file (see ``_read_cache_rows``).
+
+    Built from the SQLite cache; the value types are fixed so callers can index
+    them without re-narrowing. ``file_hash`` is None on legacy v3 caches.
+    """
+    doc_name: str
+    content: str
+    content_hash: str
+    embedding: list[float]
+    file_hash: str | None
 
 
 # ──────────────────────────── Helpers ────────────────────────────────────
@@ -390,8 +407,8 @@ class KBIndexStore:
 
             target = _rel_key(self.kb_path, pathlib.Path(file_path)).lower()
             old_count = self._index.count()
-            self._index._docs = [  # type: ignore[union-attr]
-                doc for doc in self._index._docs  # type: ignore[union-attr]
+            self._index._docs = [
+                doc for doc in self._index._docs
                 if doc.source().lower() != target
             ]
 
@@ -406,7 +423,7 @@ class KBIndexStore:
             logger.warning("No matching chunks found to remove for '%s'", file_path)
             return False
 
-    async def sync_changes(self) -> tuple[KBVectorIndex, dict]:
+    async def sync_changes(self) -> tuple[KBVectorIndex, dict[str, object]]:
         """Sync the index with files added, renamed, changed, or deleted on disk.
 
         Cheap counterpart to :meth:`rebuild`: it reuses the disk cache and only
@@ -425,7 +442,9 @@ class KBIndexStore:
         # concurrent upload/sync cannot interleave and lose chunks.
         async with self._mutation_lock():
             if self._index is None or self._index.is_empty():
-                await self._load_inner()  # lock-free core — we already hold it
+                # Capture the return so mypy knows _index is non-None below
+                # (_load_inner always assigns + returns a live index).
+                self._index = await self._load_inner()  # lock-free core — held
 
             files = await self._iter_files()
             rows = await self._read_cache_rows_async() if self._db_path.exists() else {}
@@ -526,20 +545,25 @@ class KBIndexStore:
                     # removed files' rows are pruned by the upsert path.
                     await self._save_to_disk(changed={_rel_key(self.kb_path, p) for p in to_embed})
 
-            report = {
-                "added": [_rel_key(self.kb_path, p) for p in still_added],
-                "changed": [_rel_key(self.kb_path, p) for p in changed
-                            if _rel_key(self.kb_path, p) not in {r[1] for r in renamed}],
+            added_keys = [_rel_key(self.kb_path, p) for p in still_added]
+            changed_keys = [
+                _rel_key(self.kb_path, p) for p in changed
+                if _rel_key(self.kb_path, p) not in {r[1] for r in renamed}
+            ]
+            removed_keys = [n for n in removed if n not in used_old]
+            report: dict[str, object] = {
+                "added": added_keys,
+                "changed": changed_keys,
                 "renamed": renamed,
-                "removed": [n for n in removed if n not in used_old],
+                "removed": removed_keys,
                 "failed": failures,
                 "changed_count": len(to_embed),
                 "ok": not failures,
             }
             logger.info(
                 "KB sync: %d added, %d changed, %d renamed, %d removed, %d failed (%d chunk(s) total)",
-                len(report["added"]), len(report["changed"]), len(renamed),
-                len(report["removed"]), len(failures),
+                len(added_keys), len(changed_keys), len(renamed),
+                len(removed_keys), len(failures),
                 self._index.count() if self._index else 0,
             )
             return self._index, report
@@ -728,7 +752,7 @@ class KBIndexStore:
             return None
         return _file_hash_bytes(data)
 
-    async def _chunks_valid(self, cached: list[dict], file: pathlib.Path) -> bool:
+    async def _chunks_valid(self, cached: list[_CacheRow], file: pathlib.Path) -> bool:
         """True when cached chunks for *file* match the on-disk chunking exactly.
 
         P2 #19 fast path: if the cached rows carry a *source file hash* and it
@@ -784,7 +808,7 @@ class KBIndexStore:
         """Directory walk off the event loop (P0 #4)."""
         return await asyncio.to_thread(_iter_kb_files, self.kb_path)
 
-    async def _read_cache_rows_async(self) -> dict[str, list[dict]]:
+    async def _read_cache_rows_async(self) -> dict[str, list[_CacheRow]]:
         """SQLite cache read off the event loop (P0 #4)."""
         return await asyncio.to_thread(self._read_cache_rows)
 
@@ -794,7 +818,7 @@ class KBIndexStore:
             _read_text_sync, path
         )
 
-    async def _rechunk(self, path: pathlib.Path) -> list:
+    async def _rechunk(self, path: pathlib.Path) -> list[ChunkInfo]:
         """Re-chunk from disk off the event loop (P0 #4).
 
         ``Chunker.split_file`` is a pure CPU/IO pass (read file, regex
@@ -838,7 +862,7 @@ class KBIndexStore:
             conn.execute("ALTER TABLE document_index ADD COLUMN file_hash TEXT")
         return conn
 
-    def _read_cache_rows(self) -> dict[str, list[dict]]:
+    def _read_cache_rows(self) -> dict[str, list[_CacheRow]]:
         """Return cached chunks keyed by source file (ALL rows per file, in id order).
 
         Returns an empty dict for legacy/corrupt caches (no content-hash schema),
@@ -867,7 +891,7 @@ class KBIndexStore:
             logger.warning("Could not read index cache: %s", exc)
             return {}
 
-        result: dict[str, list[dict]] = {}
+        result: dict[str, list[_CacheRow]] = {}
         # P2 #22: legacy rows are keyed by *basename* (no "/").  Re-keying
         # those used to run a full ``_iter_kb_files`` rglob *per row*.  Instead
         # resolve the KB file list ONCE (lazily, only when a legacy row is seen)
@@ -1028,9 +1052,8 @@ class KBIndexStore:
             cols = {r[1] for r in conn.execute("PRAGMA table_info(document_index)")}
             if "source_file" not in cols:
                 conn.close()
-                conn = None
                 self._persist_index_to_db(idx)
-                return
+                return  # finally's close() is a safe no-op on a closed connection
             now = time.time()
             # 1. Replace rows for the changed files (delete old, insert new).
             for key in changed:
