@@ -130,7 +130,7 @@ def get_message_count(guild_id: int, channel_id: int) -> int:
     return len(_chat_history.get(guild_id, {}).get(channel_id, []))
 
 
-def get_active_char_key(guild_id: int | None, channel_id: int) -> str:
+def get_active_char_key(guild_id: int | None, channel_id: int | None) -> str:
     from config.characters import default_character
     if guild_id is not None and (guild_id, channel_id) in _active_characters:
         return _active_characters[(guild_id, channel_id)]
