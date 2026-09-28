@@ -47,6 +47,10 @@ import re
 import threading
 import time
 from datetime import datetime
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import discord
 
 log = logging.getLogger("bot.sessions")
 
@@ -70,7 +74,7 @@ _DEFAULT_PATH = _REPO_ROOT / "data" / "sessions.json"
 _store_path: pathlib.Path | None = None
 _lock = threading.Lock()
 
-_state: dict = {
+_state: dict[str, Any] = {
     "session": None,          # the active session (None when no session is running)
     "last_ended": None,       # most recently ended session (overview pending delivery?)
     "last_start_at": None,    # epoch seconds of the most recent start
@@ -195,7 +199,7 @@ def _next_session_index(now: datetime) -> int:
     return best + 1
 
 
-def _session_dir(session: dict) -> pathlib.Path:
+def _session_dir(session: dict[str, Any]) -> pathlib.Path:
     """The per-session folder (absolute). Prefer the stored ``dir`` key; fall
     back to the notes file's parent so partially-built sessions still resolve."""
     d = session.get("dir")
@@ -246,7 +250,7 @@ def _next_transcript_name(directory: pathlib.Path) -> str:
     return f"transcript_{best + 1:02d}.md"
 
 
-def _session_docs(session: dict, subdir: str) -> list[str]:
+def _session_docs(session: dict[str, Any], subdir: str) -> list[str]:
     """Names of standalone documents currently in one of the session's sub-folders."""
     d = _session_dir(session) / subdir
     if not d.exists():
@@ -302,12 +306,12 @@ def _documents_block_for_dir(folder: pathlib.Path) -> list[str]:
     return ["", "## Documents (combined uploads + transcripts — full text)", ""] + lines
 
 
-def _documents_section_lines(session: dict) -> list[str]:
+def _documents_section_lines(session: dict[str, Any]) -> list[str]:
     """The combined ``## Documents`` section for *session*'s folder."""
     return _documents_block_for_dir(_session_dir(session))
 
 
-def _session_file_content(session: dict) -> str:
+def _session_file_content(session: dict[str, Any]) -> str:
     """Render the session's ``notes.md`` from its state + raw dot-dir files.
 
     Real notes are timestamped bullets under ``## Notes``.  The session's RAG
@@ -348,7 +352,7 @@ def _session_file_content(session: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _write_session_file(session: dict) -> None:
+def _write_session_file(session: dict[str, Any]) -> None:
     """(Re)write the session's ``notes.md``. Failures are logged, never raised."""
     path = pathlib.Path(session.get("file") or "")
     if not path:
@@ -378,7 +382,7 @@ def _index_session_file(path: pathlib.Path) -> None:
         loop = asyncio.get_running_loop()
         fut = loop.create_task(update_kb_document(path))
 
-        def _on_done(t: "asyncio.Task") -> None:
+        def _on_done(t: "asyncio.Task[Any]") -> None:
             try:
                 if not t.result():
                     log.warning("Session file %s not auto-indexed — run /reindex_kb.", path.name)
@@ -393,7 +397,7 @@ def _index_session_file(path: pathlib.Path) -> None:
         log.warning("Auto-index of session file failed for %s: %s", path, e)
 
 
-def _session_index_paths(session: dict) -> list[pathlib.Path]:
+def _session_index_paths(session: dict[str, Any]) -> list[pathlib.Path]:
     """Indexable files for a session: ONLY ``notes.md``.
 
     The combined notes file carries the full text of every upload and
@@ -408,12 +412,12 @@ def _session_index_paths(session: dict) -> list[pathlib.Path]:
     return []
 
 
-def _index_session_paths(session: dict) -> None:
+def _index_session_paths(session: dict[str, Any]) -> None:
     for p in _session_index_paths(session):
         _index_session_file(p)
 
 
-def _reindex_notes_file(session: dict) -> None:
+def _reindex_notes_file(session: dict[str, Any]) -> None:
     """Re-read the session's ``notes.md`` from disk and sync state + index.
 
     The user may have edited the markdown file on disk; treat it as the new
@@ -436,7 +440,7 @@ def _reindex_notes_file(session: dict) -> None:
     cut = re.search(r"^## ", section, flags=re.MULTILINE)
     if cut:
         section = section[:cut.start()]
-    notes: list[list] = []
+    notes: list[list[float | str]] = []
     for line in section.splitlines():
         bm = re.match(r"^\s*-\s*\(([^)]+)\)\s*(.+?)\s*$", line)
         if bm:
@@ -548,33 +552,33 @@ def migrate_legacy_session_dirs() -> int:
 
 # ── Public API — session lifecycle ───────────────────────────────────────
 
-def get_current_session() -> dict | None:
+def get_current_session() -> dict[str, Any] | None:
     """The current session if one is active, else None."""
-    s = _state.get("session")
+    s: dict[str, Any] | None = _state.get("session")
     if s and not s.get("ended_at"):
         return s
     return None
 
 
-def get_last_session() -> dict | None:
+def get_last_session() -> dict[str, Any] | None:
     """Most recent session (active or the last ended one) — for /session_notes view."""
     return _state.get("session") or _state.get("last_ended")
 
 
-def _pending_manual_overview() -> dict | None:
+def _pending_manual_overview() -> dict[str, Any] | None:
     """Return the last-ENDED session whose AI overview has not been delivered yet.
 
     The overview of a manually ended session is delivered when the NEXT
     session starts (per spec).  Once delivered, ``overview_delivered`` is set
     so it is never sent twice.
     """
-    s = _state.get("last_ended")
+    s: dict[str, Any] | None = _state.get("last_ended")
     if s and not s.get("overview_delivered") and s.get("overview"):
         return s
     return None
 
 
-def start_session(name: str | None = None) -> tuple[dict, dict | None]:
+def start_session(name: str | None = None) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """Start a new global session.
 
     Enforces the safety rules (see module docstring).  Returns
@@ -592,7 +596,7 @@ def start_session(name: str | None = None) -> tuple[dict, dict | None]:
     now = time.time()
     current = get_current_session()
 
-    closed_info: dict | None = None
+    closed_info: dict[str, Any] | None = None
     if current is not None:
         age = now - current["started_at"]
         if age >= STALE_SESSION_SEC:
@@ -638,8 +642,8 @@ def start_session(name: str | None = None) -> tuple[dict, dict | None]:
     return session, closed_info
 
 
-def _end_session_internal(session: dict, overview: str | None,
-                          merged_log: str | None = None) -> dict:
+def _end_session_internal(session: dict[str, Any], overview: str | None,
+                          merged_log: str | None = None) -> dict[str, Any]:
     """Shared end logic — sets ended_at, moves to last_ended, persists."""
     session["ended_at"] = time.time()
     if overview is not None:
@@ -657,14 +661,14 @@ def _end_session_internal(session: dict, overview: str | None,
     return session
 
 
-def mark_overview_delivered(session: dict) -> None:
+def mark_overview_delivered(session: dict[str, Any]) -> None:
     """Remember that the previous session's overview was posted to Discord."""
     session["overview_delivered"] = True
     _save()
 
 
 def end_session(overview: str | None = None, name: str | None = None,
-                merged_log: str | None = None) -> dict | None:
+                merged_log: str | None = None) -> dict[str, Any] | None:
     """End the current session.
 
     *name* (optional) renames the session in its file/state; *overview* is
@@ -685,7 +689,7 @@ def end_session(overview: str | None = None, name: str | None = None,
 
 # ── Public API — notes ───────────────────────────────────────────────────
 
-def add_note(text: str, author: str = "") -> dict | None:
+def add_note(text: str, author: str = "") -> dict[str, Any] | None:
     """Append a timestamped note to the current session.
 
     The note is stored whole (whitespace-normalized to a single line — the
@@ -712,7 +716,8 @@ def add_note(text: str, author: str = "") -> dict | None:
     return session
 
 
-def _append_document_file(session: dict, subdir: str, title: str, text: str) -> pathlib.Path:
+def _append_document_file(session: dict[str, Any], subdir: str, title: str,
+                          text: str) -> pathlib.Path:
     """Write *text* as one standalone ``.md`` file inside a session sub-folder.
 
     Returns the written path.  The file keeps the raw document text (a
@@ -733,7 +738,8 @@ def _append_document_file(session: dict, subdir: str, title: str, text: str) -> 
     return path
 
 
-def add_transcript(text: str, title: str = "", session: dict | None = None) -> tuple[dict | None, int]:
+def add_transcript(text: str, title: str = "",
+                   session: dict[str, Any] | None = None) -> tuple[dict[str, Any] | None, int]:
     """Store a finished voice-channel transcript for a session.
 
     Called from the STT background job after ``/stop_recording``.  The full
@@ -777,7 +783,8 @@ def add_transcript(text: str, title: str = "", session: dict | None = None) -> t
         return None, 0
 
 
-def add_document(text: str, title: str = "", session: dict | None = None) -> tuple[dict | None, int]:
+def add_document(text: str, title: str = "",
+                 session: dict[str, Any] | None = None) -> tuple[dict[str, Any] | None, int]:
     """Store an uploaded text document (``.txt`` / ``.md``) for a session.
 
     The whole file is written as a raw ``.md`` under the session's hidden
@@ -814,7 +821,7 @@ def add_document(text: str, title: str = "", session: dict | None = None) -> tup
         return None, 0
 
 
-def get_notes(session: dict | None = None) -> list[list]:
+def get_notes(session: dict[str, Any] | None = None) -> list[list[float | str]]:
     """Notes of *session* (default: current, else last known).
 
     Each entry is ``[epoch, text]`` where *text* is the full (un-split) note
@@ -826,7 +833,7 @@ def get_notes(session: dict | None = None) -> list[list]:
     return [list(n) for n in s.get("notes", [])]
 
 
-def refresh_notes_from_disk(session: dict | None = None) -> list[list]:
+def refresh_notes_from_disk(session: dict[str, Any] | None = None) -> list[list[float | str]]:
     """Re-read the notes file from disk (user may have edited it) and sync state."""
     s = session if session is not None else _state.get("session")
     if not s:
@@ -838,7 +845,7 @@ def refresh_notes_from_disk(session: dict | None = None) -> list[list]:
 
 # ── Public API — next-session reminders ──────────────────────────────────
 
-def queue_next_session_reminder(channel_id: int, message: str) -> dict:
+def queue_next_session_reminder(channel_id: int, message: str) -> dict[str, Any]:
     """Queue a reminder to be delivered when the NEXT session starts.
 
     Persists immediately; fires from :func:`deliver_queued_reminders` inside
@@ -857,11 +864,11 @@ def queue_next_session_reminder(channel_id: int, message: str) -> dict:
     return entry
 
 
-def list_queued_reminders() -> list[dict]:
+def list_queued_reminders() -> list[dict[str, Any]]:
     return [dict(r) for r in _state.get("next_session_reminders", [])]
 
 
-async def deliver_queued_reminders(bot) -> int:
+async def deliver_queued_reminders(bot: "discord.Client") -> int:
     """Send all queued next-session reminders to their channels.
 
     Called by the /start_session handler right after a new session started.
@@ -882,8 +889,8 @@ async def deliver_queued_reminders(bot) -> int:
     if not queued:
         return 0
     sent = 0
-    delivered: list[dict] = []
-    failed: list[dict] = []
+    delivered: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
     for r in queued:
         try:
             # send_to_channel uses the local cache first, then falls back to a
