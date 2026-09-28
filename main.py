@@ -372,8 +372,7 @@ async def list_kb_docs_command(interaction: discord.Interaction, path: str | Non
 async def reindex_kb_command(interaction: discord.Interaction) -> None:
     """Re-index KB files — delegated to commands/kb_commands.py."""
     from commands.kb_commands import handle_reindex_kb
-    # Temporary: remove once commands/kb_commands.py is typed (mypy #3, session 16).
-    await handle_reindex_kb(interaction)  # type: ignore[no-untyped-call]
+    await handle_reindex_kb(interaction)
 
 
 @bot.tree.command(name="sync_kb", description="Re-index only new, renamed, edited or deleted KB files — unchanged files are skipped.")

@@ -5,6 +5,7 @@ import asyncio
 import logging
 import pathlib
 
+import discord
 import httpx
 
 from kb.storage import validate_upload_async, list_kb_files_async
@@ -17,9 +18,9 @@ UPLOAD_DOWNLOAD_TIMEOUT = 60.0  # seconds
 
 
 async def handle_upload_kb(
-    interaction,                           # Discord Interaction
+    interaction: discord.Interaction,       # Discord Interaction
     url: str | None = None,                 # remote URL → download
-    attachment=None,                        # discord.Attachment or None
+    attachment: discord.Attachment | None = None,  # discord.Attachment or None
     subfolder: str | None = None,           # optional subfolder
 ) -> None:
     """Upload a file directly to the local KB storage directory."""
@@ -117,7 +118,8 @@ def get_root_directories(kb_path: pathlib.Path) -> list[str]:
     return sorted(dirs)
 
 
-async def handle_list_kb_docs(interaction, subfolder_path: str | None = None):
+async def handle_list_kb_docs(interaction: discord.Interaction,
+                              subfolder_path: str | None = None) -> None:
     """List all documents in KB_PATH directory.
 
     If *subfolder_path* is given, recurses into that subfolder.
@@ -169,10 +171,13 @@ async def handle_list_kb_docs(interaction, subfolder_path: str | None = None):
     lines.append("")
     lines.append(section_label)
     for doc in docs[:30]:  # cap at 30
-        size_kb = doc["size"] / 1024  # float; never a string (0-byte files are valid)
+        # Coerce to the known runtime types: size is an int (bytes) and the
+        # name/hash/date fields are str — the list_kb_files dict is typed
+        # loosely as dict[str, str | int], so narrow here at the point of use.
+        size_kb = int(doc["size"]) / 1024  # float; never a string (0-byte files valid)
         name = doc.get("name", doc.get("filename", "unknown"))
-        sha8 = (doc.get("sha256", "?")[:8])
-        date = doc.get("modified", "?")[:10]
+        sha8 = str(doc.get("sha256", "?"))[:8]
+        date = str(doc.get("modified", "?"))[:10]
         lines.append(f"  • `{name}` — {size_kb:.1f} KB — {date} — sha:`{sha8}...`")
 
     if len(docs) > 30:
@@ -181,7 +186,7 @@ async def handle_list_kb_docs(interaction, subfolder_path: str | None = None):
     await send_long_response(interaction, "\n".join(lines))
 
 
-async def handle_reindex_kb(interaction):
+async def handle_reindex_kb(interaction: discord.Interaction) -> None:
     """Trigger reindexing of all files in the KB using the vector index."""
     from config.settings import KB_PATH
 
@@ -239,7 +244,7 @@ async def handle_reindex_kb(interaction):
     await interaction.followup.send("\n".join(msg_parts))
 
 
-async def handle_sync_kb(interaction) -> None:
+async def handle_sync_kb(interaction: discord.Interaction) -> None:
     """Re-index only files that changed on disk (new, renamed, edited, deleted).
 
     Unlike /reindex_kb this never re-embeds unchanged files, so it is fast and
