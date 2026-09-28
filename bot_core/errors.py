@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from typing import Any
 from email.utils import parsedate_to_datetime
 
 log = logging.getLogger("bot.errors")
@@ -36,7 +37,7 @@ class AIError(Exception):
 class TimeoutError(AIError):
     category = "timeout"
 
-    def __init__(self, message: str = "The AI backend took too long to respond.", **kw):
+    def __init__(self, message: str = "The AI backend took too long to respond.", **kw: Any):
         kw.setdefault("user_message", "⏱️ The AI backend took too long to respond. Please try again.")
         super().__init__(message, **kw)
 
@@ -44,7 +45,7 @@ class TimeoutError(AIError):
 class ModelNotFoundError(AIError):
     category = "model_not_found"
 
-    def __init__(self, model: str, backend_url: str = "", **kw):
+    def __init__(self, model: str, backend_url: str = "", **kw: Any):
         self.model = model
         self.backend_url = backend_url
         msg = f"Model '{model}' not found on the AI backend."
@@ -55,7 +56,7 @@ class ModelNotFoundError(AIError):
 class BackendDownError(AIError):
     category = "backend_down"
 
-    def __init__(self, message: str = "The AI backend is unreachable.", **kw):
+    def __init__(self, message: str = "The AI backend is unreachable.", **kw: Any):
         kw.setdefault("user_message", "🔌 The AI backend is unreachable right now. Please try again in a minute.")
         super().__init__(message, **kw)
 
@@ -71,7 +72,7 @@ class AIBackendError(AIError):
 
     category = "backend_error"
 
-    def __init__(self, message: str = "The AI backend returned an empty response.", **kw):
+    def __init__(self, message: str = "The AI backend returned an empty response.", **kw: Any):
         kw.setdefault("user_message", "🤖 The AI backend returned an empty response. Please try again.")
         super().__init__(message, **kw)
 
@@ -95,8 +96,8 @@ class AIResponseTruncatedError(AIError):
         self,
         message: str = "The model used its full token budget on reasoning and produced no answer.",
         max_tokens: int | None = None,
-        **kw,
-    ):
+        **kw: Any,
+    ) -> None:
         kw.setdefault(
             "user_message",
             "⚠️ The model ran out of response budget before answering "
@@ -107,7 +108,7 @@ class AIResponseTruncatedError(AIError):
         self.max_tokens = max_tokens
 
 
-def _is_truncated_empty_response(resp, content: str) -> bool:
+def _is_truncated_empty_response(resp: object, content: str) -> bool:
     """True when *resp* is a max-tokens truncation with an empty answer.
 
     ``finish_reason == "length"`` means the backend cut the generation off at
@@ -124,7 +125,7 @@ def _is_truncated_empty_response(resp, content: str) -> bool:
     return finish == "length"
 
 
-def extract_reply_text(resp, *, default: str = "(empty response)") -> str:
+def extract_reply_text(resp: object, *, default: str = "(empty response)") -> str:
     """Safely return the first choice's message content from a completion.
 
     P1 #8: some backends return an empty ``choices`` array (or a ``None``
@@ -147,7 +148,7 @@ def extract_reply_text(resp, *, default: str = "(empty response)") -> str:
     if not choices:
         raise AIBackendError("The AI backend returned no choices.")
     message = getattr(choices[0], "message", None)
-    content = getattr(message, "content", None)
+    content: str | None = getattr(message, "content", None)
     if not content or not content.strip():
         if _is_truncated_empty_response(resp, content or ""):
             max_tokens = getattr(choices[0], "max_tokens", None)
@@ -180,7 +181,8 @@ def classify_ai_error(exc: BaseException, *, model: str = "", backend_url: str =
         from bot_core.ai_client import RateLimitError
 
         if isinstance(exc, RateLimitError):
-            return exc
+            # Intentional: return the bot's RateLimitError as-is (see above).
+            return exc  # type: ignore[return-value]
     except ImportError:
         pass
 
@@ -231,7 +233,10 @@ def classify_ai_error(exc: BaseException, *, model: str = "", backend_url: str =
         retry_after = _parse_retry_after(raw, fallback=AI_RETRY_AFTER_FALLBACK_S)
         if raw:
             log.info("429 retry-after: header=%r -> %ds", raw, retry_after)
-        return RateLimitError("ai", retry_after=retry_after)
+        # Intentional: the classifier is a pure function that returns the
+        # bot's RateLimitError (a plain Exception, not an AIError) as-is so
+        # callers can handle it uniformly; see docstring rule 5.
+        return RateLimitError("ai", retry_after=retry_after)  # type: ignore[return-value]
 
     # 6. Fallback
     return AIError(str(exc), cause=exc)

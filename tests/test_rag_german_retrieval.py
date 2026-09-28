@@ -1,4 +1,4 @@
-"""Tests for the German-query RAG fixes (see docs/RAG_ANALYSIS_2026-09-27.md).
+"""Tests for the German-query RAG fixes (see docs/internal/RAG_ANALYSIS_2026-09-27.md).
 
 Covers:
 - kb.chunker.html_tables_to_plain_text — HTML table → plain text conversion

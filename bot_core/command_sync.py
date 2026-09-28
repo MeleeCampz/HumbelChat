@@ -28,7 +28,7 @@ It is safe to run repeatedly: deleting an already-absent command raises
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import discord
 
@@ -117,7 +117,7 @@ async def purge_stale_globals(bot: "Bot") -> list[str]:
     return deleted
 
 
-async def sync_commands(bot: "Bot") -> dict:
+async def sync_commands(bot: "Bot") -> dict[str, Any]:
     """Bring Discord's registered commands back in line with the code.
 
     1. Delete all stale guild-scoped commands (the bot is global-only).

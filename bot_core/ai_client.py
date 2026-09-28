@@ -24,8 +24,15 @@ import time
 from datetime import datetime
 
 import asyncio
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING, Any, cast
+
 from openai import AsyncOpenAI, APIStatusError
+from openai.types.chat import ChatCompletionMessageParam
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from config.characters import Character
 
 from bot_core.history import ensure_history, get_history, set_history
 from config.settings import (
@@ -161,7 +168,7 @@ async def _validate_model(client: AsyncOpenAI, effective_model: str) -> str:
             log.warning("Could not list backend models at %s: %s", INFER_URL, e)
     if available and effective_model not in available and effective_model != DEFAULT_MODEL:
         log.warning("Model '%s' not found on backend; falling back to '%s'", effective_model, DEFAULT_MODEL)
-        return DEFAULT_MODEL
+        return DEFAULT_MODEL or ""
     return effective_model
 
 
@@ -239,14 +246,14 @@ def _scaled_timeout(total_chars: int, max_tokens: int | None = None) -> float:
 
 
 def _apply_prompt_budget(
-    recent_history: list[dict],
+    recent_history: list[ChatCompletionMessageParam],
     kb_docs: list[tuple[str, str]],
     rag_context: str,
     included_names: list[str],
     system_p: str,
     username: str,
     user_message: str,
-) -> tuple[list[dict], list[tuple[str, str]], str, list[str]]:
+) -> tuple[list[ChatCompletionMessageParam], list[tuple[str, str]], str, list[str]]:
     """Trim *recent_history* / *kb_docs* until the estimated prompt fits.
 
     The estimate uses the *exact* same message shapes that
@@ -261,9 +268,11 @@ def _apply_prompt_budget(
     context = rag_context
     names = list(included_names)
 
-    def _est(hist: list[dict], ctx: str) -> int:
+    def _est(hist: list[ChatCompletionMessageParam], ctx: str) -> int:
         total = (len(system_p) if system_p else 0)
-        total += sum(len(m.get("content", "")) for m in hist)
+        # History content is always a plain str at runtime (see _persist_turn);
+        # the openai TypedDict union also allows part-lists, which we never store.
+        total += sum(len(cast(str, m.get("content", ""))) for m in hist)
         total += len(_append_user_message(username, user_message, ctx))
         return total
 
@@ -345,7 +354,7 @@ def _is_transient_api_failure(exc: BaseException) -> bool:
     ) or "timed out" in str(exc).lower()
 
 
-async def _call_completion_with_retry(client: AsyncOpenAI, **kwargs):
+async def _call_completion_with_retry(client: AsyncOpenAI, **kwargs: Any) -> Any:
     """Invoke ``chat.completions.create`` with one retry on transient errors.
 
     P1 #7: a transient 5xx / timeout / connection blip used to fail the whole
@@ -369,10 +378,11 @@ async def _call_completion_with_retry(client: AsyncOpenAI, **kwargs):
                 type(e).__name__, e, delay, attempt + 1, _COMPLETION_MAX_ATTEMPTS,
             )
             await asyncio.sleep(delay)
-    raise last_exc  # pragma: no cover — unreachable, loop always returns/raises
+    # Unreachable: the loop above always returns or raises on every attempt.
+    raise last_exc  # type: ignore[misc]  # pragma: no cover
 
 
-def _resolve_request_params(char_obj) -> tuple[int, float]:
+def _resolve_request_params(char_obj: Character | None) -> tuple[int, float]:
     """Resolve max_tokens and temperature from character config."""
     _char_max = char_obj.max_tokens if (char_obj and char_obj.max_tokens) else None
     _request_max_tokens: int = _char_max if _char_max else MAX_TOKENS
@@ -415,7 +425,7 @@ _ai_waiters: int = 0        # requests queued behind the active one
 
 
 @asynccontextmanager
-async def _ai_slot():
+async def _ai_slot() -> AsyncIterator[None]:
     """Hold the process-wide AI slot for the duration of one request.
 
     P3 #26: maintains the live queue counters so callers can surface
@@ -472,15 +482,15 @@ class _AIRequestContext:
         *,
         effective_model: str,
         client: AsyncOpenAI,
-        messages: list[dict],
+        messages: list[ChatCompletionMessageParam],
         user_message: str,
         guild_id: int,
-        channel_id: int,
+        channel_id: int | None,
         username: str,
         system_p: str,
         rag_context: str,
         included_names: list[str],
-        recent_history: list[dict],
+        recent_history: list[ChatCompletionMessageParam],
         total_chars: int,
         max_tokens: int,
         temperature: float,
@@ -503,7 +513,7 @@ class _AIRequestContext:
         self.timeout_sec = timeout_sec
 
 
-def _compose_system_prompt(char_obj) -> str:
+def _compose_system_prompt(char_obj: Character | None) -> str:
     """Persona prompt + the global response-format appendix (stat blocks).
 
     The appendix lives in settings (env-overridable via ``STAT_BLOCK_FORMAT_RULES``)
@@ -515,14 +525,14 @@ def _compose_system_prompt(char_obj) -> str:
     return base + STAT_BLOCK_FORMAT_RULES
 
 
-def _session_field(session, key, default=None):
+def _session_field(session: object, key: str, default: Any = None) -> Any:
     """Read *key* from a session that may be a dict (live) or an object (tests)."""
     if isinstance(session, dict):
         return session.get(key, default)
     return getattr(session, key, default)
 
 
-def _build_last_session_context(session) -> str:
+def _build_last_session_context(session: object) -> str:
     """Format the previous session as a BRIEF, size-capped context block.
 
     Overview only — deliberately NO notes / merged log: detailed session
@@ -546,7 +556,7 @@ def _build_last_session_context(session) -> str:
         started = _session_field(session, "started_at")
         ended = _session_field(session, "ended_at")
 
-        def _fmt_ts(ts) -> str:
+        def _fmt_ts(ts: Any) -> str:
             try:
                 return datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M")
             except (TypeError, ValueError, OSError):
@@ -599,7 +609,7 @@ async def _build_ai_request(
     user_message: str,
     model_slug: str,
     guild_id: int,
-    channel_id: int,
+    channel_id: int | None,
     username: str = "",
     user_id: str | int | None = None,
     char_key: str | None = None,
@@ -676,7 +686,11 @@ async def _build_ai_request(
             log.warning("last-session context lookup failed: %s", e)
 
     # ── Build messages ─────────────────────────────────────────────────
-    recent_history = history[-(2 * max_messages):] if max_messages else []
+    # Stored chat history is plain {"role", "content"} dicts — exactly the
+    # openai user/assistant message shape (cast at the storage boundary).
+    recent_history: list[ChatCompletionMessageParam] = \
+        cast(list[ChatCompletionMessageParam],
+             history[-(2 * max_messages):] if max_messages else [])
 
     # ── Phase 3: prompt budget (decision Q3a) ────────────────────────────
     # If the estimated prompt exceeds PROMPT_BUDGET_CHARS, trim oldest
@@ -687,7 +701,7 @@ async def _build_ai_request(
             system_p, username, user_message,
         )
 
-    messages: list[dict] = []
+    messages: list[ChatCompletionMessageParam] = []
     # P2-3: system prompt is persona-only (no RAG)
     if system_p:
         messages.append({"role": "system", "content": system_p})
@@ -696,7 +710,7 @@ async def _build_ai_request(
     # P2-3: RAG context injected into the user message, right before the question
     messages.append({"role": "user", "content": _append_user_message(username, user_message, rag_context, session_ctx)})
 
-    _total_chars = sum(len(m.get("content", "")) for m in messages)
+    _total_chars = sum(len(cast(str, m.get("content", ""))) for m in messages)
     _approx_tokens = int(_total_chars / 4)
     log.info(
         "ask_ai → model=%s messages_in_prompt=%d KB_files=%d system_chars=%d rag_chars=%d history_msgs=%d total_chars=%.1fK estimated_tokens=%d",
@@ -736,7 +750,8 @@ async def _build_ai_request(
     )
 
 
-def _persist_turn(guild_id: int, channel_id: int, user_message: str, reply_text: str) -> None:
+def _persist_turn(guild_id: int, channel_id: int | None, user_message: str,
+                  reply_text: str) -> None:
     """Append a (user, assistant) pair to history and persist it (P0 #2).
 
     Store the *clean* user message (not the RAG-inflated ``user_content``),
@@ -774,11 +789,11 @@ async def ask_ai(
     user_message: str,
     model_slug: str,
     guild_id: int,
-    channel_id: int,
+    channel_id: int | None,
     username: str = "",
     user_id: str | int | None = None,
     char_key: str | None = None,
-) -> tuple[str, dict]:
+) -> tuple[str, dict[str, Any]]:
     """AI request with RAG, rate limiting, and input validation.
 
     Returns (reply_text, extra_info_dict).
@@ -869,11 +884,11 @@ async def ask_ai_stream(
     user_message: str,
     model_slug: str,
     guild_id: int,
-    channel_id: int,
+    channel_id: int | None,
     username: str = "",
     user_id: str | int | None = None,
     char_key: str | None = None,
-):
+) -> AsyncIterator[str]:
     """Streaming variant of :func:`ask_ai` (P3 #24).
 
     An ``async generator`` that yields progressively-grown text as the
@@ -939,7 +954,7 @@ async def ask_ai_stream(
             stream: AsyncStream[ChatCompletionChunk] = \
                 await ctx.client.chat.completions.create(
                     model=ctx.effective_model,
-                    messages=ctx.messages,  # type: ignore[arg-type]
+                    messages=ctx.messages,
                     temperature=ctx.temperature,
                     max_tokens=ctx.max_tokens,
                     stream=True,
@@ -1012,7 +1027,9 @@ async def ask_ai_stream(
                 # reason (success, timeout, cancellation); idempotent in the
                 # openai SDK.
                 try:
-                    stream.close()
+                    # openai's AsyncStream.close() is async — awaiting it is
+                    # what actually releases the HTTP connection (P3 #3 fix).
+                    await stream.close()
                 except Exception:
                     pass
         except asyncio.CancelledError:

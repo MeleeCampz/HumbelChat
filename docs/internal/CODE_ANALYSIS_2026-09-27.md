@@ -93,7 +93,7 @@ fixing would be churn beyond "confirmed bugs".
 
 | # | Item | Notes |
 |---|------|-------|
-| I1 | **mypy cleanup campaign** — 290 issues across 36 files (hotspots: `sessions.py` 35, `embed_formatter.py` 25, `ai_client.py` 25, `transcriber.py` 22, `kb/index.py` 15). | Incremental: one module per session, no behaviour changes. The codebase is ruff-clean and the runtime behaviour is sound; this is purely type-hygiene. |
+| I1 | **mypy cleanup campaign** — ~~290 issues across 36 files~~ → **done (2026-10)**: `mypy bot_core commands kb utils config main.py` now reports **0 errors** across all 50 source files. | Executed incrementally, one module per session, no behaviour changes except two sanctioned bug fixes: (1) `await stream.close()` in `ai_client.py` (the un-awaited async close leaked streaming HTTP connections), and (2) `message.guild_id` → `message.guild.id if message.guild else 0` in `main.py`'s prefix path (DM messages have no `guild_id`). Kept in default mode (no strict promotion). |
 | I2 | **Document the `_looks_german` trigger** in `kb/retrievers.py`. With `RAG_REWRITE_ALL_QUERIES=1` (default) every query is rewritten, so the German-detection heuristic only matters behind the `RAG_REWRITE_ALL_QUERIES=0` kill-switch. | Docs/comment only — no code change needed. |
 | I3 | **The 7 pre-existing test failures** are environment artifacts (Windows-local path expectations ×2, embed-formatter/ai-command/p5 mismatches ×5). | Worth a pass to either fix the tests or mark them platform-conditional so CI runs green. |
 
@@ -136,7 +136,7 @@ non-obvious invariants a future maintainer should not break:
 |---|--------|-------|
 | pytest | 7 failed / 717 passed / 6 skipped | 7 failed / **721** passed / 6 skipped (same 7 pre-existing failures) |
 | ruff | clean | clean |
-| mypy | 290 issues | 290 issues (unchanged — see I1) |
+| mypy | 290 issues | 290 issues at analysis time; **0** after the I1 campaign (2026-10) |
 
 Three real bugs fixed, four regression tests added, zero behaviour changes
 beyond the fixes, zero new test failures.

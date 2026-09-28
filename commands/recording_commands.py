@@ -22,6 +22,7 @@ import logging
 import pathlib
 import time
 from datetime import datetime
+from typing import Any, cast
 
 import discord
 
@@ -56,17 +57,17 @@ def _get_recorder(bot: discord.Client) -> VoiceRecorder:
     return attach_to_bot(bot, RECORDINGS_DIR)
 
 
-def _user_voice_channel(interaction: discord.Interaction):
+def _user_voice_channel(interaction: discord.Interaction) -> discord.VoiceChannel | None:
     """Return the voice channel the invoking user is in, or ``None``."""
     member = interaction.user
     # In a guild interaction.user is a Member with a .voice attribute.
     voice = getattr(member, "voice", None)
     if voice is not None:
-        return getattr(voice, "channel", None)
+        return cast(discord.VoiceChannel | None, getattr(voice, "channel", None))
     return None
 
 
-def _guild_voice_client(bot: discord.Client, guild_id: int):
+def _guild_voice_client(bot: discord.Client, guild_id: int) -> discord.VoiceClient | None:
     """Return the bot's VoiceClient for this guild (or ``None``)."""
     try:
         guild = bot.get_guild(guild_id)
@@ -74,10 +75,14 @@ def _guild_voice_client(bot: discord.Client, guild_id: int):
         return None
     if guild is None:
         return None
-    return getattr(guild, "voice_client", None)
+    return cast(discord.VoiceClient | None, getattr(guild, "voice_client", None))
 
 
-async def _ensure_bot_in_channel(bot: discord.Client, guild_id: int, channel) -> None:
+async def _ensure_bot_in_channel(
+    bot: discord.Client,
+    guild_id: int,
+    channel: discord.VoiceChannel,
+) -> None:
     """Join (or move) the bot into ``channel``. No-op if already there.
 
     New joins go through ``channel.connect(cls=recorder_voice_cls(bot))`` so
@@ -222,7 +227,12 @@ async def handle_stop_recording(
     await interaction.response.defer()
 
     try:
-        manifest = recorder.stop() if in_memory else recover_recording(orphan)
+        if in_memory:
+            assert recorder is not None  # in_memory implies a live recorder
+            manifest = recorder.stop()
+        else:
+            assert orphan is not None  # guarded above: returned when None
+            manifest = recover_recording(orphan)
     except Exception as e:  # pragma: no cover - defensive
         log.exception("Failed to stop voice recording")
         await interaction.followup.send(f"⚠️ Failed to stop recording: {e}")
@@ -283,7 +293,10 @@ async def handle_stop_recording(
         except Exception:  # pragma: no cover - defensive
             manifest_file = None
 
-    await interaction.followup.send(body, file=manifest_file)
+    if manifest_file is not None:
+        await interaction.followup.send(body, file=manifest_file)
+    else:
+        await interaction.followup.send(body)
 
     if run_stt:
         spawn_tracked_task(
@@ -292,7 +305,11 @@ async def handle_stop_recording(
         )
 
 
-async def _safe_followup(interaction: discord.Interaction, body: str, files: list | None = None) -> None:
+async def _safe_followup(
+    interaction: discord.Interaction,
+    body: str,
+    files: list[discord.File] | None = None,
+) -> None:
     """Best-effort followup — the webhook can expire for very long recordings."""
     try:
         await interaction.followup.send(body, files=files or [])
@@ -302,8 +319,8 @@ async def _safe_followup(interaction: discord.Interaction, body: str, files: lis
 
 async def _run_transcription(
     interaction: discord.Interaction,
-    manifest: dict,
-    session_at_stop: dict | None = None,
+    manifest: dict[str, Any],
+    session_at_stop: dict[str, Any] | None = None,
 ) -> None:
     """Background job: transcribe every speaker's WAV, write transcript.json,
     append the transcript to the session that was active when the recording
@@ -382,7 +399,7 @@ async def _run_transcription(
         + session_line
     )
 
-    files: list = []
+    files: list[discord.File] = []
     for f in (path, path.with_name("transcript.txt")):
         try:
             if f.exists():

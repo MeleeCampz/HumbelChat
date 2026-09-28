@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import struct
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, cast
 
 import nacl.secret
 
@@ -112,7 +112,9 @@ def _decrypt_dave(
         return inner
     try:
         import davey  # local import keeps module import-light
-        return dave_session.decrypt(user_id, davey.MediaType.audio, inner)
+        # davey is an untyped C-backed lib → decrypt() is Any; the frame comes
+        # back as raw Opus bytes (or None). Cast to the declared return type.
+        return cast(Optional[bytes], dave_session.decrypt(user_id, davey.MediaType.audio, inner))
     except Exception as e:  # pragma: no cover - depends on live MLS state
         msg = f"{type(e).__name__}: {e}"
         if on_error is not None:

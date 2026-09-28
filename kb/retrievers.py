@@ -36,10 +36,11 @@ import time
 import logging
 import os
 import pathlib
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from kb.index import KBIndexStore
+    from kb.lexical import BM25
     from kb.vector_db import KBVectorIndex
 
 logger = logging.getLogger("kb.retrievers")
@@ -82,7 +83,8 @@ async def _ensure_index_store(kb_path: str | pathlib.Path) -> Optional["KBIndexS
         await store.load()
         _index_store = store
         _kb_path_for_store = kb_path
-        logger.info("Vector index store ready (%d chunks)", store.get_index().count() if store.get_index() else 0)
+        idx = store.get_index()
+        logger.info("Vector index store ready (%d chunks)", idx.count() if idx else 0)
     return _index_store
 
 
@@ -109,10 +111,12 @@ def replace_index_store(
     _index_store = store
     if kb_path is not None:
         _kb_path_for_store = kb_path
+    new_idx = store.get_index() if store is not None else None
+    old_idx = old_store.get_index() if old_store is not None else None
     logger.info(
         "Vector index store swapped in (%d chunks)%s",
-        store.get_index().count() if store is not None and store.get_index() else 0,
-        f" (was {old_store.get_index().count()} chunks)" if old_store is not None and old_store.get_index() else "",
+        new_idx.count() if new_idx else 0,
+        f" (was {old_idx.count()} chunks)" if old_idx else "",
     )
     if old_store is not None and old_store is not store:
         # Best-effort async cleanup of the replaced store.  It is no longer
@@ -430,10 +434,10 @@ async def _retrieve_keyword(
 # A BM25 index over every chunk's content, cached by identity of ``idx._docs`` so it is
 # built once and reused across queries (rebuilt automatically when the doc list object is
 # replaced). Provides an exact-term signal to fuse with dense vectors via RRF.
-_bm25_cache: tuple | None = None  # (BM25, docs_ref, count)
+_bm25_cache: tuple["BM25", Any, int] | None = None  # (BM25, docs_ref, count)
 
 
-def _get_bm25(idx):
+def _get_bm25(idx: "KBVectorIndex") -> "BM25":
     """Return a cached BM25 index for *idx*, building it on first use."""
     global _bm25_cache
     docs = idx._docs
@@ -445,7 +449,7 @@ def _get_bm25(idx):
     return bm25
 
 
-def _lexical_ranking(idx, query: str, limit: int) -> list[tuple[str, str, float]]:
+def _lexical_ranking(idx: "KBVectorIndex", query: str, limit: int) -> list[tuple[str, str, float]]:
     """BM25 ranking of all chunks for *query* as ``[(name, content, score), ...]``.
 
     Synchronous (CPU) — call via ``asyncio.to_thread``.
@@ -560,7 +564,7 @@ async def _retrieve_vector(
     # IMPORTANT: score EVERY query variant (original + expansions), not just the
     # raw query. BM25 on the raw German query alone matches "stat block" monster
     # text and German session notes verbatim, which drowned out the expansion-
-    # fused dense ranking (see docs/RAG_ANALYSIS_2026-09-27.md). The translated
+    # fused dense ranking (see docs/internal/RAG_ANALYSIS_2026-09-27.md). The translated
     # English expansions let BM25 exact-match KB terms like "Chain Mail".
     hybrid_ranked = ranked
     from config.settings import RAG_HYBRID_ENABLED
@@ -701,7 +705,7 @@ async def update_kb_document(file_path: str | pathlib.Path) -> bool:
         return await store.update_single_document(file_path)
 
 
-async def sync_kb_store() -> tuple[Optional["KBVectorIndex"], dict]:
+async def sync_kb_store() -> tuple[Optional["KBVectorIndex"], dict[str, Any]]:
     """Sync the (singleton) index with files changed on disk outside the bot.
 
     Re-embeds only new/renamed/changed files and drops rows for files that

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import pathlib
 import logging
+from typing import Any
 
 log = logging.getLogger("bot.config.characters")
 
@@ -33,7 +34,7 @@ class Character:
         self.temperature = temperature
 
     @staticmethod
-    def from_dict(key: str, data: dict) -> Character:
+    def from_dict(key: str, data: dict[str, Any]) -> Character:
         display = data.get("display", data.get("name", key.title()))
         model = data.get("model", "") 
         return Character(
@@ -45,7 +46,7 @@ class Character:
             temperature=data.get("temperature"),
         )
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"Character({self.display!r} → {self.model!r})"
 
 

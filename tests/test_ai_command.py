@@ -314,7 +314,8 @@ class TestExplicitCharacterPersona:
         message.author.id = 9
         message.author.display_name = "Ada"
         message.content = f"{main.BOT_PREFIX} hello"
-        message.guild_id = 42
+        # discord.Message has no .guild_id — the real API is message.guild.id.
+        message.guild = MagicMock(id=42)
         message.channel.id = 7
         message.channel.name = "general"
         message.channel.send = AsyncMock()

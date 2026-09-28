@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
+from typing import Any
 
 import discord
 
@@ -74,7 +75,7 @@ def _merge_prompt() -> str:
 
 # ── Overview source assembly ────────────────────────────────────────────
 
-def _session_documents_text(session: dict) -> tuple[str, list[str]]:
+def _session_documents_text(session: dict[str, Any]) -> tuple[str, list[str]]:
     """Full text of the session's own documents (attachments + transcripts).
 
     Returns ``(text, refs)`` where *refs* are ``<subdir>/<filename>`` labels
@@ -119,7 +120,7 @@ def _session_documents_text(session: dict) -> tuple[str, list[str]]:
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
-def _get_bot():
+def _get_bot() -> discord.Client | None:
     """Running bot reference with side-effect-free resolution.
 
     Delegates to :func:`bot_core.channel_delivery.get_bot`, which reads the
@@ -133,14 +134,14 @@ def _get_bot():
     return get_bot()
 
 
-def _resolve_overview_model(guild_id: int | None, channel_id: int) -> str:
+def _resolve_overview_model(guild_id: int | None, channel_id: int | None) -> str:
     """Model for the AI overview: active character's model, else DEFAULT_MODEL."""
     char = get_character(get_active_char_key(guild_id, channel_id))
     model = (char.model if (char and char.model) else "").strip()
     return model or DEFAULT_MODEL or ""
 
 
-def _fallback_overview(session: dict, notes: list[list]) -> str:
+def _fallback_overview(session: dict[str, Any], notes: list[list[float | str]]) -> str:
     """Plain-text overview used when the AI backend is unavailable.
 
     Still points the user at the session's own documents (the real source of
@@ -170,7 +171,9 @@ def _fallback_overview(session: dict, notes: list[list]) -> str:
     return "\n".join(lines)
 
 
-def _build_supplemental_sources(session: dict, guild_id: int | None, channel_id: int) -> str:
+def _build_supplemental_sources(
+    session: dict[str, Any], guild_id: int | None, channel_id: int | None,
+) -> str:
     """Combined notes + recent chat section for the overview prompt.
 
     Notes come first (they are timestamped and session-specific); the recent
@@ -184,7 +187,8 @@ def _build_supplemental_sources(session: dict, guild_id: int | None, channel_id:
     hist = get_history(guild_id if guild_id is not None else 0, channel_id)
     chat_lines = []
     for m in hist[-_OVERVIEW_HISTORY_MESSAGES:]:
-        role = {"user": "User", "assistant": "AI"}.get(m.get("role"), m.get("role"))
+        raw_role = m.get("role", "")
+        role = {"user": "User", "assistant": "AI"}.get(raw_role, raw_role)
         chat_lines.append(f"[{role}]: {m.get('content', '')}")
     chat_text = "\n\n".join(chat_lines) or "(no recent chat in this channel)"
 
@@ -199,7 +203,9 @@ def _build_supplemental_sources(session: dict, guild_id: int | None, channel_id:
     return body
 
 
-async def _generate_overview(session: dict, guild_id: int | None, channel_id: int) -> str:
+async def _generate_overview(
+    session: dict[str, Any], guild_id: int | None, channel_id: int | None,
+) -> str:
     """AI overview of the session from the session's OWN material only.
 
     Sources, strongest first: the session's own documents (attachments/ and
@@ -275,7 +281,9 @@ async def _generate_overview(session: dict, guild_id: int | None, channel_id: in
 _MERGED_LOG_MAX_TOKENS = 24576
 
 
-async def _generate_merged_log(session: dict, guild_id: int | None, channel_id: int) -> str | None:
+async def _generate_merged_log(
+    session: dict[str, Any], guild_id: int | None, channel_id: int | None,
+) -> str | None:
     """AI-merged canonical session log from the session's own documents.
 
     Every player log / transcript of the session covers the same chronological
@@ -437,6 +445,11 @@ async def handle_remind_next_session(interaction: discord.Interaction, message: 
         )
         return
 
+    # A slash command always arrives in a channel; the guard only satisfies
+    # mypy (interaction.channel is typed as ... | None).
+    if interaction.channel is None:
+        await interaction.response.send_message("⚠️ This command needs to run in a channel.")
+        return
     entry = S.queue_next_session_reminder(interaction.channel.id, message)
     queued = len(S.list_queued_reminders())
 
@@ -626,7 +639,7 @@ def _chunk_display(text: str, limit: int = _VIEW_MSG_LIMIT) -> list[str]:
     return [p for p in parts if p]
 
 
-def _build_view_parts(session: dict) -> list[str]:
+def _build_view_parts(session: dict[str, Any]) -> list[str]:
     """Build the display-only /session_notes messages for one session.
 
     Notes are shown in full (word-wrapped across messages when long); the raw

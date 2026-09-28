@@ -37,10 +37,10 @@ from typing import AsyncIterator
 log = logging.getLogger("bot.channel_queue")
 
 # channel_id -> single-token FIFO queue (the token is the "channel slot")
-_queues: dict[int, asyncio.Queue] = {}
+_queues: dict[int, asyncio.Queue[None]] = {}
 
 
-def _queue_for(channel_key: int) -> asyncio.Queue:
+def _queue_for(channel_key: int) -> asyncio.Queue[None]:
     q = _queues.get(channel_key)
     if q is None:
         q = asyncio.Queue(maxsize=1)

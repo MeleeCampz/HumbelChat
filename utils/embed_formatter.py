@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import logging
 import re
+from typing import cast
 
 import discord
 
@@ -593,7 +594,12 @@ def _build_embed_impl(
     *,
     title_override: str | None = None,
     color: int | None = None,
-) -> discord.Embed | None:
+) -> tuple[discord.Embed, str] | None:
+    """Build one embed; returns ``(embed, overflow_text)`` or ``None``.
+
+    The second tuple element is the content that did not fit ("" when it all
+    fits) — callers use it to decide whether to split into more embeds.
+    """
     if not text or not text.strip():
         return None
 
@@ -750,7 +756,8 @@ def _build_embed_impl(
                 nm = _fold_name(name if idx == 0 else f"{name} (cont.)")
                 add_field(nm, value, False)
         elif kind == "list":
-            lines = list(payload)  # type: ignore[arg-type]
+            # kind == "list" ⇒ payload is the list[str] built in _extract_blocks.
+            lines = cast(list[str], payload)
             for gi, group in enumerate(_group_lines(lines)):
                 # First group takes the pending heading as its field name so
                 # the label sits with its bullets; later groups stay unnamed.
@@ -783,7 +790,7 @@ def _build_embed_impl(
 
     # ── Usefulness gate: an embed for a 5-word reply is just noise ─────
     body_len = sum(len(p) for p in desc_parts) + sum(
-        len(f.value) for f in embed.fields
+        len(f.value or "") for f in embed.fields
     )
     if body_len < 80 and not embed.fields:
         log.debug("build_embed: content too small (%d chars) — using plain text",
@@ -929,9 +936,9 @@ def build_embeds_for_channel(
             try:
                 r = _build_embed_impl(chunk, title_override=title_override, color=color)
                 if r is not None:
-                    e, t2 = r
-                    if not t2:
-                        out.append(e)
+                    first_embed, tail2 = r
+                    if not tail2:
+                        out.append(first_embed)
                         continue
             except Exception:  # defensive
                 pass
