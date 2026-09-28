@@ -41,7 +41,10 @@ _OCR_MIME_MAP = {
 OCR_TEXT_EXTS = (".txt", ".md", ".csv", ".json", ".log", ".xml", ".html", ".htm", ".ini", ".yaml", ".yml")
 
 
-def _resolve_utility_model(guild_id: int | None, channel_id: int) -> tuple[str, float | None, int | None]:
+def _resolve_utility_model(
+    guild_id: int | None,
+    channel_id: int | None,
+) -> tuple[str, float | None, int | None]:
     """Resolve (model, temperature, max_tokens) from the channel's active
     character, falling back to DEFAULT_MODEL when unset (code review §1.8).
     """
@@ -49,13 +52,13 @@ def _resolve_utility_model(guild_id: int | None, channel_id: int) -> tuple[str, 
     char = get_character(char_key)
     model = (char.model if (char and char.model) else "").strip()
     if not model:
-        return DEFAULT_MODEL, None, None
+        return (DEFAULT_MODEL or ""), None, None
     temp = getattr(char, "temperature", None)
     max_tok = getattr(char, "max_tokens", None)
     return model, temp, max_tok
 
 
-async def _validated_utility_model(guild_id: int | None, channel_id: int) -> str:
+async def _validated_utility_model(guild_id: int | None, channel_id: int | None) -> str:
     """Resolve + guard against stale model slugs (P0 model-not-found guard)."""
     model, _, _ = _resolve_utility_model(guild_id, channel_id)
     client = _make_client()
@@ -96,6 +99,7 @@ async def handle_remind_command(
     clamped = delay > MAX_REMINDER_DELAY_SEC
     delay = clamp_reminder_delay(delay)
 
+    assert interaction.channel is not None  # slash commands always have a channel
     channel_id = interaction.channel.id
 
     # Fail fast: refuse to schedule into a channel we cannot actually write
