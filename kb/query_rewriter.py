@@ -119,7 +119,7 @@ Expansions:
         # Qwen3-style hybrid-thinking models spend their ENTIRE 256-token budget on
         # reasoning and return no content ("full token budget on reasoning"). This is
         # a short utility call — disable thinking. Measured: 0.5s with it off vs
-        # 5.7s of pure thinking (see docs/RAG_ANALYSIS_2026-09-27.md).
+        # 5.7s of pure thinking (see docs/internal/RAG_ANALYSIS_2026-09-27.md).
         # Kwargs are passed inline (not via a dict) so mypy can match each against
         # the AsyncCompletions.create overload.
         try:

@@ -564,7 +564,7 @@ async def _retrieve_vector(
     # IMPORTANT: score EVERY query variant (original + expansions), not just the
     # raw query. BM25 on the raw German query alone matches "stat block" monster
     # text and German session notes verbatim, which drowned out the expansion-
-    # fused dense ranking (see docs/RAG_ANALYSIS_2026-09-27.md). The translated
+    # fused dense ranking (see docs/internal/RAG_ANALYSIS_2026-09-27.md). The translated
     # English expansions let BM25 exact-match KB terms like "Chain Mail".
     hybrid_ranked = ranked
     from config.settings import RAG_HYBRID_ENABLED
