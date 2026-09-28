@@ -89,10 +89,11 @@ update.
 
 ## Local development (no Docker)
 
-The venv/tmux scripts still work for dev runs on any platform:
+The tmux-based control script works for dev runs on any platform — it creates
+the venv automatically if missing, so a fresh clone needs just one command:
 
 ```bash
-./setup_venv.sh && ./botctl.sh start   # or: python main.py in the foreground
+./botctl.sh start   # sets up .venv if needed, then launches in a detached tmux session
 ```
 
 See [Configuration](./configuration.md) for all env vars.

@@ -8,9 +8,8 @@
 # mypy, coverage) should run. Nothing here is read at runtime by the bot — it
 # only matters when you `pip install` the project or run the tooling.
 #
-#   [project]                        name, version, required runtime deps, entry point
+#   [project]                        name, version, required runtime deps
 #   [project.optional-dependencies]  optional "extras" (see below)
-#   [project.scripts]                the `discord-ai-bot` console command
 #   [tool.*]                         pytest / coverage / ruff / mypy configuration
 #
 # Install matrix (each line is a full, working install):
@@ -86,10 +85,6 @@ dev = [
     "mypy==2.3.1",
     "pytest-cov==7.0.0",
 ]
-
-[project.scripts]
-# P3 #27: console entry point (main.py exposes run_bot()).
-discord-ai-bot = "main:run_bot"
 
 [tool.setuptools.packages.find]
 where = ["."]
