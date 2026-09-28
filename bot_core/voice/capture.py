@@ -12,7 +12,7 @@ import struct
 import wave
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 # ── Constants ────────────────────────────────────────────────────────────────
 SAMPLE_RATE = 48_000          # Discord voice is always 48 kHz
@@ -114,7 +114,7 @@ class _SpeakerLog:
         return out
 
     @staticmethod
-    def read_meta(path: Path) -> Optional[dict]:
+    def read_meta(path: Path) -> Optional[dict[str, Any]]:
         """Parse the log header (sample_rate/channels/width/frame_samples)."""
         try:
             data = Path(path).read_bytes()
