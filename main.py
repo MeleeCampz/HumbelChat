@@ -769,13 +769,12 @@ def _recover_crashed_recordings(bot_obj: commands.Bot) -> None:
 
 
 def run_bot() -> None:
-    """P3 #27: entry point for the ``discord-ai-bot`` console script.
+    """Entry point for ``python main.py`` / ``python -m main``.
 
-    Extracted from the module-level ``__main__`` block so the bot can be
-    launched via ``python -m main`` *and* the installed ``discord-ai-bot``
-    console script (see ``pyproject.toml``) without duplicating the startup
-    sequence. Behaviour is unchanged: guard on the token, enforce the single
-    instance lock, log the connection target, then run the bot.
+    Extracted from the module-level ``__main__`` block so the startup sequence
+    lives in one place. Behaviour: guard on the token, enforce the single
+    instance lock, log the connection target, then run the bot. Local dev can
+    also reach this via ``./botctl.sh start``; production runs it in Docker.
     """
     if not DISCORD_TOKEN:
         log.error("Please set the DISCORD_BOT_TOKEN environment variable.")

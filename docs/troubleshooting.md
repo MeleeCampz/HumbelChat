@@ -5,7 +5,7 @@
 Likely cause: command sync not yet propagated by Discord.
 
 Fix:
-- Re-run the bot with `python main.py` or `./start_bot.sh`
+- Restart the bot — local dev: `./botctl.sh restart`; Docker production: `docker compose up -d --build`
 - Or wait up to about an hour for Discord to propagate the update
 - Verify `DISCORD_BOT_TOKEN` is valid in `.env`
 
@@ -71,7 +71,7 @@ Likely cause: stale PID or port conflict from a previous run.
 
 Fix:
 - Use `./botctl.sh restart` (or `stop` then `start`) — it kills the existing tmux session and starts fresh
-- If `./start_bot.sh` reports "Bot already running", remove the stale `.bot.pid` file in the project root (the process is dead, so nothing else needs cleaning up)
+- If `./botctl.sh start` reports "Bot already running", remove the stale `.bot.pid` file in the project root (the process is dead, so nothing else needs cleaning up)
 
 ## New commands not appearing after code changes
 

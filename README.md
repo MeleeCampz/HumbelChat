@@ -4,18 +4,37 @@ A self-hosted Discord bot with AI chat, configurable AI personas, and optional R
 
 ## Quick start
 
-Requires **Python 3.10+** (3.12 recommended — see `.python-version`).
+Pick one of two ways to run it — that's the whole startup story:
+
+### Production — Docker (recommended for the live bot)
+
+The bot runs in its own container with all runtime data bind-mounted from the
+repo — see [Docker deployment](./docs/docker.md).
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate   # Linux/macOS
-pip install -r requirements.txt
-cp .env.example .env
-# edit .env and set at minimum: DISCORD_BOT_TOKEN, INFER_URL, INFER_API_KEY
-python main.py
+cp .env.example .env   # then set DISCORD_BOT_TOKEN, INFER_URL, INFER_API_KEY
+docker compose up -d --build   # build + start (also the update flow after git pull)
+docker compose logs -f bot     # live logs
+docker compose down            # stop
 ```
 
-Prefer the packaged install (base + optional extras) instead of `requirements.txt`:
+### Local development — no Docker
+
+One script sets up the venv and runs the bot in a detached tmux session that
+survives browser/terminal shutdowns. Requires **Python 3.10+** (3.12 recommended).
+
+```bash
+cp .env.example .env   # then set DISCORD_BOT_TOKEN, INFER_URL, INFER_API_KEY
+./botctl.sh start      # creates .venv if missing, then launches in tmux
+./botctl.sh logs       # watch output · also: stop | restart | status
+```
+
+<details>
+<summary>Optional extras & running directly</summary>
+
+The heavy STT and vector dependencies are optional extras (a base install runs
+the core bot):
+
 ```bash
 pip install -e .                # base (AI chat + RAG text retrieval)
 pip install -e '.[stt]'         # + local STT (faster-whisper)
@@ -23,19 +42,10 @@ pip install -e '.[rag-vector]'  # + vector retrieval (fastembed)
 pip install -e '.[all]'         # everything
 ```
 
-**Docker (production):** the bot runs in its own container with all runtime
-data bind-mounted from the repo — see [Docker deployment](./docs/docker.md).
-```bash
-docker compose up -d --build   # build + start (also the update flow after git pull)
-docker compose logs -f bot     # live logs
-docker compose down            # stop
-```
-
-Or run without Docker — a startup script keeps the bot in a detached tmux session so it survives browser/terminal shutdowns:
-```bash
-./botctl.sh start      # or: restart | stop | status | logs
-```
-`./start_bot.sh` also works for a simple foreground-style start.
+`./botctl.sh setup` refreshes the venv after dependency changes. To run in the
+foreground without tmux: `./.venv/bin/python main.py` (Windows:
+`.venv\Scripts\python main.py`).
+</details>
 
 ## Docs
 
@@ -82,7 +92,7 @@ discord-ai-bot/
 ├── kb/                # storage, chunker, embedder, retrievers, vector_db, ...
 ├── utils/             # embed_formatter, response_splitter, url_fetch, typing_loop, ...
 ├── data/              # runtime data (knowledge base, recordings, session notes)
-├── botctl.sh          # tmux-based run/stop/restart helper
+├── botctl.sh          # local-dev control (tmux): setup / start / stop / restart / status / logs
 ├── requirements.txt   # pinned deps (see pyproject.toml for optional extras)
 ├── pyproject.toml     # packaging: base + [stt] [rag-vector] [dev] extras
 └── docs/              # in-depth docs (index: docs/README.md)
