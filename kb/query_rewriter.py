@@ -32,7 +32,7 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from openai import AsyncOpenAI  # type: ignore[import-untyped]
+    from openai import AsyncOpenAI
 
 logger = logging.getLogger("kb.query_rewriter")
 
@@ -116,25 +116,31 @@ Expansions:
             original_query=original_query,
         )
 
-        create_kwargs = dict(
-            model=self.model_slug,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,  # Low for consistent, focused expansions
-            max_tokens=256,
-            timeout=self.REWRITE_TIMEOUT_SEC,
-        )
         # Qwen3-style hybrid-thinking models spend their ENTIRE 256-token budget on
         # reasoning and return no content ("full token budget on reasoning"). This is
         # a short utility call — disable thinking. Measured: 0.5s with it off vs
         # 5.7s of pure thinking (see docs/RAG_ANALYSIS_2026-09-27.md).
+        # Kwargs are passed inline (not via a dict) so mypy can match each against
+        # the AsyncCompletions.create overload.
         try:
             response = await self._client.chat.completions.create(
-                extra_body={"enable_thinking": False}, **create_kwargs
+                model=self.model_slug,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,  # Low for consistent, focused expansions
+                max_tokens=256,
+                timeout=self.REWRITE_TIMEOUT_SEC,
+                extra_body={"enable_thinking": False},
             )
         except Exception:
             # Backend rejected the extra param (or transient failure) — retry plain.
             try:
-                response = await self._client.chat.completions.create(**create_kwargs)
+                response = await self._client.chat.completions.create(
+                    model=self.model_slug,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3,
+                    max_tokens=256,
+                    timeout=self.REWRITE_TIMEOUT_SEC,
+                )
             except Exception as exc:
                 logger.warning("Query rewrite attempt failed (%s); returning no expansions", exc)
                 return []
@@ -148,7 +154,7 @@ Expansions:
             logger.warning("Query rewrite attempt failed (%s); returning no expansions", exc)
             return []
         lines = [line.strip() for line in content.split("\n") if line.strip()]
-        return lines[: self.max_expansions]  # type: ignore[arg-type]
+        return lines[: self.max_expansions]
 
 
 # ── Module-level convenience ───────────────────────────────────────────
