@@ -29,7 +29,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import socket
-from urllib.parse import urljoin, urlparse
+from urllib.parse import ParseResult, urljoin, urlparse
 
 import httpx
 
@@ -57,7 +57,7 @@ ALLOWED_SCHEMES = ("http", "https")
 _DANGEROUS_HOSTNAMES = {"localhost", "metadata", "ip6-localhost", "ip6-loopback"}
 
 
-def _ip_disallowed(ip: ipaddress._BaseAddress) -> bool:
+def _ip_disallowed(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """True for the always-blocked IP classes (loopback, link-local metadata,
     reserved, unspecified).  *Private* ranges (10/8, 172.16/12, 192.168/16) are
     handled separately so self-hosted users can still fetch their own LAN docs."""
@@ -90,7 +90,7 @@ def _host_disallowed(host: str, *, block_private: bool) -> bool:
     return False
 
 
-def _address_disallowed(ip: ipaddress._BaseAddress, *, block_private: bool) -> bool:
+def _address_disallowed(ip: ipaddress.IPv4Address | ipaddress.IPv6Address, *, block_private: bool) -> bool:
     if _ip_disallowed(ip):
         return True
     if block_private and (ip.is_private or ip.is_multicast):
@@ -114,7 +114,11 @@ def _checked_connect_ip(host: str, port: int, *, block_private: bool) -> str:
         raise UnsafeUrlError(f"Could not resolve host {host!r}.") from exc
     allowed: list[str] = []
     for info in infos:
-        raw = info[4][0].split("%", 1)[0]
+        addr = info[4][0]
+        if not isinstance(addr, str):
+            # Fail closed (SSRF hardening): unexpected sockaddr shape.
+            raise UnsafeUrlError(f"Could not resolve host {host!r}.")
+        raw = addr.split("%", 1)[0]
         try:
             ip = ipaddress.ip_address(raw)
         except ValueError:
@@ -129,7 +133,7 @@ def _checked_connect_ip(host: str, port: int, *, block_private: bool) -> str:
     return allowed[0]
 
 
-def _port_for(parsed) -> int:
+def _port_for(parsed: ParseResult) -> int:
     if parsed.port:
         return parsed.port
     return 443 if (parsed.scheme or "").lower() == "https" else 80
@@ -175,7 +179,7 @@ def _revalidate_after_redirect(final_url: httpx.URL, *, block_private: bool) -> 
         raise UnsafeUrlError(f"Redirect to disallowed host {host!r}.")
 
 
-def _pinned_request(url: str, *, block_private: bool) -> tuple[str, dict, dict]:
+def _pinned_request(url: str, *, block_private: bool) -> tuple[str, dict[str, str], dict[str, bytes]]:
     """Return ``(ip_url, headers, extensions)`` for a checked connection."""
     validate_url(url, block_private=block_private)
     parsed = urlparse(url)
