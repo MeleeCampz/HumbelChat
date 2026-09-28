@@ -15,10 +15,12 @@ import threading
 log = logging.getLogger("bot.history")
 
 # guild_id -> channel_id -> [messages]  (each message: {"role": str, "content": str})
-_chat_history: dict[int, dict[int, list[dict[str, str]]]] = {}
+# NOTE: ids may be None for DM turns — that has always happened at runtime
+# (persisted under the string key "None"), so the types say so too.
+_chat_history: dict[int | None, dict[int | None, list[dict[str, str]]]] = {}
 
 # Per-guild / per-channel active character key map
-_active_characters: dict[tuple[int, int], str] = {}
+_active_characters: dict[tuple[int | None, int | None], str] = {}
 
 # --- Persistence -----------------------------------------------------------
 
@@ -95,7 +97,7 @@ def load_persisted() -> None:
 
 # --- Public API (unchanged signatures) -------------------------------------
 
-def ensure_history(guild_id: int, channel_id: int) -> None:
+def ensure_history(guild_id: int | None, channel_id: int | None) -> None:
     _chat_history.setdefault(guild_id, {})
     _chat_history[guild_id].setdefault(channel_id, [])
 
@@ -104,12 +106,13 @@ def get_history(guild_id: int | None, channel_id: int | None) -> list[dict[str, 
     return _chat_history.get(guild_id, {}).get(channel_id, [])
 
 
-def set_history(guild_id: int, channel_id: int, messages: list[dict[str, str]]) -> None:
+def set_history(guild_id: int | None, channel_id: int | None,
+                messages: list[dict[str, str]]) -> None:
     _chat_history.setdefault(guild_id, {})[channel_id] = messages
     _save_to_disk()
 
 
-def clear_history(guild_id: int, channel_id: int) -> None:
+def clear_history(guild_id: int | None, channel_id: int | None) -> None:
     _chat_history.get(guild_id, {}).pop(channel_id, None)
     _active_characters.pop((guild_id, channel_id), None)
     _save_to_disk()
@@ -126,7 +129,7 @@ def reset_all_history() -> None:
     _save_to_disk()
 
 
-def get_message_count(guild_id: int, channel_id: int) -> int:
+def get_message_count(guild_id: int | None, channel_id: int | None) -> int:
     return len(_chat_history.get(guild_id, {}).get(channel_id, []))
 
 
@@ -137,7 +140,8 @@ def get_active_char_key(guild_id: int | None, channel_id: int | None) -> str:
     return default_character().key
 
 
-def set_active_char_key(guild_id: int | None, channel_id: int, char_key: str) -> None:
+def set_active_char_key(guild_id: int | None, channel_id: int | None,
+                        char_key: str) -> None:
     if guild_id is not None:
         _active_characters[(guild_id, channel_id)] = char_key
         _save_to_disk()
