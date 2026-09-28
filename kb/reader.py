@@ -9,7 +9,9 @@ import asyncio
 import os
 import pathlib
 import re
+from collections.abc import Callable
 from functools import partial
+from typing import Any, TypeVar
 
 
 # ──────────────────────────── Helpers ────────────────────────────────
@@ -335,7 +337,11 @@ def get_relevant_chunks(
                     continue
                 depth = _header_depth(all_lines[li])
                 if depth is not None and depth >= 2:
-                    if header_li is None or depth < best_header_depth:
+                    # header_li and best_header_depth are set together, so the
+                    # second comparison only runs when both are real values.
+                    if header_li is None or (
+                        best_header_depth is not None and depth < best_header_depth
+                    ):
                         header_li = li
                         best_header_depth = depth
                 elif hc > best_hc:
@@ -455,7 +461,11 @@ def get_relevant_chunks(
 # work in the default thread pool and return the same data — callers only
 # need to await them.
 
-async def _run_in_thread(func, *args, **kwargs):
+_R = TypeVar("_R")
+
+
+async def _run_in_thread(func: Callable[..., _R], *args: Any,
+                         **kwargs: Any) -> _R:
     """Run *func* in the default executor.
 
     Uses ``loop.run_in_executor`` directly (rather than ``asyncio.to_thread``)
