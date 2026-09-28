@@ -100,7 +100,7 @@ def ensure_history(guild_id: int, channel_id: int) -> None:
     _chat_history[guild_id].setdefault(channel_id, [])
 
 
-def get_history(guild_id: int, channel_id: int) -> list[dict[str, str]]:
+def get_history(guild_id: int | None, channel_id: int | None) -> list[dict[str, str]]:
     return _chat_history.get(guild_id, {}).get(channel_id, [])
 
 
