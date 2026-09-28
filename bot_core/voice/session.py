@@ -202,7 +202,7 @@ class VoiceRecorder:
             self._pending_packets.clear()
         log.info("Voice recording discarded (join failed)")
 
-    def stop(self) -> Optional[dict]:
+    def stop(self) -> Optional[dict[str, Any]]:
         """Stop capturing and write WAV files + manifest. Returns the manifest.
 
         Reads each speaker's on-disk frame log back, lays the frames on the
@@ -231,7 +231,7 @@ class VoiceRecorder:
             }
 
         # Build the timeline-aligned WAV per speaker.
-        speakers_out: list[dict] = []
+        speakers_out: list[dict[str, Any]] = []
         max_end = self._started_at
         for uid, frames in speakers_data.items():
             if not frames:
@@ -324,7 +324,7 @@ class VoiceRecorder:
         return manifest
 
     # ── voice-websocket hook (op-5 / op-12 / op-13) ─────────────────────────
-    async def on_voice_ws(self, ws: Any, msg: dict) -> None:
+    async def on_voice_ws(self, ws: Any, msg: dict[str, Any]) -> None:
         """Installed as the voice WebSocket hook. Maps SSRC -> user_id."""
         try:
             op = msg.get("op")
@@ -593,7 +593,8 @@ class VoiceRecorder:
         with self._lock:
             d = self._decoders.get(user_id)
             if d is None:
-                d = opus.Decoder()
+                # discord.opus is a thin C-extension wrapper without stubs.
+                d = opus.Decoder()  # type: ignore[no-untyped-call]
                 self._decoders[user_id] = d
             return d
 
@@ -608,7 +609,7 @@ class VoiceRecorder:
                 sp.decode_failures += 1
 
     # ── diagnostics ──────────────────────────────────────────────────────────
-    def snapshot(self) -> dict:
+    def snapshot(self) -> dict[str, Any]:
         with self._lock:
             return {
                 "recording": self._recording,
@@ -659,11 +660,14 @@ def recorder_voice_cls(bot: discord.Client) -> type[discord.VoiceClient]:
     recorder = getattr(bot, "_voice_recorder", None)
     if recorder is None:
         raise VoiceRecorderError("attach_to_bot() must be called before joining voice")
+    # Bind to a typed name: mypy does not carry the None-narrowing into the
+    # nested class body below.
+    wired_recorder: VoiceRecorder = recorder
 
     class RecordingVoiceClient(discord.VoiceClient):
         def __init__(self, client: discord.Client, channel: Any) -> None:
             super().__init__(client, channel)
-            _wire_voice_client(self, recorder)
+            _wire_voice_client(self, wired_recorder)
 
     return RecordingVoiceClient
 

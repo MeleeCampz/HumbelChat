@@ -485,7 +485,7 @@ class _AIRequestContext:
         messages: list[ChatCompletionMessageParam],
         user_message: str,
         guild_id: int,
-        channel_id: int,
+        channel_id: int | None,
         username: str,
         system_p: str,
         rag_context: str,
@@ -609,7 +609,7 @@ async def _build_ai_request(
     user_message: str,
     model_slug: str,
     guild_id: int,
-    channel_id: int,
+    channel_id: int | None,
     username: str = "",
     user_id: str | int | None = None,
     char_key: str | None = None,
@@ -750,7 +750,8 @@ async def _build_ai_request(
     )
 
 
-def _persist_turn(guild_id: int, channel_id: int, user_message: str, reply_text: str) -> None:
+def _persist_turn(guild_id: int, channel_id: int | None, user_message: str,
+                  reply_text: str) -> None:
     """Append a (user, assistant) pair to history and persist it (P0 #2).
 
     Store the *clean* user message (not the RAG-inflated ``user_content``),
