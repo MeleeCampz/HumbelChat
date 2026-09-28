@@ -10,10 +10,14 @@ registration from Discord. This handler instead deletes the stale registrations
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING, cast
 
 import discord
 
 from bot_core import command_sync
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from discord.ext.commands import Bot
 
 log = logging.getLogger("bot.commands.sync_command")
 
@@ -27,7 +31,9 @@ async def handle_sync_command(interaction: discord.Interaction) -> None:
     - Deletes any stale **global** command no longer present in the code.
     """
     await interaction.response.defer()
-    client = interaction.client
+    # interaction.client is the live bot (a commands.Bot at runtime); the stubs
+    # only expose .tree on Bot, so narrow it for the call.
+    client = cast("Bot", interaction.client)
 
     try:
         report = await command_sync.sync_commands(client)

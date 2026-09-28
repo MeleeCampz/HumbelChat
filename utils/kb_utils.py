@@ -3,7 +3,7 @@ import logging
 
 log = logging.getLogger("bot")
 
-def log_top_kb_files(kb_path: pathlib.Path, top_n: int = 5):
+def log_top_kb_files(kb_path: pathlib.Path, top_n: int = 5) -> None:
     """Logs the largest files in the KB directory."""
     if not kb_path.exists():
         return
