@@ -13,7 +13,7 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from bot_core.voice.capture import (
     CHANNELS,
@@ -59,7 +59,7 @@ def find_open_recording(recordings_dir: Path, guild_id: Optional[int] = None) ->
     return None if best is None else best[1]
 
 
-def recover_recording(rec_dir: Path, *, now: Optional[float] = None) -> Optional[dict]:
+def recover_recording(rec_dir: Path, *, now: Optional[float] = None) -> Optional[dict[str, Any]]:
     """Finalize one open recording regardless of how recently it started."""
     return _recover_one(Path(rec_dir), time.time() if now is None else now)
 
@@ -69,7 +69,7 @@ def recover_orphans(
     *,
     threshold_s: float = _RECOVERY_THRESHOLD_S,
     now: Optional[float] = None,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Rebuild WAVs + manifest for recording dirs left open by a crash.
 
     An *orphan* is a directory under ``recordings_dir`` that has a ``.recording``
@@ -87,7 +87,7 @@ def recover_orphans(
     if not recordings_dir.is_dir():
         return []
     now = time.time() if now is None else now
-    recovered: list[dict] = []
+    recovered: list[dict[str, Any]] = []
     for entry in sorted(recordings_dir.iterdir()):
         if not entry.is_dir():
             continue
@@ -111,7 +111,7 @@ def recover_orphans(
     return recovered
 
 
-def _recover_one(rec_dir: Path, now: float) -> Optional[dict]:
+def _recover_one(rec_dir: Path, now: float) -> Optional[dict[str, Any]]:
     """Rebuild one orphaned recording into WAVs + a ``recovered`` manifest."""
     try:
         marker = json.loads((rec_dir / _MARKER_NAME).read_text())
@@ -144,7 +144,7 @@ def _recover_one(rec_dir: Path, now: float) -> Optional[dict]:
         max_end = max(max_end, first_ts + len(frames) * FRAME_SAMPLES / SAMPLE_RATE)
     total_samples = int(max(0.0, max_end - started_at) * SAMPLE_RATE)
 
-    speakers_out: list[dict] = []
+    speakers_out: list[dict[str, Any]] = []
     for log_path, frames in logs:
         user_id = _user_id_from_log_name(log_path.name)
         display_name = ""
