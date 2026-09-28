@@ -9,6 +9,10 @@ for the optional character header so header + body never exceeds that budget
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    import discord
 
 log = logging.getLogger("bot.splitter")
 
@@ -104,7 +108,11 @@ def _split_long_message(text: str, header_text: str = "") -> list[str]:
     return [f"{header_prefix}{chunk}".strip() for chunk in chunks if chunk.strip()]
 
 
-async def send_long_response(source, reply_text: str, char_name: str = "") -> None:
+async def send_long_response(
+    source: discord.Interaction | discord.Message,
+    reply_text: str,
+    char_name: str = "",
+) -> None:
     """Send *reply_text* to a Discord channel following up on *source*.
 
     Works with both Slash Commands (``followup.send``) and prefix commands
@@ -139,7 +147,7 @@ async def send_long_response(source, reply_text: str, char_name: str = "") -> No
 
 
 async def send_long_response_embedded(
-    source,
+    source: discord.Interaction | discord.Message,
     reply_text: str,
     char_name: str = "",
 ) -> bool:
@@ -171,10 +179,12 @@ async def send_long_response_embedded(
         _MAX_EMBEDS_PER_MSG = 10
         for i in range(0, len(embeds), _MAX_EMBEDS_PER_MSG):
             batch = embeds[i : i + _MAX_EMBEDS_PER_MSG]
-            kw: dict = {"embeds": batch} if len(batch) > 1 else {"embed": batch[0]}
+            kw: dict[str, Any] = {"embeds": batch} if len(batch) > 1 else {"embed": batch[0]}
 
             if hasattr(source, "followup"):
-                msg = await source.followup.send(content=None, **kw)
+                # discord.py's Webhook.send stubs don't model content=None +
+                # dynamic embed/embeds kwargs (runtime accepts both).
+                msg = await source.followup.send(content=None, **kw)  # type: ignore[call-overload]
             else:
                 msg = await source.reply(content=None, **kw)
             log.info(
