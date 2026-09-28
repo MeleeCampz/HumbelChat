@@ -14,8 +14,8 @@ import threading
 
 log = logging.getLogger("bot.history")
 
-# guild_id -> channel_id -> [messages]
-_chat_history: dict[int, dict[int, list[dict]]] = {}
+# guild_id -> channel_id -> [messages]  (each message: {"role": str, "content": str})
+_chat_history: dict[int, dict[int, list[dict[str, str]]]] = {}
 
 # Per-guild / per-channel active character key map
 _active_characters: dict[tuple[int, int], str] = {}
@@ -100,11 +100,11 @@ def ensure_history(guild_id: int, channel_id: int) -> None:
     _chat_history[guild_id].setdefault(channel_id, [])
 
 
-def get_history(guild_id: int, channel_id: int) -> list[dict]:
+def get_history(guild_id: int, channel_id: int) -> list[dict[str, str]]:
     return _chat_history.get(guild_id, {}).get(channel_id, [])
 
 
-def set_history(guild_id: int, channel_id: int, messages: list[dict]) -> None:
+def set_history(guild_id: int, channel_id: int, messages: list[dict[str, str]]) -> None:
     _chat_history.setdefault(guild_id, {})[channel_id] = messages
     _save_to_disk()
 
