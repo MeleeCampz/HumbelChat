@@ -318,7 +318,7 @@ class Embedder:
 
                     # OpenAI-compatible response format: {"data": [...], "model": ...}
                     if isinstance(data, dict) and "data" in data:
-                        embeddings = [d["embedding"] for d in data["data"]]  # type: ignore[index]
+                        embeddings = [d["embedding"] for d in data["data"]]
                     else:
                         raise ValueError(f"Unexpected response shape: {data}")
 
@@ -356,7 +356,7 @@ class Embedder:
 
         # All endpoints failed
         raise EmbeddingError(
-            f"All embedding endpoints failed. Last error: {last_exc}",  # type: ignore[arg-type]
+            f"All embedding endpoints failed. Last error: {last_exc}",
         )
 
 
