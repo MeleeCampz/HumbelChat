@@ -41,7 +41,7 @@ class ChunkInfo:
 # the real content and item names ("Chain Mail", "Goblin") never appear as
 # clean tokens for BM25. Converting tables to plain text BEFORE chunking makes
 # both dense and lexical retrieval substantially stronger (measured: armor
-# lookups 0.47 → 0.56+ cosine, see docs/RAG_ANALYSIS_2026-09-27.md).
+# lookups 0.47 → 0.56+ cosine, see docs/internal/RAG_ANALYSIS_2026-09-27.md).
 _TABLE_RE = re.compile(r"<table.*?</table>", re.S | re.I)
 _TR_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.S | re.I)
 _CELL_RE = re.compile(r"<t[hd][^>]*>(.*?)</t[hd]>", re.S | re.I)
