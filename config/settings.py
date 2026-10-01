@@ -116,7 +116,18 @@ STAT_BLOCK_FORMAT_RULES: str = os.getenv(
     ),
 )
 CONTEXT_WINDOW: int = _safe_int(os.getenv("CONTEXT_WINDOW"), 10)
-REQUEST_TIMEOUT: int = _safe_int(os.getenv("AI_REQUEST_TIMEOUT"), 120)
+# ── AI timeout (single knob, idle-based) ───────────────────────────────
+# Maximum SILENCE from the backend before a request is declared failed.
+# Passed to the openai SDK as ``timeout=``: for LM Studio's single-shot
+# responses that bounds the total wait; on streams httpx applies it per read,
+# so any arriving chunk resets it (idle watchdog). There is deliberately NO
+# total wall-clock cap — a slow-but-alive generation may run as long as it
+# keeps producing data; /ai stop is the escape hatch. Raise this for models
+# with long silent thinking phases (e.g. 300).
+# ``AI_REQUEST_TIMEOUT`` is kept as a fallback alias for existing .env files.
+AI_TIMEOUT_S: float = _safe_float(
+    os.getenv("AI_TIMEOUT_S") or os.getenv("AI_REQUEST_TIMEOUT"), 120.0
+)
 # §3.9: lightweight backend liveness probe. 0 = only probe once on startup;
 # a positive value starts a periodic background check at that interval.
 AI_HEALTH_CHECK_INTERVAL: int = _safe_int(os.getenv("AI_HEALTH_CHECK_INTERVAL"), 0)
@@ -125,12 +136,16 @@ AI_HEALTH_CHECK_TIMEOUT: int = _safe_int(os.getenv("AI_HEALTH_CHECK_TIMEOUT"), 5
 # header. The header value itself is clamped to [5, 120] s (see
 # bot_core.errors._parse_retry_after); this is only the no-header fallback.
 AI_RETRY_AFTER_FALLBACK_S: int = _safe_int(os.getenv("AI_RETRY_AFTER_FALLBACK_S"), 30)
-# Generous defaults: thinking models (e.g. Qwen3) spend part of max_tokens on
-# internal reasoning before the visible answer — small budgets can be fully
-# consumed by thinking, producing empty answers (finish_reason "length").
-# ai_client auto-retries once at MAX_TOKENS_HARD_CAP when that happens.
+# Retained for reference / backward compatibility: chat no longer applies a
+# global output cap — requests omit max_tokens so the backend (LM Studio)
+# lets the model use its maximum output length. A per-character ``max_tokens``
+# in characters.json is still honoured when explicitly set.
 MAX_TOKENS: int = _safe_int(os.getenv("MAX_TOKENS"), 8000)
 MAX_TOKENS_HARD_CAP: int = _safe_int(os.getenv("MAX_TOKENS_HARD_CAP"), 16384)
+#: Output cap for summary calls (/summarize, /end_session overview).
+#: 0 (default) = do NOT send max_tokens → model maximum output length.
+#: Set a positive value to cap those calls.
+SUMMARY_CALL_MAX_TOKENS: int = _safe_int(os.getenv("SUMMARY_CALL_MAX_TOKENS"), 0)
 
 # Fallback models tried (in order) when DEFAULT_MODEL fails during summarize/translate.
 # Comma-separated list of model slugs.
@@ -487,21 +502,6 @@ RAG_ATTACH_FLOOR: float = _safe_float(os.getenv("RAG_ATTACH_FLOOR"), 0.50)
 # reply paths that re-deliver as multi-message chunks) are simpler with the
 # proven non-streaming path, so it defaults to off.
 AI_STREAM: bool = _safe_bool(os.getenv("AI_STREAM"), True)
-# ── Streaming response time budgets (seconds) ───────────────────────────
-# A streamed response has three distinct clock phases, each with its own
-# configurable budget:
-#   1. AI_STREAM_INITIAL_TIMEOUT_S — how long the backend may take BEFORE
-#      the first chunk arrives (prompt processing + first token; for
-#      thinking models this includes the whole reasoning phase, so it is
-#      deliberately a bit larger than the per-chunk timeout).
-#   2. AI_STREAM_CHUNK_TIMEOUT_S — maximum gap between two consecutive
-#      chunks once generation has started (the SSE read timeout).
-#   3. AI_STREAM_TOTAL_TIMEOUT_S — hard cap for the WHOLE response, from
-#      request start to the final chunk (guards against a slow backend
-#      dribbling out chunks forever).
-AI_STREAM_INITIAL_TIMEOUT_S: float = _safe_float(os.getenv("AI_STREAM_INITIAL_TIMEOUT_S"), 90.0)
-AI_STREAM_CHUNK_TIMEOUT_S: float = _safe_float(os.getenv("AI_STREAM_CHUNK_TIMEOUT_S"), 60.0)
-AI_STREAM_TOTAL_TIMEOUT_S: float = _safe_float(os.getenv("AI_STREAM_TOTAL_TIMEOUT_S"), 300.0)
 # Wall-clock budget (seconds) for the LLM rewrite call itself.
 RAG_REWRITE_BUDGET_SECONDS: int = _safe_int(os.getenv("RAG_REWRITE_BUDGET_SECONDS"), 10)
 

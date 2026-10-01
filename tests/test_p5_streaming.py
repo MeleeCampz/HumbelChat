@@ -1,17 +1,16 @@
-"""P5 regression tests: streaming /ai with explicit time budgets.
+"""P5 regression tests: streaming /ai with a single idle timeout.
 
 The 2026-09-24 failure: a 41 K-char prompt on a 27 B thinking model was
 killed by the request timeout, but the SDK's *default* max_retries=3 turned
 one "attempt" into 3×145 s of retries inside the client. The agreed fix:
 
   * exactly ONE retry when a request fails (bot-owned, transient only);
-  * streamed responses with three configurable time budgets —
-      AI_STREAM_INITIAL_TIMEOUT_S (default 90 s, larger because prompt
-      processing + the hidden thinking phase emit no tokens),
-      AI_STREAM_CHUNK_TIMEOUT_S   (default 60 s per-chunk gap),
-      AI_STREAM_TOTAL_TIMEOUT_S   (default 300 s hard cap);
+  * a single timeout knob AI_TIMEOUT_S (default 120 s) — maximum SILENCE
+    from the backend. On a stream httpx applies it per read, so it acts as
+    an idle watchdog: any arriving chunk resets it and an active generation
+    may run indefinitely; there is deliberately NO total wall-clock cap;
   * streaming is the default delivery path (AI_STREAM=1);
-  * all of the above overridable in the config (.env).
+  * overridable in the config (.env).
 """
 from __future__ import annotations
 
@@ -151,25 +150,24 @@ class TestAskAiCompletionRetry:
         assert client.chat.completions.create.await_count == 1
 
 
-# ──────────────────── stream time budgets ────────────────────
+# ──────────────────── stream idle timeout (#9) ────────────────────
 
 
-def _patch_budgets(monkeypatch, initial: float, chunk: float, total: float):
-    monkeypatch.setattr(settings, "AI_STREAM_INITIAL_TIMEOUT_S", initial)
-    monkeypatch.setattr(settings, "AI_STREAM_CHUNK_TIMEOUT_S", chunk)
-    monkeypatch.setattr(settings, "AI_STREAM_TOTAL_TIMEOUT_S", total)
-    # ai_client imports the names at module import time — patch them there too.
-    monkeypatch.setattr(ai_client, "AI_STREAM_INITIAL_TIMEOUT_S", initial)
-    monkeypatch.setattr(ai_client, "AI_STREAM_CHUNK_TIMEOUT_S", chunk)
-    monkeypatch.setattr(ai_client, "AI_STREAM_TOTAL_TIMEOUT_S", total)
+def _patch_timeout(monkeypatch, timeout_s: float):
+    monkeypatch.setattr(settings, "AI_TIMEOUT_S", timeout_s)
+    # ai_client imports the name at module import time — patch it there too.
+    monkeypatch.setattr(ai_client, "AI_TIMEOUT_S", timeout_s)
 
 
-class TestStreamBudgets:
+class TestStreamIdleTimeout:
     @pytest.mark.asyncio
-    async def test_success_within_budgets_persists_final_reply(self, monkeypatch):
+    async def test_success_persists_final_reply(self, monkeypatch):
         fake = _FakeStream([_stream_chunk("Hel"), _stream_chunk("lo", "stop")])
         client = _stub_ask_ai_env(monkeypatch, lambda **kw: fake)
-        _patch_budgets(monkeypatch, 90, 60, 300)
+        # No per-character budget → max_tokens must be omitted (model-max).
+        monkeypatch.setattr(ai_client, "_resolve_request_params",
+                            lambda char_obj: (None, 0.7))
+        _patch_timeout(monkeypatch, 120.0)
 
         collected = []
         async for text in ai_client.ask_ai_stream(
@@ -180,55 +178,18 @@ class TestStreamBudgets:
 
         assert collected == ["Hel", "Hello", "Hello"]  # progressive + final
         assert fake.closed is True                      # connection released
-        # stream=True was requested with the initial budget as HTTP timeout
+        # stream=True with the single AI_TIMEOUT_S as the HTTP (per-read /
+        # idle) timeout, and NO max_tokens (model-max output).
         kwargs = client.chat.completions.create.await_args.kwargs
         assert kwargs["stream"] is True
-        assert kwargs["timeout"] == 90
+        assert kwargs["timeout"] == 120.0
+        assert "max_tokens" not in kwargs
 
     @pytest.mark.asyncio
-    async def test_initial_wait_larger_than_chunk_gap(self, monkeypatch):
-        """Budgets flow through from settings: 90 s initial > 60 s chunk,
-        300 s total hard cap — the values the user asked for as defaults."""
-        assert settings.AI_STREAM_INITIAL_TIMEOUT_S == 90
-        assert settings.AI_STREAM_CHUNK_TIMEOUT_S == 60
-        assert settings.AI_STREAM_TOTAL_TIMEOUT_S == 300
-        assert settings.AI_STREAM_INITIAL_TIMEOUT_S > settings.AI_STREAM_CHUNK_TIMEOUT_S
-
-    @pytest.mark.asyncio
-    async def test_no_first_chunk_raises_initial_timeout(self, monkeypatch):
-        class _NeverStream:
-            def __init__(self):
-                self.closed = False
-
-            def __aiter__(self):
-                return self
-
-            async def __anext__(self):
-                await asyncio.Event().wait()  # never completes
-
-            def close(self):
-                self.closed = True
-
-        fake = _NeverStream()
-        _stub_ask_ai_env(monkeypatch, lambda **kw: fake)
-        _patch_budgets(monkeypatch, 0.05, 60, 300)
-
-        with pytest.raises(ValueError) as ei:
-            async for _ in ai_client.ask_ai_stream(
-                user_message="ping", model_slug="test-model",
-                guild_id=9, channel_id=10, username="Alice", user_id=None,
-            ):
-                pass
-        # user sees the friendly timeout message; the classified cause
-        # carries the initial-phase detail (no chunk yet → initial, not per-chunk)
-        assert "too long to respond" in str(ei.value)
-        cause = ei.value.__cause__
-        assert "initial timeout" in str(cause)
-        assert "per-chunk" not in str(cause)
-        assert fake.closed is True
-
-    @pytest.mark.asyncio
-    async def test_stalled_between_chunks_raises_chunk_timeout(self, monkeypatch):
+    async def test_stalled_stream_surfaces_friendly_timeout(self, monkeypatch):
+        """A stalled stream surfaces as httpx's read timeout (the idle
+        watchdog fires inside the SDK transport); ask_ai_stream must classify
+        it into the friendly timeout error and release the connection."""
         class _StalledStream:
             def __init__(self):
                 self.closed = False
@@ -241,55 +202,50 @@ class TestStreamBudgets:
                 if not self._done_first:
                     self._done_first = True
                     return _stream_chunk("start")
-                await asyncio.Event().wait()  # stall forever after first chunk
+                # Simulate httpx's per-read idle timeout firing mid-stream.
+                raise httpx.ReadTimeout(
+                    "timed out", request=httpx.Request("GET", "http://backend.invalid/stream")
+                )
 
             def close(self):
                 self.closed = True
 
         fake = _StalledStream()
         _stub_ask_ai_env(monkeypatch, lambda **kw: fake)
-        _patch_budgets(monkeypatch, 90, 0.05, 300)
+        _patch_timeout(monkeypatch, 0.05)
 
         with pytest.raises(ValueError) as ei:
             async for _ in ai_client.ask_ai_stream(
                 user_message="ping", model_slug="test-model",
-                guild_id=11, channel_id=12, username="Alice", user_id=None,
+                guild_id=9, channel_id=10, username="Alice", user_id=None,
             ):
                 pass
-        assert "per-chunk" in str(ei.value.__cause__)
+        assert "too long to respond" in str(ei.value)
         assert fake.closed is True
 
     @pytest.mark.asyncio
-    async def test_total_cap_stops_long_running_stream(self, monkeypatch):
-        # A slow trickle that never hits the per-chunk gap (0.01 s << 60 s)
-        # must still be cut off by the 300 s hard cap (shrunk to 0.1 s here).
-        class _DribbleStream:
-            def __init__(self):
-                self.closed = False
-                self._n = 0
-
-            def __aiter__(self):
-                return self
-
-            async def __anext__(self):
-                self._n += 1
-                await asyncio.sleep(0.01)
-                return _stream_chunk(f"t{self._n}")
-
-            def close(self):
-                self.closed = True
-
-        fake = _DribbleStream()
+    async def test_active_slow_stream_runs_to_completion(self, monkeypatch):
+        """No total wall-clock cap: a slow-but-alive stream (every chunk well
+        within the idle timeout) completes fully, however long it takes."""
+        # 20 chunks × 0.01 s = 0.2 s of active generation — previously this
+        # would have been measured against a total budget; now only silence
+        # matters.
+        fake = _FakeStream([_stream_chunk(f"t{i}") for i in range(20)], delay=0.01)
         _stub_ask_ai_env(monkeypatch, lambda **kw: fake)
-        _patch_budgets(monkeypatch, 90, 60, 0.1)
+        monkeypatch.setattr(ai_client, "_resolve_request_params",
+                            lambda char_obj: (None, 0.7))
+        _patch_timeout(monkeypatch, 60.0)
 
-        with pytest.raises(ValueError) as ei:
-            async for _ in ai_client.ask_ai_stream(
-                user_message="ping", model_slug="test-model",
-                guild_id=13, channel_id=14, username="Alice", user_id=None,
-            ):
-                pass
-        assert "total time budget" in str(ei.value.__cause__)
+        collected = []
+        async for text in ai_client.ask_ai_stream(
+            user_message="ping", model_slug="test-model",
+            guild_id=13, channel_id=14, username="Alice", user_id=None,
+        ):
+            collected.append(text)
+
+        # 20 progressive yields + 1 final full-text yield.
+        assert len(collected) == 21
+        assert collected[-1] == "".join(f"t{i}" for i in range(20))
         assert fake.closed is True
 
 
@@ -298,30 +254,21 @@ class TestStreamBudgets:
 
 class TestConfigOverrides:
     def test_defaults_are_user_requested_values(self):
-        # "hard cap of 5 minutes total ... 1 minute timeout for chunks,
-        # with a bit of a larger initial wait"
-        assert settings.AI_STREAM_TOTAL_TIMEOUT_S == 300        # 5 minutes
-        assert settings.AI_STREAM_CHUNK_TIMEOUT_S == 60         # 1 minute
-        assert settings.AI_STREAM_INITIAL_TIMEOUT_S == 90       # larger initial wait
+        # Single knob: maximum silence from the backend (default 120 s).
+        assert settings.AI_TIMEOUT_S == 120.0
         assert settings.AI_STREAM is True                       # streaming on by default
 
     def test_env_override_parsed(self, monkeypatch):
         import importlib
 
-        monkeypatch.setenv("AI_STREAM_INITIAL_TIMEOUT_S", "120.5")
-        monkeypatch.setenv("AI_STREAM_CHUNK_TIMEOUT_S", "30")
-        monkeypatch.setenv("AI_STREAM_TOTAL_TIMEOUT_S", "600")
+        monkeypatch.setenv("AI_TIMEOUT_S", "300")
         monkeypatch.setenv("AI_STREAM", "0")
         import config.settings as s
         importlib.reload(s)
         try:
-            assert s.AI_STREAM_INITIAL_TIMEOUT_S == 120.5
-            assert s.AI_STREAM_CHUNK_TIMEOUT_S == 30
-            assert s.AI_STREAM_TOTAL_TIMEOUT_S == 600
+            assert s.AI_TIMEOUT_S == 300.0
             assert s.AI_STREAM is False
         finally:
-            monkeypatch.delenv("AI_STREAM_INITIAL_TIMEOUT_S", raising=False)
-            monkeypatch.delenv("AI_STREAM_CHUNK_TIMEOUT_S", raising=False)
-            monkeypatch.delenv("AI_STREAM_TOTAL_TIMEOUT_S", raising=False)
+            monkeypatch.delenv("AI_TIMEOUT_S", raising=False)
             monkeypatch.delenv("AI_STREAM", raising=False)
             importlib.reload(s)

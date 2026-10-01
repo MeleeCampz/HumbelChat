@@ -110,3 +110,4 @@ whisper-api.env
 # Local-only agent skill (drives the remote open-terminal; holds no secrets but is
 # machine/deployment-specific and must never be committed to the repo)
 .agents/skills/openterminal/
+.venv-linux/

@@ -18,28 +18,37 @@ All environment variables are loaded from `.env` at the project root. Copy `.env
 | `SYSTEM_PROMPT` | Fallback system prompt when a character has none | *(empty)* |
 | `FALLBACK_MODELS` | Comma-separated model slugs tried in order if the primary model fails (used by `/summarize` and `/translate`) | *(empty)* |
 | `SESSION_SUMMARY_PROMPT` | System prompt used by `/end_session` to write the AI session overview; empty = built-in default | *(empty — built-in default)* |
-| `AI_REQUEST_TIMEOUT` | HTTP timeout in seconds | `120` |
+| `AI_TIMEOUT_S` | Maximum silence from the AI backend before a request fails (seconds) — see *Timeouts* below | `120` |
 | `AI_HEALTH_CHECK_INTERVAL` | `0` probes once at startup; positive integer repeats liveness checks every N seconds | `0` |
 | `AI_HEALTH_CHECK_TIMEOUT` | Timeout for each liveness probe | `5` |
-| `MAX_TOKENS` | Baseline max tokens per response | `8000` |
-| `MAX_TOKENS_HARD_CAP` | Absolute upper bound applied after character/global value is chosen; also the budget of the one-shot retry when a response is truncated | `16384` |
+| `SUMMARY_CALL_MAX_TOKENS` | Token cap for summary calls (`/summarize`, `/end_session` overview); `0` = model maximum output length | `0` |
+| `MAX_TOKENS` / `MAX_TOKENS_HARD_CAP` | **Deprecated** — no longer applied as global defaults; kept for reference | `8000` / `16384` |
 
-## Response length defaults
+## Response length
 
-The bot resolves `max_tokens` for each request using this precedence, then clamps the result to `MAX_TOKENS_HARD_CAP`:
+Requests omit `max_tokens` by default, so the backend (LM Studio) lets the
+model use its **maximum output length**. A per-character `max_tokens` in
+`characters.json` is still honoured when explicitly set. Summary calls can be
+capped separately with `SUMMARY_CALL_MAX_TOKENS`. If a response is truncated
+(`finish_reason` `length`) with an empty answer, the bot reports a friendly
+error (the model's own output limit was exhausted); a partial answer is
+delivered as-is. Long outputs are split into multiple Discord messages.
 
-1. Per-character `max_tokens` from `characters.json`, if present
-2. Global `MAX_TOKENS` from `.env`
-3. `MAX_TOKENS_HARD_CAP` from `.env` (final clamp)
+## Timeouts
 
-Budgets are intentionally generous: thinking models (e.g. Qwen3) spend part
-of `max_tokens` on internal *reasoning* before writing the visible answer,
-and the budget covers both. If a response is truncated (`finish_reason`
-`length`) with an empty answer, the bot automatically retries once at
-`MAX_TOKENS_HARD_CAP`; only if that is still truncated does it report a
-friendly error instead of an empty reply. Large values can increase response
-time and output length (long outputs are split into multiple Discord
-messages).
+A single knob governs all AI calls: **`AI_TIMEOUT_S`** (default `120`) — the
+maximum SILENCE from the backend before a request fails.
+
+* Normal (non-streaming) responses: total wait bound for the whole request.
+* Streamed responses: an idle watchdog. The timeout is applied per read, so
+  any arriving chunk resets it — a slow-but-alive generation may run
+  indefinitely, while a stalled or dead backend fails within `AI_TIMEOUT_S`
+  of silence. There is deliberately no total wall-clock cap; `/ai stop`
+  cancels an in-flight response.
+
+Raise `AI_TIMEOUT_S` (e.g. `300`) for models with long silent thinking
+phases. `AI_REQUEST_TIMEOUT` is still read as a fallback alias for older
+`.env` files.
 
 ## Bot behavior
 

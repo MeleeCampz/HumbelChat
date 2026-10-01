@@ -7,6 +7,7 @@ from .settings import (
     DEFAULT_MODEL,
     DEFAULT_SYSTEM_PROMPT,
     DISCORD_TOKEN,
+    AI_TIMEOUT_S,
     FALLBACK_MODELS,
     INFER_API_KEY,
     INFER_URL,
@@ -16,7 +17,7 @@ from .settings import (
     RAG_MAX_DOCS,
     RAG_RETRIEVAL_METHOD,
     RAG_WINDOW_LINES,
-    REQUEST_TIMEOUT,
+    SUMMARY_CALL_MAX_TOKENS,
 )
 # NOTE: the character registry is exposed through accessor functions only.
 # Re-exporting the private ``_CHARACTERS`` list here used to invite the
@@ -31,6 +32,7 @@ __all__ = [
     "DEFAULT_MODEL",
     "DEFAULT_SYSTEM_PROMPT",
     "DISCORD_TOKEN",
+    "AI_TIMEOUT_S",
     "FALLBACK_MODELS",
     "INFER_API_KEY",
     "INFER_URL",
@@ -40,7 +42,7 @@ __all__ = [
     "RAG_MAX_DOCS",
     "RAG_RETRIEVAL_METHOD",
     "RAG_WINDOW_LINES",
-    "REQUEST_TIMEOUT",
+    "SUMMARY_CALL_MAX_TOKENS",
     "load_characters",
     "get_character",
     "default_character",

@@ -7,9 +7,13 @@ import logging
 
 import discord
 
-from config.settings import DEFAULT_MODEL, FALLBACK_MODELS
+from config.settings import (
+    DEFAULT_MODEL,
+    FALLBACK_MODELS,
+    SUMMARY_CALL_MAX_TOKENS,
+)
 from bot_core.history import get_active_char_key, get_history
-from bot_core.ai_client import _make_client, _validate_model
+from bot_core.ai_client import _make_client, _validate_model, complete_text
 from bot_core.errors import extract_reply_text
 from config.characters import get_character
 
@@ -284,7 +288,12 @@ async def handle_summarize_command(
     summary = None
     for model in models_to_try:
         try:
-            resp = await client.chat.completions.create(
+            # Model-max output (max_tokens omitted unless SUMMARY_CALL_MAX_TOKENS
+            # caps it) + thinking disabled: a short factual summary gains
+            # nothing from the reasoning phase, which used to eat the whole
+            # 2048-token budget and leave no answer (#9).
+            summary = await complete_text(
+                client,
                 model=model,
                 messages=[
                     {
@@ -294,12 +303,12 @@ async def handle_summarize_command(
                     {"role": "user", "content": text},
                 ],
                 temperature=0.3,
-                max_tokens=2048,
+                max_tokens=SUMMARY_CALL_MAX_TOKENS or None,
+                disable_thinking=True,
             )
-            # P1 #8: empty `choices` raises here → caught by the per-model
-            # except → the next fallback model gets a turn (previously this
-            # crashed the whole command with an IndexError).
-            summary = extract_reply_text(resp, default="(empty)")
+            if not summary.strip():
+                log.error("Summarize produced an empty answer with model %s", model)
+                continue
             break  # Success!
         except Exception as e:
             log.error("Summarize error with model %s: %s", model, e)

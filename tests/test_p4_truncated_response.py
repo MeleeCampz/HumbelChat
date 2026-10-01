@@ -10,10 +10,13 @@ Covered here:
   * ``extract_reply_text`` raises :class:`AIResponseTruncatedError` for
     empty-content + ``finish_reason="length"`` (and keeps the legacy
     placeholder behaviour for *ordinary* empty replies).
-  * ``ask_ai`` retries ONCE with a bigger budget when truncated, and surfaces
-    a real friendly error (never a placeholder, never a persisted empty
-    turn) when the bigger budget is still truncated or already the cap.
-  * ``_scaled_timeout`` accounts for large output budgets.
+  * ``ask_ai`` omits ``max_tokens`` by default (model-max output) while still
+    honouring an explicit per-character budget, and surfaces a real friendly
+    error — never a placeholder, never a persisted empty turn — when the
+    model's own output limit truncates the answer (#9: no more 4× retry).
+  * ``complete_text`` (shared summary-call helper): omits max_tokens by
+    default, passes ``enable_thinking: False`` with a plain-call fallback,
+    and warns on partial truncation.
 """
 from __future__ import annotations
 
@@ -42,9 +45,12 @@ def _resp(content: str | None, *, finish_reason: str | None = None,
     return resp
 
 
-def _stub_ask_ai_env(monkeypatch, create_side_effect, *, initial_budget: int,
-                     hard_cap: int = 4096):
-    """Point ask_ai at a stub client + empty KB with a KNOWN token budget."""
+def _stub_ask_ai_env(monkeypatch, create_side_effect, *, initial_budget=None):
+    """Point ask_ai at a stub client + empty KB.
+
+    ``initial_budget`` is the per-request max_tokens: None (default) means
+    "not specified" → ask_ai must omit the parameter entirely.
+    """
     client = MagicMock()
     client.chat.completions.create = AsyncMock(side_effect=create_side_effect)
     client.models.list = AsyncMock(return_value=MagicMock(data=[]))
@@ -53,7 +59,6 @@ def _stub_ask_ai_env(monkeypatch, create_side_effect, *, initial_budget: int,
                         AsyncMock(return_value="test-model"))
     monkeypatch.setattr(ai_client, "_resolve_request_params",
                         lambda char_obj: (initial_budget, 0.7))
-    monkeypatch.setattr(ai_client, "MAX_TOKENS_HARD_CAP", hard_cap)
     from kb import retrievers
     monkeypatch.setattr(retrievers, "retrieve_kb_documents",
                         AsyncMock(return_value=[]))
@@ -99,116 +104,64 @@ class TestExtractReplyTextTruncation:
         assert err.max_tokens == 2000
 
 
-# ─────────────────────── ask_ai: budget retry ───────────────────────
+# ─────────────────────── ask_ai: model-max output (#9) ───────────────────────
 
 
-class TestAskAiBudgetRetry:
+class TestAskAiModelMaxOutput:
     @pytest.mark.asyncio
-    async def test_truncation_then_retry_with_bigger_budget(self, monkeypatch):
-        """The P4 core case: first call truncated → one retry at the hard cap."""
+    async def test_max_tokens_omitted_when_not_specified(self, monkeypatch):
+        """No per-character budget → the parameter is OMITTED so the backend
+        (LM Studio) uses the model's maximum output length."""
         client = _stub_ask_ai_env(
-            monkeypatch,
-            [_resp(None, finish_reason="length"), _resp("REAL ANSWER")],
-            initial_budget=1024, hard_cap=4096,
+            monkeypatch, [_resp("PONG", finish_reason="stop")],
+            initial_budget=None,
         )
         reply, _ = await _ask(guild_id=1, channel_id=2)
 
-        assert reply == "REAL ANSWER"
-        assert client.chat.completions.create.await_count == 2
-        first_kwargs = client.chat.completions.create.call_args_list[0].kwargs
-        second_kwargs = client.chat.completions.create.call_args_list[1].kwargs
-        assert first_kwargs["max_tokens"] == 1024
-        # Retry budget: min(hard_cap, 4× initial) = min(4096, 4096) = 4096.
-        assert second_kwargs["max_tokens"] == 4096
+        assert reply == "PONG"
+        assert client.chat.completions.create.await_count == 1
+        kwargs = client.chat.completions.create.call_args.kwargs
+        assert "max_tokens" not in kwargs
 
     @pytest.mark.asyncio
-    async def test_retry_timeout_scales_with_retry_budget(self, monkeypatch):
-        """The truncation retry generates up to 4× more tokens, so its wall-clock
-        timeout must be re-scaled for the RETRY budget — reusing the original
-        (smaller-budget) timeout would time out exactly the thinking-model case
-        P4 targets (a model that needed more tokens also needs more time)."""
+    async def test_per_character_budget_still_honoured(self, monkeypatch):
         client = _stub_ask_ai_env(
-            monkeypatch,
-            [_resp(None, finish_reason="length"), _resp("REAL ANSWER")],
-            initial_budget=1024, hard_cap=4096,
+            monkeypatch, [_resp("PONG", finish_reason="stop")],
+            initial_budget=2048,
         )
-        reply, _ = await _ask(guild_id=7, channel_id=8)
-
-        assert reply == "REAL ANSWER"
-        first_kwargs = client.chat.completions.create.call_args_list[0].kwargs
-        second_kwargs = client.chat.completions.create.call_args_list[1].kwargs
-        # Both timeouts share the same prompt-size term; only the output-budget
-        # term differs: (4096 - 1024) / 1000 * 0.5 s (well under the 8× cap).
-        assert second_kwargs["timeout"] > first_kwargs["timeout"]
-        assert second_kwargs["timeout"] - first_kwargs["timeout"] == pytest.approx(
-            (4096 - 1024) / 1000 * 0.5
-        )
+        await _ask(guild_id=3, channel_id=4)
+        kwargs = client.chat.completions.create.call_args.kwargs
+        assert kwargs["max_tokens"] == 2048
 
     @pytest.mark.asyncio
-    async def test_persistent_truncation_surfaces_real_error_not_placeholder(
-            self, monkeypatch):
-        """Two truncated calls → friendly error; no placeholder is returned."""
+    async def test_timeout_is_single_ai_timeout_s(self, monkeypatch):
+        """The request timeout is the single AI_TIMEOUT_S knob (no more
+        prompt/budget-scaled timeouts)."""
+        monkeypatch.setattr(ai_client, "AI_TIMEOUT_S", 300.0)
         client = _stub_ask_ai_env(
-            monkeypatch,
-            [_resp(None, finish_reason="length"),
-             _resp(None, finish_reason="length")],
-            initial_budget=1024, hard_cap=4096,
+            monkeypatch, [_resp("PONG", finish_reason="stop")],
+            initial_budget=None,
         )
-        with pytest.raises(ValueError) as ei:
-            await _ask(guild_id=3, channel_id=4)
-
-        assert client.chat.completions.create.await_count == 2
-        # A REAL error message, not the old "(empty response)" placeholder.
-        assert "ran out of response budget" in str(ei.value)
-        assert "(empty response)" not in str(ei.value)
+        await _ask(guild_id=5, channel_id=6)
+        kwargs = client.chat.completions.create.call_args.kwargs
+        assert kwargs["timeout"] == pytest.approx(300.0)
 
     @pytest.mark.asyncio
-    async def test_truncation_at_hard_cap_is_not_retried(self, monkeypatch):
-        """Budget already at the cap → nothing bigger to try → one call only."""
+    async def test_truncation_surfaces_real_error_no_retry(self, monkeypatch):
+        """With model-max output, finish_reason 'length' means the model's true
+        limit was hit — there is nothing bigger to retry at. One call, real
+        friendly error, never a placeholder."""
         client = _stub_ask_ai_env(
             monkeypatch,
             [_resp(None, finish_reason="length")],
-            initial_budget=4096, hard_cap=4096,
+            initial_budget=None,
         )
         with pytest.raises(ValueError) as ei:
-            await _ask(guild_id=5, channel_id=6)
+            await _ask(guild_id=7, channel_id=8)
 
         assert client.chat.completions.create.await_count == 1
         assert "ran out of response budget" in str(ei.value)
-
-    @pytest.mark.asyncio
-    async def test_failed_retry_call_is_classified_too(self, monkeypatch):
-        """If the retry CALL itself fails (e.g. timeout), the user still gets
-        a friendly classified error, not a raw traceback."""
-        import httpx
-        import openai
-        req = httpx.Request("POST", "http://backend.invalid/v1")
-        timeout_exc = openai.APITimeoutError(request=req)
-        client = _stub_ask_ai_env(
-            monkeypatch,
-            # 1st call: truncated. Retry call: transient timeout on BOTH of
-            # its internal attempts (the retry helper retries transient
-            # failures once), then it propagates.
-            [_resp(None, finish_reason="length"), timeout_exc, timeout_exc],
-            initial_budget=1024, hard_cap=4096,
-        )
-        with patch.object(ai_client, "_COMPLETION_RETRY_BACKOFF_S", 0.01):
-            with pytest.raises(ValueError) as ei:
-                await _ask(guild_id=7, channel_id=8)
-
-        assert "too long to respond" in str(ei.value)
-        # 1 initial call + 2 internal attempts of the (failed) retry call.
-        assert client.chat.completions.create.await_count == 3
-
-    @pytest.mark.asyncio
-    async def test_successful_path_unchanged_single_call(self, monkeypatch):
-        client = _stub_ask_ai_env(
-            monkeypatch, [_resp("PONG", finish_reason="stop")],
-            initial_budget=1024, hard_cap=4096,
-        )
-        reply, _ = await _ask(guild_id=9, channel_id=10)
-        assert reply == "PONG"
-        assert client.chat.completions.create.await_count == 1
+        assert "(empty response)" not in str(ei.value)
 
     @pytest.mark.asyncio
     async def test_failed_turn_persists_no_placeholder_in_history(self, monkeypatch):
@@ -218,9 +171,8 @@ class TestAskAiBudgetRetry:
 
         _client = _stub_ask_ai_env(
             monkeypatch,
-            [_resp(None, finish_reason="length"),
-             _resp(None, finish_reason="length")],
-            initial_budget=1024, hard_cap=4096,
+            [_resp(None, finish_reason="length")],
+            initial_budget=None,
         )
         with pytest.raises(ValueError):
             await _ask(guild_id=11, channel_id=12)
@@ -230,40 +182,82 @@ class TestAskAiBudgetRetry:
                            if m.get("role") == "assistant"]
         assert "(empty response)" not in assistant_turns
 
+
+# ─────────────────────── complete_text: summary-call helper (#9) ───────────────────────
+
+
+class TestCompleteText:
     @pytest.mark.asyncio
-    async def test_successful_retry_persists_real_answer(self, monkeypatch):
-        """After a successful budget-retry the REAL answer (not a placeholder)
-        lands in the channel history."""
-        from bot_core.history import get_history
+    async def test_omits_max_tokens_and_passes_thinking_flag(self, monkeypatch):
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(
+            return_value=_resp("SUMMARY", finish_reason="stop"))
 
-        _client = _stub_ask_ai_env(
-            monkeypatch,
-            [_resp(None, finish_reason="length"), _resp("REAL ANSWER")],
-            initial_budget=1024, hard_cap=4096,
+        text = await ai_client.complete_text(
+            client, model="m", messages=[{"role": "user", "content": "x"}],
+            temperature=0.3, disable_thinking=True,
         )
-        await _ask(guild_id=13, channel_id=14)
 
-        history = get_history(13, 14)
-        assistant_turns = [m["content"] for m in history
-                           if m.get("role") == "assistant"]
-        assert assistant_turns == ["REAL ANSWER"]
+        assert text == "SUMMARY"
+        kwargs = client.chat.completions.create.call_args.kwargs
+        assert "max_tokens" not in kwargs
+        assert kwargs["extra_body"] == {"enable_thinking": False}
+        assert kwargs["timeout"] == pytest.approx(ai_client.AI_TIMEOUT_S)
 
+    @pytest.mark.asyncio
+    async def test_explicit_max_tokens_passed(self, monkeypatch):
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(
+            return_value=_resp("SUMMARY", finish_reason="stop"))
 
-# ─────────────────────── scaled timeout for big budgets ───────────────────────
+        await ai_client.complete_text(
+            client, model="m", messages=[], temperature=0.3, max_tokens=4096,
+        )
+        kwargs = client.chat.completions.create.call_args.kwargs
+        assert kwargs["max_tokens"] == 4096
+        assert "extra_body" not in kwargs
 
+    @pytest.mark.asyncio
+    async def test_thinking_param_rejected_falls_back_to_plain(self, monkeypatch):
+        """Backend rejects the extra param → one plain retry without it."""
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(side_effect=[
+            RuntimeError("unknown parameter: enable_thinking"),
+            _resp("SUMMARY", finish_reason="stop"),
+        ])
 
-class TestScaledTimeoutWithBudget:
-    def test_scales_with_prompt_only(self, monkeypatch):
-        # Backwards-compatible: no budget → prompt-only scaling (unchanged).
-        monkeypatch.setattr(ai_client, "REQUEST_TIMEOUT", 120)
-        assert ai_client._scaled_timeout(2000) == pytest.approx(121.0)
+        text = await ai_client.complete_text(
+            client, model="m", messages=[], temperature=0.3,
+            disable_thinking=True,
+        )
 
-    def test_grows_with_max_tokens(self, monkeypatch):
-        monkeypatch.setattr(ai_client, "REQUEST_TIMEOUT", 120)
-        # 120 base + 0.5 (2000 chars) + 4.0 (8000 tokens) = 125
-        assert ai_client._scaled_timeout(2000, 8000) == pytest.approx(125.0)
+        assert text == "SUMMARY"
+        assert client.chat.completions.create.await_count == 2
+        first_kwargs = client.chat.completions.create.call_args_list[0].kwargs
+        second_kwargs = client.chat.completions.create.call_args_list[1].kwargs
+        assert first_kwargs["extra_body"] == {"enable_thinking": False}
+        assert "extra_body" not in second_kwargs
 
-    def test_capped_at_eight_times_base(self, monkeypatch):
-        monkeypatch.setattr(ai_client, "REQUEST_TIMEOUT", 120)
-        huge = ai_client._scaled_timeout(1_000_000, 1_000_000)
-        assert huge == 120 * 8  # cap, not 120 + 500 + 50
+    @pytest.mark.asyncio
+    async def test_empty_answer_at_model_limit_raises(self, monkeypatch):
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(
+            return_value=_resp(None, finish_reason="length"))
+
+        with pytest.raises(ValueError) as ei:
+            await ai_client.complete_text(
+                client, model="m", messages=[], temperature=0.3,
+            )
+        assert "ran out of response budget" in str(ei.value)
+
+    @pytest.mark.asyncio
+    async def test_partial_answer_at_model_limit_is_returned(self, monkeypatch):
+        """A truncated-but-non-empty answer is a valid partial answer."""
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(
+            return_value=_resp("partial summary", finish_reason="length"))
+
+        text = await ai_client.complete_text(
+            client, model="m", messages=[], temperature=0.3,
+        )
+        assert text == "partial summary"

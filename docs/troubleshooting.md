@@ -26,7 +26,7 @@ Likely cause: API timeout or backend issue.
 
 Fix:
 - Look for the startup health-check line in `bot.log`: `AI backend health check at startup: OK/DOWN`. A `DOWN` result means the bot cannot reach `INFER_URL` — fix connectivity before anything else.
-- Increase `AI_REQUEST_TIMEOUT` in `.env`
+- Increase `AI_TIMEOUT_S` in `.env` (maximum silence from the backend; for slow thinking models try `300`)
 - Check the inference backend logs
 - Verify `INFER_URL` and `INFER_API_KEY` if applicable
 
