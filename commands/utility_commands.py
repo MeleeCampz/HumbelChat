@@ -303,7 +303,7 @@ async def handle_summarize_command(
                     {"role": "user", "content": text},
                 ],
                 temperature=0.3,
-                max_tokens=SUMMARY_CALL_MAX_TOKENS or None,
+                max_tokens=max(0, SUMMARY_CALL_MAX_TOKENS) or None,
                 disable_thinking=True,
             )
             if not summary.strip():

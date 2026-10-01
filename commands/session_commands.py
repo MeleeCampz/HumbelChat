@@ -261,7 +261,7 @@ async def _generate_overview(
                 },
             ],
             temperature=0.3,
-            max_tokens=SUMMARY_CALL_MAX_TOKENS or None,
+            max_tokens=max(0, SUMMARY_CALL_MAX_TOKENS) or None,
             disable_thinking=True,
         )
         if not summary.strip():

@@ -50,6 +50,19 @@ Raise `AI_TIMEOUT_S` (e.g. `300`) for models with long silent thinking
 phases. `AI_REQUEST_TIMEOUT` is still read as a fallback alias for older
 `.env` files.
 
+Two things to know:
+
+* **Non-streamed calls** (`/end_session` overview and merged log run
+  non-streamed): the whole request — hidden thinking phase *plus*
+  generation — must complete within one `AI_TIMEOUT_S` of silence, since no
+  data arrives until the response is done. If long merges time out, raise
+  the knob.
+* **LM Studio output cap**: some LM Studio versions silently stop generation
+  at roughly 10K–16K tokens regardless of the requested budget (open upstream
+  bug, `finish_reason` stays `stop`, so it is undetectable). Short replies
+  are unaffected; very long merged session logs may be cut. Watch for fixes
+  in LM Studio releases.
+
 ## Bot behavior
 
 | Variable | Description | Default |
