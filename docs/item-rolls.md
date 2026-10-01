@@ -20,7 +20,9 @@ them with your own. The seed only acts while the folder holds no rollable
 tables and **never overwrites existing files**, so in-place edits survive.
 
 Files are re-read on every roll — adding a table or adjusting tiers never
-requires a restart. The location is overridable via the `ITEMS_DIR` env var.
+requires a restart. The location is overridable via the `ITEMS_DIR` env var,
+and the table used when `/roll_items` is called without a `table` argument is
+configurable via `DEFAULT_ITEM_TABLE` (default: `magic_items`).
 
 ## Item table format
 
@@ -76,8 +78,9 @@ between tiers are impossible by construction:
 
 ### Plain roll (`/roll_items [table] [count] [rarity]`)
 
-1. Build the pool: all valid rows of the named table, or of **all** tables
-   combined when `table` is omitted (rows keep their table of origin).
+1. Build the pool: all valid rows of the named table — or of the **default
+   table** (`magic_items`; override with the `DEFAULT_ITEM_TABLE` env var)
+   when `table` is omitted. Every roll draws from exactly one table.
 2. Optionally filter by `rarity:` (plain rolls only — ignored when `cr` is
    given); an unknown rarity errors with the rarities that do exist in scope.
 3. Remove items already rolled out (see [Persistent pool](#persistent-no-repeat-pool)).
@@ -123,14 +126,14 @@ long campaign doesn't hand out the same Bag of Holding twice.
 
 - **State file** — consumed items are recorded in the hidden
   `data/items/.rolled_state.json` as `{table: [names]}`. Identity is
-  *(table, name)*, so an all-tables roll records each item under its source
-  table and a later single-table roll still excludes it. The file is managed
-  by the bot; editing it by hand is possible but unnecessary. A missing or
-  corrupt file degrades to "nothing consumed" (rolls just work).
+  *(table, name)*, so an item name that exists in two tables is tracked
+  separately for each. The file is managed by the bot; editing it by hand is
+  possible but unnecessary. A missing or corrupt file degrades to "nothing
+  consumed" (rolls just work).
 - **Consumption timing** — items are recorded only after the reply has been
   delivered; a failed send loses nothing.
 - **Footer** — every real roll ends with a remaining clause, e.g.
-  `— 361 of 365 remaining in all tables`. With a `rarity:` filter the scope
+  `— 361 of 365 remaining in magic_items`. With a `rarity:` filter the scope
   names the subset, e.g. `— 8 of 10 remaining in loot (rare)`.
 - **Exhaustion** — when everything in scope is already rolled out, the
   command replies with a friendly message pointing at the reset options

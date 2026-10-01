@@ -315,11 +315,11 @@ async def remind_command(
 
 @bot.tree.command(name="roll_items", description="Roll random items from an item table (with item page links).")
 @app_commands.describe(
-    table="Optional table name (a CSV file in data/items/); omit to roll across all tables",
+    table="Optional table name (a CSV file in data/items/); omit to use the default table (magic_items)",
     count="How many items to roll (ignored when cr is given)",
     cr="Optional monster Challenge Rating (e.g. 4 or 1/2) — scales item count and rarities",
     rarity="Optional rarity filter for plain rolls (e.g. rare); ignored when cr is given",
-    fresh="Reset the no-repeat pool before rolling (previously rolled items come back)",
+    fresh="Reset this table's no-repeat pool before rolling (previously rolled items come back)",
     preview="With cr: show what the roll would do without rolling or consuming anything",
 )
 async def roll_items_command(

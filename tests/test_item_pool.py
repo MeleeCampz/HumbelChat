@@ -333,3 +333,55 @@ class TestUtilityCommands:
         asyncio.run(handle_item_reset_rolls_command(ix, table="nope"))
         (call,) = ix._calls
         assert call["embed"] is None and "No table named" in call["content"]
+
+
+# ── default table resolution ───────────────────────────────────────────────
+
+class TestDefaultTable:
+    def test_omitted_table_uses_default(self, items_dir, monkeypatch):
+        from config import settings
+        monkeypatch.setattr(settings, "DEFAULT_ITEM_TABLE", "loot")
+        write_table(items_dir, "loot.csv", [[f"Item {k}", "", "common", ""] for k in range(5)])
+        ix = make_ix()
+        import asyncio
+        asyncio.run(handle_roll_items_command(ix, count=2))
+        (call,) = ix._calls
+        assert call["embed"] is not None and len(call["embed"].fields) == 2
+        assert "remaining in loot" in call["embed"].footer.text
+
+    def test_blank_table_falls_back_to_default(self, items_dir, monkeypatch):
+        from config import settings
+        monkeypatch.setattr(settings, "DEFAULT_ITEM_TABLE", "loot")
+        write_table(items_dir, "loot.csv", [["A", "", "common", ""]])
+        ix = make_ix()
+        import asyncio
+        asyncio.run(handle_roll_items_command(ix, table="   ", count=1))
+        (call,) = ix._calls
+        assert call["embed"] is not None and "A" in call["embed"].fields[0].name
+
+    def test_missing_default_lists_available_tables(self, items_dir, monkeypatch):
+        from config import settings
+        monkeypatch.setattr(settings, "DEFAULT_ITEM_TABLE", "nope")
+        write_table(items_dir, "loot.csv", [["A", "", "common", ""]])
+        ix = make_ix()
+        import asyncio
+        asyncio.run(handle_roll_items_command(ix, count=1))
+        (call,) = ix._calls
+        assert call["embed"] is None
+        assert "No table named `nope`" in call["content"] and "`loot`" in call["content"]
+
+    def test_fresh_only_resets_the_rolled_table(self, items_dir):
+        write_table(items_dir, "a.csv", [["A0", "", "common", ""]])
+        write_table(items_dir, "b.csv", [["B0", "", "common", ""], ["B1", "", "common", ""]])
+        item_state.consume([
+            item_tables.Item(name="A0", table="a"),
+            item_tables.Item(name="B0", table="b"),
+        ])
+        ix = make_ix()
+        import asyncio
+        asyncio.run(handle_roll_items_command(ix, table="a", count=1, fresh=True))
+        (call,) = ix._calls
+        assert call["embed"] is not None  # table a was refilled by fresh
+        state = item_state.load_state()
+        assert "A0" in state.get("a", [])  # re-consumed after the roll
+        assert "B0" in state.get("b", [])  # table b untouched by fresh

@@ -65,15 +65,21 @@ async def handle_roll_items_command(
     fresh: bool = False,
     preview: bool = False,
 ) -> None:
-    """Roll random items from the CSV tables in ``ITEMS_DIR``.
+    """Roll random items from one CSV table in ``ITEMS_DIR``.
 
-    ``cr`` (optional) overrides ``count`` and filters by the tier's rarities;
-    ``rarity`` (optional) filters plain rolls only. ``fresh`` resets the
-    persistent no-repeat pool before rolling; ``preview`` (with ``cr``) shows
-    what a roll would do without consuming anything.
+    ``table`` omitted → the default table (``DEFAULT_ITEM_TABLE``, usually
+    ``magic_items``). ``cr`` (optional) overrides ``count`` and filters by the
+    tier's rarities; ``rarity`` (optional) filters plain rolls only. ``fresh``
+    resets this table's no-repeat pool before rolling; ``preview`` (with
+    ``cr``) shows what a roll would do without consuming anything.
     """
     if table:
         table = table.strip() or None
+    if not table:
+        # Omitted table → the configured default (read at call time so tests
+        # can monkeypatch it). Every roll is from exactly one table.
+        from config import settings
+        table = settings.DEFAULT_ITEM_TABLE
     if rarity:
         rarity = rarity.strip().lower() or None
     count = max(1, int(count))
@@ -84,18 +90,18 @@ async def handle_roll_items_command(
         # First use: copy the built-in sample tables into ITEMS_DIR so the
         # user can edit them in place (existing files are never touched).
         item_tables.seed_from_samples()
-        rng = random.Random()
-        if table is None and not item_tables.list_tables():
+        if not item_tables.list_tables():
             return {
                 "ok": False,
-                "error": "No item tables found — add CSV files to `data/items/` (see docs/commands.md).",
+                "error": "No item tables found — add CSV files to `data/items/` (see docs/item-rolls.md).",
             }
+        scope = table
+        rng = random.Random()
         try:
             if fresh and not preview:
-                item_state.reset()
+                item_state.reset(table)
             items = item_tables.load_items(table)
             item_state.prune(items)
-            scope = table if table else "all tables"
 
             if cr is not None:
                 cr_value = item_tables.parse_cr(cr)
@@ -192,13 +198,8 @@ async def handle_roll_items_command(
             }
         except LookupError:
             tables = item_tables.list_tables()
-            if table is not None:
-                avail = ", ".join(f"`{t}`" for t in tables) or "*(none — add CSVs to `data/items/`)*"
-                return {"ok": False, "error": f"No table named `{table}`. Available tables: {avail}."}
-            return {
-                "ok": False,
-                "error": "No item tables found — add CSV files to `data/items/` (see docs/commands.md).",
-            }
+            avail = ", ".join(f"`{t}`" for t in tables) or "*(none — add CSVs to `data/items/`)*"
+            return {"ok": False, "error": f"No table named `{table}`. Available tables: {avail}."}
         except ValueError as exc:
             if cr is not None and "CR" in str(exc):
                 return {"ok": False, "error": f"Couldn't parse CR `{cr}` — use e.g. `4` or `1/2`."}
