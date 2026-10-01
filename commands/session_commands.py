@@ -14,9 +14,8 @@ from typing import Any
 
 import discord
 
-from bot_core.ai_client import _make_client, _validate_model
+from bot_core.ai_client import _make_client, _validate_model, complete_text
 from bot_core.history import get_active_char_key, get_history
-from bot_core.errors import extract_reply_text
 from config.characters import get_character
 from config.settings import (
     DEFAULT_MODEL,
@@ -24,6 +23,7 @@ from config.settings import (
     DEFAULT_SESSION_SUMMARY_PROMPT,
     SESSION_MERGE_PROMPT,
     SESSION_SUMMARY_PROMPT,
+    SUMMARY_CALL_MAX_TOKENS,
 )
 
 log = logging.getLogger("bot.session_commands")
@@ -243,7 +243,12 @@ async def _generate_overview(
 
     client = _make_client()
     try:
-        resp = await client.chat.completions.create(
+        # Model-max output (max_tokens omitted unless SUMMARY_CALL_MAX_TOKENS
+        # caps it) + thinking disabled: a ~250-word factual overview gains
+        # nothing from the reasoning phase, which used to eat the token budget
+        # and leave no answer (#9).
+        summary = await complete_text(
+            client,
             model=model,
             messages=[
                 {
@@ -256,14 +261,9 @@ async def _generate_overview(
                 },
             ],
             temperature=0.3,
-            # Generous: the overview model (Qwen3) thinks first; 1500 was
-            # enough for the thinking phase alone and could exhaust the budget
-            # before the summary was written (finish_reason "length").
-            max_tokens=4096,
+            max_tokens=SUMMARY_CALL_MAX_TOKENS or None,
+            disable_thinking=True,
         )
-        # P1 #8: empty `choices` raises here → caught by the except below →
-        # _fallback_overview, instead of crashing with an IndexError.
-        summary = extract_reply_text(resp, default="")
         if not summary.strip():
             raise ValueError("empty overview")
         return summary.strip()
@@ -271,14 +271,6 @@ async def _generate_overview(
         log.error("Session overview AI request failed (%s): %s", model, e)
         return _fallback_overview(session, notes)
 
-
-#: Output budget for the AI-merged session log. Much larger than the overview's
-#: 4096 — the merged log is a full narrative record, not a ~250-word summary,
-#: and thinking models (Qwen3) spend several thousand tokens on reasoning
-#: BEFORE any answer token: 8192 was exhausted by the thinking phase alone.
-#: Backends that cap lower clamp or reject; a rejection falls back to the
-#: mechanical full-text copy (see _generate_merged_log).
-_MERGED_LOG_MAX_TOKENS = 24576
 
 
 async def _generate_merged_log(
@@ -318,16 +310,19 @@ async def _generate_merged_log(
 
     client = _make_client()
     try:
-        resp = await client.chat.completions.create(
+        # Model-max output (max_tokens omitted): the merged log is a full
+        # narrative record and benefits from the model's whole output capacity.
+        # Thinking stays ON here — long-form merging quality matters more than
+        # latency, and /end_session already defers (#9).
+        merged = await complete_text(
+            client,
             model=model,
             messages=[
                 {"role": "system", "content": _merge_prompt()},
                 {"role": "user", "content": user_content},
             ],
             temperature=0.2,
-            max_tokens=_MERGED_LOG_MAX_TOKENS,
         )
-        merged = extract_reply_text(resp, default="")
         if not merged.strip():
             raise ValueError("empty merged log")
         return merged.strip()

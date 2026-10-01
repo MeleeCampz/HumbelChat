@@ -41,10 +41,8 @@ from config.settings import (
     DEFAULT_MODEL,
     DEFAULT_SYSTEM_PROMPT,
     STAT_BLOCK_FORMAT_RULES,
+    AI_TIMEOUT_S,
     CONTEXT_WINDOW,
-    REQUEST_TIMEOUT,
-    MAX_TOKENS,
-    MAX_TOKENS_HARD_CAP,
     KB_PATH,
     RAG_MAX_DOCS,
     RAG_MAX_CHARS,
@@ -55,9 +53,6 @@ from config.settings import (
     MAX_INPUT_CHARS,
     AI_RATE_LIMIT_MAX,
     AI_RATE_LIMIT_WINDOW,
-    AI_STREAM_INITIAL_TIMEOUT_S,
-    AI_STREAM_CHUNK_TIMEOUT_S,
-    AI_STREAM_TOTAL_TIMEOUT_S,
     PROMPT_BUDGET_CHARS,
 )
 
@@ -208,25 +203,6 @@ def _build_rag_context(kb_docs: list[tuple[str, str]]) -> tuple[str, list[str]]:
                  docs_added, len(kb_docs), chars_used / 1024)
     return rag_context, included_names
 
-
-def _scaled_timeout(total_chars: int, max_tokens: int | None = None) -> float:
-    """§2.3: derive a request timeout that scales with prompt size.
-
-    Base timeout (``REQUEST_TIMEOUT``) covers a small prompt. For every
-    additional 1000 chars of prompt (≈250 tokens) we allow 0.5 s more.
-
-    Large *output* budgets (e.g. thinking models that may produce up to
-    ``max_tokens`` tokens) are scaled the same way per 1000 max_tokens,
-    because a full-budget generation at low local inference speed needs
-    roughly the same wall time as a same-size prompt. The cap is
-    ``REQUEST_TIMEOUT * 8`` so a generous budget (e.g. 16 K tokens) cannot
-    time out while the backend is legitimately still generating — at
-    ``AI_REQUEST_TIMEOUT=120`` that is 960 s worst case, still finite.
-    """
-    extra = (total_chars / 1000) * 0.5
-    if max_tokens:
-        extra += (max_tokens / 1000) * 0.5
-    return min(REQUEST_TIMEOUT + extra, REQUEST_TIMEOUT * 8)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -382,11 +358,15 @@ async def _call_completion_with_retry(client: AsyncOpenAI, **kwargs: Any) -> Any
     raise last_exc  # type: ignore[misc]  # pragma: no cover
 
 
-def _resolve_request_params(char_obj: Character | None) -> tuple[int, float]:
-    """Resolve max_tokens and temperature from character config."""
-    _char_max = char_obj.max_tokens if (char_obj and char_obj.max_tokens) else None
-    _request_max_tokens: int = _char_max if _char_max else MAX_TOKENS
-    _request_max_tokens = min(_request_max_tokens, MAX_TOKENS_HARD_CAP)
+def _resolve_request_params(char_obj: Character | None) -> tuple[int | None, float]:
+    """Resolve max_tokens and temperature from character config.
+
+    No global output cap: when the character does not set an explicit
+    ``max_tokens`` this returns ``None`` so callers OMIT the parameter and
+    the backend (LM Studio) lets the model use its maximum output length.
+    """
+    _request_max_tokens: int | None = \
+        char_obj.max_tokens if (char_obj and char_obj.max_tokens) else None
 
     _char_temp = getattr(char_obj, "temperature", None)
     _request_temp: float = float(_char_temp) if isinstance(_char_temp, (int, float)) else 0.7
@@ -492,7 +472,7 @@ class _AIRequestContext:
         included_names: list[str],
         recent_history: list[ChatCompletionMessageParam],
         total_chars: int,
-        max_tokens: int,
+        max_tokens: int | None,
         temperature: float,
         timeout_sec: float,
     ) -> None:
@@ -724,12 +704,9 @@ async def _build_ai_request(
 
     _request_max_tokens, _request_temp = _resolve_request_params(char_obj)
 
-    # §2.3: scale the timeout with prompt size — large RAG contexts take the
-    # backend much longer, and a flat 120 s cap caused frequent timeouts on
-    # 60 K+ token prompts. Add 0.5 s per 1000 chars of prompt (capped).
-    # Timeout scales with prompt size AND the output budget (a thinking
-    # model generating up to max_tokens needs wall time for the output too).
-    timeout_sec = _scaled_timeout(_total_chars, _request_max_tokens)
+    # Idle-based timeout: AI_TIMEOUT_S bounds how long the backend may stay
+    # SILENT (single knob — see config/settings.py). No total wall-clock cap.
+    timeout_sec = AI_TIMEOUT_S
 
     return _AIRequestContext(
         effective_model=effective_model,
@@ -785,6 +762,87 @@ def _friendly_ai_error(e: BaseException, *, model: str, backend_url: str) -> Non
     raise e
 
 
+async def complete_text(
+    client: AsyncOpenAI,
+    *,
+    model: str,
+    messages: list[dict[str, Any]],
+    temperature: float,
+    max_tokens: int | None = None,
+    timeout: float | None = None,
+    disable_thinking: bool = False,
+) -> str:
+    """Single-shot completion returning the visible reply text.
+
+    Shared by the summary-type call sites (/summarize, /end_session overview
+    and merged log):
+
+    * ``max_tokens=None`` (default) → the parameter is OMITTED so the backend
+      (LM Studio) lets the model use its maximum output length.
+    * ``timeout`` defaults to ``AI_TIMEOUT_S`` — maximum silence from the
+      backend before the request fails.
+    * ``disable_thinking=True`` sends ``extra_body={"enable_thinking": False}``
+      (Qwen3-style hybrid-thinking models); if the backend rejects the param,
+      one plain retry follows (same pattern as kb/query_rewriter.py).
+    * A response cut off at the model's output limit with NO visible content
+      raises ``AIResponseTruncatedError``; a PARTIAL answer is returned with a
+      warning log. Callers keep their own fallback logic.
+    """
+    from bot_core.errors import extract_reply_text
+
+    _timeout = timeout if timeout is not None else AI_TIMEOUT_S
+
+    def _kwargs(disable_thinking: bool) -> dict[str, Any]:
+        kw: dict[str, Any] = dict(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            stream=False,
+            timeout=_timeout,
+        )
+        if max_tokens is not None:
+            kw["max_tokens"] = max_tokens
+        if disable_thinking:
+            kw["extra_body"] = {"enable_thinking": False}
+        return kw
+
+    try:
+        if disable_thinking:
+            try:
+                resp = await client.chat.completions.create(**_kwargs(True))
+            except Exception:  # noqa: BLE001 — rejected param or transient blip
+                # Backend rejected the extra param (or transient failure) —
+                # retry plain.
+                resp = await client.chat.completions.create(**_kwargs(False))
+        else:
+            resp = await client.chat.completions.create(**_kwargs(False))
+    except Exception as e:  # noqa: BLE001 — classified below
+        _friendly_ai_error(e, model=model, backend_url=INFER_URL)
+
+    try:
+        text = extract_reply_text(resp, default="")
+    except Exception as e:  # noqa: BLE001
+        # AIResponseTruncatedError (empty answer at the model's output limit)
+        # and AIBackendError (empty choices) both propagate — callers keep
+        # their own fallback logic.
+        if isinstance(e, ValueError):
+            raise
+        _friendly_ai_error(e, model=model, backend_url=INFER_URL)
+
+    choices = getattr(resp, "choices", None)
+    if (
+        choices
+        and getattr(choices[0], "finish_reason", None) == "length"
+        and text.strip()
+    ):
+        log.warning(
+            "complete_text(%s): response hit the model's output limit "
+            "(finish_reason='length'); the answer may be cut off (%d chars)",
+            model, len(text),
+        )
+    return text
+
+
 async def ask_ai(
     user_message: str,
     model_slug: str,
@@ -804,70 +862,31 @@ async def ask_ai(
             username=username, user_id=user_id, char_key=char_key,
         )
 
-        from bot_core.errors import AIResponseTruncatedError, extract_reply_text
+        from bot_core.errors import extract_reply_text
+
+        # Omit max_tokens when unset so the backend (LM Studio) lets the model
+        # use its maximum output length.
+        create_kwargs: dict[str, Any] = dict(
+            model=ctx.effective_model,
+            messages=ctx.messages,
+            temperature=ctx.temperature,
+            stream=False,
+            timeout=ctx.timeout_sec,
+        )
+        if ctx.max_tokens is not None:
+            create_kwargs["max_tokens"] = ctx.max_tokens
 
         try:
             # P1 #7: one bounded retry on transient 5xx/timeout/connection
             # failures before we give up on the turn.
-            resp = await _call_completion_with_retry(
-                ctx.client,
-                model=ctx.effective_model,
-                messages=ctx.messages,
-                temperature=ctx.temperature,
-                max_tokens=ctx.max_tokens,
-                stream=False,
-                timeout=ctx.timeout_sec,
-            )
+            resp = await _call_completion_with_retry(ctx.client, **create_kwargs)
             # P1 #8: extract the reply safely — an empty `choices` array is a
-            # malformed backend response, not a crash. `extract_reply_text`
-            # returns a placeholder for empty *content* and raises AIBackendError
-            # for empty *choices*, which the except below turns into a
-            # user-friendly message.
+            # malformed backend response (AIBackendError), and a response cut
+            # off at the model's output limit with no visible answer raises
+            # AIResponseTruncatedError. Both fall through to _friendly_ai_error
+            # below as real errors — there is no bigger budget to retry with
+            # when max_tokens is omitted (model max).
             reply_text = extract_reply_text(resp)
-        except AIResponseTruncatedError:
-            # P4: the model spent its ENTIRE max_tokens budget on thinking
-            # and produced no answer (finish_reason "length", content empty).
-            # Retry once with a bigger budget (4×, capped at the hard cap).
-            # If the budget was already the cap, there is nothing bigger to
-            # try — surface the real error instead of an empty reply.
-            retry_budget = min(MAX_TOKENS_HARD_CAP, ctx.max_tokens * 4)
-            if retry_budget <= ctx.max_tokens:
-                log.error(
-                    "Response truncated at max_tokens=%d and the budget is "
-                    "already the hard cap — surfacing a real error",
-                    ctx.max_tokens,
-                )
-                _friendly_ai_error(
-                    AIResponseTruncatedError(max_tokens=ctx.max_tokens),
-                    model=ctx.effective_model, backend_url=INFER_URL,
-                )
-            log.warning(
-                "Response truncated (empty answer at max_tokens=%d); "
-                "retrying once with max_tokens=%d",
-                ctx.max_tokens, retry_budget,
-            )
-            # The retry generates up to 4× more tokens than the original call,
-            # so it needs a proportionally bigger wall-clock budget: re-scale
-            # the timeout for the RETRY budget (the old code reused
-            # ctx.timeout_sec, which was sized for the smaller original budget
-            # — a thinking model that needed more tokens also needs more time,
-            # so the retry would time out in exactly the case P4 targets).
-            retry_timeout = _scaled_timeout(ctx.total_chars, retry_budget)
-            try:
-                resp = await _call_completion_with_retry(
-                    ctx.client,
-                    model=ctx.effective_model,
-                    messages=ctx.messages,
-                    temperature=ctx.temperature,
-                    max_tokens=retry_budget,
-                    stream=False,
-                    timeout=retry_timeout,
-                )
-                reply_text = extract_reply_text(resp)
-            except Exception as e:  # noqa: BLE001 — classified below
-                # Covers the retry call's own transient failures AND a second
-                # truncation → friendly error, never an empty reply.
-                _friendly_ai_error(e, model=ctx.effective_model, backend_url=INFER_URL)
         except Exception as e:  # noqa: BLE001 — classified below
             _friendly_ai_error(e, model=ctx.effective_model, backend_url=INFER_URL)
 
@@ -897,15 +916,13 @@ async def ask_ai_stream(
     persists history exactly once, at the end, so a mid-stream failure (or a
     cancelled consumer) leaves no partial turn in the history.
 
-    Time budgets (all overridable in the config / .env):
-
-    * ``AI_STREAM_INITIAL_TIMEOUT_S`` (default 90 s) — maximum wait for the
-      FIRST visible chunk; covers prompt processing plus the model's hidden
-      thinking phase, which emits no tokens.
-    * ``AI_STREAM_CHUNK_TIMEOUT_S`` (default 60 s) — maximum gap between
-      two consecutive chunks once generation has started.
-    * ``AI_STREAM_TOTAL_TIMEOUT_S`` (default 300 s) — hard cap for the whole
-      response, request start to final chunk.
+    Timeout (single knob, ``AI_TIMEOUT_S``, overridable in .env): maximum
+    SILENCE from the backend. The SDK passes it to httpx as a per-read
+    timeout, which on a stream is an idle watchdog — any arriving chunk
+    resets it, so a slow-but-alive generation may run indefinitely while a
+    stalled/dead backend fails within ``AI_TIMEOUT_S`` of silence. There is
+    deliberately no total wall-clock cap; /ai stop (cancellation) is the
+    escape hatch.
 
     Yields
     ------
@@ -935,79 +952,33 @@ async def ask_ai_stream(
             # we surface it immediately rather than risk a duplicated partial
             # reply. The non-streaming path keeps its one bounded retry.
             #
-            # Time budgets: the SDK ``timeout=`` on a streamed request only
-            # bounds the time until the HTTP response (stream object)
-            # arrives — it does NOT bound how long the model takes to emit
-            # chunks. So each budget is enforced here around the chunk reads
-            # (config.settings, overridable via env):
-            #   * AI_STREAM_INITIAL_TIMEOUT_S — wait for the FIRST visible
-            #     chunk. This deliberately covers the larger silent window:
-            #     prompt processing PLUS the model's hidden thinking phase
-            #     (Qwen3 emits no tokens while reasoning).
-            #   * AI_STREAM_CHUNK_TIMEOUT_S — maximum gap between two
-            #     consecutive chunks once generation has started.
-            #   * AI_STREAM_TOTAL_TIMEOUT_S — hard cap for the WHOLE
-            #     response, request start to final chunk.
+            # Timeout: AI_TIMEOUT_S is an idle watchdog — httpx applies the
+            # SDK timeout per read, so a stalled stream (no chunk within
+            # AI_TIMEOUT_S) raises ReadTimeout while an active generation may
+            # run indefinitely. No total wall-clock cap; /ai stop is the
+            # escape hatch.
             from openai import AsyncStream
             from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 
+            create_kwargs: dict[str, Any] = dict(
+                model=ctx.effective_model,
+                messages=ctx.messages,
+                temperature=ctx.temperature,
+                stream=True,
+                timeout=AI_TIMEOUT_S,
+            )
+            if ctx.max_tokens is not None:
+                create_kwargs["max_tokens"] = ctx.max_tokens
+
             stream: AsyncStream[ChatCompletionChunk] = \
-                await ctx.client.chat.completions.create(
-                    model=ctx.effective_model,
-                    messages=ctx.messages,
-                    temperature=ctx.temperature,
-                    max_tokens=ctx.max_tokens,
-                    stream=True,
-                    timeout=AI_STREAM_INITIAL_TIMEOUT_S,
-                )
-            loop = asyncio.get_running_loop()
-            started_at = loop.time()
-            hard_deadline = started_at + AI_STREAM_TOTAL_TIMEOUT_S
+                await ctx.client.chat.completions.create(**create_kwargs)
             try:
                 while True:
-                    gap_budget = (
-                        AI_STREAM_INITIAL_TIMEOUT_S if not collected
-                        else AI_STREAM_CHUNK_TIMEOUT_S
-                    )
-                    gap_deadline = loop.time() + gap_budget
-                    next_deadline = min(gap_deadline, hard_deadline)
-                    wait_s = next_deadline - loop.time()
-                    # Which budget bound THIS wait. On Windows the event-loop
-                    # timer can fire a few ms early, so re-comparing
-                    # loop.time() against hard_deadline after the timeout is
-                    # racy — the binding budget computed up front is not.
-                    total_cap_binding = gap_deadline >= hard_deadline
-                    if wait_s <= 0:
-                        from bot_core.errors import TimeoutError as _AITimeout
-
-                        raise _AITimeout(
-                            f"Streamed response exceeded the "
-                            f"{AI_STREAM_TOTAL_TIMEOUT_S:.0f}s total time budget."
-                        )
                     try:
-                        chunk = await asyncio.wait_for(
-                            stream.__anext__(), timeout=wait_s
-                        )
+                        chunk = await stream.__anext__()
                     except StopAsyncIteration:
                         break
-                    except asyncio.TimeoutError:
-                        from bot_core.errors import TimeoutError as _AITimeout
 
-                        if total_cap_binding or loop.time() >= hard_deadline:
-                            raise _AITimeout(
-                                f"Streamed response exceeded the "
-                                f"{AI_STREAM_TOTAL_TIMEOUT_S:.0f}s total time budget."
-                            ) from None
-                        if not collected:
-                            raise _AITimeout(
-                                f"The AI backend did not start responding "
-                                f"within the {AI_STREAM_INITIAL_TIMEOUT_S:.0f}s "
-                                f"initial timeout."
-                            ) from None
-                        raise _AITimeout(
-                            f"No chunk from the AI backend within the "
-                            f"{AI_STREAM_CHUNK_TIMEOUT_S:.0f}s per-chunk timeout."
-                        ) from None
                     # Track the server-side finish reason (set on the final
                     # chunk) so a truncated-but-silent stream can be told
                     # apart from an ordinary empty answer (P4).

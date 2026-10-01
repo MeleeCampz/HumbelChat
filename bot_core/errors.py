@@ -136,11 +136,11 @@ def extract_reply_text(resp: object, *, default: str = "(empty response)") -> st
     the next model).
 
     Budget-exhausted truncations are distinguished: when the response was cut
-    off at ``max_tokens`` (``finish_reason == "length"``) and no visible
+    off at its output limit (``finish_reason == "length"``) and no visible
     content was produced, :class:`AIResponseTruncatedError` is raised instead
-    of silently returning *default*. ``ask_ai`` catches that and retries once
-    at ``MAX_TOKENS_HARD_CAP``; other callers surface a real error message
-    instead of posting an empty placeholder.
+    of silently returning *default*. Callers surface a real friendly error
+    message (never an empty placeholder). With model-max output (#9), this
+    means the model's own maximum output length was exhausted.
     """
     if resp is None:
         raise AIBackendError("The AI backend returned no response.")
