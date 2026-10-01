@@ -49,8 +49,17 @@ async def handle_item_search_command(
         matches = item_search.search_items(query, items, limit=limit)
         if not matches:
             return {"ok": False, "error": f"No items matching `{query}` in {_scope_label(table)}."}
+        # Single-table results: name the table once in the title. Mixed
+        # results: keep a per-item table line.
+        match_tables = {item.table for item, _ in matches if item.table}
+        if len(match_tables) == 1:
+            scope_label = f"`{match_tables.pop()}`"
+            per_item_table = False
+        else:
+            scope_label = _scope_label(table)
+            per_item_table = table is None
         embed = discord.Embed(
-            title=f"🔎 {query!r} — {len(matches)} match(es) in {_scope_label(table)}",
+            title=f"🔎 {query!r} — {len(matches)} match(es) in {scope_label}",
             color=discord.Color.gold(),
         )
         for item, _score in matches:
@@ -58,7 +67,7 @@ async def handle_item_search_command(
             lines = []
             if item.url:
                 lines.append(f"[Item page]({item.url})")
-            if table is None and item.table:
+            if per_item_table and item.table:
                 lines.append(f"table: `{item.table}`")
             embed.add_field(name=label, value="\n".join(lines) or "—", inline=False)
         return {"ok": True, "embed": embed}
