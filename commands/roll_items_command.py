@@ -166,11 +166,14 @@ async def handle_roll_items_command(
             if not available:
                 return {"ok": False, "error": _exhausted_error(scope, rarity)}
             rolled, exhausted = item_tables.roll_items(available, count, rng=rng)
+            # With a rarity filter the remaining clause refers to the filtered
+            # subset — say so explicitly.
+            roll_scope = f"{scope} ({rarity})" if rarity is not None else scope
             footer_parts = []
             if exhausted:
-                footer_parts.append(f"only {len(rolled)} item(s) available in {scope}")
+                footer_parts.append(f"only {len(rolled)} item(s) available in {roll_scope}")
             footer_parts.append(
-                f"{len(available) - len(rolled)} of {total} remaining in {scope}"
+                f"{len(available) - len(rolled)} of {total} remaining in {roll_scope}"
             )
             return {
                 "ok": True,

@@ -122,7 +122,7 @@ Per-table counts: total, rolled out, remaining, plus a per-rarity breakdown (foo
 
 Return consumed items to the pool — one table or all — and report how many came back.
 
-See **[docs/item-rolls.md](./item-rolls.md)** for the full picture: file layout, both CSV formats, the exact rolling mechanics (with a worked example), the persistent no-repeat pool, tier tuning tips, first-run seeding, and how the item collection pipeline works — including the recipe for adding a newly purchased book.
+See **[docs/item-rolls.md](./item-rolls.md)** for the full picture: file layout, both CSV formats, the exact rolling mechanics (with a worked example), the persistent no-repeat pool, tier tuning tips, and first-run seeding.
 
 ### Sessions
 

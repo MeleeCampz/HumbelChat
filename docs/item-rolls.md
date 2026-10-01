@@ -1,7 +1,7 @@
 # Item rolls (`/roll_items`)
 
 How the random item tables work: data layout, CSV formats, and the exact
-rolling mechanics — plus how the item collection is maintained.
+rolling mechanics.
 
 ## Data layout
 
@@ -11,7 +11,6 @@ rolling mechanics — plus how the item collection is maintained.
 | `data/items/cr_tiers.csv` | CR tier definitions for `/roll_items cr:…` | no |
 | `data/items/.rolled_state.json` | Persistent no-repeat pool state (hidden; managed by the bot) | no |
 | `item_samples/` | Built-in starter tables shipped with the repo | yes |
-| `data/items/tools/` | Private collection pipeline (scripts + caches) | no |
 
 **First run.** `data/items/` is gitignored, but a fresh clone still works out
 of the box: on its first run, `/roll_items` copies the two files from
@@ -131,7 +130,8 @@ long campaign doesn't hand out the same Bag of Holding twice.
 - **Consumption timing** — items are recorded only after the reply has been
   delivered; a failed send loses nothing.
 - **Footer** — every real roll ends with a remaining clause, e.g.
-  `— 361 of 365 remaining in all tables`.
+  `— 361 of 365 remaining in all tables`. With a `rarity:` filter the scope
+  names the subset, e.g. `— 8 of 10 remaining in loot (rare)`.
 - **Exhaustion** — when everything in scope is already rolled out, the
   command replies with a friendly message pointing at the reset options
   instead of rolling nothing.
@@ -165,93 +165,8 @@ long campaign doesn't hand out the same Bag of Holding twice.
 - Rarities a tier never lists can never come up in CR rolls, but *can* come up
   in plain rolls (which sample the whole table).
 
-## Maintaining the item collection
+## Maintaining the tables
 
-The tables are maintained by a private pipeline in `data/items/tools/`
-(also local-only; the scripts are intentionally not committed). No account or
-login on the item database is needed — everything comes from public pages:
-
-```
-owned_sources.csv ─┐
-                   ├─► collect_items.py ─► collected_items.csv ─► build_roll_table.py --all ─► magic_items.csv
-gap_book_items.json ┘         (pool)        (one row per owned catalog item)
-```
-
-`collect_items.py` assembles the pool from four public sources:
-
-1. **Item-database catalog** — the magic-item browse listing on the item
-   database is server-rendered and public (~62 pages). Every entry carries
-   name + canonical URL + displayed rarity, so one pass captures the whole
-   ~1,200-item catalog. (The site's filter params are client-side only; there
-   is no per-book or per-rarity server filtering.)
-2. **dnd-wiki.org** — a MediaWiki with a working API at `/w/api.php`. Its
-   "5e24 Magic Items" / "5e Magic Items" categories hold canon item pages
-   whose wikitext cites the source book(s) via `{{Cite Pub|…}}` templates —
-   that is the **book attribution** — and include a short description per item.
-3. **Basic Rules A-Z index** — the item database's `br-2024/magic-items-a-z`
-   page is also server-rendered; everything on it is Basic Rules by
-   definition (names, URLs, rarities, descriptions).
-4. **Gap lists** (`tools/gap_book_items.json`) — a few owned books have no
-   per-book list on the wiki. For those, small item rosters were researched
-   manually (dnd5e.wikidot.com's `wondrous-items:<book>` pages, Fandom wikis)
-   and committed as name lists; they are matched against the catalog at run
-   time.
-
-Items whose cited books match `owned_sources.csv` are kept, deduped by name
-(newer edition wins, a specific book beats the free Basic Rules alias),
-deduped again by URL (edition variants of one catalog item collapse to one
-row), renamed to their catalog display name, and written to
-`collected_items.csv` plus a human-readable report (`tools/last_report.txt`).
-Cached pages in `.page_cache/` make re-runs cheap — delete that folder to
-force a full refresh.
-
-### Adding a newly purchased book
-
-1. Add its **exact official title** to `owned_sources.csv` (one per line;
-   check the title on the item database's library page — fuzzy matching
-   tolerates small deviations, but exact is best).
-2. Re-run `python data/items/tools/collect_items.py`. Most canon books are
-   picked up automatically via the wiki citations — check
-   `tools/last_report.txt` for the new book's count.
-3. If the book shows **0 items**, it has no per-book list on dnd-wiki:
-   research its magic-item roster (try `dnd5e.wikidot.com`'s wondrous-items
-   pages, the book's Fandom wiki page, or the item database's table-of-contents
-   page for the book), and add an entry to `tools/gap_book_items.json` in the
-   format of the existing ones (book title + item names + where you found them
-   + date). Re-run the collector.
-4. Rebuild the table: `python data/items/tools/build_roll_table.py --all`.
-   Existing rows are kept **verbatim** (emotes and notes preserved); new items
-   are appended with their short description in `notes`. A `.bak` of the
-   previous table is written first.
-
-The builder also enriches every row before writing:
-
-- **Emotes** — a row whose `name` has no emote prefix gets one assigned
-  deterministically: a hand-picked override (in `EMOTE_OVERRIDES_RAW`) beats
-  ordered keyword rules (sword→⚔️, potion→🧪, ring→💍, staff→🦯, …), and
-  anything unmatched falls back to ✨. A leading ✨ is treated as a
-  placeholder and re-assigned on the next run once a better rule/override
-  exists. Existing non-✨ emotes are never touched.
-- **Descriptions** — an empty `notes` cell is filled from
-  `tools/descriptions_extra.json` (hand-written/fetched short descriptions
-  keyed by normalized name) or, failing that, from the cached Basic Rules A-Z
-  page. A note that looks mangled by the wiki-markup stripper (leftover
-  template fragments) is replaced the same way. Clean notes are left alone.
-
-Notes on the resulting table:
-
-- `--all` includes every pool item, including rarities the CR tiers never
-  reference (`artifact`, `varies`, `unknown`). Those never appear in
-  CR-scaled rolls (a tier only draws the rarities it lists), but they *can*
-  come up in a plain `/roll_items <count>` roll, which samples the whole
-  table. Use `--targets common:N,…` instead if you want a smaller table capped
-  per rarity.
-- Every row carries an emote prefix and a short description; tweak either
-  directly in the `name` / `notes` columns whenever you like (the roll embed
-  shows name + rarity only, so notes length doesn't matter).
-- Verify after each run: `last_report.txt` lists unmatched names and per-book
-  counts; every URL in the output comes from a live catalog page fetched that
-  day.
-
-Keep volumes low and personal — the item database's terms prohibit
-distributing scrapers, which is why none of this is published.
+The tables are plain CSVs — add, edit, or delete rows directly and the next
+roll picks up the changes immediately (no restart needed). One file per
+table; see the format above.

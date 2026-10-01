@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import pathlib
 from unittest.mock import AsyncMock, MagicMock
 
@@ -213,6 +214,8 @@ class TestRollItemsV2:
         (call,) = ix._calls
         names = {f.name.split("**")[1] for f in call["embed"].fields}
         assert names <= {"R1", "R2"} and len(names) == 2
+        # Remaining clause is scoped to the filtered subset, not the whole table.
+        assert "remaining in loot (rare)" in call["embed"].footer.text
 
     def test_rarity_unknown_lists_available(self, items_dir):
         write_table(items_dir, "loot.csv", [["C1", "", "common", ""], ["V1", "", "very rare", ""]])
@@ -278,6 +281,19 @@ class TestUtilityCommands:
         asyncio.run(handle_item_search_command(ix, query="zzz"))
         (call,) = ix._calls
         assert call["embed"] is None and "No items matching" in call["content"]
+
+    def test_stats_ignores_stale_state_entries(self, items_dir):
+        # State for a row that no longer exists in the CSV must not count.
+        write_table(items_dir, "loot.csv", [["C1", "", "common", ""]])
+        (state_file(items_dir)).write_text(
+            json.dumps({"loot": ["C1", "Deleted Row"]}), encoding="utf-8")
+        ix = make_ix()
+        import asyncio
+        asyncio.run(handle_item_stats_command(ix))
+        (call,) = ix._calls
+        value = call["embed"].fields[0].value
+        # Stale entry not counted: 1 consumed (not 2), remaining 0 (not negative).
+        assert "1 rolled out" in value and "0 left" in value
 
     def test_stats_counts_include_consumed(self, items_dir):
         write_table(items_dir, "loot.csv", [

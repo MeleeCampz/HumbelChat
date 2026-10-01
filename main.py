@@ -325,7 +325,7 @@ async def remind_command(
 async def roll_items_command(
     interaction: discord.Interaction,
     table: str | None = None,
-    count: int = 3,
+    count: app_commands.Range[int, 1, 25] = 3,
     cr: str | None = None,
     rarity: str | None = None,
     fresh: bool = False,
@@ -349,7 +349,7 @@ async def item_search_command(
     interaction: discord.Interaction,
     query: str,
     table: str | None = None,
-    limit: int = 10,
+    limit: app_commands.Range[int, 1, 25] = 10,
 ) -> None:
     """Item lookup — delegated to commands/item_commands.py."""
     from commands.item_commands import handle_item_search_command

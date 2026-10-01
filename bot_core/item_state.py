@@ -87,7 +87,7 @@ def exclude_consumed(items: list[Item]) -> tuple[list[Item], int]:
 
     An item is *consumed* when its (table, name) identity is recorded in the
     state file. Stale identities (rows deleted from the CSVs) are simply
-    never matched — they get pruned on the next save.
+    never matched — :func:`prune` removes them on the next roll.
     """
     with _lock:
         state = load_state()
