@@ -78,30 +78,32 @@ class AIBackendError(AIError):
 
 
 class AIResponseTruncatedError(AIError):
-    """The model's response was cut off by ``max_tokens`` before any answer.
+    """The model's response was cut off at its output limit before any answer.
 
-    Thinking models (e.g. Qwen3) spend part of ``max_tokens`` on internal
+    Thinking models (e.g. Qwen3) spend part of the output budget on internal
     reasoning (returned in ``reasoning_content``) *before* the visible
     ``content``. When the budget is exhausted mid-reasoning the API still
     completes "successfully" — but with ``content == ""`` and
     ``finish_reason == "length"``. Treating that as an empty *answer*
     (a ``(empty response)`` placeholder) hid the real failure and polluted
-    channel history with the placeholder. This error lets callers retry with
-    a bigger budget and, if that still fails, surface a real message.
+    channel history with the placeholder. This error lets callers surface a
+    real message instead. With model-max output (#9), the limit in question
+    is the model's own maximum output length — there is no bigger budget to
+    retry with.
     """
 
     category = "truncated_response"
 
     def __init__(
         self,
-        message: str = "The model used its full token budget on reasoning and produced no answer.",
+        message: str = "The model used its full output budget on reasoning and produced no answer.",
         max_tokens: int | None = None,
         **kw: Any,
     ) -> None:
         kw.setdefault(
             "user_message",
             "⚠️ The model ran out of response budget before answering "
-            "(the request was too demanding for the configured max tokens). "
+            "(it reached its maximum output length). "
             "Please ask a narrower question or try again.",
         )
         super().__init__(message, **kw)

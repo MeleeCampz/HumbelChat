@@ -37,18 +37,20 @@ Characters are defined in `characters.json` and control AI persona, model, syste
 | `model` | Model slug used for the inference API |
 | `system_prompt` | Custom system prompt for the character |
 | `temperature` | Optional sampling temperature (e.g. `0.7`) sent with AI requests |
-| `max_tokens` | Optional per-character max tokens; overrides `MAX_TOKENS` |
+| `max_tokens` | Optional per-character max tokens; when set, it is sent with AI requests for that character |
 
 ## Per-character max_tokens
 
-If a character sets `max_tokens`, that value is used for AI requests using that character. Otherwise, the bot falls back to the global `MAX_TOKENS` value from `.env`.
+If a character sets `max_tokens`, that value is used for AI requests using
+that character. Otherwise the parameter is **omitted entirely**, so the
+backend (LM Studio) lets the model use its maximum output length — there is
+no global default or hard cap anymore (`MAX_TOKENS` / `MAX_TOKENS_HARD_CAP`
+in `.env` are no longer applied).
 
-Either way, the final value is clamped by `MAX_TOKENS_HARD_CAP`.
-
-Note: keep budgets generous for *thinking* models (e.g. Qwen3) — `max_tokens`
-covers internal reasoning **and** the visible answer. If a response is
-truncated (`finish_reason "length"`) with an empty answer, the bot
-automatically retries once at `MAX_TOKENS_HARD_CAP` before giving up.
+Note: a set budget covers internal reasoning **and** the visible answer for
+*thinking* models (e.g. Qwen3). If a response is truncated
+(`finish_reason "length"`) with an empty answer, the bot reports a friendly
+error — with model-max output there is no bigger budget to retry with.
 
 Example character with a custom limit:
 

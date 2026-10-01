@@ -219,10 +219,17 @@ class TestCompleteText:
 
     @pytest.mark.asyncio
     async def test_thinking_param_rejected_falls_back_to_plain(self, monkeypatch):
-        """Backend rejects the extra param → one plain retry without it."""
+        """Backend rejects the extra param (4xx) → one plain retry without it."""
+        import httpx
+        import openai
+        req = httpx.Request("POST", "http://backend.invalid/v1/chat/completions")
+        rejected = openai.BadRequestError(
+            "Unknown parameter: enable_thinking",
+            response=httpx.Response(400, request=req), body=None,
+        )
         client = MagicMock()
         client.chat.completions.create = AsyncMock(side_effect=[
-            RuntimeError("unknown parameter: enable_thinking"),
+            rejected,
             _resp("SUMMARY", finish_reason="stop"),
         ])
 
@@ -237,6 +244,27 @@ class TestCompleteText:
         second_kwargs = client.chat.completions.create.call_args_list[1].kwargs
         assert first_kwargs["extra_body"] == {"enable_thinking": False}
         assert "extra_body" not in second_kwargs
+
+    @pytest.mark.asyncio
+    async def test_timeout_does_not_trigger_plain_retry(self, monkeypatch):
+        """A timeout on the thinking call must propagate immediately — the
+        plain retry is reserved for 4xx param rejections (retrying a timeout
+        would double the silence before surfacing the error)."""
+        import httpx
+        import openai
+        req = httpx.Request("POST", "http://backend.invalid/v1/chat/completions")
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(
+            side_effect=openai.APITimeoutError(request=req))
+
+        with pytest.raises(ValueError) as ei:
+            await ai_client.complete_text(
+                client, model="m", messages=[], temperature=0.3,
+                disable_thinking=True,
+            )
+        assert "too long to respond" in str(ei.value)
+        # Exactly ONE attempt — no plain retry after a timeout.
+        assert client.chat.completions.create.await_count == 1
 
     @pytest.mark.asyncio
     async def test_empty_answer_at_model_limit_raises(self, monkeypatch):

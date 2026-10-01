@@ -11,9 +11,9 @@ P3 additions:
 
 P5 additions:
   - Streaming is the default delivery path for /ai (``AI_STREAM=1``)
-  - Streamed responses get three explicit time budgets: a larger initial
-    wait (prompt processing + thinking), a per-chunk gap timeout, and a
-    hard cap on the whole response (all overridable in the config)
+  - A single timeout knob ``AI_TIMEOUT_S`` bounds how long the backend may
+    stay silent: total-wait bound for normal responses, per-read idle
+    watchdog for streams (any chunk resets it; no total wall-clock cap)
   - The shared client is created with ``max_retries=0`` so the bot's own
     policy (exactly ONE retry on transient failure) is the only retry layer
 """
@@ -810,9 +810,13 @@ async def complete_text(
         if disable_thinking:
             try:
                 resp = await client.chat.completions.create(**_kwargs(True))
-            except Exception:  # noqa: BLE001 — rejected param or transient blip
-                # Backend rejected the extra param (or transient failure) —
-                # retry plain.
+            except APIStatusError as e:
+                # Only a 4xx rejection (e.g. the backend does not know the
+                # ``enable_thinking`` param) justifies a plain retry. Timeouts
+                # and connection/5xx failures must propagate immediately —
+                # retrying them would double the silence before surfacing.
+                if e.status_code is None or e.status_code >= 500:
+                    raise
                 resp = await client.chat.completions.create(**_kwargs(False))
         else:
             resp = await client.chat.completions.create(**_kwargs(False))
@@ -1021,10 +1025,15 @@ async def ask_ai_stream(
             # honestly instead of the generic empty-response message.
             from bot_core.errors import AIBackendError, AIResponseTruncatedError
             if getattr(stream, "_final_finish_reason", None) == "length":
+                limit_desc = (
+                    f"max_tokens={ctx.max_tokens}"
+                    if ctx.max_tokens is not None
+                    else "the model's maximum output length"
+                )
                 _friendly_ai_error(
                     AIResponseTruncatedError(
-                        f"Streamed response truncated at max_tokens="
-                        f"{ctx.max_tokens} with no visible answer.",
+                        f"Streamed response truncated at {limit_desc} "
+                        f"with no visible answer.",
                         max_tokens=ctx.max_tokens,
                     ),
                     model=ctx.effective_model, backend_url=INFER_URL,
