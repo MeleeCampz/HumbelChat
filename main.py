@@ -319,8 +319,7 @@ async def remind_command(
     count="How many items to roll (ignored when cr is given)",
     cr="Optional monster Challenge Rating (e.g. 4 or 1/2) — scales item count and rarities",
     rarity="Optional rarity filter for plain rolls (e.g. rare); ignored when cr is given",
-    fresh="Reset this table's no-repeat pool before rolling (previously rolled items come back)",
-    preview="With cr: show what the roll would do without rolling or consuming anything",
+    consume="When on, rolled items are marked as used and won't come up again until /reset_rolls (default: off)",
 )
 async def roll_items_command(
     interaction: discord.Interaction,
@@ -328,14 +327,13 @@ async def roll_items_command(
     count: app_commands.Range[int, 1, 25] = 3,
     cr: str | None = None,
     rarity: str | None = None,
-    fresh: bool = False,
-    preview: bool = False,
+    consume: bool = False,
 ) -> None:
     """Random item table roll — delegated to commands/roll_items_command.py."""
     from commands.roll_items_command import handle_roll_items_command
     await handle_roll_items_command(
         interaction, table=table, count=count, cr=cr,
-        rarity=rarity, fresh=fresh, preview=preview,
+        rarity=rarity, consume=consume,
     )
 
 

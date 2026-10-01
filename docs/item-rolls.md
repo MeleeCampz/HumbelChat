@@ -8,7 +8,7 @@ How the item tables work: data layout, CSV formats, and rolling mechanics.
 |---|---|
 | `data/items/*.csv` | Your rollable tables (one CSV per table; gitignored) |
 | `data/items/cr_tiers.csv` | CR tier definitions for `/roll_items cr:…` |
-| `data/items/.rolled_state.json` | No-repeat pool state (hidden, managed by the bot) |
+| `data/items/.rolled_state.json` | Consumed-item tracking for `consume:true` rolls (hidden, managed by the bot) |
 | `item_samples/` | Built-in starter tables shipped with the repo |
 
 **First run.** A fresh clone works out of the box: the first `/roll_items`
@@ -52,28 +52,27 @@ is drawn uniformly and that many items are sampled. A range of `0-…` means
 ## Rolling mechanics
 
 **Plain roll** — `/roll_items [table] [count] [rarity]`: draws `count`
-(default 3) items uniformly at random **without replacement** from one table
-(the named one, or the default). `rarity:` filters first (plain rolls only);
-already-rolled items are excluded. If fewer remain than requested, everything
-is returned with a note in the footer.
+(default 3) items uniformly at random from one table (the named one, or the
+default) — no repeats within a single roll. `rarity:` filters first (plain
+rolls only). If fewer than requested exist, everything is returned with a note
+in the footer.
 
 **CR-scaled roll** — `/roll_items cr:<rating>`: `cr` overrides `count`. The
 winning tier's per-rarity ranges decide how many of each rarity come up (e.g.
 CR 5 → tier `min_cr 3` → maybe 1 common, 2–3 uncommon, 1–2 rare). The footer
 shows the tier and the per-rarity breakdown.
 
-## No-repeat pool
+## Consuming items (`consume` flag)
 
-An item comes up **once** until the pool is reset — a long campaign doesn't
-hand out the same Bag of Holding twice.
+By default rolls are pure random — nothing is tracked, and the same item can
+come up again. Turn on `consume:true` to keep track of what you hand out:
 
-- Consumed items are tracked in the hidden `.rolled_state.json`; every roll's
-  footer shows what's left (e.g. `— 361 of 365 remaining in magic_items`).
-- An exhausted pool gets a friendly message instead of an empty roll.
-- Reset with `fresh:true` (resets the rolled table, then rolls) or
-  `/reset_rolls [table]` (one table or all, without rolling).
-- `preview:true` with `cr:` shows the tier's ranges and the available count
-  per rarity — no roll, nothing consumed.
+- A consuming roll excludes items already marked as rolled, then marks the new
+  picks; they stay out until cleared with `/reset_rolls [table]` (one table or all).
+- Plain rolls ignore the tracking entirely — handy for quick or throwaway rolls
+  that shouldn't touch the campaign pool.
+- Every consuming roll's footer shows what's left (e.g. `— 361 of 365 remaining in magic_items`);
+an exhausted pool gets a friendly message instead of an empty roll.
 
 ## Utility commands
 
@@ -82,7 +81,7 @@ hand out the same Bag of Holding twice.
   page link for each match.
 - **`/item_stats [table]`** — per-table totals: total / rolled out / remaining
   plus a per-rarity breakdown. Read-only.
-- **`/reset_rolls [table]`** — returns consumed items to the pool (one table or all).
+- **`/reset_rolls [table]`** — clears the consumed-item tracking (one table or all), so those items can come up again.
 
 ## Tuning tips
 

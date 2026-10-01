@@ -1,8 +1,9 @@
-"""Persistent no-repeat pool state for /roll_items.
+"""Consumed-item tracking for /roll_items (the ``consume`` flag).
 
-Tracks which items have already been rolled out so an item never comes up
-twice until the pool is reset (``fresh:true`` or ``/reset_rolls``). State
-lives in a hidden JSON file next to the tables — ``<ITEMS_DIR>/
+Tracks which items have already been rolled out by consuming rolls so they
+don't come up again until the tracking is cleared with ``/reset_rolls``.
+Plain (non-consuming) rolls neither read nor write this state. State lives in
+a hidden JSON file next to the tables — ``<ITEMS_DIR>/
 .rolled_state.json`` — shaped as ``{"<table>": ["Item Name", ...]}``.
 
 Identity is **(table, name)**: items keep their table of origin (see
