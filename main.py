@@ -313,6 +313,23 @@ async def remind_command(
     await handle_remind_command(interaction, time_value, time_unit, message)
 
 
+@bot.tree.command(name="roll_items", description="Roll random items from an item table (with item page links).")
+@app_commands.describe(
+    table="Optional table name (a CSV file in data/items/); omit to roll across all tables",
+    count="How many items to roll (ignored when cr is given)",
+    cr="Optional monster Challenge Rating (e.g. 4 or 1/2) — scales item count and rarities",
+)
+async def roll_items_command(
+    interaction: discord.Interaction,
+    table: str | None = None,
+    count: int = 3,
+    cr: str | None = None,
+) -> None:
+    """Random item table roll — delegated to commands/roll_items_command.py."""
+    from commands.roll_items_command import handle_roll_items_command
+    await handle_roll_items_command(interaction, table=table, count=count, cr=cr)
+
+
 @bot.tree.command(name="ocr", description="Extract text from an image (OCR).")
 async def ocr_command(interaction: discord.Interaction, image: discord.Attachment | None = None) -> None:
     """Vision-based OCR — delegated to commands/utility_commands.py."""

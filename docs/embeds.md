@@ -23,7 +23,7 @@ Markdown subset (no tables).
 
 - Replies longer than one embed are sent as several embed messages (max 10
   embeds per message). Over-long pieces are split across multiple fields.
-- The accent color defaults to the D&D Beyond green (`#96BF6B`); degraded
+- The accent color defaults to the classic tabletop green (`#96BF6B`); degraded
   parses fall back to Discord blurple.
 
 ## Fallback behavior
