@@ -86,17 +86,16 @@ Schedule a one-time reminder (minimum 10 seconds ahead); the bot posts a `⏰ Re
 ### `/roll_items`
 
 ```
-/roll_items [table: <name>] [count: 1-25] [cr: <rating>] [rarity: <rarity>] [fresh: false] [preview: false]
+/roll_items [table: <name>] [count: 1-25] [cr: <rating>] [rarity: <rarity>] [consume: false]
 ```
 
-Roll random items from your CSV item table in `data/items/` (override with `ITEMS_DIR`). The reply is an embed where each item shows name, rarity, description, and an item page link. Items only come up once until the pool is reset (see below).
+Roll random items from your CSV item table in `data/items/` (override with `ITEMS_DIR`). The reply is an embed where each item shows name, rarity, description, and an item page link. By default rolls are pure random — nothing is tracked; with `consume` on, rolled items are marked so they don't come up again (see below).
 
 - **`table`** — optional. A CSV filename in `data/items/` without the `.csv` suffix (case-insensitive). Omit to use the default table (`magic_items`; override with the `DEFAULT_ITEM_TABLE` env var).
 - **`count`** — how many items to roll (default 3). Rolls are **without replacement** — an item never repeats within one roll. If the table has fewer items than requested, everything is returned with a note.
 - **`cr`** — optional monster Challenge Rating (`4`, `1/2`, `1/4`, …). When given, it **overrides `count`**: the tier with the highest `min_cr` ≤ CR wins, and each of its per-rarity ranges is rolled independently.
 - **`rarity`** — optional filter for plain rolls (e.g. `rare`). Ignored when `cr` is given.
-- **`fresh`** — reset this table's no-repeat pool before rolling, so previously rolled items come back.
-- **`preview`** — with `cr`: show the tier's ranges and available pool sizes without rolling or consuming anything.
+- **`consume`** — when on, rolled items are marked as used: they're excluded from later `consume` rolls until cleared with `/reset_rolls`. Off by default (pure random, nothing tracked).
 
 ### `/item_search`
 

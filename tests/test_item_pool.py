@@ -1,4 +1,4 @@
-"""Tests for /roll_items v2: persistent pool state, search, stats, preview."""
+"""Tests for /roll_items: pool state, the consume flag, search, and stats."""
 from __future__ import annotations
 
 import csv
@@ -155,53 +155,53 @@ class TestItemSearch:
 # ── /roll_items v2 handler paths ───────────────────────────────────────────
 
 class TestRollItemsV2:
-    def test_no_repeat_across_rolls(self, items_dir):
+    def test_default_roll_touches_no_state(self, items_dir):
+        # consume off (default): pure random from the full table, no tracking.
         write_table(items_dir, "loot.csv", [[f"Item {k}", "", "common", ""] for k in range(5)])
-        first = second = None
         ix1 = make_ix()
         import asyncio
         asyncio.run(handle_roll_items_command(ix1, table="loot", count=3))
         (call1,) = ix1._calls
-        first = {f.name.split("**")[1] for f in call1["embed"].fields}
-        ix2 = make_ix()
-        asyncio.run(handle_roll_items_command(ix2, table="loot", count=3))
-        (call2,) = ix2._calls
-        second = {f.name.split("**")[1] for f in call2["embed"].fields}
-        assert first and second and not (first & second)
+        assert call1["embed"] is not None and len(call1["embed"].fields) == 3
+        assert not state_file(items_dir).exists()  # nothing marked
+        footer = call1["embed"].footer.text if call1["embed"].footer else ""
+        assert "remaining" not in footer
 
     def test_remaining_clause_in_footer(self, items_dir):
         write_table(items_dir, "loot.csv", [[f"Item {k}", "", "common", ""] for k in range(5)])
         ix = make_ix()
         import asyncio
-        asyncio.run(handle_roll_items_command(ix, table="loot", count=2))
+        asyncio.run(handle_roll_items_command(ix, table="loot", count=2, consume=True))
         (call,) = ix._calls
         assert "3 of 5 remaining in loot" in call["embed"].footer.text
 
-    def test_fresh_rerolls_consumed(self, items_dir):
+    def test_consume_excludes_and_marks(self, items_dir):
         write_table(items_dir, "tiny.csv", [["Only", "", "common", ""]])
         import asyncio
+        # A consuming roll marks the item…
         ix1 = make_ix()
-        asyncio.run(handle_roll_items_command(ix1, table="tiny", count=1))
-        # Pool now exhausted — a plain roll must fail with the reset hint…
+        asyncio.run(handle_roll_items_command(ix1, table="tiny", count=1, consume=True))
+        (call1,) = ix1._calls
+        assert call1["embed"] is not None and "Only" in call1["embed"].fields[0].name
+        # …so the next consuming roll finds an exhausted pool…
         ix2 = make_ix()
-        asyncio.run(handle_roll_items_command(ix2, table="tiny", count=1))
+        asyncio.run(handle_roll_items_command(ix2, table="tiny", count=1, consume=True))
         (call2,) = ix2._calls
         assert call2["embed"] is None and "Pool exhausted" in call2["content"]
-        # …but fresh:true refills it.
+        # …but a plain roll ignores the tracking and still returns it.
         ix3 = make_ix()
-        asyncio.run(handle_roll_items_command(ix3, table="tiny", count=1, fresh=True))
+        asyncio.run(handle_roll_items_command(ix3, table="tiny", count=1))
         (call3,) = ix3._calls
         assert call3["embed"] is not None and "Only" in call3["embed"].fields[0].name
 
-    def test_exhausted_message_names_reset_options(self, items_dir):
+    def test_exhausted_message_points_at_reset(self, items_dir):
         write_table(items_dir, "tiny.csv", [["Only", "", "common", ""]])
         import asyncio
-        make_ix()
-        asyncio.run(handle_roll_items_command(make_ix(), table="tiny", count=1))
+        asyncio.run(handle_roll_items_command(make_ix(), table="tiny", count=1, consume=True))
         ix = make_ix()
-        asyncio.run(handle_roll_items_command(ix, table="tiny", count=1))
+        asyncio.run(handle_roll_items_command(ix, table="tiny", count=1, consume=True))
         (call,) = ix._calls
-        assert "fresh:true" in call["content"] and "/reset_rolls" in call["content"]
+        assert "/reset_rolls" in call["content"]
 
     def test_rarity_filter(self, items_dir):
         write_table(items_dir, "loot.csv", [
@@ -210,7 +210,8 @@ class TestRollItemsV2:
         ])
         import asyncio
         ix = make_ix()
-        asyncio.run(handle_roll_items_command(ix, table="loot", count=2, rarity="rare"))
+        asyncio.run(handle_roll_items_command(ix, table="loot", count=2,
+                                              rarity="rare", consume=True))
         (call,) = ix._calls
         names = {f.name.split("**")[1] for f in call["embed"].fields}
         assert names <= {"R1", "R2"} and len(names) == 2
@@ -238,22 +239,6 @@ class TestRollItemsV2:
         (call,) = ix._calls
         # cr wins: rare items come up despite the common filter.
         assert any("rare" in f.name for f in call["embed"].fields)
-
-    def test_preview_shows_ranges_and_consumes_nothing(self, items_dir):
-        write_table(items_dir, "loot.csv", [
-            ["C1", "", "common", ""], ["C2", "", "common", ""],
-            ["U1", "", "uncommon", ""],
-        ])
-        (items_dir / item_tables.CR_TIERS_FILENAME).write_text(
-            "min_cr,rarities\n0,common:1-2;uncommon:1-1\n", encoding="utf-8")
-        import asyncio
-        ix = make_ix()
-        asyncio.run(handle_roll_items_command(ix, table="loot", cr="1", preview=True))
-        (call,) = ix._calls
-        assert call["embed"].title.startswith("🎲 Preview")
-        assert "common 1-2 (2 available)" in call["embed"].description
-        assert "uncommon 1-1 (1 available)" in call["embed"].description
-        assert not state_file(items_dir).exists()  # nothing consumed
 
 
 # ── utility command handlers ───────────────────────────────────────────────
@@ -376,7 +361,7 @@ class TestDefaultTable:
         write_table(items_dir, "loot.csv", [[f"Item {k}", "", "common", ""] for k in range(5)])
         ix = make_ix()
         import asyncio
-        asyncio.run(handle_roll_items_command(ix, count=2))
+        asyncio.run(handle_roll_items_command(ix, count=2, consume=True))
         (call,) = ix._calls
         assert call["embed"] is not None and len(call["embed"].fields) == 2
         assert "remaining in loot" in call["embed"].footer.text
@@ -402,18 +387,14 @@ class TestDefaultTable:
         assert call["embed"] is None
         assert "No table named `nope`" in call["content"] and "`loot`" in call["content"]
 
-    def test_fresh_only_resets_the_rolled_table(self, items_dir):
-        write_table(items_dir, "a.csv", [["A0", "", "common", ""]])
+    def test_consume_only_marks_the_rolled_table(self, items_dir):
+        write_table(items_dir, "a.csv", [["A0", "", "common", ""], ["A1", "", "common", ""]])
         write_table(items_dir, "b.csv", [["B0", "", "common", ""], ["B1", "", "common", ""]])
-        item_state.consume([
-            item_tables.Item(name="A0", table="a"),
-            item_tables.Item(name="B0", table="b"),
-        ])
         ix = make_ix()
         import asyncio
-        asyncio.run(handle_roll_items_command(ix, table="a", count=1, fresh=True))
+        asyncio.run(handle_roll_items_command(ix, table="a", count=2, consume=True))
         (call,) = ix._calls
-        assert call["embed"] is not None  # table a was refilled by fresh
+        assert call["embed"] is not None and len(call["embed"].fields) == 2
         state = item_state.load_state()
-        assert "A0" in state.get("a", [])  # re-consumed after the roll
-        assert "B0" in state.get("b", [])  # table b untouched by fresh
+        assert set(state.get("a", [])) == {"A0", "A1"}  # rolled table marked
+        assert "b" not in state  # other tables untouched
