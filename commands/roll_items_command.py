@@ -8,7 +8,7 @@ from typing import Any
 
 import discord
 
-from bot_core import item_tables
+from bot_core import item_state, item_tables
 
 log = logging.getLogger("bot.roll_items_command")
 
@@ -48,18 +48,34 @@ def _build_embed(
     return embed
 
 
+def _exhausted_error(scope: str, rarity: str | None) -> str:
+    what = f"no {rarity} items in {scope}" if rarity else f"all items in {scope}"
+    return (
+        f"Pool exhausted — {what} have already been rolled. "
+        "Use `fresh:true` or `/reset_rolls` to put them back."
+    )
+
+
 async def handle_roll_items_command(
     interaction: discord.Interaction,
     table: str | None = None,
     count: int = 3,
     cr: str | None = None,
+    rarity: str | None = None,
+    fresh: bool = False,
+    preview: bool = False,
 ) -> None:
     """Roll random items from the CSV tables in ``ITEMS_DIR``.
 
-    ``cr`` (optional) overrides ``count`` and filters by the tier's rarities.
+    ``cr`` (optional) overrides ``count`` and filters by the tier's rarities;
+    ``rarity`` (optional) filters plain rolls only. ``fresh`` resets the
+    persistent no-repeat pool before rolling; ``preview`` (with ``cr``) shows
+    what a roll would do without consuming anything.
     """
     if table:
         table = table.strip() or None
+    if rarity:
+        rarity = rarity.strip().lower() or None
     count = max(1, int(count))
     await interaction.response.defer()
 
@@ -75,43 +91,93 @@ async def handle_roll_items_command(
                 "error": "No item tables found — add CSV files to `data/items/` (see docs/commands.md).",
             }
         try:
+            if fresh and not preview:
+                item_state.reset()
+            items = item_tables.load_items(table)
+            item_state.prune(items)
+            scope = table if table else "all tables"
+
             if cr is not None:
                 cr_value = item_tables.parse_cr(cr)
                 tiers = item_tables.load_cr_tiers()
-                items = item_tables.load_items(table)
+                if not tiers:
+                    raise item_tables.NoCrTiersError("no CR tiers configured")
+
+                if preview:
+                    # Show what the roll would do — no sampling, no consume.
+                    tier = item_tables.resolve_tier(cr_value, tiers)
+                    available, _total = item_state.exclude_consumed(items)
+                    avail_by_rarity: dict[str, int] = {}
+                    for i in available:
+                        avail_by_rarity[i.rarity] = avail_by_rarity.get(i.rarity, 0) + 1
+                    parts = [
+                        f"{rr.rarity} {rr.min_count}-{rr.max_count} "
+                        f"({avail_by_rarity.get(rr.rarity, 0)} available)"
+                        for rr in tier.ranges
+                    ]
+                    return {
+                        "ok": True,
+                        "preview": True,
+                        "title": f"🎲 Preview — CR {_fmt_cr(cr_value)} from {scope}",
+                        "description": (
+                            f"tier (min CR {_fmt_cr(tier.min_cr)}): " + " · ".join(parts)
+                        ),
+                    }
+
+                available, total = item_state.exclude_consumed(items)
+                if not available:
+                    return {"ok": False, "error": _exhausted_error(scope, None)}
                 rolled, tier, exhausted = item_tables.roll_for_cr(
-                    cr_value, items, tiers, rng=rng
+                    cr_value, available, tiers, rng=rng
                 )
-                scope = table if table else "all tables"
                 by_rarity: dict[str, int] = {}
                 for item in rolled:
                     by_rarity[item.rarity] = by_rarity.get(item.rarity, 0) + 1
                 breakdown = ", ".join(f"{r} ×{n}" for r, n in sorted(by_rarity.items()))
-                footer_extra = (
-                    f" — some rarities ran out of items in {scope}"
-                    if exhausted else ""
-                )
-                footer: str | None = (
+                footer_parts = [
                     f"CR {_fmt_cr(cr_value)} → tier (min CR {_fmt_cr(tier.min_cr)}): {breakdown}"
-                    + footer_extra
+                ]
+                if exhausted:
+                    footer_parts.append(f"some rarities ran out of items in {scope}")
+                footer_parts.append(
+                    f"{len(available) - len(rolled)} of {total} remaining in {scope}"
                 )
                 return {
                     "ok": True,
                     "title": f"🎲 Random items from {scope} (CR {_fmt_cr(cr_value)})",
                     "items": rolled,
-                    "footer": footer,
+                    "footer": " — ".join(footer_parts),
+                    "consume": rolled,
                 }
-            items = item_tables.load_items(table)
-            rolled, exhausted = item_tables.roll_items(items, count, rng=rng)
-            scope = table if table else "all tables"
-            footer = (
-                f"— only {len(rolled)} item(s) available in {scope}" if exhausted else None
+
+            pool = items
+            if rarity is not None:
+                pool = [i for i in items if i.rarity == rarity]
+                if not pool:
+                    have = sorted({i.rarity for i in items})
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"No `{rarity}` items in {scope}. "
+                            f"Rarities available: {', '.join(have) or 'none'}."
+                        ),
+                    }
+            available, total = item_state.exclude_consumed(pool)
+            if not available:
+                return {"ok": False, "error": _exhausted_error(scope, rarity)}
+            rolled, exhausted = item_tables.roll_items(available, count, rng=rng)
+            footer_parts = []
+            if exhausted:
+                footer_parts.append(f"only {len(rolled)} item(s) available in {scope}")
+            footer_parts.append(
+                f"{len(available) - len(rolled)} of {total} remaining in {scope}"
             )
             return {
                 "ok": True,
                 "title": f"🎲 Random items from {scope}",
                 "items": rolled,
-                "footer": footer,
+                "footer": " — ".join(footer_parts),
+                "consume": rolled,
             }
         except item_tables.NoCrTiersError:
             return {
@@ -137,11 +203,28 @@ async def handle_roll_items_command(
 
     try:
         result = await asyncio.to_thread(_roll)
+        if not result["ok"]:
+            await interaction.followup.send(result["error"])
+            return
+        if result.get("preview"):
+            embed = discord.Embed(
+                title=result["title"],
+                color=discord.Color.gold(),
+                description=result.get("description"),
+            )
+            await interaction.followup.send(embed=embed)
+            return
+        await interaction.followup.send(
+            embed=_build_embed(result["title"], result["items"], result["footer"])
+        )
+        # Consume only after the reply landed — a failed send loses nothing.
+        if result.get("consume"):
+            await asyncio.to_thread(item_state.consume, result["consume"])
     except Exception:
         log.exception("roll_items: unexpected error")
-        await interaction.followup.send("Item rolling failed unexpectedly — check the bot logs.")
-        return
-    if not result["ok"]:
-        await interaction.followup.send(result["error"])
-        return
-    await interaction.followup.send(embed=_build_embed(result["title"], result["items"], result["footer"]))
+        try:
+            await interaction.followup.send(
+                "Item rolling failed unexpectedly — check the bot logs."
+            )
+        except Exception:  # noqa: BLE001 - last-resort, nothing left to do
+            pass

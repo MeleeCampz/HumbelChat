@@ -86,16 +86,43 @@ Schedule a one-time reminder (minimum 10 seconds ahead); the bot posts a `⏰ Re
 ### `/roll_items`
 
 ```
-/roll_items [table: <name>] [count: 1-25] [cr: <rating>]
+/roll_items [table: <name>] [count: 1-25] [cr: <rating>] [rarity: <rarity>] [fresh: false] [preview: false]
 ```
 
-Roll a list of random items from the CSV item tables in `data/items/` (override with `ITEMS_DIR`). The reply is an embed where each item shows its name, rarity, notes, and a link to its item page.
+Roll a list of random items from the CSV item tables in `data/items/` (override with `ITEMS_DIR`). The reply is an embed where each item shows its name, rarity, notes, and a link to its item page. Items only come up once until the pool is reset (see below).
 
 - **`table`** — optional. A CSV filename in `data/items/` without the `.csv` suffix (case-insensitive). Omit to roll across *all* tables combined.
 - **`count`** — how many items to roll (default 3). Rolls are **without replacement** — an item never repeats within one roll. If the table has fewer items than requested, everything is returned with a note.
 - **`cr`** — optional monster Challenge Rating (`4`, `1/2`, `1/4`, …). When given, it **overrides `count`** and selects a tier from `data/items/cr_tiers.csv`: the tier with the **highest `min_cr` that is ≤ the rolled CR** wins (a CR below every tier uses the first one). Each rarity range in the tier is then rolled independently.
+- **`rarity`** — optional filter for plain rolls (e.g. `rare`). Ignored when `cr` is given.
+- **`fresh`** — reset the no-repeat pool before rolling, so previously rolled items come back.
+- **`preview`** — with `cr`: show the tier's ranges and available pool sizes without rolling or consuming anything.
 
-See **[docs/item-rolls.md](./item-rolls.md)** for the full picture: file layout, both CSV formats, the exact rolling mechanics (with a worked example), tier tuning tips, first-run seeding, and how the item collection pipeline works — including the recipe for adding a newly purchased book.
+### `/item_search`
+
+```
+/item_search <query> [table: <name>] [limit: 10]
+```
+
+Fuzzy-search the item tables (emote prefixes ignored) and list matches with rarity, table, and item page link. Deterministic scoring: exact > prefix > substring > similarity.
+
+### `/item_stats`
+
+```
+/item_stats [table: <name>]
+```
+
+Per-table counts: total, rolled out, remaining, plus a per-rarity breakdown (footer with grand totals).
+
+### `/reset_rolls`
+
+```
+/reset_rolls [table: <name>]
+```
+
+Return consumed items to the pool — one table or all — and report how many came back.
+
+See **[docs/item-rolls.md](./item-rolls.md)** for the full picture: file layout, both CSV formats, the exact rolling mechanics (with a worked example), the persistent no-repeat pool, tier tuning tips, first-run seeding, and how the item collection pipeline works — including the recipe for adding a newly purchased book.
 
 ### Sessions
 
