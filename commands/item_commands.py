@@ -103,8 +103,12 @@ async def handle_item_stats_command(
         grand_total = grand_remaining = 0
         for t in sorted({i.table for i in items}):
             rows = [i for i in items if i.table == t]
-            consumed = len(state.get(t, []))
-            remaining = len(rows) - min(consumed, len(rows))
+            # Only count consumed entries that still exist as rows — stale
+            # state (deleted CSV rows) is pruned on the next roll, but stats
+            # must not show it in the meantime.
+            live_names = {i.name for i in rows}
+            consumed = len([n for n in state.get(t, []) if n in live_names])
+            remaining = len(rows) - consumed
             by_rarity: dict[str, int] = {}
             for i in rows:
                 by_rarity[i.rarity] = by_rarity.get(i.rarity, 0) + 1

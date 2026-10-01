@@ -56,7 +56,7 @@ foreground without tmux: `./.venv/bin/python main.py` (Windows:
 - [RAG / Knowledge Base](./docs/rag.md) — retrieval methods, smart chunking, supported file types
 - [Voice Recording](./docs/voice-recording.md) — per-speaker voice capture for STT (pipeline, manifest format, troubleshooting)
 - [Commands](./docs/commands.md) — slash command and prefix command reference
-- [Item Rolls](./docs/item-rolls.md) — `/roll_items` table formats, rolling mechanics, and collection maintenance
+- [Item Rolls](./docs/item-rolls.md) — `/roll_items` table formats, rolling mechanics, and pool management
 - [Permissions](./docs/permissions.md) — Discord permissions the bot needs, where to set them, and per-channel override traps
 - [Troubleshooting](./docs/troubleshooting.md) — common symptoms and fixes
 
