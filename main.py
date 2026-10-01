@@ -461,6 +461,14 @@ async def sync_command(interaction: discord.Interaction) -> None:
     await handle_sync_command(interaction)
 
 
+@bot.tree.command(name="help", description="Show all available commands, or details for one command.")
+@app_commands.describe(command="Optional command name to show detailed usage for")
+async def help_command(interaction: discord.Interaction, command: str | None = None) -> None:
+    """List commands (or one command's detail view) — delegated to commands/help_command.py."""
+    from commands.help_command import handle_help_command
+    await handle_help_command(interaction, command)
+
+
 @bot.tree.command(name="start_session", description="Start a new work session.")
 @app_commands.describe(name="Optional custom name for the session")
 async def start_session_command(interaction: discord.Interaction, name: str | None = None) -> None:

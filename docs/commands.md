@@ -196,6 +196,12 @@ Stops capturing, writes one WAV per speaker plus a `manifest.json`, and replies 
 
 With `STT_ENABLED` on (default), each speaker's audio is then transcribed in the background via the backend's `/v1/audio/transcriptions` endpoint (`STT_MODEL`, e.g. `qwen3-asr-1.7b`) and a follow-up message with the transcript preview + attached `transcript.json` is posted when done. If a session is active, the finished transcript is also appended to its notes automatically — pinned to the session that was active when the recording stopped, even if it ends before STT finishes (`STT_ADD_TO_SESSION=0` in `.env` opts out). Set `transcribe: false` to skip STT for one recording, or `STT_ENABLED=0` in `.env` to disable it entirely.
 
+### `/help`
+
+Shows a categorized overview of **all** available commands (AI & Chat, D&D Items, Knowledge Base, Sessions, Voice Recording, Utility, Maintenance). The listing is generated from the live command set, so it always matches what the bot actually has.
+
+With an argument — `/help <command>` — it shows a detail view for that one command: its description plus every option (type, required/default, and min–max where applicable).
+
 ### `/sync`
 
 Re-sync all slash commands with Discord. Use this if commands appear duplicated in the slash command menu or if newly added commands are not showing up.

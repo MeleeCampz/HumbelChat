@@ -68,6 +68,7 @@ foreground without tmux: `./.venv/bin/python main.py` (Windows:
 - `/list_kb_docs` — list knowledge base documents
 - `/reindex_kb` — rebuild the knowledge base index
 - `/clear_history` — clear channel conversation history
+- `/help` — list all commands, or show detailed usage for one (`/help <command>`)
 - `/sync` — re-sync all slash commands (fixes duplicated commands)
 - `/ocr` — extract text from an image
 - `/summarize` — summarize chat history or a URL
