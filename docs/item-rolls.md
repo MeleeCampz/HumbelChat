@@ -1,57 +1,38 @@
 # Item rolls (`/roll_items`)
 
-How the random item tables work: data layout, CSV formats, and the exact
-rolling mechanics.
+How the item tables work: data layout, CSV formats, and rolling mechanics.
 
 ## Data layout
 
-| Location | Contents | Committed? |
-|---|---|---|
-| `data/items/*.csv` | Your rollable tables (one CSV per table) | no (gitignored, local-only) |
-| `data/items/cr_tiers.csv` | CR tier definitions for `/roll_items cr:…` | no |
-| `data/items/.rolled_state.json` | Persistent no-repeat pool state (hidden; managed by the bot) | no |
-| `item_samples/` | Built-in starter tables shipped with the repo | yes |
+| Location | Contents |
+|---|---|
+| `data/items/*.csv` | Your rollable tables (one CSV per table; gitignored) |
+| `data/items/cr_tiers.csv` | CR tier definitions for `/roll_items cr:…` |
+| `data/items/.rolled_state.json` | No-repeat pool state (hidden, managed by the bot) |
+| `item_samples/` | Built-in starter tables shipped with the repo |
 
-**First run.** `data/items/` is gitignored, but a fresh clone still works out
-of the box: on its first run, `/roll_items` copies the two files from
-`item_samples/` into `data/items/` (creating the directory if needed). From
-then on there is a single data location — edit the CSVs in place or replace
-them with your own. The seed only acts while the folder holds no rollable
-tables and **never overwrites existing files**, so in-place edits survive.
-
-Files are re-read on every roll — adding a table or adjusting tiers never
-requires a restart. The location is overridable via the `ITEMS_DIR` env var,
-and the table used when `/roll_items` is called without a `table` argument is
-configurable via `DEFAULT_ITEM_TABLE` (default: `magic_items`).
+**First run.** A fresh clone works out of the box: the first `/roll_items`
+copies the starter tables from `item_samples/` into `data/items/` — only while
+the folder holds no tables, and existing files are never overwritten. From
+then on, edit the CSVs in place; they are re-read on every roll (no restart).
+The directory is overridable via `ITEMS_DIR`, and the table used when `table`
+is omitted is set by `DEFAULT_ITEM_TABLE` (default: `magic_items`).
 
 ## Item table format
 
-One CSV per table, header row required:
+One CSV per table (table name = filename without `.csv`, case-insensitive):
 
 ```csv
 name,url,rarity,notes
-Bag of Holding,https://example.com/items/bag-of-holding,uncommon,"5-ft cube, 0 weight, holds up to 500 lb."
+Bag of Holding,https://example.com/items/bag-of-holding,uncommon,"Holds up to 500 lb."
 ```
 
-- **`name`** — the only required column. Rows without a name are skipped with
-  a warning log. An emote prefix here (e.g. `🎒 Bag of Holding`) is rendered
-  as-is in the embed.
-- **`url`** — optional; rendered as an "Item page" link above the notes.
-- **`rarity`** — optional; case-insensitive. A blank rarity normalizes to
-  `common`, so mundane items still participate in CR-scaled rolls. The
-  official 5e scale is `common / uncommon / rare / very rare / legendary`;
-  any other label (e.g. `artifact`) simply never matches a tier range.
-- **`notes`** — optional; shown under the link in the embed.
+- **`name`** — the only required column. An emote prefix (e.g. `🎒 Bag of Holding`) is rendered as-is.
+- **`url`** — optional; shown as an "Item page" link.
+- **`rarity`** — optional, case-insensitive; blank = `common`. The 5e scale is `common / uncommon / rare / very rare / legendary`; other labels (e.g. `artifact`) never match a CR tier.
+- **`notes`** — optional short description, shown in roll embeds and `/item_search`.
 
-Parsing is deliberately tolerant: BOM/CRLF OK, header and cell whitespace
-trimmed, headers matched case-insensitively, missing optional columns and
-unknown extra columns OK. Table names are CSV filenames without the `.csv`
-suffix, matched case-insensitively (`magic_items`, `Magic_Items.CSV`, and
-`MAGIC_ITEMS` all work).
-
-## CR tier format
-
-`data/items/cr_tiers.csv`, fully user-tunable:
+## CR tier format (`data/items/cr_tiers.csv`)
 
 ```csv
 min_cr,rarities
@@ -62,115 +43,54 @@ min_cr,rarities
 14,very rare:2-3;legendary:1-2
 ```
 
-Each row is one tier: a single `min_cr` (integer or fraction — `1/2`, `1/4`)
-plus `rarities`, a semicolon-separated list of **per-rarity count ranges**
-(`rarity:min-max`). Because each tier has only a *minimum*, overlaps and gaps
-between tiers are impossible by construction:
-
-- Tier selection is a **step function** — the tier with the highest `min_cr`
-  that is ≤ the rolled CR wins. A CR below every tier uses the first one; a
-  CR above the last tier stays on the last one.
-- A range of `0-…` means "maybe" (the roll can yield zero of that rarity).
-- Malformed rows are skipped with a warning log; a row whose ranges all fail
-  to parse is dropped entirely.
+Each row is a tier. The tier with the **highest `min_cr` ≤ the rolled CR**
+wins (a CR below every tier uses the first one). `rarities` holds per-rarity
+count ranges (`rarity:min-max`, semicolon-separated): for each range a count
+is drawn uniformly and that many items are sampled. A range of `0-…` means
+"maybe"; rarities with no items in the table are skipped.
 
 ## Rolling mechanics
 
-### Plain roll (`/roll_items [table] [count] [rarity]`)
+**Plain roll** — `/roll_items [table] [count] [rarity]`: draws `count`
+(default 3) items uniformly at random **without replacement** from one table
+(the named one, or the default). `rarity:` filters first (plain rolls only);
+already-rolled items are excluded. If fewer remain than requested, everything
+is returned with a note in the footer.
 
-1. Build the pool: all valid rows of the named table — or of the **default
-   table** (`magic_items`; override with the `DEFAULT_ITEM_TABLE` env var)
-   when `table` is omitted. Every roll draws from exactly one table.
-2. Optionally filter by `rarity:` (plain rolls only — ignored when `cr` is
-   given); an unknown rarity errors with the rarities that do exist in scope.
-3. Remove items already rolled out (see [Persistent pool](#persistent-no-repeat-pool)).
-4. Draw `count` items **uniformly at random without replacement** — an item
-   never repeats within one roll, and every remaining item has equal odds
-   regardless of rarity (plain rolls ignore the tier table entirely).
-5. If the pool holds fewer items than requested, everything is returned
-   (shuffled) and the embed footer notes how many were available.
+**CR-scaled roll** — `/roll_items cr:<rating>`: `cr` overrides `count`. The
+winning tier's per-rarity ranges decide how many of each rarity come up (e.g.
+CR 5 → tier `min_cr 3` → maybe 1 common, 2–3 uncommon, 1–2 rare). The footer
+shows the tier and the per-rarity breakdown.
 
-### CR-scaled roll (`/roll_items cr:<rating>`)
+## No-repeat pool
 
-`cr` overrides `count`. The rating accepts integers and fractions
-(`4`, `1/2`, `1/4`; whitespace tolerated). Then:
+An item comes up **once** until the pool is reset — a long campaign doesn't
+hand out the same Bag of Holding twice.
 
-1. **Pick the tier** — highest `min_cr ≤ CR` (step function, above).
-2. Remove items already rolled out (see [Persistent pool](#persistent-no-repeat-pool)).
-3. **Roll each range independently.** For every `rarity:min-max` pair in the
-   tier, a count is drawn *uniformly* from `[min, max]`, then that many items
-   are sampled without replacement from the pool of items with that rarity.
-4. Rarities the tier lists but the table has **no items for are skipped**
-   (not an error). If a rarity's pool is smaller than its drawn count, all
-   remaining items of that rarity come up and the footer notes the shortage.
-5. If nothing could be rolled at all (every listed rarity empty, or every
-   range rolled zero), the command replies with a friendly error naming what
-   the tier wanted.
-
-**Worked example — `/roll_items cr:5` with the default tiers:** CR 5 → tier
-`min_cr 3` (`common:0-1;uncommon:2-3;rare:1-2`). Suppose the table holds 40
-common, 90 uncommon, and 30 rare items:
-
-- common: draw uniform in 0–1 → say **1** → sample 1 of 40
-- uncommon: draw uniform in 2–3 → say **3** → sample 3 of 90
-- rare: draw uniform in 1–2 → say **1** → sample 1 of 30
-
-Result: 5 items, footer `CR 5 → tier (min CR 3): common ×1, uncommon ×3,
-rare ×1`. Note the two independent sources of randomness — the per-rarity
-*counts* are random, and *which* items fill them are random.
-
-## Persistent no-repeat pool
-
-By default an item can only come up **once** until the pool is reset — so a
-long campaign doesn't hand out the same Bag of Holding twice.
-
-- **State file** — consumed items are recorded in the hidden
-  `data/items/.rolled_state.json` as `{table: [names]}`. Identity is
-  *(table, name)*, so an item name that exists in two tables is tracked
-  separately for each. The file is managed by the bot; editing it by hand is
-  possible but unnecessary. A missing or corrupt file degrades to "nothing
-  consumed" (rolls just work).
-- **Consumption timing** — items are recorded only after the reply has been
-  delivered; a failed send loses nothing.
-- **Footer** — every real roll ends with a remaining clause, e.g.
-  `— 361 of 365 remaining in magic_items`. With a `rarity:` filter the scope
-  names the subset, e.g. `— 8 of 10 remaining in loot (rare)`.
-- **Exhaustion** — when everything in scope is already rolled out, the
-  command replies with a friendly message pointing at the reset options
-  instead of rolling nothing.
-- **Resetting**:
-  - `fresh:true` on `/roll_items` — clears the whole pool, then rolls from it.
-  - `/reset_rolls [table]` — clears one table (or all) without rolling, and
-    reports how many items were returned.
-- **Previewing** — `/roll_items cr:<rating> preview:true` shows the tier's
-  ranges with the currently available pool size per rarity, e.g.
-  `common 0-1 (40 available) · uncommon 2-3 (90 available)` — no roll, no
-  consumption. Handy for checking a CR before spending items from the pool.
-- **Editing tables** — rows you delete from a CSV are pruned from the state
-  on the next roll; stale entries never wedge the pool.
+- Consumed items are tracked in the hidden `.rolled_state.json`; every roll's
+  footer shows what's left (e.g. `— 361 of 365 remaining in magic_items`).
+- An exhausted pool gets a friendly message instead of an empty roll.
+- Reset with `fresh:true` (resets the rolled table, then rolls) or
+  `/reset_rolls [table]` (one table or all, without rolling).
+- `preview:true` with `cr:` shows the tier's ranges and the available count
+  per rarity — no roll, nothing consumed.
 
 ## Utility commands
 
-- **`/item_search <query> [table] [limit]`** — fuzzy-finds items (default top
-  10, max 25) and lists them with their short description, rarity, table, and
-  item page link. Scoring
-  is deterministic: exact match > name starts with the query > substring >
-  `difflib` similarity (kept when ≥ 0.6). Emote prefixes are ignored —
-  `bag of holding` matches `🎒 Bag of Holding`. Never touches pool state.
-- **`/item_stats [table]`** — per table: total, rolled out, remaining, plus a
-  per-rarity breakdown; footer with grand totals. Read-only.
-- **`/reset_rolls [table]`** — returns consumed items to the pool (see above).
+- **`/item_search <query> [table] [limit]`** — fuzzy-finds items (emote
+  prefixes ignored; default top 10) and lists description, rarity, table, and
+  page link for each match.
+- **`/item_stats [table]`** — per-table totals: total / rolled out / remaining
+  plus a per-rarity breakdown. Read-only.
+- **`/reset_rolls [table]`** — returns consumed items to the pool (one table or all).
 
 ## Tuning tips
 
-- Want bigger loot at low CR? Widen the early ranges (`0,common:1-2;uncommon:2-3`).
-- Want legendary items to start earlier? Add a row like `8,rare:1-2;legendary:0-1` —
-  it slots in automatically by `min_cr`.
-- Rarities a tier never lists can never come up in CR rolls, but *can* come up
-  in plain rolls (which sample the whole table).
+- Bigger loot at low CR? Widen the early ranges (`0,common:1-2;uncommon:2-3`).
+- Legendary items earlier? Add a row like `8,rare:1-2;legendary:0-1` — it slots in by `min_cr`.
+- Rarities a tier never lists can't come up in CR rolls, but *can* in plain rolls.
 
 ## Maintaining the tables
 
-The tables are plain CSVs — add, edit, or delete rows directly and the next
-roll picks up the changes immediately (no restart needed). One file per
-table; see the format above.
+Plain CSVs — add, edit, or delete rows directly; the next roll picks up the
+changes immediately. One file per table.
