@@ -274,6 +274,33 @@ class TestUtilityCommands:
         assert any("Bag of Tricks" in n for n in names)
         assert not any("Sword" in n for n in names)
 
+    def test_search_single_table_named_once(self, items_dir):
+        # All matches from one table → named once in the title, no per-item line.
+        write_table(items_dir, "loot.csv", [
+            ["Bag of Holding", "https://x/bag", "uncommon", ""],
+            ["Bag of Tricks", "", "uncommon", ""],
+        ])
+        ix = make_ix()
+        import asyncio
+        asyncio.run(handle_item_search_command(ix, query="bag"))
+        (call,) = ix._calls
+        assert "in `loot`" in call["embed"].title
+        for f in call["embed"].fields:
+            assert "table:" not in f.value
+
+    def test_search_mixed_tables_keep_per_item_line(self, items_dir):
+        # Matches from two tables → per-item table lines stay.
+        write_table(items_dir, "loot.csv", [["Bag of Holding", "", "uncommon", ""]])
+        write_table(items_dir, "arcane.csv", [["Bag of Tricks", "", "uncommon", ""]])
+        ix = make_ix()
+        import asyncio
+        asyncio.run(handle_item_search_command(ix, query="bag"))
+        (call,) = ix._calls
+        assert "in all tables" in call["embed"].title
+        values = [f.value for f in call["embed"].fields]
+        assert any("table: `loot`" in v for v in values)
+        assert any("table: `arcane`" in v for v in values)
+
     def test_search_no_matches_friendly(self, items_dir):
         write_table(items_dir, "loot.csv", [["Sword of Fire", "", "rare", ""]])
         ix = make_ix()
