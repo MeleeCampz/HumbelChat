@@ -65,6 +65,8 @@ async def handle_item_search_command(
         for item, _score in matches:
             label = f"**{item.name}** — {item.rarity}"
             lines = []
+            if item.notes:
+                lines.append(item.notes)
             if item.url:
                 lines.append(f"[Item page]({item.url})")
             if per_item_table and item.table:

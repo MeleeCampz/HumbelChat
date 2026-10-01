@@ -152,7 +152,8 @@ long campaign doesn't hand out the same Bag of Holding twice.
 ## Utility commands
 
 - **`/item_search <query> [table] [limit]`** — fuzzy-finds items (default top
-  10, max 25) and lists them with rarity, table, and item page link. Scoring
+  10, max 25) and lists them with their short description, rarity, table, and
+  item page link. Scoring
   is deterministic: exact match > name starts with the query > substring >
   `difflib` similarity (kept when ≥ 0.6). Emote prefixes are ignored —
   `bag of holding` matches `🎒 Bag of Holding`. Never touches pool state.

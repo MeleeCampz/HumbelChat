@@ -277,7 +277,8 @@ class TestUtilityCommands:
     def test_search_single_table_named_once(self, items_dir):
         # All matches from one table → named once in the title, no per-item line.
         write_table(items_dir, "loot.csv", [
-            ["Bag of Holding", "https://x/bag", "uncommon", ""],
+            ["Bag of Holding", "https://x/bag", "uncommon",
+             "Carries up to 500 lb of gear."],
             ["Bag of Tricks", "", "uncommon", ""],
         ])
         ix = make_ix()
@@ -285,12 +286,16 @@ class TestUtilityCommands:
         asyncio.run(handle_item_search_command(ix, query="bag"))
         (call,) = ix._calls
         assert "in `loot`" in call["embed"].title
-        for f in call["embed"].fields:
-            assert "table:" not in f.value
+        values = [f.value for f in call["embed"].fields]
+        # Short description is listed so the user need not open the link.
+        assert any("Carries up to 500 lb of gear." in v for v in values)
+        for v in values:
+            assert "table:" not in v
 
     def test_search_mixed_tables_keep_per_item_line(self, items_dir):
         # Matches from two tables → per-item table lines stay.
-        write_table(items_dir, "loot.csv", [["Bag of Holding", "", "uncommon", ""]])
+        write_table(items_dir, "loot.csv",
+                    [["Bag of Holding", "", "uncommon", "Holds 500 lb."]])
         write_table(items_dir, "arcane.csv", [["Bag of Tricks", "", "uncommon", ""]])
         ix = make_ix()
         import asyncio

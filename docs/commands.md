@@ -104,7 +104,7 @@ Roll a list of random items from the CSV item tables in `data/items/` (override 
 /item_search <query> [table: <name>] [limit: 10]
 ```
 
-Fuzzy-search the item tables (emote prefixes ignored) and list matches with rarity, table, and item page link. Deterministic scoring: exact > prefix > substring > similarity.
+Fuzzy-search the item tables (emote prefixes ignored) and list matches with their short description, rarity, table, and item page link — so you can see what an item does without opening the link. Deterministic scoring: exact > prefix > substring > similarity.
 
 ### `/item_stats`
 
