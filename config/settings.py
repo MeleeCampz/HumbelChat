@@ -319,6 +319,10 @@ ITEMS_DIR: pathlib.Path = pathlib.Path(
     _or_default(os.getenv("ITEMS_DIR"), str(_REPO_ROOT / "data" / "items"))
 )
 
+#: Table used by /roll_items when no table is named — a CSV filename in
+#: ITEMS_DIR without the .csv suffix (case-insensitive).
+DEFAULT_ITEM_TABLE: str = _or_default(os.getenv("DEFAULT_ITEM_TABLE"), "magic_items")
+
 # ── Voice recording (per-speaker capture for STT) ───────────────────────────
 # Where /start_recording writes its per-recording subdirectories (one WAV per
 # speaker + a manifest.json with absolute timestamps). Defaults to

@@ -6,8 +6,8 @@ lives in a hidden JSON file next to the tables — ``<ITEMS_DIR>/
 .rolled_state.json`` — shaped as ``{"<table>": ["Item Name", ...]}``.
 
 Identity is **(table, name)**: items keep their table of origin (see
-:class:`bot_core.item_tables.Item`), so an all-tables roll records each item
-under the table it came from and a later single-table roll still excludes it.
+:class:`bot_core.item_tables.Item`), so an item name that exists in two
+different tables is tracked separately for each.
 
 All read-modify-write cycles run under a process-wide lock (rolls happen in
 ``asyncio.to_thread``) and writes are atomic (temp file + ``os.replace``).
