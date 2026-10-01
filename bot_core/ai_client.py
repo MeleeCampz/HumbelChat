@@ -827,10 +827,8 @@ async def complete_text(
         text = extract_reply_text(resp, default="")
     except Exception as e:  # noqa: BLE001
         # AIResponseTruncatedError (empty answer at the model's output limit)
-        # and AIBackendError (empty choices) both propagate — callers keep
-        # their own fallback logic.
-        if isinstance(e, ValueError):
-            raise
+        # and AIBackendError (empty choices) become friendly ValueErrors —
+        # callers keep their own fallback logic.
         _friendly_ai_error(e, model=model, backend_url=INFER_URL)
 
     choices = getattr(resp, "choices", None)
