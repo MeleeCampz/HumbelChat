@@ -9,6 +9,7 @@ rolling mechanics — plus how the item collection is maintained.
 |---|---|---|
 | `data/items/*.csv` | Your rollable tables (one CSV per table) | no (gitignored, local-only) |
 | `data/items/cr_tiers.csv` | CR tier definitions for `/roll_items cr:…` | no |
+| `data/items/.rolled_state.json` | Persistent no-repeat pool state (hidden; managed by the bot) | no |
 | `item_samples/` | Built-in starter tables shipped with the repo | yes |
 | `data/items/tools/` | Private collection pipeline (scripts + caches) | no |
 
@@ -74,14 +75,17 @@ between tiers are impossible by construction:
 
 ## Rolling mechanics
 
-### Plain roll (`/roll_items [table] [count]`)
+### Plain roll (`/roll_items [table] [count] [rarity]`)
 
 1. Build the pool: all valid rows of the named table, or of **all** tables
    combined when `table` is omitted (rows keep their table of origin).
-2. Draw `count` items **uniformly at random without replacement** — an item
-   never repeats within one roll, and every item has equal odds regardless of
-   rarity (plain rolls ignore the tier table entirely).
-3. If the pool holds fewer items than requested, everything is returned
+2. Optionally filter by `rarity:` (plain rolls only — ignored when `cr` is
+   given); an unknown rarity errors with the rarities that do exist in scope.
+3. Remove items already rolled out (see [Persistent pool](#persistent-no-repeat-pool)).
+4. Draw `count` items **uniformly at random without replacement** — an item
+   never repeats within one roll, and every remaining item has equal odds
+   regardless of rarity (plain rolls ignore the tier table entirely).
+5. If the pool holds fewer items than requested, everything is returned
    (shuffled) and the embed footer notes how many were available.
 
 ### CR-scaled roll (`/roll_items cr:<rating>`)
@@ -90,13 +94,14 @@ between tiers are impossible by construction:
 (`4`, `1/2`, `1/4`; whitespace tolerated). Then:
 
 1. **Pick the tier** — highest `min_cr ≤ CR` (step function, above).
-2. **Roll each range independently.** For every `rarity:min-max` pair in the
+2. Remove items already rolled out (see [Persistent pool](#persistent-no-repeat-pool)).
+3. **Roll each range independently.** For every `rarity:min-max` pair in the
    tier, a count is drawn *uniformly* from `[min, max]`, then that many items
    are sampled without replacement from the pool of items with that rarity.
-3. Rarities the tier lists but the table has **no items for are skipped**
+4. Rarities the tier lists but the table has **no items for are skipped**
    (not an error). If a rarity's pool is smaller than its drawn count, all
    remaining items of that rarity come up and the footer notes the shortage.
-4. If nothing could be rolled at all (every listed rarity empty, or every
+5. If nothing could be rolled at all (every listed rarity empty, or every
    range rolled zero), the command replies with a friendly error naming what
    the tier wanted.
 
@@ -112,7 +117,47 @@ Result: 5 items, footer `CR 5 → tier (min CR 3): common ×1, uncommon ×3,
 rare ×1`. Note the two independent sources of randomness — the per-rarity
 *counts* are random, and *which* items fill them are random.
 
-### Tuning tips
+## Persistent no-repeat pool
+
+By default an item can only come up **once** until the pool is reset — so a
+long campaign doesn't hand out the same Bag of Holding twice.
+
+- **State file** — consumed items are recorded in the hidden
+  `data/items/.rolled_state.json` as `{table: [names]}`. Identity is
+  *(table, name)*, so an all-tables roll records each item under its source
+  table and a later single-table roll still excludes it. The file is managed
+  by the bot; editing it by hand is possible but unnecessary. A missing or
+  corrupt file degrades to "nothing consumed" (rolls just work).
+- **Consumption timing** — items are recorded only after the reply has been
+  delivered; a failed send loses nothing.
+- **Footer** — every real roll ends with a remaining clause, e.g.
+  `— 361 of 365 remaining in all tables`.
+- **Exhaustion** — when everything in scope is already rolled out, the
+  command replies with a friendly message pointing at the reset options
+  instead of rolling nothing.
+- **Resetting**:
+  - `fresh:true` on `/roll_items` — clears the whole pool, then rolls from it.
+  - `/reset_rolls [table]` — clears one table (or all) without rolling, and
+    reports how many items were returned.
+- **Previewing** — `/roll_items cr:<rating> preview:true` shows the tier's
+  ranges with the currently available pool size per rarity, e.g.
+  `common 0-1 (40 available) · uncommon 2-3 (90 available)` — no roll, no
+  consumption. Handy for checking a CR before spending items from the pool.
+- **Editing tables** — rows you delete from a CSV are pruned from the state
+  on the next roll; stale entries never wedge the pool.
+
+## Utility commands
+
+- **`/item_search <query> [table] [limit]`** — fuzzy-finds items (default top
+  10, max 25) and lists them with rarity, table, and item page link. Scoring
+  is deterministic: exact match > name starts with the query > substring >
+  `difflib` similarity (kept when ≥ 0.6). Emote prefixes are ignored —
+  `bag of holding` matches `🎒 Bag of Holding`. Never touches pool state.
+- **`/item_stats [table]`** — per table: total, rolled out, remaining, plus a
+  per-rarity breakdown; footer with grand totals. Read-only.
+- **`/reset_rolls [table]`** — returns consumed items to the pool (see above).
+
+## Tuning tips
 
 - Want bigger loot at low CR? Widen the early ranges (`0,common:1-2;uncommon:2-3`).
 - Want legendary items to start earlier? Add a row like `8,rare:1-2;legendary:0-1` —

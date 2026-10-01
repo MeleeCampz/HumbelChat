@@ -318,16 +318,68 @@ async def remind_command(
     table="Optional table name (a CSV file in data/items/); omit to roll across all tables",
     count="How many items to roll (ignored when cr is given)",
     cr="Optional monster Challenge Rating (e.g. 4 or 1/2) — scales item count and rarities",
+    rarity="Optional rarity filter for plain rolls (e.g. rare); ignored when cr is given",
+    fresh="Reset the no-repeat pool before rolling (previously rolled items come back)",
+    preview="With cr: show what the roll would do without rolling or consuming anything",
 )
 async def roll_items_command(
     interaction: discord.Interaction,
     table: str | None = None,
     count: int = 3,
     cr: str | None = None,
+    rarity: str | None = None,
+    fresh: bool = False,
+    preview: bool = False,
 ) -> None:
     """Random item table roll — delegated to commands/roll_items_command.py."""
     from commands.roll_items_command import handle_roll_items_command
-    await handle_roll_items_command(interaction, table=table, count=count, cr=cr)
+    await handle_roll_items_command(
+        interaction, table=table, count=count, cr=cr,
+        rarity=rarity, fresh=fresh, preview=preview,
+    )
+
+
+@bot.tree.command(name="item_search", description="Fuzzy-search the item tables for a specific item.")
+@app_commands.describe(
+    query="Item name or part of it (e.g. 'bag of holding')",
+    table="Optional table to search in; omit to search all tables",
+    limit="Maximum number of matches (1-25, default 10)",
+)
+async def item_search_command(
+    interaction: discord.Interaction,
+    query: str,
+    table: str | None = None,
+    limit: int = 10,
+) -> None:
+    """Item lookup — delegated to commands/item_commands.py."""
+    from commands.item_commands import handle_item_search_command
+    await handle_item_search_command(interaction, query=query, table=table, limit=limit)
+
+
+@bot.tree.command(name="item_stats", description="Show item counts per rarity and remaining pool size.")
+@app_commands.describe(
+    table="Optional table name; omit to show all tables",
+)
+async def item_stats_command(
+    interaction: discord.Interaction,
+    table: str | None = None,
+) -> None:
+    """Pool stats — delegated to commands/item_commands.py."""
+    from commands.item_commands import handle_item_stats_command
+    await handle_item_stats_command(interaction, table=table)
+
+
+@bot.tree.command(name="reset_rolls", description="Return rolled items to the pool (one table or all).")
+@app_commands.describe(
+    table="Optional table name; omit to reset every table",
+)
+async def reset_rolls_command(
+    interaction: discord.Interaction,
+    table: str | None = None,
+) -> None:
+    """Pool reset — delegated to commands/item_commands.py."""
+    from commands.item_commands import handle_item_reset_rolls_command
+    await handle_item_reset_rolls_command(interaction, table=table)
 
 
 @bot.tree.command(name="ocr", description="Extract text from an image (OCR).")

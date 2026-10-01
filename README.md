@@ -72,7 +72,10 @@ foreground without tmux: `./.venv/bin/python main.py` (Windows:
 - `/ocr` — extract text from an image
 - `/summarize` — summarize chat history or a URL
 - `/translate` — translate text into a target language
-- `/roll_items` — roll random items from CSV item tables (item page links, optional CR scaling)
+- `/roll_items` — roll random items from CSV item tables (item page links, optional CR scaling, no-repeat pool)
+- `/item_search` — fuzzy-search the item tables for a specific item
+- `/item_stats` — per-rarity counts and remaining pool size
+- `/reset_rolls` — return rolled items to the pool
 - `/start_session` — start a work session
 - `/end_session` — end the session and generate an AI overview
 - `/remind_next_session` — queue a reminder for the next session start
