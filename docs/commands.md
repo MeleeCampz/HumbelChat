@@ -83,6 +83,20 @@ Translate text into the target language. Put the text to translate after a colon
 
 Schedule a one-time reminder (minimum 10 seconds ahead); the bot posts a `⏰ Reminder` message in this channel when it fires. Accepted units: seconds, minutes, hours. Reminders persist across restarts (see `REMINDERS_PERSIST_FILE`).
 
+### `/roll_items`
+
+```
+/roll_items [table: <name>] [count: 1-25] [cr: <rating>]
+```
+
+Roll a list of random items from the CSV item tables in `data/items/` (override with `ITEMS_DIR`). The reply is an embed where each item shows its name, rarity, notes, and a link to its item page.
+
+- **`table`** — optional. A CSV filename in `data/items/` without the `.csv` suffix (case-insensitive). Omit to roll across *all* tables combined.
+- **`count`** — how many items to roll (default 3). Rolls are **without replacement** — an item never repeats within one roll. If the table has fewer items than requested, everything is returned with a note.
+- **`cr`** — optional monster Challenge Rating (`4`, `1/2`, `1/4`, …). When given, it **overrides `count`** and selects a tier from `data/items/cr_tiers.csv`: the tier with the **highest `min_cr` that is ≤ the rolled CR** wins (a CR below every tier uses the first one). Each rarity range in the tier is then rolled independently.
+
+See **[docs/item-rolls.md](./item-rolls.md)** for the full picture: file layout, both CSV formats, the exact rolling mechanics (with a worked example), tier tuning tips, first-run seeding, and how the item collection pipeline works — including the recipe for adding a newly purchased book.
+
 ### Sessions
 
 Sessions are a global (bot-wide) bookkeeping concept: at most one session is active at a time. Each session gets its own folder under `<KB_PATH>/session_notes/` whose `notes.md` combines notes + the AI-merged session log (all player uploads combined into one de-duplicated record at `/end_session`) + the overview — that single file is part of the RAG-enabled knowledge base and can be edited on disk at any time (raw uploads/transcripts are kept in hidden `.attachments/` / `.transcripts/` folders, out of RAG). When a session has ended, its overview + notes are also attached to every AI turn as a stable last-session context block (see `docs/rag.md`).

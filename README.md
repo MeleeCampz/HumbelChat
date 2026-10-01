@@ -56,6 +56,7 @@ foreground without tmux: `./.venv/bin/python main.py` (Windows:
 - [RAG / Knowledge Base](./docs/rag.md) — retrieval methods, smart chunking, supported file types
 - [Voice Recording](./docs/voice-recording.md) — per-speaker voice capture for STT (pipeline, manifest format, troubleshooting)
 - [Commands](./docs/commands.md) — slash command and prefix command reference
+- [Item Rolls](./docs/item-rolls.md) — `/roll_items` table formats, rolling mechanics, and collection maintenance
 - [Permissions](./docs/permissions.md) — Discord permissions the bot needs, where to set them, and per-channel override traps
 - [Troubleshooting](./docs/troubleshooting.md) — common symptoms and fixes
 
@@ -71,6 +72,7 @@ foreground without tmux: `./.venv/bin/python main.py` (Windows:
 - `/ocr` — extract text from an image
 - `/summarize` — summarize chat history or a URL
 - `/translate` — translate text into a target language
+- `/roll_items` — roll random items from CSV item tables (item page links, optional CR scaling)
 - `/start_session` — start a work session
 - `/end_session` — end the session and generate an AI overview
 - `/remind_next_session` — queue a reminder for the next session start

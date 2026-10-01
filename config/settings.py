@@ -312,6 +312,13 @@ CHARACTERS_FILE: pathlib.Path = pathlib.Path(
     _or_default(os.getenv("CHARACTERS_FILE"), str(_REPO_ROOT / "characters.json"))
 )
 
+# ── Item tables (/roll_items) ───────────────────────────────────────────────
+# One CSV per rollable table, plus cr_tiers.csv for CR-scaled rolls.
+# Defaults to <repo_root>/data/items.
+ITEMS_DIR: pathlib.Path = pathlib.Path(
+    _or_default(os.getenv("ITEMS_DIR"), str(_REPO_ROOT / "data" / "items"))
+)
+
 # ── Voice recording (per-speaker capture for STT) ───────────────────────────
 # Where /start_recording writes its per-recording subdirectories (one WAV per
 # speaker + a manifest.json with absolute timestamps). Defaults to

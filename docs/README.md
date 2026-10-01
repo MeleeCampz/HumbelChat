@@ -9,5 +9,6 @@ This folder holds the in-depth docs. Start with the root [README](../README.md) 
 - [Voice Recording](./voice-recording.md) — per-speaker voice capture for STT
 - [Recording to Transcript](./recording-to-transcript.md) — turning a recording into an interleaved transcript
 - [Commands](./commands.md)
+- [Item Rolls](./item-rolls.md) — `/roll_items` table formats, rolling mechanics, collection maintenance
 - [Permissions](./permissions.md) — Discord intents and required permissions
 - [Troubleshooting](./troubleshooting.md)

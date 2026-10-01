@@ -1,0 +1,6 @@
+min_cr,rarities
+0,common:0-1;uncommon:1-2
+3,common:0-1;uncommon:2-3;rare:1-2
+6,uncommon:1-2;rare:2-3
+10,rare:2-3;very rare:1-2
+14,very rare:2-3;legendary:1-2
