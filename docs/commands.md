@@ -163,21 +163,32 @@ Queue a reminder that is delivered when the **next** session starts (in the chan
 ### `/session_notes`
 
 ```
-/session_notes [action: add|view] [note: <text>] [file: <.txt/.md>]
+/session_notes [note: <text>] [file: <.txt/.md>]
 ```
 
-| Action | Description |
-|---|---|
-| `add` | Append a timestamped note to the current session (requires an active session; notes are stored in the session file and re-indexed for RAG). Voice-channel transcripts from `/stop_recording` are added automatically this way when STT finishes |
-| `view` | Show the current session's notes — or the most recent ended session's if none is active (reads the file from disk, so manual edits are picked up) |
+Append a timestamped note to the **current** session (requires an active session; notes are stored in the session file and re-indexed for RAG). Voice-channel transcripts from `/stop_recording` are added automatically this way when STT finishes.
 
-**Adding a text document:** `add` also accepts a **file** — a `.txt` or `.md` attachment — instead of (or in place of) the `note` text:
+**Adding a text document:** also accepts a **file** — a `.txt` or `.md` attachment — instead of (or in place of) the `note` text:
 
 ```
-/session_notes action: add file: <.txt or .md file>
+/session_notes file: <.txt or .md file>
 ```
 
 The whole document is stored as one raw file in the session's hidden `.attachments/` folder (out of RAG); at `/end_session` the AI merges all such uploads into the session's single combined log inside the RAG-indexed `notes.md` — same treatment as voice transcripts (`.transcripts/`). Only `.txt` / `.md` are accepted (other types are rejected), the file must be valid UTF-8 and ≤ 2 MB, and a file takes precedence over an inline `note` when both are supplied.
+
+### `/session_info`
+
+```
+/session_info
+```
+
+Show info about the **current** session — or the most recent ended session if none is active (reads the notes file from disk, so manual edits are picked up). Displays:
+
+- session name and status (`current` / `last (ended)`), with start time, end time and duration for ended sessions;
+- the stored recap (truncated) when one exists;
+- all notes added to the session (the most recent 10 in full, long ones split across messages) plus the total count;
+- uploaded documents (`📎 Attachments`) and voice transcripts (`🎙️ Transcripts`), each listed with filename and size;
+- the session folder name (`notes.md` is the single RAG document; raw files stay in the hidden folders).
 
 ### Voice recording
 

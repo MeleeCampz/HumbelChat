@@ -313,51 +313,73 @@ class TestSessionNotesCommand:
     @pytest.mark.asyncio
     async def test_add_without_active_refused(self, ix):
         from commands.session_commands import handle_session_notes
-        await handle_session_notes(ix, action="add", note="hello")
+        await handle_session_notes(ix, note="hello")
         assert any("no active session" in m for m in ix._sent)
 
     @pytest.mark.asyncio
-    async def test_add_requires_note_text(self, ix):
+    async def test_requires_note_or_file(self, ix):
+        """No action parameter any more: nothing supplied -> usage hint pointing at /session_info."""
         from commands.session_commands import handle_session_notes
         S.start_session(name="N")
-        await handle_session_notes(ix, action="add", note=None)
-        assert any("Please provide a note" in m for m in ix._sent)
+        await handle_session_notes(ix)
+        assert any("Provide a `note`" in m for m in ix._sent)
+        assert any("/session_info" in m for m in ix._sent)
 
     @pytest.mark.asyncio
-    async def test_add_and_view(self, ix):
+    async def test_add(self, ix):
         from commands.session_commands import handle_session_notes
         ix.user = MagicMock()
         ix.user.display_name = "Alice"
         S.start_session(name="Notes")
-        await handle_session_notes(ix, action="add", note="remember the deploy")
+        await handle_session_notes(ix, note="remember the deploy")
         assert any("Note added" in m for m in ix._sent)
 
-        await handle_session_notes(ix, action="view")
-        view_msgs = [m for m in ix._sent if "Session notes" in m]
-        assert view_msgs and "remember the deploy" in view_msgs[-1]
-        assert "Alice" in view_msgs[-1]  # author attribution
+
+class TestSessionInfo:
+    """``/session_info`` — info about the current session (or the last ended one)."""
 
     @pytest.mark.asyncio
-    async def test_view_after_end_shows_last(self, ix):
-        from commands.session_commands import handle_session_notes
+    async def test_current_session_shows_notes(self, ix):
+        from commands.session_commands import handle_session_info
+        S.start_session(name="Notes")
+        S.add_note("remember the deploy", author="Alice")
+        await handle_session_info(ix)
+        info_msgs = [m for m in ix._sent if "Session info" in m]
+        assert info_msgs and "**current**" in info_msgs[0]
+        assert any("remember the deploy" in m for m in info_msgs)
+
+    @pytest.mark.asyncio
+    async def test_after_end_shows_last(self, ix):
+        from commands.session_commands import handle_session_info
         S.start_session(name="Done")
         S.add_note("final note")
         S.end_session(overview="wrapped up")
-        await handle_session_notes(ix, action="view")
-        view_msgs = [m for m in ix._sent if "Session notes" in m]
-        assert any("last (ended)" in m and "final note" in m for m in view_msgs)
+        await handle_session_info(ix)
+        info_msgs = [m for m in ix._sent if "Session info" in m]
+        assert any("last (ended)" in m and "final note" in m for m in info_msgs)
+        assert any("wrapped up" in m for m in info_msgs)  # stored recap shown
 
     @pytest.mark.asyncio
-    async def test_view_no_sessions(self, ix):
-        from commands.session_commands import handle_session_notes
-        await handle_session_notes(ix, action="view")
+    async def test_no_sessions(self, ix):
+        from commands.session_commands import handle_session_info
+        await handle_session_info(ix)
         assert any("No sessions yet" in m for m in ix._sent)
 
     @pytest.mark.asyncio
-    async def test_unknown_action(self, ix):
-        from commands.session_commands import handle_session_notes
-        await handle_session_notes(ix, action="destroy", note=None)
-        assert any("Unknown action" in m for m in ix._sent)
+    async def test_lists_documents_with_size(self, ix):
+        from commands.session_commands import handle_session_info
+        S.start_session(name="Docs")
+        session, n = S.add_document("hello world", title="doc.txt")
+        assert n == 1
+        att_dir = pathlib.Path(session["dir"]) / ".attachments"
+        files = [f for f in att_dir.iterdir() if f.is_file()]
+        assert files
+        await handle_session_info(ix)
+        info_msgs = [m for m in ix._sent if "Session info" in m]
+        assert any("Attachments" in m and files[0].name in m for m in info_msgs)
+        # the listing carries a human-readable size, not just a bare pointer
+        import re
+        assert any(re.search(rf"{re.escape(files[0].name)}\` — \d+(\.\d+)? (B|KB|MB)", m) for m in info_msgs)
 
 
 def _doc_attachment(name: str, content: str, size: int | None = None) -> MagicMock:
@@ -370,13 +392,13 @@ def _doc_attachment(name: str, content: str, size: int | None = None) -> MagicMo
 
 
 class TestSessionNotesDocumentUpload:
-    """``/session_notes action: add`` with a ``.txt`` / ``.md`` file attached."""
+    """``/session_notes`` with a ``.txt`` / ``.md`` file attached."""
 
     @pytest.mark.asyncio
     async def test_add_txt_success_and_view(self, ix):
         from commands.session_commands import handle_session_notes
         S.start_session(name="Docs")
-        await handle_session_notes(ix, action="add", note=None,
+        await handle_session_notes(ix, note=None,
                                    file=_doc_attachment("notes.txt", "ship the API key fix"))
         assert any("Document" in m and "notes.txt" in m for m in ix._sent)
         # the document is stored as its OWN file in the session's attachments/ folder
@@ -384,16 +406,18 @@ class TestSessionNotesDocumentUpload:
         att_dir = pathlib.Path(session["dir"]) / ".attachments"
         assert any("ship the API key fix" in f.read_text(encoding="utf-8")
                    for f in att_dir.iterdir() if f.is_file())
-        # …and shows up in the view as a pointer
-        await handle_session_notes(ix, action="view")
-        view = [m for m in ix._sent if "Session notes" in m]
-        assert any("attachments/" in m for m in view)
+        # …and shows up in /session_info with its stored name
+        from commands.session_commands import handle_session_info
+        await handle_session_info(ix)
+        stored = [f.name for f in att_dir.iterdir() if f.is_file()]
+        info = [m for m in ix._sent if "Session info" in m]
+        assert any("Attachments" in m and name in m for m in info for name in stored)
 
     @pytest.mark.asyncio
     async def test_add_md_success(self, ix):
         from commands.session_commands import handle_session_notes
         S.start_session(name="Docs")
-        await handle_session_notes(ix, action="add", note=None,
+        await handle_session_notes(ix, note=None,
                                    file=_doc_attachment("plan.md", "# Plan\n- step one\n- step two"))
         assert any("plan.md" in m and "added to session" in m for m in ix._sent)
 
@@ -401,7 +425,7 @@ class TestSessionNotesDocumentUpload:
     async def test_disallowed_extension_refused(self, ix):
         from commands.session_commands import handle_session_notes
         S.start_session(name="Docs")
-        await handle_session_notes(ix, action="add", note=None,
+        await handle_session_notes(ix, note=None,
                                    file=_doc_attachment("photo.png", "binary-ish"))
         assert any("Only text documents" in m for m in ix._sent)
         assert S.get_notes(S.get_current_session()) == []
@@ -410,7 +434,7 @@ class TestSessionNotesDocumentUpload:
     async def test_oversized_refused(self, ix):
         from commands.session_commands import handle_session_notes
         S.start_session(name="Docs")
-        await handle_session_notes(ix, action="add", note=None,
+        await handle_session_notes(ix, note=None,
                                    file=_doc_attachment("huge.txt", "x" * 2_000_000, size=3_000_000))
         assert any("too large" in m for m in ix._sent)
         assert S.get_notes(S.get_current_session()) == []
@@ -419,7 +443,7 @@ class TestSessionNotesDocumentUpload:
     async def test_empty_file_refused(self, ix):
         from commands.session_commands import handle_session_notes
         S.start_session(name="Docs")
-        await handle_session_notes(ix, action="add", note=None,
+        await handle_session_notes(ix, note=None,
                                    file=_doc_attachment("empty.txt", ""))
         assert any("nothing to add" in m for m in ix._sent)
         assert S.get_notes(S.get_current_session()) == []
@@ -432,14 +456,14 @@ class TestSessionNotesDocumentUpload:
         att.filename = "binary.txt"
         att.size = 4
         att.read = AsyncMock(return_value=b"\xff\xfe\x00\x01")
-        await handle_session_notes(ix, action="add", note=None, file=att)
+        await handle_session_notes(ix, note=None, file=att)
         assert any("not valid UTF-8" in m for m in ix._sent)
         assert S.get_notes(S.get_current_session()) == []
 
     @pytest.mark.asyncio
     async def test_no_active_session_refused(self, ix):
         from commands.session_commands import handle_session_notes
-        await handle_session_notes(ix, action="add", note=None,
+        await handle_session_notes(ix, note=None,
                                    file=_doc_attachment("a.txt", "hello"))
         assert any("no active session" in m for m in ix._sent)
 
@@ -447,7 +471,7 @@ class TestSessionNotesDocumentUpload:
     async def test_file_wins_over_inline_note(self, ix):
         from commands.session_commands import handle_session_notes
         S.start_session(name="Docs")
-        await handle_session_notes(ix, action="add", note="inline note",
+        await handle_session_notes(ix, note="inline note",
                                    file=_doc_attachment("doc.txt", "from the file"))
         session = S.get_current_session()
         att_dir = pathlib.Path(session["dir"]) / ".attachments"
@@ -459,7 +483,7 @@ class TestSessionNotesDocumentUpload:
     async def test_long_document_stored_as_single_file(self, ix):
         from commands.session_commands import handle_session_notes
         S.start_session(name="Docs")
-        await handle_session_notes(ix, action="add", note=None,
+        await handle_session_notes(ix, note=None,
                                    file=_doc_attachment("long.md", ("word " * 2000).strip()))
         session = S.get_current_session()
         att_dir = pathlib.Path(session["dir"]) / ".attachments"
@@ -534,10 +558,11 @@ class TestAddTranscript:
         # notes.md lists the transcript pointer …
         on_disk = pathlib.Path(session["file"]).read_text(encoding="utf-8")
         assert "## Documents" in on_disk and files[0].name in on_disk
-        # … and /session_notes view lists it
-        await handle_session_notes(ix, action="view")
-        view_msgs = [m for m in ix._sent if "Session notes" in m]
-        assert any("transcripts/" in m for m in view_msgs)
+        # … and /session_info lists it under Transcripts
+        from commands.session_commands import handle_session_info
+        await handle_session_info(ix)
+        info_msgs = [m for m in ix._sent if "Session info" in m]
+        assert any("Transcripts" in m and files[0].name in m for m in info_msgs)
 
 
 class TestOverviewSourceAssembly:
