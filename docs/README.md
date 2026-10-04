@@ -6,6 +6,7 @@ This folder holds the in-depth docs. Start with the root [README](../README.md) 
 - [Embeds](./embeds.md)
 - [Characters](./characters.md)
 - [RAG / Knowledge Base](./rag.md)
+- [Obsidian Vault Sync](./obsidian-vault.md) — git-backed vaults in the KB, two-way session notes
 - [Voice Recording](./voice-recording.md) — per-speaker voice capture for STT
 - [Recording to Transcript](./recording-to-transcript.md) — turning a recording into an interleaved transcript
 - [Commands](./commands.md)

@@ -568,6 +568,12 @@ async def on_ready() -> None:
     # periodic liveness probe (AI_HEALTH_CHECK_INTERVAL).
     start_backend_health_probe(bot)
 
+    # #19: Obsidian vault sync — clone/pull (and for the campaign vault,
+    # commit+push session notes) on a periodic background loop. No-op when
+    # OBSIDIAN_VAULTS is empty; tracked task, cancelled on shutdown.
+    from bot_core.vault_sync import start_vault_sync
+    start_vault_sync()
+
     log_top_kb_files(KB_PATH)
 
     # Warm in-process CPU models (embedding + optional reranker) if enabled, so the

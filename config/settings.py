@@ -332,6 +332,31 @@ CHARACTERS_FILE: pathlib.Path = pathlib.Path(
     _or_default(os.getenv("CHARACTERS_FILE"), str(_REPO_ROOT / "characters.json"))
 )
 
+# ── Session notes location ────────────────────────────────────────────────
+# Where per-session folders live. Inside the KB by default so each session's
+# combined notes.md is automatically RAG-indexed (and shows up in
+# /list_kb_docs). Override to point inside an Obsidian campaign vault, e.g.
+# <KB_PATH>/humblewood/session_notes — see docs/obsidian-vault.md (#19).
+SESSIONS_NOTES_DIR: pathlib.Path = pathlib.Path(
+    _or_default(os.getenv("SESSIONS_NOTES_DIR"), str(KB_PATH / "session_notes"))
+)
+
+# ── Obsidian vault sync (#19) ─────────────────────────────────────────────
+# Semicolon-separated `name=git_url` entries, e.g.
+#   humblewood=https://…;dnd_handbook=https://…
+# Each vault is cloned into <KB_PATH>/<name>/ and pulled + incrementally
+# re-indexed on a periodic background loop. Empty = feature off. Private repos
+# use a token-embedded URL: https://<user>:<token>@github.com/<user>/<repo>.git
+OBSIDIAN_VAULTS: str = os.getenv("OBSIDIAN_VAULTS", "")
+# Name of the vault that is TWO-WAY and holds the session notes (its URL needs
+# write access). Must be one of the names in OBSIDIAN_VAULTS; empty = all
+# vaults are read-only mirrors. See docs/obsidian-vault.md.
+OBSIDIAN_CAMPAIGN_VAULT: str = os.getenv("OBSIDIAN_CAMPAIGN_VAULT", "")
+# Pull/commit period in seconds; 0 = one startup pass, no periodic loop.
+OBSIDIAN_VAULT_PULL_INTERVAL: int = _safe_int(
+    os.getenv("OBSIDIAN_VAULT_PULL_INTERVAL"), 300
+)
+
 # ── Item tables (/roll_items) ───────────────────────────────────────────────
 # One CSV per rollable table, plus cr_tiers.csv for CR-scaled rolls.
 # Defaults to <repo_root>/data/items.
