@@ -1,5 +1,5 @@
 """Session slash commands — /start_session, /end_session,
-/remind_next_session and /session_notes.
+/remind_next_session, /session_notes and /session_info.
 
 Delegates all state handling to ``bot_core.sessions``; this module only
 translates between Discord interactions and the session store, plus the
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
+from datetime import datetime
 from typing import Any
 
 import discord
@@ -40,11 +41,11 @@ _OVERVIEW_POST_LIMIT = 1800
 _OVERVIEW_DOC_BUDGET = 60_000
 # Discord message cap is 2000 chars; keep view messages under it.
 _VIEW_MSG_LIMIT = 1900
-# How many recent notes / pointers to show in /session_notes view.
-_VIEW_NOTE_LIMIT = 25
+# How many recent notes to show (in full) in /session_info.
+_INFO_NOTE_LIMIT = 10
 
 # ── /session_notes document uploads ──────────────────────────────────────────
-#: Text-document extensions accepted by ``/session_notes action: add`` with a file
+#: Text-document extensions accepted by ``/session_notes`` with a file
 #: attached. Deliberately limited to plain text / markdown (what was asked for);
 #: everything else is rejected before it is read or stored.
 _SESSION_DOC_EXTENSIONS = {".txt", ".md"}
@@ -437,56 +438,46 @@ async def handle_remind_next_session(interaction: discord.Interaction, message: 
 
 async def handle_session_notes(
     interaction: discord.Interaction,
-    action: str = "view",
     note: str | None = None,
     file: discord.Attachment | None = None,
 ) -> None:
-    """Add a note (or an uploaded ``.txt`` / ``.md`` document) to the current session,
-    or view notes (current/last session)."""
+    """Add a note (or an uploaded ``.txt`` / ``.md`` document) to the current session.
+
+    There is no view action any more — ``/session_info`` shows what a session
+    contains (notes, documents, transcripts).
+    """
     from bot_core import sessions as S
 
-    act = (action or "view").strip().lower()
+    # A document upload wins over an inline note: it is the richer action
+    # and keeps a single, unambiguous result.
+    if file is not None:
+        await _add_document_from_attachment(interaction, file)
+        return
 
-    if act == "add":
-        # A document upload wins over an inline note: it is the richer action
-        # and keeps a single, unambiguous result.
-        if file is not None:
-            await _add_document_from_attachment(interaction, file)
-            return
-
-        if not note or not note.strip():
-            await interaction.response.send_message(
-                "⚠️ Please provide a note, e.g. `/session_notes action: add note: \"remember the API key\"` "
-                "— or attach a `.txt`/`.md` file to add a whole document.",
-                
-            )
-            return
-        session = S.get_current_session()
-        if session is None:
-            await interaction.response.send_message(
-                "⚠️ There is no active session to add notes to. Start one with `/start_session` first.",
-                
-            )
-            return
-        author = (interaction.user.display_name or "").strip() if interaction.user else ""
-        updated = S.add_note(note, author=author)
-        if updated is None:
-            await interaction.response.send_message("⚠️ Could not add the note.")
-            return
-        n = len(updated.get("notes", []))
+    if not note or not note.strip():
         await interaction.response.send_message(
-            f"📝 Note added to session **{updated.get('name') or '(untitled)'}** ({n} note(s) total).\n"
-            f"📄 `{pathlib.Path(updated['file']).name}`",
+            "⚠️ Provide a `note` or attach a `.txt`/`.md` file — e.g. "
+            "`/session_notes note: \"remember the API key\"`. "
+            "Use `/session_info` to view session contents.",
         )
         return
 
-    if act != "view":
+    session = S.get_current_session()
+    if session is None:
         await interaction.response.send_message(
-            f"⚠️ Unknown action ``{action}``. Use `add` or `view`."
+            "⚠️ There is no active session to add notes to. Start one with `/start_session` first.",
         )
         return
-
-    await _show_session_notes(interaction)
+    author = (interaction.user.display_name or "").strip() if interaction.user else ""
+    updated = S.add_note(note, author=author)
+    if updated is None:
+        await interaction.response.send_message("⚠️ Could not add the note.")
+        return
+    n = len(updated.get("notes", []))
+    await interaction.response.send_message(
+        f"📝 Note added to session **{updated.get('name') or '(untitled)'}** ({n} note(s) total).\n"
+        f"📄 `{pathlib.Path(updated['file']).name}`",
+    )
 
 
 async def _add_document_from_attachment(interaction: discord.Interaction, file: discord.Attachment) -> None:
@@ -600,38 +591,67 @@ def _chunk_display(text: str, limit: int = _VIEW_MSG_LIMIT) -> list[str]:
     return [p for p in parts if p]
 
 
-def _build_view_parts(session: dict[str, Any]) -> list[str]:
-    """Build the display-only /session_notes messages for one session.
+def _format_size(num_bytes: int) -> str:
+    """Human-readable file size for the /session_info document listing."""
+    if num_bytes < 1024:
+        return f"{num_bytes} B"
+    if num_bytes < 1024 * 1024:
+        return f"{num_bytes / 1024:.1f} KB"
+    return f"{num_bytes / (1024 * 1024):.1f} MB"
 
-    Notes are shown in full (word-wrapped across messages when long); the raw
-    documents (attachments / transcripts) are listed as pointers to their
-    hidden dot-dir files — their full text is combined into notes.md, the
-    session's single RAG document.
+
+def _build_info_parts(session: dict[str, Any]) -> list[str]:
+    """Build the display-only /session_info messages for one session.
+
+    Shows the session's identity/timing, its notes (last few in full,
+    word-wrapped across messages when long) and its raw documents
+    (attachments / transcripts) listed with name and size — their full text
+    is combined into notes.md, the session's single RAG document.
     """
     from bot_core import sessions as S
 
     status = "**current**" if S.get_current_session() else "**last (ended)**"
-    lines = [f"📝 **Session notes — {session.get('name') or '(untitled)'}** ({status})"]
+    lines = [f"ℹ️ **Session info — {session.get('name') or '(untitled)'}** ({status})"]
+
+    started = datetime.fromtimestamp(session["started_at"]).strftime("%Y-%m-%d %H:%M")
+    timing = f"🕒 Started: {started}"
+    if session.get("ended_at"):
+        ended = datetime.fromtimestamp(session["ended_at"]).strftime("%Y-%m-%d %H:%M")
+        elapsed = session["ended_at"] - session["started_at"]
+        h, rem = divmod(int(elapsed), 3600)
+        m, s = divmod(rem, 60)
+        timing += f" — ended: {ended} (lasted {h:d}:{m:02d}:{s:02d})"
+    lines.append(timing)
+
     if session.get("overview"):
-        lines.append(f"📄 Overview: “{_truncate(session['overview'], 300)}”")
+        lines.append(f"📄 Recap: “{_truncate(session['overview'], 300)}”")
     lines.append("")
+
     notes = S.get_notes(session)
+    lines.append(f"**📝 Notes ({len(notes)})**")
     if not notes:
-        lines.append("(no notes yet — add one with `/session_notes action: add note: \"...\"`)")
+        lines.append("(no notes yet — add one with `/session_notes note: \"...\"`)")
     else:
-        shown = notes[-_VIEW_NOTE_LIMIT:]
+        shown = notes[-_INFO_NOTE_LIMIT:]
         for _ts, text in shown:
             lines.append(f"- {text}")
         if len(notes) > len(shown):
             lines.append(f"… and {len(notes) - len(shown)} earlier note(s).")
+
     for subdir, heading in ((S._SUBDIR_ATTACHMENTS, "📎 Attachments"),
                             (S._SUBDIR_TRANSCRIPTS, "🎙️ Transcripts")):
         docs = S._session_docs(session, subdir)
         if docs:
             lines.append("")
-            lines.append(f"**{heading}**")
+            lines.append(f"**{heading} ({len(docs)})**")
             for name in docs:
-                lines.append(f"- `{subdir}/{name}`")
+                size = "?"
+                try:
+                    size = _format_size((S._session_dir(session) / subdir / name).stat().st_size)
+                except OSError:
+                    pass
+                lines.append(f"- `{name}` — {size}")
+
     lines.append("")
     lines.append(f"📄 Folder: `{pathlib.Path(session['dir']).name}/` (notes.md = single RAG document; "
                  f"raw files kept in hidden folders)")
@@ -640,8 +660,8 @@ def _build_view_parts(session: dict[str, Any]) -> list[str]:
     return _chunk_display("\n".join(lines))
 
 
-async def _show_session_notes(interaction: discord.Interaction) -> None:
-    """View notes of the current session (or the last ended one)."""
+async def handle_session_info(interaction: discord.Interaction) -> None:
+    """Show info about the current session (or the last ended one)."""
     from bot_core import sessions as S
 
     session = S.get_current_session() or S.get_last_session()
@@ -657,7 +677,7 @@ async def _show_session_notes(interaction: discord.Interaction) -> None:
     # Notes are stored whole and only split at display time — so a long note
     # needs several messages.  Send them sequentially (no defer needed: the
     # view is local and fast, well within the 15 s response window).
-    parts = _build_view_parts(session)
+    parts = _build_info_parts(session)
     if not parts:
         await interaction.response.send_message("ℹ️ No notes yet.")
         return
