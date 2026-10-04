@@ -948,6 +948,11 @@ async def ask_ai_stream(
         )
 
         collected: list[str] = []
+        # Initialized up front (audit L5): the empty-stream diagnostics below
+        # getattr() this name; unreachable today only because
+        # _friendly_ai_error always raises, and that must stay a coincidence
+        # of the classifier, not of control flow.
+        stream: Any = None
         try:
             # The streaming call is NOT retried: a mid-stream transient
             # failure is ambiguous (we may have already emitted tokens), so
@@ -972,8 +977,8 @@ async def ask_ai_stream(
             if ctx.max_tokens is not None:
                 create_kwargs["max_tokens"] = ctx.max_tokens
 
-            stream: AsyncStream[ChatCompletionChunk] = \
-                await ctx.client.chat.completions.create(**create_kwargs)
+            stream = cast("AsyncStream[ChatCompletionChunk]",
+                         await ctx.client.chat.completions.create(**create_kwargs))
             try:
                 while True:
                     try:
