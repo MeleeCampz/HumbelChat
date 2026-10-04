@@ -155,6 +155,20 @@ class TestStartSessionRecap:
         await handle_start_session(ix, name="Fresh")
         assert not any("Previous session recap" in m for m in ix._sent)
 
+    @pytest.mark.asyncio
+    async def test_start_failed_send_keeps_recap_undelivered(self, ix):
+        """A failed recap post must NOT mark it delivered — a later
+        /start_session retries delivery instead of losing the recap."""
+        from commands.session_commands import handle_start_session
+        S.start_session(name="Prev")
+        S.end_session(overview="**What happened:** got the key.")
+        S._state["last_start_at"] = time.time() - 2 * 3600
+        ix.followup.send = AsyncMock(side_effect=RuntimeError("discord down"))
+        with pytest.raises(RuntimeError):
+            await handle_start_session(ix, name="Next")
+        assert S._state["last_ended"]["overview_delivered"] is False
+        assert S._pending_manual_overview() is not None
+
 
 class TestEndSessionCommand:
 

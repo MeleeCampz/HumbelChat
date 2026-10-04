@@ -325,14 +325,17 @@ async def handle_start_session(interaction: discord.Interaction, name: str | Non
     # its last notes so it is not left without any record.
     if closed_info:
         prev = closed_info["session"]
-        if closed_info["kind"] == "manual" and prev.get("overview"):
-            S.mark_overview_delivered(prev)
         text = (prev.get("overview") or _plain_digest(prev)).strip()
         if text:
             await interaction.followup.send(
                 f"🔁 **Previous session recap** ({prev.get('name') or 'untitled'})\n\n"
                 f"{_truncate(text)}"
             )
+            # Mark delivered only AFTER Discord accepted the message — a
+            # failed send must not lose the stored recap (a later
+            # /start_session will retry delivery).
+            if closed_info["kind"] == "manual":
+                S.mark_overview_delivered(prev)
 
     # Deliver queued next-session reminders to their channels.
     bot = _get_bot()
@@ -356,8 +359,7 @@ async def handle_end_session(interaction: discord.Interaction, name: str | None 
     session = S.get_current_session()
     if session is None:
         await interaction.response.send_message(
-            "⚠️ There is no active session to end. Start one with `/start_session`.",
-            
+            "⚠️ There is no active session to end. Start one with `/start_session`."
         )
         return
 
