@@ -601,13 +601,13 @@ async def _add_document_from_attachment(interaction: discord.Interaction, file: 
 
     # The raw document lives in the hidden .attachments/ folder; its full
     # text is combined into notes.md — the session's single RAG document.
+    # NOTE: we deliberately do NOT show the stored filename — picking it as
+    # "newest file in the dir" raced with concurrent uploads and named the
+    # wrong file (audit L3). add_document() does not return the path.
     from bot_core import sessions as _S
-    att_dir = pathlib.Path(_S._session_dir(updated)) / _S._SUBDIR_ATTACHMENTS
-    files = sorted(att_dir.iterdir()) if att_dir.exists() else []
-    fname = files[-1].name if files else title
     await interaction.response.send_message(
         f"📎 Document **{title}** added to session **{updated.get('name') or '(untitled)'}**\n"
-        f"📄 Saved as `{_S._SUBDIR_ATTACHMENTS}/{fname}` (kept on disk; full text combined "
+        f"📄 Saved under `{_S._SUBDIR_ATTACHMENTS}/` (kept on disk; full text combined "
         f"into the session notes file, which is RAG-enabled).",
     )
     return
@@ -692,8 +692,28 @@ async def _show_session_notes(interaction: discord.Interaction) -> None:
     # needs several messages.  Send them sequentially (no defer needed: the
     # view is local and fast, well within the 15 s response window).
     parts = _build_view_parts(session)
-    for i, part in enumerate(parts):
-        if i == 0:
-            await interaction.response.send_message(part)
-        else:
+    if not parts:
+        await interaction.response.send_message("ℹ️ No notes yet.")
+        return
+    # First part via the initial response (no defer needed: the view is local
+    # and fast). Later parts are best-effort: one failed followup used to blow
+    # up the whole loop unhandled, losing every remaining part (audit L7).
+    await interaction.response.send_message(parts[0])
+    failed_at = -1
+    for i, part in enumerate(parts[1:], start=1):
+        try:
             await interaction.followup.send(part)
+        except discord.DiscordException as e:
+            log.warning("session-notes view: part %d/%d failed to deliver: %s",
+                        i + 1, len(parts), e)
+            failed_at = i
+            break
+    if failed_at > 0:
+        missing = len(parts) - failed_at
+        try:
+            await interaction.followup.send(
+                f"⚠️ Delivery interrupted — {missing} of {len(parts)} part(s) "
+                f"could not be sent."
+            )
+        except discord.DiscordException:
+            pass  # nothing left to try; the warning above is for the logs
