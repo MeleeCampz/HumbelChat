@@ -53,6 +53,27 @@ class ModelNotFoundError(AIError):
         super().__init__(msg, **kw)
 
 
+class BadRequestError(AIError):
+    """The backend rejected the request itself (HTTP 400) for a non-model reason.
+
+    Previously EVERY HTTP 400 was reported as ``ModelNotFoundError``, which
+    sent users debugging the wrong thing — the most common real 400 from local
+    backends is ``context_length_exceeded`` (conversation too long), plus
+    unsupported-parameter and malformed-payload errors.
+    """
+
+    category = "bad_request"
+
+    def __init__(self, message: str = "The AI backend rejected the request.", **kw: Any):
+        kw.setdefault(
+            "user_message",
+            "⚠️ The AI backend rejected the request. This usually means the "
+            "conversation is too long for the model's context window — try "
+            "`/clear_history` or a shorter question.",
+        )
+        super().__init__(message, **kw)
+
+
 class BackendDownError(AIError):
     category = "backend_down"
 
@@ -167,7 +188,9 @@ def classify_ai_error(exc: BaseException, *, model: str = "", backend_url: str =
          (wrapped if necessary).
       2. openai ``APITimeoutError`` / ``openai.APIConnectionError`` / message
          contains "timed out" → :class:`TimeoutError`
-      3. HTTP 400 / 404 / "model not found" → :class:`ModelNotFoundError`
+      3. HTTP 404, or a 400 whose message mentions the model,
+         → :class:`ModelNotFoundError`; any other HTTP 400
+         → :class:`BadRequestError` (e.g. context-length overflow)
       4. ``httpx.ConnectError`` / message contains "connection" → :class:`BackendDownError`
       5. HTTP 429 → ``RateLimitError`` carrying the backend's ``Retry-After``
          (parsed + clamped; see :func:`_parse_retry_after`)
@@ -203,9 +226,29 @@ def classify_ai_error(exc: BaseException, *, model: str = "", backend_url: str =
     ):
         return TimeoutError(str(exc), cause=exc)
 
-    # 3. Model-not-found
-    if status_code in (400, 404) or "model not found" in error_msg or "does not exist" in error_msg:
+    # 3. Model-not-found. A bare 400 is NOT enough: context-length and other
+    # request-validation failures also arrive as 400 and must not be blamed on
+    # the model slug (see BadRequestError). Prose like "this model's maximum
+    # context length" mentions *model* without being a model error, so match
+    # explicit model-missing phrases only — and let context-length signals
+    # win first.
+    _ctx_signals = (
+        "context_length", "context length", "maximum context",
+        "too many tokens", "prompt is too long", "input is too long",
+    )
+    if status_code == 400 and any(s in error_msg for s in _ctx_signals):
+        return BadRequestError(str(exc), cause=exc)
+    _model_missing_phrases = (
+        "model not found", "does not exist", "invalid model", "unknown model",
+        "no such model", "model is not available", "model_not_found",
+    )
+    if (
+        status_code == 404
+        or any(s in error_msg for s in _model_missing_phrases)
+    ):
         return ModelNotFoundError(model or "?", backend_url=backend_url, cause=exc)
+    if status_code == 400:
+        return BadRequestError(str(exc), cause=exc)
 
     # 4. Backend down / connection
     if (
@@ -308,6 +351,7 @@ __all__ = [
     "AIError",
     "TimeoutError",
     "ModelNotFoundError",
+    "BadRequestError",
     "BackendDownError",
     "AIBackendError",
     "AIResponseTruncatedError",
