@@ -13,6 +13,7 @@ Hermeticity notes:
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import types
 
@@ -256,7 +257,11 @@ class TestReminderFireDelivery:
             R._reminders[rid] = {"channel_id": 9, "message": "m", "delay_sec": 0,
                                  "fires_at": 0, "created_at": 0, "fired": False}
             await R._fire(rid, 9, "m", 0)  # noqa: SLF001 - whitebox
-            assert R._reminders[rid]["fired"] is True, "must only fire on success"
+            # Delivered reminders are DELETED (memory + disk), not kept as a
+            # `fired: true` tombstone — the store must not grow forever.
+            assert rid not in R._reminders, "delivered reminder must be removed"
+            payload = json.loads(store_path.read_text())
+            assert rid not in payload, "delivery must prune the persisted file too"
         finally:
             if old is not None:
                 main.bot = old
@@ -374,7 +379,8 @@ class TestReminderFireDelivery:
 
             state["bot"] = _bot(cache_get=lambda cid: MagicMock(send=AsyncMock()))
             await asyncio.sleep(0.05)                 # let sleep(0) retry + fire run
-            assert R._reminders[rid]["fired"] is True, "retry must deliver after recovery"
+            # Delivered on retry -> removed from the store (see above).
+            assert rid not in R._reminders, "retry must deliver after recovery"
         finally:
             R.cancel_reminder(rid)
             R._reminders.pop(rid, None)

@@ -157,8 +157,15 @@ async def _fire(rid: str, channel_id: int, message: str, delay: int) -> None:
             channel_id)
 
     lock = _deliver_locks.setdefault(rid, asyncio.Lock())
-    async with lock:
-        await _deliver_reminder(rid, channel_id, message)
+    try:
+        async with lock:
+            await _deliver_reminder(rid, channel_id, message)
+    finally:
+        # _deliver_locks was keyed per reminder id and never pruned — one
+        # asyncio.Lock leaked for every reminder the process ever scheduled.
+        # Drop it once its holder is gone (only if no other _fire still owns it).
+        if _deliver_locks.get(rid) is lock:
+            _deliver_locks.pop(rid, None)
 
 
 async def _deliver_reminder(rid: str, channel_id: int, message: str) -> None:
@@ -189,7 +196,11 @@ async def _deliver_reminder(rid: str, channel_id: int, message: str) -> None:
         return
 
     if rid in _reminders:
-        _reminders[rid]["fired"] = True
+        # Delivered: drop the entry entirely instead of keeping a `fired: true`
+        # record forever. Fired reminders were never removed from _reminders or
+        # the JSON file, so both grew unboundedly over the bot's lifetime and
+        # every _save() rewrote the whole (ever-growing) payload.
+        _reminders.pop(rid, None)
         _save()
     log.info("Reminder %s fired and delivered (channel %s)", rid, channel_id)
 
@@ -362,6 +373,14 @@ def rearm_pending_reminders() -> int:
     replaced, otherwise both tasks would fire and the user would be pinged twice.
     """
     _load()
+    # Drop tombstones from older builds (which persisted fired reminders
+    # forever) so an existing store file shrinks instead of growing.
+    pruned = [rid for rid, info in list(_reminders.items()) if info.get("fired")]
+    for rid in pruned:
+        _reminders.pop(rid, None)
+    if pruned:
+        log.info("Pruned %d already-fired reminder(s) from the store", len(pruned))
+        _save()
     now = time.time()
     count = 0
     for rid, info in list(_reminders.items()):
