@@ -24,6 +24,7 @@ import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -317,3 +318,60 @@ class TestForceRebuildCacheSafety:
         assert rows > 0
         # Atomic swap leaves no stray temp files behind.
         assert not list(persist.glob("*.tmp"))
+
+
+# ─────────────── L2/L4/L8: low-priority polish locks ─────────────────────
+
+class TestLowPrioPolish:
+    def test_chunker_hash_is_stable_across_processes(self):
+        """hash() is PYTHONHASHSEED-randomized; _hash must not be."""
+        import subprocess
+        import sys
+        code = (
+            "from kb.chunker import Chunker;"
+            "print(Chunker._hash('Some Section Header'))"
+        )
+        outs = set()
+        for seed in ("0", "123"):
+            r = subprocess.run(
+                [sys.executable, "-c", code], capture_output=True, text=True,
+                env={"PYTHONHASHSEED": seed, "PATH": __import__("os").environ["PATH"]},
+                cwd=".",
+            )
+            assert r.returncode == 0, r.stderr
+            outs.add(r.stdout.strip())
+        assert len(outs) == 1, f"_hash differs across PYTHONHASHSEED: {outs}"
+
+    @pytest.mark.asyncio
+    async def test_remind_unit_wording(self, ix):
+        from commands.utility_commands import handle_remind_command
+        ix.channel = MagicMock()
+        ix.channel.id = 99
+        await handle_remind_command(ix, time_value=30, time_unit="seconds", message="x")
+        assert "**30 seconds**" in ix._sent[0], "plural must stay plural"
+        ix._sent.clear()
+        await handle_remind_command(ix, time_value=1, time_unit="hours", message="y")
+        assert "**1 hour**" in ix._sent[0], "value 1 must be singular"
+
+    @pytest.mark.parametrize(
+        ("env", "expected"),
+        [({"RERANK_TOP_K": "7"}, 7), ({"RAG_VECTOR_TOP_K": "9"}, 9)],
+    )
+    def test_rerank_top_k_env_alias(self, env, expected):
+        """RERANK_TOP_K wins; legacy RAG_VECTOR_TOP_K still honored.
+
+        Run in a SUBPROCESS: reloading config.settings in-process re-evaluates
+        every module-level constant and leaks into sibling tests (the fail-soft
+        embedding tests depend on the exact import-time settings state).
+        """
+        import os
+        import subprocess
+        import sys
+        code = "import config.settings as s; print(s.RERANK_TOP_K)"
+        e = {k: v for k, v in os.environ.items()
+             if k not in ("RERANK_TOP_K", "RAG_VECTOR_TOP_K")}
+        e.update(env)
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                           text=True, env=e, cwd=".")
+        assert r.returncode == 0, r.stderr
+        assert int(r.stdout.strip()) == expected

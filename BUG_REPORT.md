@@ -101,6 +101,8 @@ The handler builds a **new** `KBIndexStore(kb_path)` "to avoid disturbing the li
 
 ## LOW / polish
 
+> **Status (2026-07):** L1–L9 fixed on branch `fix/audit-findings`; L10 reviewed and kept as a deliberate tradeoff (documented in code).
+
 ### L1. `channel_queue` timing logs are wrong
 **File:** `utils/channel_queue.py` L68–77
 `waited_s = time.monotonic() - started` is computed **before** `await q.get()` — always ≈0, so "ACQUIRED after Xs wait" never shows real waits. And `held_s = now - (started + waited_s)` measures queue+hold together, not the hold. Logging-only; fix by timing around `q.get()`.
@@ -142,6 +144,10 @@ Both report the just-created file as `sorted(dir.iterdir())[-1]`. Concurrent upl
 - `utils/embed_formatter.py`: fence-balanced splitting, empty-field-name protection, MAX_FIELDS overflow parking — all check out; pathological inputs degrade to plain text via `build_embed`'s never-raise contract.
 - `bot_core/command_sync.py`: correctly distinguishes local-cache clear vs remote delete; propagates sync payload errors instead of reporting false success.
 - `_friendly_ai_error` always raises → the "empty response" fallback paths in ai_client are safe.
+
+## Fix status
+
+All HIGH and MEDIUM findings (H1, H2, M1–M5) plus all LOW items (L1–L9; L10 documented) are fixed on branch `fix/audit-findings`, each with regression tests in `tests/test_audit_regressions.py` (+ updated delivery-semantics tests in `tests/test_channel_delivery.py`). Full suite: green.
 
 ## Suggested priority order
 1. **H1** (session overwrite) and **H2** (persisted-load abort) — both silently destroy user data today.
