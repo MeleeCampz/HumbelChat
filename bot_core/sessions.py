@@ -190,7 +190,11 @@ def _next_session_index(now: datetime) -> int:
         return 1
     best = 0
     for f in folders:
-        m = re.match(rf"^{re.escape(prefix)}_(\d+)_", f.name)
+        # Unnamed sessions produce folders like ``2026-01-01_03`` with NO
+        # trailing underscore — the old ``(\\d+)_`` pattern skipped them, so
+        # the next session re-used their index and silently overwrote their
+        # notes.md (os.replace in _write_session_file). Accept both shapes.
+        m = re.match(rf"^{re.escape(prefix)}_(\d+)(?:_|$)", f.name)
         if m:
             try:
                 best = max(best, int(m.group(1)))
@@ -621,7 +625,14 @@ def start_session(name: str | None = None) -> tuple[dict[str, Any], dict[str, An
 
     dt = datetime.fromtimestamp(now)
     safe_name = _sanitize_name(name)
-    file_path = _session_file_path(now, safe_name, _next_session_index(dt))
+    index = _next_session_index(dt)
+    file_path = _session_file_path(now, safe_name, index)
+    # Defensive collision guard: never point a new session at an existing
+    # folder, no matter how it got there (manual rename, clock skew, a
+    # partially-created session). Bump until the path is free.
+    while file_path.parent.exists():
+        index += 1
+        file_path = _session_file_path(now, safe_name, index)
     session = {
         "id": dt.strftime("%Y%m%d%H%M%S"),
         "name": safe_name,
