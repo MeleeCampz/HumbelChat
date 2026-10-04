@@ -19,6 +19,8 @@ import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from tests.ai_mocks import FakeStream, chunk
+
 
 # ─────────────────────── 1. History not polluted by RAG ──────────────────────
 
@@ -238,10 +240,10 @@ class TestSummarizeUrl:
         factory = _streaming_client_factory(
             "https://example.com/doc.txt", b"A long document to summarize.")
 
-        ai_resp = MagicMock()
-        ai_resp.choices = [MagicMock(message=MagicMock(content="SUMMARY_TEXT"))]
+        # /summarize goes through complete_text, which consumes a stream.
         ai_client = MagicMock()
-        ai_client.chat.completions.create = AsyncMock(return_value=ai_resp)
+        ai_client.chat.completions.create = AsyncMock(
+            return_value=FakeStream([chunk("SUMMARY_TEXT", "stop")]))
 
         with patch("utils.url_fetch.httpx.AsyncClient", factory), \
              patch("commands.utility_commands._make_client", return_value=ai_client), \

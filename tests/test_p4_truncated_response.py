@@ -16,7 +16,12 @@ Covered here:
     model's own output limit truncates the answer (#9: no more 4× retry).
   * ``complete_text`` (shared summary-call helper): omits max_tokens by
     default, passes ``enable_thinking: False`` with a plain-call fallback,
-    and warns on partial truncation.
+    and warns on partial truncation. It runs STREAMED internally (full text
+    collected and returned) so ``AI_TIMEOUT_S`` is a true idle watchdog even
+    for long thinking+generation calls — mid-stream stalls surface as a
+    friendly timeout, chunk collection is order-preserving, and an
+    empty-yet-finished stream is an ordinary empty answer while a
+    zero-chunk stream is a backend error.
 """
 from __future__ import annotations
 
@@ -26,6 +31,8 @@ import pytest
 
 from bot_core import ai_client
 from bot_core.errors import AIResponseTruncatedError, extract_reply_text
+from tests.ai_mocks import FakeStream as _FakeStream
+from tests.ai_mocks import chunk as _chunk
 
 
 # ─────────────────────────── helpers ───────────────────────────
@@ -190,8 +197,8 @@ class TestCompleteText:
     @pytest.mark.asyncio
     async def test_omits_max_tokens_and_passes_thinking_flag(self, monkeypatch):
         client = MagicMock()
-        client.chat.completions.create = AsyncMock(
-            return_value=_resp("SUMMARY", finish_reason="stop"))
+        stream = _FakeStream([_chunk("SUMMARY", "stop")])
+        client.chat.completions.create = AsyncMock(return_value=stream)
 
         text = await ai_client.complete_text(
             client, model="m", messages=[{"role": "user", "content": "x"}],
@@ -201,14 +208,16 @@ class TestCompleteText:
         assert text == "SUMMARY"
         kwargs = client.chat.completions.create.call_args.kwargs
         assert "max_tokens" not in kwargs
+        assert kwargs["stream"] is True  # streamed internally → idle watchdog
         assert kwargs["extra_body"] == {"enable_thinking": False}
         assert kwargs["timeout"] == pytest.approx(ai_client.AI_TIMEOUT_S)
+        assert stream.closed  # HTTP connection released after collection
 
     @pytest.mark.asyncio
     async def test_explicit_max_tokens_passed(self, monkeypatch):
         client = MagicMock()
         client.chat.completions.create = AsyncMock(
-            return_value=_resp("SUMMARY", finish_reason="stop"))
+            return_value=_FakeStream([_chunk("SUMMARY", "stop")]))
 
         await ai_client.complete_text(
             client, model="m", messages=[], temperature=0.3, max_tokens=4096,
@@ -216,6 +225,18 @@ class TestCompleteText:
         kwargs = client.chat.completions.create.call_args.kwargs
         assert kwargs["max_tokens"] == 4096
         assert "extra_body" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_chunks_collected_in_order(self, monkeypatch):
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(return_value=_FakeStream([
+            _chunk("Hel"), _chunk("lo"), _chunk(None, "stop"),
+        ]))
+
+        text = await ai_client.complete_text(
+            client, model="m", messages=[], temperature=0.3,
+        )
+        assert text == "Hello"
 
     @pytest.mark.asyncio
     async def test_thinking_param_rejected_falls_back_to_plain(self, monkeypatch):
@@ -230,7 +251,7 @@ class TestCompleteText:
         client = MagicMock()
         client.chat.completions.create = AsyncMock(side_effect=[
             rejected,
-            _resp("SUMMARY", finish_reason="stop"),
+            _FakeStream([_chunk("SUMMARY", "stop")]),
         ])
 
         text = await ai_client.complete_text(
@@ -267,10 +288,35 @@ class TestCompleteText:
         assert client.chat.completions.create.await_count == 1
 
     @pytest.mark.asyncio
+    async def test_idle_timeout_mid_stream_surfaces_friendly_error(self, monkeypatch):
+        """A stall AFTER chunks have started (httpx ReadTimeout on a read) is
+        a real failure — it must surface as the friendly timeout error, not
+        silently return the partial text."""
+        import httpx
+        import openai
+        req = httpx.Request("POST", "http://backend.invalid/v1/chat/completions")
+
+        class _StallingStream(_FakeStream):
+            async def __anext__(self):
+                if not self.closed and not getattr(self, "_first", False):
+                    self._first = True
+                    return _chunk("partial ")
+                raise openai.APITimeoutError(request=req)
+
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(return_value=_StallingStream([]))
+
+        with pytest.raises(ValueError) as ei:
+            await ai_client.complete_text(
+                client, model="m", messages=[], temperature=0.3,
+            )
+        assert "too long to respond" in str(ei.value)
+
+    @pytest.mark.asyncio
     async def test_empty_answer_at_model_limit_raises(self, monkeypatch):
         client = MagicMock()
         client.chat.completions.create = AsyncMock(
-            return_value=_resp(None, finish_reason="length"))
+            return_value=_FakeStream([_chunk(None, "length")]))
 
         with pytest.raises(ValueError) as ei:
             await ai_client.complete_text(
@@ -283,9 +329,35 @@ class TestCompleteText:
         """A truncated-but-non-empty answer is a valid partial answer."""
         client = MagicMock()
         client.chat.completions.create = AsyncMock(
-            return_value=_resp("partial summary", finish_reason="length"))
+            return_value=_FakeStream([_chunk("partial summary", "length")]))
 
         text = await ai_client.complete_text(
             client, model="m", messages=[], temperature=0.3,
         )
         assert text == "partial summary"
+
+    @pytest.mark.asyncio
+    async def test_ordinary_empty_answer_returns_empty_string(self, monkeypatch):
+        """finish_reason 'stop' with no content: the model simply had nothing
+        to say — an ordinary empty answer (callers keep their fallbacks)."""
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(
+            return_value=_FakeStream([_chunk(None, "stop")]))
+
+        text = await ai_client.complete_text(
+            client, model="m", messages=[], temperature=0.3,
+        )
+        assert text == ""
+
+    @pytest.mark.asyncio
+    async def test_zero_chunk_stream_raises_backend_error(self, monkeypatch):
+        """A stream that produces NOTHING is the streamed analogue of empty
+        ``choices`` (P1 #8) — a backend anomaly, not an empty answer."""
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(return_value=_FakeStream([]))
+
+        with pytest.raises(ValueError) as ei:
+            await ai_client.complete_text(
+                client, model="m", messages=[], temperature=0.3,
+            )
+        assert "empty response" in str(ei.value).lower()

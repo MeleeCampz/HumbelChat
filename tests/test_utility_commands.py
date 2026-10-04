@@ -4,6 +4,8 @@ from __future__ import annotations
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from tests.ai_mocks import FakeStream, chunk
+
 
 class TestRemindCommand:
 
@@ -103,12 +105,11 @@ class TestSummarizeCommand:
             {"role": "assistant", "content": "Hi there!"},
         ]
 
-        mock_resp = MagicMock()
-        mock_resp.choices = [MagicMock(message=MagicMock(content="Summary text"))]
-
+        # /summarize goes through complete_text, which consumes a stream.
         with patch("commands.utility_commands._make_client") as MockClient:
             inst = MagicMock()
-            inst.chat.completions.create = AsyncMock(return_value=mock_resp)
+            inst.chat.completions.create = AsyncMock(
+                return_value=FakeStream([chunk("Summary text", "stop")]))
             MockClient.return_value = inst
             await handle_summarize_command(ix)
 

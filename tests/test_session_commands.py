@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from bot_core import sessions as S
+from tests.ai_mocks import FakeStream, chunk
 
 
 @pytest.fixture(autouse=True)
@@ -29,9 +30,10 @@ def _mock_ai(content="We did great work today.", fail=False):
     if fail:
         inst.chat.completions.create = AsyncMock(side_effect=RuntimeError("backend down"))
     else:
-        resp = MagicMock()
-        resp.choices = [MagicMock(message=MagicMock(content=content))]
-        inst.chat.completions.create = AsyncMock(return_value=resp)
+        # complete_text consumes its completion as a stream (idle watchdog),
+        # so the fake must be stream-shaped — a bare MagicMock would hang.
+        inst.chat.completions.create = AsyncMock(
+            return_value=FakeStream([chunk(content, "stop")]))
     return patch("commands.session_commands._make_client", return_value=inst), \
            patch("commands.session_commands._validate_model", new=AsyncMock(return_value="test-model"))
 
@@ -140,9 +142,8 @@ class TestEndSessionCommand:
         from commands.session_commands import handle_end_session
         S.start_session(name="Custom")
         inst = MagicMock()
-        resp = MagicMock()
-        resp.choices = [MagicMock(message=MagicMock(content="ok"))]
-        inst.chat.completions.create = AsyncMock(return_value=resp)
+        inst.chat.completions.create = AsyncMock(
+            return_value=FakeStream([chunk("ok", "stop")]))
         monkeypatch.setattr(sc, "_make_client", lambda: inst)
         monkeypatch.setattr(sc, "_validate_model", AsyncMock(return_value="test-model"))
         monkeypatch.setattr(sc, "SESSION_SUMMARY_PROMPT", "MY CUSTOM PROMPT")
@@ -160,9 +161,8 @@ class TestEndSessionCommand:
         from commands.session_commands import handle_end_session
         S.start_session(name="Default")
         inst = MagicMock()
-        resp = MagicMock()
-        resp.choices = [MagicMock(message=MagicMock(content="ok"))]
-        inst.chat.completions.create = AsyncMock(return_value=resp)
+        inst.chat.completions.create = AsyncMock(
+            return_value=FakeStream([chunk("ok", "stop")]))
         monkeypatch.setattr(sc, "_make_client", lambda: inst)
         monkeypatch.setattr(sc, "_validate_model", AsyncMock(return_value="test-model"))
         monkeypatch.setattr(sc, "SESSION_SUMMARY_PROMPT", "")
@@ -543,9 +543,8 @@ class TestMergedSessionLog:
         S.start_session(name="CustomMerge")
         S.add_document("body", title="a.md")
         inst = MagicMock()
-        resp = MagicMock()
-        resp.choices = [MagicMock(message=MagicMock(content="merged"))]
-        inst.chat.completions.create = AsyncMock(return_value=resp)
+        inst.chat.completions.create = AsyncMock(
+            return_value=FakeStream([chunk("merged", "stop")]))
         monkeypatch.setattr(sc, "_make_client", lambda: inst)
         monkeypatch.setattr(sc, "_validate_model", AsyncMock(return_value="test-model"))
         monkeypatch.setattr(sc, "SESSION_MERGE_PROMPT", "MY MERGE PROMPT")
@@ -562,13 +561,11 @@ class TestMergedSessionLog:
         S.add_document("Player A: we looted the cave.", title="a.md")
         # overview call first, merge call second — distinguish by content
         inst = MagicMock()
-        resp_ov = MagicMock()
-        resp_ov.choices = [MagicMock(message=MagicMock(content="Short overview."))]
-        resp_mg = MagicMock()
-        resp_mg.choices = [MagicMock(message=MagicMock(
-            content="## The Cave\nCombined: we looted the cave."))]
-        inst.chat.completions.create = AsyncMock(
-            side_effect=[resp_ov, resp_mg])
+        inst.chat.completions.create = AsyncMock(side_effect=[
+            FakeStream([chunk("Short overview.", "stop")]),
+            FakeStream([chunk("## The Cave\nCombined: we looted the cave.",
+                              "stop")]),
+        ])
         import commands.session_commands as sc
         with patch.object(sc, "_make_client", return_value=inst), \
              patch.object(sc, "_validate_model", new=AsyncMock(return_value="test-model")):
@@ -588,10 +585,10 @@ class TestMergedSessionLog:
         S.start_session(name="EndMergeFail")
         S.add_document("Player A: we looted the cave.", title="a.md")
         inst = MagicMock()
-        resp_ov = MagicMock()
-        resp_ov.choices = [MagicMock(message=MagicMock(content="Short overview."))]
-        inst.chat.completions.create = AsyncMock(
-            side_effect=[resp_ov, RuntimeError("merge backend down")])
+        inst.chat.completions.create = AsyncMock(side_effect=[
+            FakeStream([chunk("Short overview.", "stop")]),
+            RuntimeError("merge backend down"),
+        ])
         import commands.session_commands as sc
         with patch.object(sc, "_make_client", return_value=inst), \
              patch.object(sc, "_validate_model", new=AsyncMock(return_value="test-model")):
@@ -637,9 +634,10 @@ class TestOverviewPromptIncludesSources:
         ) * 4
         S.add_document(german_log, title="log.md")
         inst = MagicMock()
-        resp = MagicMock()
-        resp.choices = [MagicMock(message=MagicMock(content="Wir reisen nach Alderheart."))]
-        inst.chat.completions.create = AsyncMock(return_value=resp)
+        # Same (exhausted-after-first-use) stream for every call: the overview
+        # consumes it; the follow-up merge gets zero chunks and fails cleanly.
+        inst.chat.completions.create = AsyncMock(
+            return_value=FakeStream([chunk("Wir reisen nach Alderheart.", "stop")]))
         monkeypatch.setattr(sc, "_make_client", lambda: inst)
         monkeypatch.setattr(sc, "_validate_model", AsyncMock(return_value="test-model"))
 
