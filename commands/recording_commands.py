@@ -380,13 +380,13 @@ async def _run_transcription(
                 session=session_at_stop,
             )
             if session is not None and n_files:
-                tdir = pathlib.Path(S._session_dir(session)) / S._SUBDIR_TRANSCRIPTS
-                tfname = sorted(p.name for p in tdir.iterdir() if p.is_file())[-1] if tdir.exists() else ""
+                # No guessed filename here (audit L3): "newest file in the
+                # transcripts dir" races with concurrent transcripts and can
+                # name the wrong file; add_transcript() does not return the path.
                 status = "active" if S.get_current_session() is session else "ended"
-                tfn = f" — `transcripts/{tfname}`" if tfname else ""
                 session_line = (
                     f"\n\n🎙️ Added to the {status} session **{session.get('name') or '(untitled)'}** "
-                    f"(1 transcript file){tfn}"
+                    f"(1 transcript file)"
                 )
             else:
                 log.info("Transcript not added: no active session at STT completion")
