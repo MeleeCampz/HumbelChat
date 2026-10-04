@@ -774,7 +774,7 @@ async def complete_text(
 ) -> str:
     """Single-shot completion returning the visible reply text.
 
-    Shared by the summary-type call sites (/summarize, /end_session overview
+    Shared by the summary-type call sites (/summarize, /end_session recap
     and merged log):
 
     * ``max_tokens=None`` (default) → the parameter is OMITTED so the backend

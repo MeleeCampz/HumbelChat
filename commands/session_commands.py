@@ -3,7 +3,9 @@
 
 Delegates all state handling to ``bot_core.sessions``; this module only
 translates between Discord interactions and the session store, plus the
-AI-generated end-of-session overview (same model-resolution pattern as
+AI-generated end-of-session recap — a very brief digest (what happened +
+suggested next steps) that is stored with the session at /end_session and
+delivered when the NEXT session starts (same model-resolution pattern as
 /summarize in commands/utility_commands.py).
 """
 from __future__ import annotations
@@ -15,32 +17,27 @@ from typing import Any
 import discord
 
 from bot_core.ai_client import _make_client, _validate_model, complete_text
-from bot_core.history import get_active_char_key, get_history
+from bot_core.history import get_active_char_key
 from config.characters import get_character
 from config.settings import (
     DEFAULT_MODEL,
     DEFAULT_SESSION_MERGE_PROMPT,
-    DEFAULT_SESSION_SUMMARY_PROMPT,
+    DEFAULT_SESSION_RECAP_PROMPT,
     SESSION_MERGE_PROMPT,
-    SESSION_SUMMARY_PROMPT,
+    SESSION_RECAP_PROMPT,
     SUMMARY_CALL_MAX_TOKENS,
 )
 
 log = logging.getLogger("bot.session_commands")
 
-# Max chars of the overview posted to the channel (Discord limit is 2000).
+# Max chars of the recap posted to the channel (Discord limit is 2000).
 _OVERVIEW_POST_LIMIT = 1800
-# How many recent chat messages feed the AI overview.
-_OVERVIEW_HISTORY_MESSAGES = 30
-# Total budget (chars) for the session documents that feed the AI overview.
-# The full session log(s) are the authoritative source for the overview — this
+# Total budget (chars) for the session documents that feed the AI recap.
+# The full session log(s) are the authoritative source for the recap — this
 # exists only to keep the prompt size bounded for very long sessions; each
 # included document keeps its header + full text (trimmed from the tail if it
 # alone exceeds the whole budget).
 _OVERVIEW_DOC_BUDGET = 60_000
-# Budget for the combined supplemental sources (notes + recent chat) in the
-# overview prompt — the session documents are primary and get their own budget.
-_OVERVIEW_SUPPLEMENT_BUDGET = 8_000
 # Discord message cap is 2000 chars; keep view messages under it.
 _VIEW_MSG_LIMIT = 1900
 # How many recent notes / pointers to show in /session_notes view.
@@ -55,15 +52,6 @@ _SESSION_DOC_EXTENSIONS = {".txt", ".md"}
 _SESSION_DOC_MAX_BYTES = 2 * 1024 * 1024
 
 
-def _summary_prompt() -> str:
-    """System prompt for the /end_session AI overview.
-
-    Customizable via SESSION_SUMMARY_PROMPT in .env (see config/settings.py);
-    falls back to the built-in default when unset/empty.
-    """
-    return SESSION_SUMMARY_PROMPT.strip() or DEFAULT_SESSION_SUMMARY_PROMPT
-
-
 def _merge_prompt() -> str:
     """System prompt for the /end_session AI session-log merge.
 
@@ -71,6 +59,18 @@ def _merge_prompt() -> str:
     falls back to the built-in default when unset/empty.
     """
     return SESSION_MERGE_PROMPT.strip() or DEFAULT_SESSION_MERGE_PROMPT
+
+
+def _recap_prompt() -> str:
+    """System prompt for the /end_session recap of the session.
+
+    The recap (what happened + suggested next steps) is stored with the
+    session and delivered when the NEXT session starts.
+
+    Customizable via SESSION_RECAP_PROMPT in .env (see config/settings.py);
+    falls back to the built-in default when unset/empty.
+    """
+    return SESSION_RECAP_PROMPT.strip() or DEFAULT_SESSION_RECAP_PROMPT
 
 
 # ── Overview source assembly ────────────────────────────────────────────
@@ -141,95 +141,62 @@ def _resolve_overview_model(guild_id: int | None, channel_id: int | None) -> str
     return model or DEFAULT_MODEL or ""
 
 
-def _fallback_overview(session: dict[str, Any], notes: list[list[float | str]]) -> str:
-    """Plain-text overview used when the AI backend is unavailable.
+def _fallback_recap(session: dict[str, Any]) -> str:
+    """Plain-text recap used at /end_session when the AI backend is unavailable.
 
-    Still points the user at the session's own documents (the real source of
-    truth) so an ended session is never left without a usable record.
+    Lists the last few notes so an ended session is never left without any
+    record; a note to that effect when there are no notes either.
     """
-    from datetime import datetime
-    started = datetime.fromtimestamp(session["started_at"]).strftime("%Y-%m-%d %H:%M")
-    ended = (datetime.fromtimestamp(session.get("ended_at") or session["started_at"])
-             .strftime("%Y-%m-%d %H:%M"))
-    lines = [
-        f"Session **{session.get('name') or 'Untitled'}** — {started} → {ended}",
-        "",
-        "AI summary unavailable (backend error) — notes recorded during this session:",
-    ]
+    notes = session.get("notes", [])
     if notes:
-        for ts, text in notes[-30:]:
-            lines.append(f"- {text}")
-    else:
-        lines.append("- (no notes recorded)")
-    try:
-        _docs, doc_refs = _session_documents_text(session)
-        if doc_refs:
-            lines += ["", "Session files (complete record)"]
-            lines += [f"- `{ref}`" for ref in doc_refs]
-    except Exception:  # pragma: no cover - defensive
-        pass
+        lines = ["AI recap unavailable (backend error) — notes recorded during this session:"]
+        lines += [f"- {text}" for _ts, text in notes[-5:]]
+        return "\n".join(lines)
+    return "(AI recap unavailable and no notes were recorded for this session)"
+
+
+def _plain_digest(session: dict[str, Any]) -> str:
+    """Plain-text digest of a previous session WITHOUT a stored AI recap.
+
+    Used at /start_session (no AI call there): lists the last few notes so a
+    stale auto-ended session still gets a short record.  Returns "" when the
+    session has no notes to show.
+    """
+    notes = session.get("notes", [])
+    if not notes:
+        return ""
+    lines = ["No AI recap available for this session — last notes recorded:"]
+    lines += [f"- {text}" for _ts, text in notes[-5:]]
     return "\n".join(lines)
 
 
-def _build_supplemental_sources(
+async def _generate_recap(
     session: dict[str, Any], guild_id: int | None, channel_id: int | None,
 ) -> str:
-    """Combined notes + recent chat section for the overview prompt.
+    """Very brief AI recap of the session, generated at /end_session.
 
-    Notes come first (they are timestamped and session-specific); the recent
-    chat of the ending channel is appended last as the weakest signal.  The
-    combined text is trimmed from the tail to ``_OVERVIEW_SUPPLEMENT_BUDGET``
-    chars so the session documents always stay the dominant source.
-    """
-    notes = session.get("notes", [])
-    notes_text = "\n".join(f"- {text}" for _ts, text in notes[-50:]) or "(no notes)"
+    Sources (strongest first): the session's own documents (attachments/ and
+    transcripts/) then its notes.  The prompt instructs the model to write it
+    in the language of the sources — no hard-coded language detection on this
+    side (see DEFAULT_SESSION_RECAP_PROMPT in config/settings.py).
 
-    hist = get_history(guild_id if guild_id is not None else 0, channel_id)
-    chat_lines = []
-    for m in hist[-_OVERVIEW_HISTORY_MESSAGES:]:
-        raw_role = m.get("role", "")
-        role = {"user": "User", "assistant": "AI"}.get(raw_role, raw_role)
-        chat_lines.append(f"[{role}]: {m.get('content', '')}")
-    chat_text = "\n\n".join(chat_lines) or "(no recent chat in this channel)"
-
-    body = (
-        "## Session notes\n"
-        f"{notes_text}\n\n"
-        "## Last chat (the channel where the session was ended — supplemental)\n"
-        f"{chat_text}"
-    )
-    if len(body) > _OVERVIEW_SUPPLEMENT_BUDGET:
-        body = body[:_OVERVIEW_SUPPLEMENT_BUDGET].rstrip() + "\n…[truncated]"
-    return body
-
-
-async def _generate_overview(
-    session: dict[str, Any], guild_id: int | None, channel_id: int | None,
-) -> str:
-    """AI overview of the session from the session's OWN material only.
-
-    Sources, strongest first: the session's own documents (attachments/ and
-    transcripts/ — the verbatim session log), then its notes, then the recent
-    chat in the ending channel.  The prompt itself instructs the model to
-    write the overview in the language of the provided sources — there is no
-    hard-coded language detection on this side (see
-    DEFAULT_SESSION_SUMMARY_PROMPT in config/settings.py).
-
-    Falls back to a plain-text note listing when no model is configured or
-    the request fails — /end_session must always produce an overview.
+    Falls back to :func:`_fallback_recap` when no model is configured or the
+    request fails — /end_session must always produce a recap.
     """
     docs_text, doc_names = _session_documents_text(session)
-    supplemental = _build_supplemental_sources(session, guild_id, channel_id)
-
     notes = session.get("notes", [])
+    if not doc_names and not notes:
+        return ""  # nothing recorded — no recap to store
+
     model = await _validate_model(_make_client(), _resolve_overview_model(guild_id, channel_id))
     if not model:
-        log.warning("No model available for session overview — using plain-text fallback")
-        return _fallback_overview(session, notes)
+        log.warning("No model available for session recap — using plain-text fallback")
+        return _fallback_recap(session)
 
+    notes_text = "\n".join(f"- {text}" for _ts, text in notes[-50:]) or "(no notes)"
     source_listing = ", ".join(doc_names) if doc_names else "(none)"
     log.info(
-        "Session overview for %r: %d document(s) [%s], %d chars docs",
+        "Session recap for %r: %d document(s) [%s], %d chars docs",
         session.get("name"), len(doc_names), source_listing, len(docs_text),
     )
 
@@ -238,39 +205,29 @@ async def _generate_overview(
         f"Session files included: {source_listing}\n\n"
         f"## Session files (authoritative — the session's own record)\n"
         f"{docs_text or '(no documents for this session)'}\n\n"
-        f"## Supplemental sources\n{supplemental}"
+        f"## Session notes\n{notes_text}"
     )
 
     client = _make_client()
     try:
-        # Model-max output (max_tokens omitted unless SUMMARY_CALL_MAX_TOKENS
-        # caps it) + thinking disabled: a ~250-word factual overview gains
-        # nothing from the reasoning phase, which used to eat the token budget
-        # and leave no answer (#9).
+        # Short output, no reasoning phase — same rationale as the overview.
         summary = await complete_text(
             client,
             model=model,
             messages=[
-                {
-                    "role": "system",
-                    "content": _summary_prompt(),
-                },
-                {
-                    "role": "user",
-                    "content": user_content,
-                },
+                {"role": "system", "content": _recap_prompt()},
+                {"role": "user", "content": user_content},
             ],
             temperature=0.3,
             max_tokens=max(0, SUMMARY_CALL_MAX_TOKENS) or None,
             disable_thinking=True,
         )
         if not summary.strip():
-            raise ValueError("empty overview")
+            raise ValueError("empty recap")
         return summary.strip()
     except Exception as e:
-        log.error("Session overview AI request failed (%s): %s", model, e)
-        return _fallback_overview(session, notes)
-
+        log.error("Session recap AI request failed (%s): %s", model, e)
+        return _fallback_recap(session)
 
 
 async def _generate_merged_log(
@@ -360,17 +317,22 @@ async def handle_start_session(interaction: discord.Interaction, name: str | Non
     ]
 
     if closed_info and closed_info["kind"] == "stale":
-        parts.append("♻️ The previous session was older than 12 h — it was auto-ended without an AI overview.")
+        parts.append("♻️ The previous session was older than 12 h — it was auto-ended without an AI recap.")
 
-    # Deliver the explicitly-ended previous session's overview (if any).
-    if closed_info and closed_info["kind"] == "manual":
+    # Deliver the stored recap of the previous session (what happened + next
+    # steps) — generated at ITS /end_session, so no AI call happens here.
+    # A stale auto-end has no stored recap: fall back to a plain digest of
+    # its last notes so it is not left without any record.
+    if closed_info:
         prev = closed_info["session"]
-        if prev.get("overview"):
-            await interaction.followup.send(
-                f"📄 **Overview of previous session** ({prev.get('name') or 'untitled'}):\n\n"
-                f"{_truncate(prev['overview'])}",
-            )
+        if closed_info["kind"] == "manual" and prev.get("overview"):
             S.mark_overview_delivered(prev)
+        text = (prev.get("overview") or _plain_digest(prev)).strip()
+        if text:
+            await interaction.followup.send(
+                f"🔁 **Previous session recap** ({prev.get('name') or 'untitled'})\n\n"
+                f"{_truncate(text)}"
+            )
 
     # Deliver queued next-session reminders to their channels.
     bot = _get_bot()
@@ -388,7 +350,7 @@ async def handle_start_session(interaction: discord.Interaction, name: str | Non
 # ── /end_session ─────────────────────────────────────────────────────────
 
 async def handle_end_session(interaction: discord.Interaction, name: str | None = None) -> None:
-    """End the current session and write its AI overview."""
+    """End the current session and write its AI recap (what happened + next steps)."""
     from bot_core import sessions as S
 
     session = S.get_current_session()
@@ -399,7 +361,7 @@ async def handle_end_session(interaction: discord.Interaction, name: str | None 
         )
         return
 
-    # Defer first — the AI overview call can exceed Discord's 15 s window.
+    # Defer first — the AI recap call can exceed Discord's 15 s window.
     await interaction.response.defer()
 
     channel_id = interaction.channel_id
@@ -407,9 +369,9 @@ async def handle_end_session(interaction: discord.Interaction, name: str | None 
     # Pick up any manual edits to the notes file before summarizing.
     S.refresh_notes_from_disk(session)
 
-    overview = await _generate_overview(session, interaction.guild_id, channel_id)
+    recap = await _generate_recap(session, interaction.guild_id, channel_id)
     merged_log = await _generate_merged_log(session, interaction.guild_id, channel_id)
-    ended = S.end_session(overview=overview, name=name, merged_log=merged_log)
+    ended = S.end_session(overview=recap or None, name=name, merged_log=merged_log)
     if ended is None:  # defensive — should not happen
         await interaction.followup.send("⚠️ Could not end the session.")
         return
@@ -417,10 +379,10 @@ async def handle_end_session(interaction: discord.Interaction, name: str | None 
     fname = pathlib.Path(ended["file"]).name
     merge_line = ("\n📜 Session log combined from all uploads."
                   if merged_log else "")
+    recap_block = f"\n\n{_truncate(recap)}" if recap else "\n(no recap — nothing was recorded for this session)"
     await interaction.followup.send(
         f"🔚 **Session ended:** {ended.get('name') or '(untitled)'}\n"
-        f"📄 Overview saved to `{fname}`.{merge_line}\n\n"
-        f"{_truncate(overview)}",
+        f"📄 Recap saved to `{fname}`.{merge_line}{recap_block}"
     )
 
 

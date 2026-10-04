@@ -81,7 +81,7 @@ class TestStartSessionCommand:
         with patch("commands.session_commands._get_bot", return_value=bot):
             await handle_start_session(ix, name="Next")
 
-        assert any("Overview of previous session" in m and "Did the old stuff." in m for m in ix._sent)
+        assert any("Previous session recap" in m and "Did the old stuff." in m for m in ix._sent)
         assert S._state["last_ended"]["overview_delivered"] is True
         assert any("Delivered 1 queued next-session reminder" in m for m in ix._sent)
         chan.send.assert_awaited_once()
@@ -97,6 +97,63 @@ class TestStartSessionCommand:
         S._state["last_start_at"] = time.time() - 13 * 3600
         await handle_start_session(ix, name="Fresh")
         assert any("auto-ended" in m for m in ix._sent)
+
+
+class TestStartSessionRecap:
+    """The previous session's recap (what happened + next steps) is generated at
+    ITS /end_session and simply delivered at the next /start_session — no AI
+    call happens at start time."""
+
+    @pytest.mark.asyncio
+    async def test_start_delivers_stored_recap_without_ai_call(self, ix):
+        from commands.session_commands import handle_start_session
+        S.start_session(name="Prev")
+        S.add_note("found the dungeon key", author="Alice")
+        S.end_session(overview="**What happened:** got the key.\n**Next steps:** open the door.")
+        S._state["last_start_at"] = time.time() - 2 * 3600
+        inst = MagicMock()
+        inst.chat.completions.create = AsyncMock(
+            return_value=FakeStream([chunk("should not be called", "stop")]))
+        with patch("commands.session_commands._make_client", return_value=inst), \
+             patch("commands.session_commands._validate_model",
+                   new=AsyncMock(return_value="test-model")):
+            await handle_start_session(ix, name="Next")
+        assert any("Previous session recap" in m and "Prev" in m
+                   and "got the key" in m for m in ix._sent)
+        inst.chat.completions.create.assert_not_awaited()
+        assert S._state["last_ended"]["overview_delivered"] is True
+
+    @pytest.mark.asyncio
+    async def test_start_plain_digest_for_stale_auto_end(self, ix):
+        """Stale auto-end has no stored recap → plain digest of the last notes (no AI)."""
+        from commands.session_commands import handle_start_session
+        S.start_session(name="Ancient")
+        S.add_note("defeated the dragon", author="Bob")
+        old = S.get_current_session()
+        old["started_at"] = time.time() - 13 * 3600
+        S._state["last_start_at"] = time.time() - 13 * 3600
+        inst = MagicMock()
+        inst.chat.completions.create = AsyncMock(
+            return_value=FakeStream([chunk("should not be called", "stop")]))
+        with patch("commands.session_commands._make_client", return_value=inst), \
+             patch("commands.session_commands._validate_model",
+                   new=AsyncMock(return_value="test-model")):
+            await handle_start_session(ix, name="Fresh")
+        assert any("auto-ended" in m for m in ix._sent)
+        assert any("Previous session recap" in m and "defeated the dragon" in m
+                   for m in ix._sent)
+        inst.chat.completions.create.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_start_no_recap_without_sources(self, ix):
+        """Stale auto-end with no notes and no documents → no recap message at all."""
+        from commands.session_commands import handle_start_session
+        S.start_session(name="Empty")
+        old = S.get_current_session()
+        old["started_at"] = time.time() - 13 * 3600
+        S._state["last_start_at"] = time.time() - 13 * 3600
+        await handle_start_session(ix, name="Fresh")
+        assert not any("Previous session recap" in m for m in ix._sent)
 
 
 class TestEndSessionCommand:
@@ -132,21 +189,22 @@ class TestEndSessionCommand:
         with p1, p2:
             await handle_end_session(ix)
         ended = S.get_last_session()
-        assert "AI summary unavailable" in ended["overview"]
+        assert "AI recap unavailable" in ended["overview"]
         assert "note that survives" in ended["overview"]
 
     @pytest.mark.asyncio
-    async def test_end_uses_custom_summary_prompt(self, ix, monkeypatch):
-        """SESSION_SUMMARY_PROMPT from settings is used as the system prompt."""
+    async def test_end_uses_custom_recap_prompt(self, ix, monkeypatch):
+        """SESSION_RECAP_PROMPT from settings is used as the system prompt."""
         import commands.session_commands as sc
         from commands.session_commands import handle_end_session
         S.start_session(name="Custom")
+        S.add_note("a note", author="Bob")  # something recorded → recap AI call happens
         inst = MagicMock()
         inst.chat.completions.create = AsyncMock(
             return_value=FakeStream([chunk("ok", "stop")]))
         monkeypatch.setattr(sc, "_make_client", lambda: inst)
         monkeypatch.setattr(sc, "_validate_model", AsyncMock(return_value="test-model"))
-        monkeypatch.setattr(sc, "SESSION_SUMMARY_PROMPT", "MY CUSTOM PROMPT")
+        monkeypatch.setattr(sc, "SESSION_RECAP_PROMPT", "MY CUSTOM PROMPT")
 
         await handle_end_session(ix)
 
@@ -156,23 +214,24 @@ class TestEndSessionCommand:
 
     @pytest.mark.asyncio
     async def test_end_falls_back_to_default_prompt(self, ix, monkeypatch):
-        """Empty SESSION_SUMMARY_PROMPT → built-in default prompt is used."""
+        """Empty SESSION_RECAP_PROMPT → built-in default prompt is used."""
         import commands.session_commands as sc
         from commands.session_commands import handle_end_session
         S.start_session(name="Default")
+        S.add_note("a note", author="Bob")  # something recorded → recap AI call happens
         inst = MagicMock()
         inst.chat.completions.create = AsyncMock(
             return_value=FakeStream([chunk("ok", "stop")]))
         monkeypatch.setattr(sc, "_make_client", lambda: inst)
         monkeypatch.setattr(sc, "_validate_model", AsyncMock(return_value="test-model"))
-        monkeypatch.setattr(sc, "SESSION_SUMMARY_PROMPT", "")
+        monkeypatch.setattr(sc, "SESSION_RECAP_PROMPT", "")
 
         await handle_end_session(ix)
 
         sys_msg = inst.chat.completions.create.await_args.kwargs["messages"][0]
-        # The built-in default is the strict single-session prompt (not the
-        # old free-form "session overviews" text), written in English.
-        assert "exactly ONE session" in sys_msg["content"]
+        # The built-in default is the strict single-session recap prompt,
+        # written in English.
+        assert "brief recap of exactly ONE session" in sys_msg["content"]
         assert "STRICT RULES" in sys_msg["content"]
 
     @pytest.mark.asyncio
@@ -608,10 +667,10 @@ class TestOverviewPromptIncludesSources:
     language of the sources itself and write the overview in that language."""
 
     def test_system_prompt_instructs_model_to_detect_language(self):
-        from commands.session_commands import _summary_prompt
-        prompt = _summary_prompt()
+        from commands.session_commands import _recap_prompt
+        prompt = _recap_prompt()
         # the default prompt is written in English and is language-neutral …
-        assert "closing overview" in prompt
+        assert "brief recap of exactly ONE session" in prompt
         # … and makes the model itself determine the sources' language
         assert "Determine the language of the provided sources yourself" in prompt
         assert "LANGUAGE" in prompt
@@ -648,11 +707,11 @@ class TestOverviewPromptIncludesSources:
         messages = inst.chat.completions.create.await_args_list[0].kwargs["messages"]
         system_content = messages[0]["content"]
         user_content = messages[1]["content"]
-        # 1) the session document's verbatim text feeds the overview
+        # 1) the session document's verbatim text feeds the recap
         assert "über die Brücke" in user_content
         # 2) the prompt is in English and carries no hard-coded language pin
         assert "Session name:" in user_content
         assert "## Session files" in user_content
-        assert "## Supplemental sources" in user_content
+        assert "## Session notes" in user_content
         assert "OUTPUT LANGUAGE" not in user_content
         assert "LANGUAGE" in system_content

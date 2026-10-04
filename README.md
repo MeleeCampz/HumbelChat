@@ -78,7 +78,7 @@ foreground without tmux: `./.venv/bin/python main.py` (Windows:
 - `/item_stats` — per-rarity counts and remaining pool size
 - `/reset_rolls` — return rolled items to the pool
 - `/start_session` — start a work session
-- `/end_session` — end the session and generate an AI overview
+- `/end_session` — end the session and generate a brief AI recap (what happened + next steps)
 - `/remind_next_session` — queue a reminder for the next session start
 - `/session_notes` — add/view notes for the current or last session
 - `/start_recording` / `/stop_recording` — capture voice channel audio per speaker (WAV + timestamped manifest) for STT
