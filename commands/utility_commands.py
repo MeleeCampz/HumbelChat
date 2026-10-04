@@ -125,14 +125,21 @@ async def handle_remind_command(
     from bot_core.reminders import schedule_reminder
     schedule_reminder(channel_id, message, delay)
 
-    unit_singular = time_unit.rstrip("s") if time_value != 1 else time_unit
+    # Explicit singular map — the old rstrip("s") produced "3 second" (wrong),
+    # kept "1 seconds" (wrong) and turned a bare "s" into "" (audit L4).
+    # time_unit is already validated against {seconds, minutes, hours} above.
+    _UNIT_SINGULAR = {"seconds": "second", "minutes": "minute", "hours": "hour"}
+    unit_word = (
+        _UNIT_SINGULAR.get(time_unit.lower(), time_unit)
+        if time_value == 1 else time_unit
+    )
     if clamped:
         prompt_text = (
             f"✅ Reminder set for **{delay // 86400} days** from now "
             f"(max I can schedule — you asked for more)."
         )
     else:
-        prompt_text = "✅ Reminder set for **" + str(time_value) + " " + unit_singular + "** from now!"
+        prompt_text = "✅ Reminder set for **" + str(time_value) + " " + unit_word + "** from now!"
     confirmation = prompt_text + f'\n📝 I\'ll ping you with: "{message}"'
     await interaction.followup.send(confirmation)
 
