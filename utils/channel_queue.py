@@ -37,6 +37,11 @@ from typing import AsyncIterator
 log = logging.getLogger("bot.channel_queue")
 
 # channel_id -> single-token FIFO queue (the token is the "channel slot")
+# Per-channel FIFO token queues, created on first use and NEVER evicted
+# (audit L10, deliberate): each entry is one tiny Queue for a channel the bot
+# has replied in at least once — bounded by active channels, negligible
+# memory. Any eviction scheme would have to race new _queue_for() callers or
+# hand over a queue with waiters on it; that risk is worse than the leak.
 _queues: dict[int, asyncio.Queue[None]] = {}
 
 
@@ -62,19 +67,23 @@ async def channel_slot(channel_id: int | None, *, name: str = "") -> AsyncIterat
         async with channel_slot(channel_id, name="ai-command"):
             ... do the AI request AND deliver every message of the reply ...
     """
-    started = time.monotonic()
     key = channel_id if channel_id is not None else 0
     q = _queue_for(key)
-    waited_s = time.monotonic() - started
+    # Time the WAIT around q.get() itself — computing waited_s BEFORE the
+    # await always logged ~0s, and deriving held_s from (started + waited_s)
+    # measured queue+hold as "hold".
+    wait_started = time.monotonic()
     await q.get()  # wait our turn (FIFO); we now own the channel slot
+    waited_s = time.monotonic() - wait_started
     log.info(
         "channel_slot: channel=%s name=%r ACQUIRED after %.1fs wait (%d waiting behind)",
         key, name, waited_s, q.qsize(),
     )
+    hold_started = time.monotonic()
     try:
         yield
     finally:
-        held_s = time.monotonic() - (started + waited_s)
+        held_s = time.monotonic() - hold_started
         log.info(
             "channel_slot: channel=%s name=%r RELEASED after %.1fs hold",
             key, name, held_s,
