@@ -39,24 +39,27 @@ delivered as-is. Long outputs are split into multiple Discord messages.
 A single knob governs all AI calls: **`AI_TIMEOUT_S`** (default `120`) — the
 maximum SILENCE from the backend before a request fails.
 
-* Normal (non-streaming) responses: total wait bound for the whole request.
-* Streamed responses: an idle watchdog. The timeout is applied per read, so
-  any arriving chunk resets it — a slow-but-alive generation may run
+* Idle watchdog (most calls): the timeout is applied per read, so any
+  arriving chunk resets it — a slow-but-alive generation may run
   indefinitely, while a stalled or dead backend fails within `AI_TIMEOUT_S`
   of silence. There is deliberately no total wall-clock cap; `/ai stop`
-  cancels an in-flight response.
+  cancels an in-flight response. This covers streamed main-chat replies and
+  ALL `complete_text` summary calls (`/summarize`, `/end_session` overview
+  and merged log) — they run *streamed internally* (the full text is
+  collected and returned), which matters for the merged log: its long hidden
+  thinking phase plus long answer must not be bounded by a total-time cap.
+* Total wait bound: plain non-streaming main-chat replies (`ask_ai`) deliver
+  no bytes until the whole generation is done, so `AI_TIMEOUT_S` bounds the
+  entire request there.
 
 Raise `AI_TIMEOUT_S` (e.g. `300`) for models with long silent thinking
-phases. `AI_REQUEST_TIMEOUT` is still read as a fallback alias for older
-`.env` files.
+phases — the bound that applies to them is the wait for the FIRST chunk
+(everything before it is silence). `AI_REQUEST_TIMEOUT` is still read as a
+fallback alias for older `.env` files.
 
-Two things to know:
+One thing to know:
 
-* **Non-streamed calls** (`/end_session` overview and merged log run
-  non-streamed): the whole request — hidden thinking phase *plus*
-  generation — must complete within one `AI_TIMEOUT_S` of silence, since no
-  data arrives until the response is done. If long merges time out, raise
-  the knob.
+* **LM Studio output cap**: some LM Studio versions silently stop generation
 * **LM Studio output cap**: some LM Studio versions silently stop generation
   at roughly 10K–16K tokens regardless of the requested budget (open upstream
   bug, `finish_reason` stays `stop`, so it is undetectable). Short replies

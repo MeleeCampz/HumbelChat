@@ -779,8 +779,15 @@ async def complete_text(
 
     * ``max_tokens=None`` (default) → the parameter is OMITTED so the backend
       (LM Studio) lets the model use its maximum output length.
-    * ``timeout`` defaults to ``AI_TIMEOUT_S`` — maximum silence from the
-      backend before the request fails.
+    * ``timeout`` defaults to ``AI_TIMEOUT_S``. The call runs STREAMED
+      internally (the full text is collected and returned), so the timeout is
+      a true idle watchdog: httpx applies it per read and every arriving chunk
+      resets it. A slow-but-alive generation — including a long hidden
+      thinking phase followed by a long answer — may run indefinitely, while
+      a stalled or dead backend fails within ``AI_TIMEOUT_S`` of silence.
+      (A non-streamed request would deliver no bytes until the WHOLE
+      generation is done, turning the knob into a total-time cap — which is
+      exactly how the Sep-30 merged-log timeout happened.)
     * ``disable_thinking=True`` sends ``extra_body={"enable_thinking": False}``
       (Qwen3-style hybrid-thinking models); if the backend rejects the param,
       one plain retry follows (same pattern as kb/query_rewriter.py).
@@ -788,7 +795,7 @@ async def complete_text(
       raises ``AIResponseTruncatedError``; a PARTIAL answer is returned with a
       warning log. Callers keep their own fallback logic.
     """
-    from bot_core.errors import extract_reply_text
+    from bot_core.errors import AIBackendError, AIResponseTruncatedError
 
     _timeout = timeout if timeout is not None else AI_TIMEOUT_S
 
@@ -797,7 +804,7 @@ async def complete_text(
             model=model,
             messages=messages,
             temperature=temperature,
-            stream=False,
+            stream=True,
             timeout=_timeout,
         )
         if max_tokens is not None:
@@ -809,7 +816,7 @@ async def complete_text(
     try:
         if disable_thinking:
             try:
-                resp = await client.chat.completions.create(**_kwargs(True))
+                stream = await client.chat.completions.create(**_kwargs(True))
             except APIStatusError as e:
                 # Only a 4xx rejection (e.g. the backend does not know the
                 # ``enable_thinking`` param) justifies a plain retry. Timeouts
@@ -817,26 +824,61 @@ async def complete_text(
                 # retrying them would double the silence before surfacing.
                 if e.status_code is None or e.status_code >= 500:
                     raise
-                resp = await client.chat.completions.create(**_kwargs(False))
+                stream = await client.chat.completions.create(**_kwargs(False))
         else:
-            resp = await client.chat.completions.create(**_kwargs(False))
+            stream = await client.chat.completions.create(**_kwargs(False))
+
+        parts: list[str] = []
+        finish_reason: str | None = None
+        got_chunk = False
+        try:
+            while True:
+                try:
+                    chunk = await stream.__anext__()
+                except StopAsyncIteration:
+                    break
+                got_chunk = True
+                choices = getattr(chunk, "choices", None)
+                if not choices:
+                    continue
+                fr = getattr(choices[0], "finish_reason", None)
+                if fr:
+                    finish_reason = fr
+                try:
+                    delta = choices[0].delta.content
+                except (IndexError, AttributeError, KeyError, TypeError):
+                    continue
+                if delta:
+                    parts.append(delta)
+        finally:
+            # Release the HTTP connection when the loop ends for any reason
+            # (success, timeout, cancellation); idempotent in the openai SDK.
+            try:
+                await stream.close()
+            except Exception:  # noqa: BLE001 — cleanup must not mask the error
+                pass
+        text = "".join(parts)
     except Exception as e:  # noqa: BLE001 — classified below
         _friendly_ai_error(e, model=model, backend_url=INFER_URL)
 
-    try:
-        text = extract_reply_text(resp, default="")
-    except Exception as e:  # noqa: BLE001
-        # AIResponseTruncatedError (empty answer at the model's output limit)
-        # and AIBackendError (empty choices) become friendly ValueErrors —
-        # callers keep their own fallback logic.
-        _friendly_ai_error(e, model=model, backend_url=INFER_URL)
+    if not got_chunk:
+        # A stream that produced nothing ≈ the non-streamed "no choices"
+        # case (P1 #8) — a real backend anomaly, not an empty answer.
+        _friendly_ai_error(
+            AIBackendError("The AI backend returned no response."),
+            model=model, backend_url=INFER_URL,
+        )
 
-    choices = getattr(resp, "choices", None)
-    if (
-        choices
-        and getattr(choices[0], "finish_reason", None) == "length"
-        and text.strip()
-    ):
+    if not text.strip():
+        if finish_reason == "length":
+            # The model's entire output budget was spent on reasoning (P4/#9).
+            _friendly_ai_error(
+                AIResponseTruncatedError(),
+                model=model, backend_url=INFER_URL,
+            )
+        return ""  # ordinary empty answer — callers keep their fallbacks
+
+    if finish_reason == "length":
         log.warning(
             "complete_text(%s): response hit the model's output limit "
             "(finish_reason='length'); the answer may be cut off (%d chars)",
