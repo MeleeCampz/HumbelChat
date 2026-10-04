@@ -13,6 +13,7 @@ class TestUploadKBCommand:
         # Create a mock attachment
         attachment = MagicMock()
         attachment.filename = "test_document.txt"
+        attachment.size = len(b"This is uploaded content.")  # real attachments always have int size
         attachment.read = AsyncMock(return_value=b"This is uploaded content.")
 
         ix = Interaction()
@@ -52,6 +53,7 @@ class TestUploadKBCommand:
         """P3 #36: a 0-byte attachment must be rejected, not stored."""
         attachment = MagicMock()
         attachment.filename = "empty.txt"
+        attachment.size = 0
         attachment.read = AsyncMock(return_value=b"")  # 0 bytes
 
         ix = Interaction()
@@ -66,6 +68,27 @@ class TestUploadKBCommand:
         from kb.storage import list_kb_files
         names = [d["name"] for d in list_kb_files(temp_kb_dir, recursive=True)]
         assert not any("empty" in n for n in names)
+
+    @pytest.mark.asyncio
+    async def test_upload_kb_rejects_oversized_attachment_before_reading(
+        self, temp_kb_dir,
+    ):
+        """Audit L6: oversized attachments are rejected from Discord's size
+        metadata WITHOUT reading the bytes into memory."""
+        from commands.kb_commands import UPLOAD_MAX_DOWNLOAD_BYTES
+        attachment = MagicMock()
+        attachment.filename = "huge.txt"
+        attachment.size = UPLOAD_MAX_DOWNLOAD_BYTES + 1
+        attachment.read = AsyncMock(side_effect=AssertionError("must not be read"))
+
+        ix = Interaction()
+        sent = ix._sent
+        with patch("kb.storage.KB_PATH", temp_kb_dir):
+            from commands.kb_commands import handle_upload_kb
+            await handle_upload_kb(ix, attachment=attachment, url=None)
+
+        assert any("too large" in s for s in sent)
+        attachment.read.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_upload_kb_early_return(self, temp_kb_dir):

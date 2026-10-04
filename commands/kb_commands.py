@@ -29,8 +29,17 @@ async def handle_upload_kb(
 
     # --- step 1: get bytes ---
     if attachment is not None:
-        data = await attachment.read()
         fname = attachment.filename or "attachment"
+        # Pre-read size guard (audit L6): Discord already reports the size —
+        # reject oversized attachments from metadata instead of buffering the
+        # whole file in memory before validate_upload_async checks it.
+        if (attachment.size or 0) > UPLOAD_MAX_DOWNLOAD_BYTES:
+            await interaction.followup.send(
+                f"⚠️ `{fname}` is too large: {attachment.size:,} bytes "
+                f"(max {UPLOAD_MAX_DOWNLOAD_BYTES:,})."
+            )
+            return
+        data = await attachment.read()
     elif url:
         # P1 #16: hardened fetch -- scheme/SSRF guard + streamed size cap.
         # (The old code did client.get() + resp.content, buffering the entire
