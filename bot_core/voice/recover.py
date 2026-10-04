@@ -214,7 +214,15 @@ def _recover_one(rec_dir: Path, now: float) -> Optional[dict[str, Any]]:
 
 
 def _user_id_from_log_name(log_name: str) -> int:
-    """Recover the user id from a ``<name>_<user_id>.log`` filename."""
-    stem = log_name[:-4] if log_name.endswith(".log") else log_name
+    """Recover the user id from a speaker-frame-log filename.
+
+    Runtime logs are named ``<safe_display>_<user_id>.wav.log`` (see
+    ``VoiceRecorder._log_path_for`` — it appends ``.log`` to the *WAV* name).
+    Stripping only ``.log`` left the trailing ``.wav``, so the old
+    ``_(\\d+)$`` search never matched: every recovered speaker collapsed to
+    user 0 and all speakers shared one ``user-0.wav`` (later ones overwrote
+    earlier ones). Strip both suffixes before matching.
+    """
+    stem = re.sub(r"(?:\.wav)?\.log$", "", log_name)
     m = re.search(r"_(\d+)$", stem)
     return int(m.group(1)) if m else 0
