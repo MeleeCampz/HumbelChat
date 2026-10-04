@@ -17,6 +17,7 @@ Usage
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import pathlib
 import re
@@ -440,8 +441,13 @@ class Chunker:
 
     @staticmethod
     def _hash(text: str) -> str:
-        """Simple hash for header deduplication."""
-        return hex(abs(hash(text)))[-8:]
+        """Stable short hash for header deduplication.
+
+        Uses blake2b, NOT the built-in ``hash()``: PYTHONHASHSEED randomization
+        made the old value differ between processes, so any comparison of this
+        field across runs (now or in the future) was silently meaningless.
+        """
+        return hashlib.blake2b(text.encode("utf-8"), digest_size=4).hexdigest()
 
 
 def _normalize_display_name(p: pathlib.Path, base_name: str) -> str:
