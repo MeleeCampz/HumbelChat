@@ -92,7 +92,19 @@ def load_characters(path: pathlib.Path) -> None:
     global _CHARACTERS, _DEFAULT_KEY, _CHAR_DISPLAY_MAP
 
     _DEFAULT_KEY, _CHARACTERS = _load_char_json(path)
-    _CHAR_DISPLAY_MAP = {c.display: c for c in _CHARACTERS}
+    _CHAR_DISPLAY_MAP = {}
+    for c in _CHARACTERS:
+        prev = _CHAR_DISPLAY_MAP.get(c.display)
+        if prev is not None:
+            # Silent last-wins made /character set <display> pick an arbitrary
+            # character when two shared a display name (audit L9) — warn.
+            log.warning(
+                "Duplicate character display name %r: key %r overrides %r; "
+                "`/character set %s` will always select %r. Give each "
+                "character a unique display name.",
+                c.display, c.key, prev.key, c.display, c.key,
+            )
+        _CHAR_DISPLAY_MAP[c.display] = c
 
 
 def all_characters() -> list[Character]:
