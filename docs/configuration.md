@@ -84,7 +84,8 @@ One thing to know:
 | `CHARACTERS_FILE` | Path to `characters.json` | `<repo_root>/characters.json` |
 | `HISTORY_PERSIST_FILE` | Where chat history + active-character picks are stored; set empty to keep history in RAM only | `<repo_root>/data/chat_history.json` |
 | `REMINDERS_PERSIST_FILE` | Where `/remind` reminders are stored so they survive restarts; set empty to disable persistence | `<repo_root>/data/reminders.json` |
-| `SESSIONS_PERSIST_FILE` | Where session state (active session + queued next-session reminders) is stored so it survives restarts; set empty to disable persistence. Session notes files always live under `<KB_PATH>/session_notes/` | `<repo_root>/data/sessions.json` |
+| `SESSIONS_PERSIST_FILE` | Where session state (active session + queued next-session reminders) is stored so it survives restarts; set empty to disable persistence. Session notes files live under `SESSIONS_NOTES_DIR` (default `<KB_PATH>/session_notes/`) | `<repo_root>/data/sessions.json` |
+| `SESSIONS_NOTES_DIR` | Where per-session folders live — point inside an Obsidian campaign vault for two-way sync (see below) | `<KB_PATH>/session_notes` |
 
 ## Voice recording and STT
 
@@ -110,6 +111,18 @@ STT runs on the same OpenAI-compatible backend as chat (`INFER_URL` / `INFER_API
 | `RAG_WINDOW_LINES` | Lines above/below each match anchor | `80` |
 | `RAG_RETRIEVAL_METHOD` | Retrieval strategy: `vector` or `keyword` | `vector` |
 | `EMBEDDING_MODEL` | Embedding model name for vector search (OpenAI-compatible /embeddings endpoint) | `nomic-embed-text:latest` |
+
+### Obsidian vault sync (#19)
+
+Vaults kept as private GitHub repos are mirrored into the KB and re-indexed on a
+periodic background loop — see [Obsidian Vault Sync](./obsidian-vault.md) for the
+full setup guide (Obsidian Git plugin, tokens, two-way campaign vault).
+
+| Variable | Description | Default |
+|---|---|---|
+| `OBSIDIAN_VAULTS` | Semicolon-separated `name=git_url` entries; each vault is cloned to `<KB_PATH>/<name>/` and pulled + incrementally re-indexed. Empty = feature off. Private repos use a token-embedded URL | *(empty)* |
+| `OBSIDIAN_CAMPAIGN_VAULT` | Name of the two-way vault that holds session notes (its URL needs write access); must be one of the names in `OBSIDIAN_VAULTS` | *(empty — all one-way)* |
+| `OBSIDIAN_VAULT_PULL_INTERVAL` | Vault pull/commit period in seconds; `0` = one startup pass only | `300` |
 
 ## Embed formatting
 

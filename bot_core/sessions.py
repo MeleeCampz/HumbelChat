@@ -98,13 +98,14 @@ def _resolve_path() -> pathlib.Path | None:
 def notes_dir() -> pathlib.Path:
     """Directory holding the per-session folders.
 
-    Lives inside the knowledge base so each session's combined ``notes.md``
-    is automatically part of the RAG-enabled documents (and shows up in
-    /list_kb_docs).  The raw dot-dir files inside each session folder are
-    hidden from the indexer.
+    Lives inside the knowledge base by default so each session's combined
+    ``notes.md`` is automatically part of the RAG-enabled documents (and
+    shows up in /list_kb_docs).  The raw dot-dir files inside each session
+    folder are hidden from the indexer.  Override with ``SESSIONS_NOTES_DIR``
+    to point inside an Obsidian campaign vault (#19, docs/obsidian-vault.md).
     """
-    from config.settings import KB_PATH
-    return pathlib.Path(KB_PATH) / "session_notes"
+    from config.settings import SESSIONS_NOTES_DIR
+    return pathlib.Path(SESSIONS_NOTES_DIR)
 
 
 # ── Persistence ──────────────────────────────────────────────────────────

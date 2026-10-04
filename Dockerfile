@@ -14,9 +14,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # libopus0 — discord.py voice loads it via ctypes at runtime (DAVE E2EE).
 # curl — reachability probes for INFER_URL during setup.
+# git — Obsidian vault sync (clone/pull/commit/push of KB vaults, #19).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libopus0 \
         curl \
+        git \
     && rm -rf /var/lib/apt/lists/*
 
 # CPU-only torch first: keeps the image small (skips multi-GB CUDA wheels) and

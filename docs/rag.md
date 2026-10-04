@@ -166,9 +166,22 @@ The knowledge base accepts and meaningfully reads/indexes:
 
 These are the expected file types for KB use. Storage itself does not strictly enforce only these extensions — uploaded files use MIME-based inference and fall back to `.txt` when the extension or MIME type is unknown — but files whose extensions are not in the set above are generally not read or indexed by the same path.
 
+## Obsidian vault sync (#19)
+
+Vaults kept as (private) GitHub repos are mirrored into the KB and kept in step
+by a background task (`bot_core/vault_sync.py`): each vault in `OBSIDIAN_VAULTS`
+is cloned to `<KB_PATH>/<vault-name>/`, pulled on a fixed interval, and changed
+files are re-indexed via the same incremental path as `/sync_kb`. The optional
+designated **campaign vault** (`OBSIDIAN_CAMPAIGN_VAULT`) is two-way — session
+notes live inside it (via `SESSIONS_NOTES_DIR`) and the bot commits + pushes
+them, so bot-generated session logs appear in Obsidian on every machine. Dot-dirs
+(`.git/`, `.obsidian/`) are skipped by the indexer as usual; non-text attachments
+are never indexed. Full setup guide: `docs/obsidian-vault.md`.
+
 ## Session notes — one RAG document per session (#11)
 
-Each session folder under `<KB_PATH>/session_notes/<date>_<idx>[_<name>]/` holds
+Each session folder under `<SESSIONS_NOTES_DIR>/<date>_<idx>[_<name>]/`
+(default `<KB_PATH>/session_notes/`; see Obsidian vault sync above) holds
 exactly ONE RAG-indexed file — `notes.md` — which contains:
 
 - the timestamped session notes (`## Notes`),
@@ -256,3 +269,7 @@ never attached this way (its content is already in the channel history).
 | `RAG_DENSE_TOP_K` | Candidate pool size for the dense leg before RRF fusion (default `48`; larger = better recall for hard lookups) |
 | `RAG_LEXICAL_TOP_K` | Candidate pool size for the BM25 leg before RRF fusion (default `48`) |
 | `RAG_EMBED_BATCH_SIZE` | Docs per `/embeddings` call during index builds (default `8`; the backend pads each batch to its longest sequence, so keep it modest for long/mixed content — raise only for short uniform chunks after measuring) |
+| `OBSIDIAN_VAULTS` | Semicolon-separated `name=git_url` Obsidian vaults to mirror into `<KB_PATH>/<name>/` (empty = off); see `docs/obsidian-vault.md` | *(empty)* |
+| `OBSIDIAN_CAMPAIGN_VAULT` | Name of the two-way vault holding session notes (bot commits + pushes there) | *(empty — all one-way)* |
+| `OBSIDIAN_VAULT_PULL_INTERVAL` | Vault pull/commit period in seconds (`0` = startup pass only) | `300` |
+| `SESSIONS_NOTES_DIR` | Where per-session folders live (point inside the campaign vault for two-way sync) | `<KB_PATH>/session_notes` |
