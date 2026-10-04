@@ -7,6 +7,7 @@ import json
 import logging
 import mimetypes
 import pathlib
+import re
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -167,11 +168,21 @@ def validate_upload(
     }
 
 
+#: A leading segment is treated as a UUID prefix ONLY when it is a full
+#: 32-hex uuid4.hex (or dashed 8-4-4-4-12). The old check accepted any
+#: all-hex word, so real filenames lost their first word:
+#: "cafe_notes.md" -> "notes.md", "add_this.md" -> "this.md" ("add", "cafe",
+#: "bad", "face", "dead"... are all valid hex).
+_UUID_PREFIX_RE = re.compile(
+    r"(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+)
+
+
 def _sanitize_filename(name: str) -> str:
     """Reduce a filename to safe characters, stripping UUID prefix if present."""
-    # Strip leading hex segment (UUID) and underscore separator
+    # Strip leading UUID segment and underscore separator (see _UUID_PREFIX_RE)
     parts = name.split("_", 1)
-    if len(parts) == 2 and all(c in "0123456789abcdef" for c in parts[0]):
+    if len(parts) == 2 and _UUID_PREFIX_RE.match(parts[0]):
         name = parts[1]
 
     safe = "".join(c for c in name if c.isalnum() or c in "._- ")
