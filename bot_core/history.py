@@ -72,6 +72,21 @@ def _save_to_disk() -> None:
             log.warning("Failed to persist history to %s: %s", path, e)
 
 
+def _parse_id_key(raw: str) -> int | None:
+    """Inverse of the ``str(g)``/``str(c)`` keys written by ``_save_to_disk``.
+
+    DM turns have ``guild_id=None`` (and theoretically a ``None`` channel),
+    which persist as the literal string ``"None"``. The old loader called
+    ``int("None")``, raised, and — caught only by the outer handler — aborted
+    the WHOLE load: remaining channels AND the entire active-character map
+    were silently dropped. This parses every key shape symmetrically with
+    how it was written.
+    """
+    if raw == "None":
+        return None
+    return int(raw)
+
+
 def load_persisted() -> None:
     """Load persisted state (if any) into memory. Safe to call repeatedly."""
     global _persist_warned
@@ -83,16 +98,36 @@ def load_persisted() -> None:
     try:
         raw = path.read_text(encoding="utf-8")
         payload = json.loads(raw)
-        for g_str, ch in payload.get("history", {}).items():
-            for c_str, msgs in ch.items():
-                _chat_history.setdefault(int(g_str), {})[int(c_str)] = msgs
-        for key, char_key in payload.get("active_characters", {}).items():
-            g_str, c_str = key.rsplit(":", 1)
-            _active_characters[(int(g_str), int(c_str))] = char_key
-        log.info("Loaded persisted history from %s", path)
     except Exception as e:
         _persist_warned = True
         log.warning("Could not load persisted history from %s: %s", path, e)
+        return
+    loaded_channels = 0
+    # Per-entry guards: one malformed key must never abort the rest of the
+    # load (see _parse_id_key docstring for the historical bug).
+    for g_str, ch in payload.get("history", {}).items():
+        try:
+            g, c = _parse_id_key(g_str), None
+        except ValueError:
+            log.warning("Skipping history entry with bad guild key %r", g_str)
+            continue
+        for c_str, msgs in ch.items():
+            try:
+                c = _parse_id_key(c_str)
+            except ValueError:
+                log.warning("Skipping history entry with bad channel key %r", c_str)
+                continue
+            _chat_history.setdefault(g, {})[c] = msgs
+            loaded_channels += 1
+    for key, char_key in payload.get("active_characters", {}).items():
+        try:
+            g_str, c_str = key.rsplit(":", 1)
+            g, c = _parse_id_key(g_str), _parse_id_key(c_str)
+        except (ValueError):
+            log.warning("Skipping active-character entry with bad key %r", key)
+            continue
+        _active_characters[(g, c)] = char_key
+    log.info("Loaded persisted history from %s (%d channel(s))", path, loaded_channels)
 
 
 # --- Public API (unchanged signatures) -------------------------------------
