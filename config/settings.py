@@ -308,7 +308,11 @@ def effective_embedding_model() -> str:
 RERANK_ENABLED: bool = _safe_bool(os.getenv("RERANK_ENABLED"), False)
 RERANK_MODEL: str = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
 # Number of candidate chunks handed to the reranker (was hardcoded 6*4=24).
-RERANK_TOP_K: int = _safe_int(os.getenv("RAG_VECTOR_TOP_K"), 15)
+# The correctly-named env var RERANK_TOP_K wins; the historical (misnamed)
+# RAG_VECTOR_TOP_K stays supported as an alias for existing deployments.
+RERANK_TOP_K: int = _safe_int(
+    os.getenv("RERANK_TOP_K", os.getenv("RAG_VECTOR_TOP_K")), 15
+)
 RERANK_TIMEOUT_SECONDS: int = _safe_int(os.getenv("RERANK_TIMEOUT_SECONDS"), 8)
 # Enable the hybrid lexical (BM25) leg that is RRF-fused with dense vectors.
 # On by default (part of the high-quality pipeline); set to 0 to use dense-only.
