@@ -249,6 +249,11 @@ class KBIndexStore:
         self.model_name = model_name
 
         self._db_path = self.persist_dir / "vector_index.db"
+        # When True, _build_fresh must NOT reuse on-disk cached embeddings
+        # (force-rebuild / stale-identity builds). The live cache file is left
+        # untouched while the new index is built and only replaced afterwards
+        # via the atomic temp-file swap in _persist_index_to_db.
+        self._ignore_cache = False
         self._index: KBVectorIndex | None = None
         # Index WRITES (build / update / sync) use a dedicated embedder that can run
         # on the GPU backend for speed while QUERIES stay on local CPU. Both must be
@@ -332,18 +337,29 @@ class KBIndexStore:
             return self._index
 
         if force_rebuild or not self._db_path.exists():
-            if force_rebuild:
-                # Drop the persisted cache so nothing stale is reused.
-                if self._db_path.exists():
-                    self._db_path.unlink()
-            self._index = await self._build_fresh()
+            # Rebuild WITHOUT deleting the persisted cache up front. The old
+            # code unlinked vector_index.db before building: a rebuild that
+            # then failed (embedding backend down, crash) left NO on-disk
+            # cache at all — the next start fell back to keyword-only retrieval
+            # until a successful rebuild. Instead we build with the cache
+            # ignored and publish via _persist_index_to_db's atomic swap.
+            self._ignore_cache = True
+            try:
+                self._index = await self._build_fresh()
+            finally:
+                self._ignore_cache = False
         elif not await asyncio.to_thread(self._cache_identity_ok):
             logger.warning(
                 "Vector cache was built for a different schema or embedding model "
                 "— rebuilding (%s)", self._db_path,
             )
-            self._db_path.unlink(missing_ok=True)
-            self._index = await self._build_fresh()
+            # Same as above: never destroy the (unusable but recoverable) old
+            # cache before the new one is ready to replace it atomically.
+            self._ignore_cache = True
+            try:
+                self._index = await self._build_fresh()
+            finally:
+                self._ignore_cache = False
         else:
             self._index = await self._load_incremental()
 
@@ -589,7 +605,12 @@ class KBIndexStore:
             await self._save_empty_cache()
             return idx
 
-        cached_rows = await self._read_cache_rows_async() if self._db_path.exists() else {}
+        # _ignore_cache: rebuilds must not resurrect vectors they were told to
+        # ignore (force-rebuild, or a cache built for another model/schema).
+        cached_rows = (
+            {} if self._ignore_cache or not self._db_path.exists()
+            else await self._read_cache_rows_async()
+        )
         to_embed_files: list[pathlib.Path] = []
 
         entries: list[tuple[str, str, str]] = []   # (display_name, content, source_file)
@@ -630,7 +651,12 @@ class KBIndexStore:
 
         if not embeddings:
             logger.error("Index build produced no chunks for '%s' — check embedding backend connectivity", self.kb_path)
-            await self._save_empty_cache()
+            # A rebuild that embedded NOTHING (backend down) must NOT clobber
+            # the existing on-disk cache with an empty one — keep it so the
+            # next start still serves cached vectors. Only persist the empty
+            # cache when there was nothing to embed (genuinely empty KB).
+            if not (self._ignore_cache and to_embed_files):
+                await self._save_empty_cache()
             return KBVectorIndex()
 
         aligned_hashes = [file_hash_by_key.get(e[2]) for e in entries]  # P2 #19
