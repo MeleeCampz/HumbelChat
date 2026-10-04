@@ -142,7 +142,7 @@ AI_RETRY_AFTER_FALLBACK_S: int = _safe_int(os.getenv("AI_RETRY_AFTER_FALLBACK_S"
 # in characters.json is still honoured when explicitly set.
 MAX_TOKENS: int = _safe_int(os.getenv("MAX_TOKENS"), 8000)
 MAX_TOKENS_HARD_CAP: int = _safe_int(os.getenv("MAX_TOKENS_HARD_CAP"), 16384)
-#: Output cap for summary calls (/summarize, /end_session overview).
+#: Output cap for summary calls (/summarize, /end_session recap).
 #: 0 (default) = do NOT send max_tokens → model maximum output length.
 #: Set a positive value to cap those calls.
 SUMMARY_CALL_MAX_TOKENS: int = _safe_int(os.getenv("SUMMARY_CALL_MAX_TOKENS"), 0)
@@ -153,48 +153,14 @@ FALLBACK_MODELS: list[str] = [
     m.strip() for m in os.getenv("FALLBACK_MODELS", "").split(",") if m.strip()
 ]
 
-# ── Session overview prompt (customizable) ───────────────────────────────
-#: Default system prompt used by /end_session to write the session overview.
-#: Strict by design: it must (1) only use THIS session's own sources, (2) never
-#: invent or pull in events from other sessions, and (3) itself determine the
-#: language of the provided sources and write the overview in that language
+# ── Session recap prompt (customizable) ──────────────────────────────────
+#: Default system prompt used by /end_session to write the session recap — a
+#: very brief digest (what happened + suggested next steps) that is stored
+#: with the session and delivered when the NEXT session starts.  Strict by
+#: design: it must (1) only use THIS session's own sources, (2) never invent
+#: or pull in events from other sessions, and (3) itself determine the
+#: language of the provided sources and write the recap in that language
 #: (no hard-coded language detection on the bot side).
-#: The prompt is written in English and is language-neutral by design: it
-#: instructs the model to write the overview in the language of the sources
-#: (German or English), so the bot works for sessions in either language.
-DEFAULT_SESSION_SUMMARY_PROMPT: str = (
-    "You are writing the closing overview for exactly ONE session.\n"
-    "The user message contains the ONLY sources for this session, in this order:\n"
-    "  1) Session files (attachments/ and transcripts/) — the complete, verbatim session record.\n"
-    "  2) Session notes — short, timestamped bullet points created during the session.\n"
-    "  3) Last chat — the last few messages in the channel where the session was ended.\n"
-    "Write a concise overview (max. ~250 words) with:\n"
-    "  - What happened in THIS session, in the order it happened, as a short bullet list.\n"
-    "  - Important points / decisions.\n"
-    "  - Open points / consequences for the NEXT session.\n"
-    "Use Markdown bullet points. Return ONLY the overview.\n\n"
-    "STRICT RULES:\n"
-    "- Use ONLY the sources in the user message. You know nothing about this session "
-    "from any other source. Add NOTHING, infer nothing, and do not recall any events, "
-    "names or places that do not appear in the provided sources.\n"
-    "- The session files are the authoritative, detailed record; the notes and the "
-    "last chat serve only as a supplement. On conflict, the session files take precedence.\n"
-    "- Never describe events from other/previous sessions and never fill gaps with "
-    "generic filler or action from the larger campaign frame. If a source names a "
-    "hook for the next session, list it as an open point — but do not narrate what "
-    "happened before or after.\n"
-    "- If the sources are thin (few notes, short chat), keep the overview short and "
-    "factual; never pad it with invented details.\n"
-    "- LANGUAGE: Determine the language of the provided sources yourself and write the ENTIRE "
-    "overview in that language (German sources → German overview, English sources → "
-    "English overview). Do not mix languages and do not translate proper names (characters, places, items).\n"
-    "- Keep proper names, numbers, amounts and item names exactly as they appear in the sources."
-)
-
-#: Override for SESSION_SUMMARY_PROMPT — set in .env to customize how the
-#: /end_session AI overview is written. Empty = use DEFAULT_SESSION_SUMMARY_PROMPT.
-SESSION_SUMMARY_PROMPT: str = os.getenv("SESSION_SUMMARY_PROMPT", "")
-
 DEFAULT_SESSION_MERGE_PROMPT: str = (
     "You are merging the individual player logs of exactly ONE session into a single, "
     "complete, well-formatted session log.\n"
@@ -228,6 +194,41 @@ DEFAULT_SESSION_MERGE_PROMPT: str = (
 #: Override for SESSION_MERGE_PROMPT — set in .env to customize how the
 #: /end_session AI session-log merge is written. Empty = use DEFAULT_SESSION_MERGE_PROMPT.
 SESSION_MERGE_PROMPT: str = os.getenv("SESSION_MERGE_PROMPT", "")
+
+DEFAULT_SESSION_RECAP_PROMPT: str = (
+    "You are writing a brief recap of exactly ONE session. It is stored with the "
+    "session and shown when the user starts the NEXT session.\n"
+    "The user message contains the ONLY sources for this session:\n"
+    "  1) Session files (attachments/ and transcripts/) — the complete, verbatim session record.\n"
+    "  2) Session notes — short, timestamped bullet points created during the session.\n"
+    "Write a brief recap (max. ~150 words) with exactly two parts:\n"
+    "  - **What happened:** 6–8 SHORT bullets in order — one event per bullet, each at most "
+    "one line; pick the most important events, no scene-setting or background.\n"
+    "  - **Next steps:** 1–3 short bullets — open points / hooks / consequences for the "
+    "next session (only if the sources explicitly support them; otherwise write a single "
+    "bullet saying there are no open points).\n"
+    "Use Markdown. Return ONLY the recap.\n\n"
+    "STRICT RULES:\n"
+    "- Use ONLY the sources in the user message. Add NOTHING, infer nothing, and do not "
+    "recall any events, names or places that do not appear in them.\n"
+    "- The session files are authoritative; the notes serve only as a supplement. On "
+    "conflict, the session files take precedence.\n"
+    "- Never narrate what happened before this session and never fill gaps with generic "
+    "filler from the larger campaign frame. If the sources are thin, keep the recap "
+    "short and factual; do not pad it.\n"
+    "- Next steps must be open points the sources themselves name (an announced task, a "
+    "threat, an unresolved thread) — never speculation about what characters know, think "
+    "or will do.\n"
+    "- LANGUAGE: Determine the language of the provided sources yourself and write the "
+    "ENTIRE recap in that language (German sources → German recap, English sources → "
+    "English recap). Do not mix languages and do not translate proper names (characters, "
+    "places, items).\n"
+    "- Keep proper names, numbers, amounts and item names exactly as they appear in the sources."
+)
+
+#: Override for SESSION_RECAP_PROMPT — set in .env to customize how the
+#: /end_session recap of the session is written. Empty = use DEFAULT_SESSION_RECAP_PROMPT.
+SESSION_RECAP_PROMPT: str = os.getenv("SESSION_RECAP_PROMPT", "")
 
 # ════════════════════════════════════
 #  BOT BEHAVIOUR

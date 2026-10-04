@@ -179,7 +179,7 @@ exactly ONE RAG-indexed file — `notes.md` — which contains:
   session's RAG content: near-identical uploads no longer exist as separate
   retrievable chunks, and `RAG_MAX_CHUNKS_PER_FILE` caps the whole session at
   a few chunks instead of a few × N files,
-- the AI overview written when the session ended.
+- the AI recap written when the session ended.
 
 If the merge is impossible (AI backend down, stale auto-end without AI,
 legacy sessions) the file falls back to a mechanical `## Documents` section
@@ -189,7 +189,7 @@ via `SESSION_MERGE_PROMPT` in `.env`.
 
 The raw uploads/transcripts are kept on disk in **hidden dot-dirs**
 (`.attachments/`, `.transcripts/`) as the verbatim record and as the source
-for both the end-of-session overview and the log merge. The indexer skips
+for both the end-of-session recap and the log merge. The indexer skips
 dot-dirs and dot-files, so they can never be re-indexed by `/sync_kb` or a
 startup rebuild — which is what previously let near-identical session uploads
 get attached multiple times by retrieval.
@@ -208,21 +208,21 @@ re-parsing.
 
 Continuity across sessions does not rely on RAG at all: when a session has
 ended, every AI turn automatically gets a `[Previous session — <name> …]`
-block (before the RAG block) containing **only the session's overview** —
-a brief orientation, deliberately nothing more. Detailed session content is
+block (before the RAG block) containing **only the session's recap** —
+a very brief orientation (what happened + next steps), deliberately nothing more. Detailed session content is
 retrieved *on demand* by RAG from the indexed `notes.md` (one file per
 session), so the proactive block stays small and the two mechanisms do not
 duplicate each other. The block is a pure function of the ended session's
 data — no per-turn timestamps or randomness — so it renders **byte-identical
 on every turn** (stable context, unlike query-dependent RAG chunks). If the
-overview alone exceeds the char budget it is truncated from the tail. A
-session without a stored overview produces no block. An active session is
+recap alone exceeds the char budget it is truncated from the tail. A
+session without a stored recap produces no block. An active session is
 never attached this way (its content is already in the channel history).
 
 | Variable | Purpose |
 |---|---|
 | `LAST_SESSION_CONTEXT_ENABLED` | Attach the last-session block at all (`1`/`0`, default on) |
-| `LAST_SESSION_MAX_CHARS` | Char budget for the block (default `4000`; keep it small — overview only) |
+| `LAST_SESSION_MAX_CHARS` | Char budget for the block (default `4000`; keep it small — recap only) |
 | `SESSION_MERGE_PROMPT` | Override the AI session-log merge prompt at `/end_session` (empty = built-in default) |
 
 ## Commands

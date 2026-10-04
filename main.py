@@ -475,7 +475,7 @@ async def start_session_command(interaction: discord.Interaction, name: str | No
     await handle_start_session(interaction, name=name)
 
 
-@bot.tree.command(name="end_session", description="End the current session and write its overview.")
+@bot.tree.command(name="end_session", description="End the current session and write its recap (what happened + next steps).")
 @app_commands.describe(name="Optional new name for the session (renames it in the notes file)")
 async def end_session_command(interaction: discord.Interaction, name: str | None = None) -> None:
     """End session — delegated to commands/session_commands.py."""
