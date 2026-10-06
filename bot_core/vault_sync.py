@@ -40,10 +40,12 @@ _BOT_GIT_EMAIL = "humbelchat-bot@localhost"
 
 
 def _run_git(args: list[str], cwd: pathlib.Path) -> tuple[int, str]:
-    """Run ``git <args>`` in *cwd*; return ``(returncode, stderr_tail)``.
+    """Run ``git <args>`` in *cwd*; return ``(returncode, output)``.
 
-    Synchronous — always call via :func:`asyncio.to_thread`.  Timeouts and
-    missing git binaries are reported as non-zero returns, never raised.
+    *output* is **stdout** on success (branch names, HEAD shas, status lines)
+    and the **stderr tail** on failure.  Synchronous — always call via
+    :func:`asyncio.to_thread`.  Timeouts and missing git binaries are reported
+    as non-zero returns, never raised.
     """
     try:
         proc = subprocess.run(
@@ -57,7 +59,9 @@ def _run_git(args: list[str], cwd: pathlib.Path) -> tuple[int, str]:
         return 1, f"git {' '.join(args)} timed out after {GIT_TIMEOUT:.0f}s"
     except (OSError, FileNotFoundError) as exc:
         return 1, f"git unavailable: {exc}"
-    stderr = (proc.stderr or "").strip()
+    if proc.returncode == 0:
+        return 0, (proc.stdout or "").strip()
+    stderr = (proc.stderr or "").strip() or (proc.stdout or "").strip()
     if len(stderr) > 500:
         stderr = "…" + stderr[-500:]
     return proc.returncode, stderr
