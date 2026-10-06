@@ -151,20 +151,43 @@ async def mirror_pull(dir_path: pathlib.Path) -> tuple[bool, bool, str | None]:
     return True, changed, None
 
 
-async def campaign_sync(dir_path: pathlib.Path) -> tuple[bool, bool, str | None]:
+def sessions_scope(vault_dir: pathlib.Path, sessions_dir: pathlib.Path) -> str | None:
+    """Relative git pathspec of *sessions_dir* inside *vault_dir*, or ``None``.
+
+    Used to scope the campaign vault's commit to the session-notes subpath so
+    bot commits only ever contain session data.  Returns ``"."`` when the two
+    are the same directory; ``None`` when the sessions dir is outside the
+    vault (misconfiguration → caller falls back to whole-tree commits).
+    """
+    try:
+        rel = pathlib.Path(sessions_dir).resolve().relative_to(
+            pathlib.Path(vault_dir).resolve()
+        )
+    except ValueError:
+        return None
+    return rel.as_posix() or "."
+
+
+async def campaign_sync(
+    dir_path: pathlib.Path, sessions_relpath: str | None = None
+) -> tuple[bool, bool, str | None]:
     """Two-way (campaign vault) tick: pull remote edits, push local commits.
 
     Order per tick:
       1. ``fetch`` + ``pull --rebase --autostash`` — bring in the user's
          Obsidian edits from other machines.
       2. If the worktree is dirty (the bot wrote session notes since the last
-         tick) → ``add -A`` + commit + push.  A rejected push gets one retry
-         after a fresh rebase; a conflicting rebase is aborted, local changes
-         are KEPT, and the tick ends with a warning (retried next tick).
+         tick) → ``add -A`` + commit + push.  When *sessions_relpath* is given
+         the status check and ``add`` are scoped to that subpath, so local
+         changes anywhere else in the vault are never committed by the bot.
+         A rejected push gets one retry after a fresh rebase; a conflicting
+         rebase is aborted, local changes are KEPT, and the tick ends with a
+         warning (retried next tick).
 
     Returns ``(ok, index_changed, error)`` — *index_changed* covers both
     pulled remote changes and locally committed notes.
     """
+    scope_args = ["--", sessions_relpath] if sessions_relpath else []
     rc, branch = await _git(["rev-parse", "--abbrev-ref", "HEAD"], dir_path)
     if rc != 0 or not branch.strip():
         return False, False, f"cannot determine branch: {branch}"
@@ -191,13 +214,13 @@ async def campaign_sync(dir_path: pathlib.Path) -> tuple[bool, bool, str | None]
         return False, False, f"pull conflict (local changes kept): {err}"
 
     # 2. Commit + push anything the bot wrote since the last tick.
-    rc, status = await _git(["status", "--porcelain"], dir_path)
+    rc, status = await _git(["status", "--porcelain", *scope_args], dir_path)
     if rc != 0:
         return False, False, f"status failed: {status}"
     pushed = False
     if status.strip():
         for args in (
-            ["add", "-A"],
+            ["add", "-A", *scope_args],
             ["commit", "--quiet", "-m", "session notes update"],
         ):
             rc, err = await _git(args, dir_path)
@@ -257,6 +280,19 @@ async def vault_sync_loop() -> None:
         )
         campaign = ""
 
+    # Scope the campaign vault's commits to the session-notes subpath so bot
+    # commits only ever contain session data (None = whole-tree fallback).
+    scope: str | None = None
+    if campaign:
+        from config.settings import SESSIONS_NOTES_DIR
+        scope = sessions_scope(pathlib.Path(KB_PATH) / campaign, pathlib.Path(SESSIONS_NOTES_DIR))
+        if scope is None:
+            log.warning(
+                "Vault sync: SESSIONS_NOTES_DIR (%s) is outside the campaign vault "
+                "(%s) — committing whole-tree changes instead",
+                SESSIONS_NOTES_DIR, KB_PATH / campaign,
+            )
+
     interval = OBSIDIAN_VAULT_PULL_INTERVAL
     log.info(
         "Vault sync: started (%d vault(s)%s, every %ss)",
@@ -274,7 +310,7 @@ async def vault_sync_loop() -> None:
                 log.warning("Vault sync: %s: %s (retrying next tick)", name, err)
                 continue
             if name == campaign:
-                ok, changed, err = await campaign_sync(vdir)
+                ok, changed, err = await campaign_sync(vdir, sessions_relpath=scope)
             else:
                 ok, changed, err = await mirror_pull(vdir)
             if not ok and err:
@@ -321,6 +357,7 @@ __all__ = [
     "parse_vaults",
     "ensure_cloned",
     "mirror_pull",
+    "sessions_scope",
     "campaign_sync",
     "vault_sync_loop",
     "start_vault_sync",

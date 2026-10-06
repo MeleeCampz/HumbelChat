@@ -29,6 +29,7 @@ class FakeGit:
         self.fail_fetch = False
         self.conflict_pull = False           # one-shot pull rebase conflict
         self.push_reject_once = False        # one-shot non-fast-forward push
+        self.dirty_outside: set[str] = set()  # uncommitted changes OUTSIDE the scope
 
     def __call__(self, args: list[str], cwd: pathlib.Path) -> tuple[int, str]:
         key = str(cwd)
@@ -57,7 +58,12 @@ class FakeGit:
         if cmd == "rebase":  # --abort
             return (0, "")
         if cmd == "status":
-            return (0, " M session_notes/x/notes.md\n" if key in self.dirty else "")
+            scoped = "--" in args
+            dirty = (
+                (key in self.dirty or key in self.dirty_outside) if not scoped
+                else key in self.dirty
+            )
+            return (0, " M session_notes/x/notes.md\n" if dirty else "")
         if cmd == "add":
             return (0, "")
         if cmd == "commit":
@@ -235,6 +241,57 @@ class TestCampaignSync:
         assert ok is False and changed is True  # local commit kept → re-index still needed
         assert "conflict" in (err or "")
         assert fake_git.ran("rebase", "--abort")
+
+
+# ──────────────────────── sessions_scope + scoped commits ────────────────────────
+
+class TestSessionsScope:
+    def test_inside_returns_relative_posix(self, tmp_path):
+        vault = tmp_path / "kb" / "humblewood"
+        sessions = vault / "HumbleWood" / "SessionLogs"
+        assert vault_sync.sessions_scope(vault, sessions) == "HumbleWood/SessionLogs"
+
+    def test_same_dir_returns_dot(self, tmp_path):
+        vault = tmp_path / "kb" / "v"
+        assert vault_sync.sessions_scope(vault, vault) == "."
+
+    def test_outside_returns_none(self, tmp_path):
+        vault = tmp_path / "kb" / "v"
+        other = tmp_path / "elsewhere"
+        assert vault_sync.sessions_scope(vault, other) is None
+
+
+class TestScopedCommits:
+    async def test_dirty_outside_scope_not_committed(self, tmp_path, fake_git):
+        vdir = make_checkout(tmp_path, "v", head="a1", fake_git=fake_git)
+        fake_git.remote_head = "a1"
+        fake_git.dirty_outside.add(str(vdir))  # e.g. manual edit in PlayerHandbook/
+        ok, changed, err = await vault_sync.campaign_sync(
+            vdir, sessions_relpath="HumbleWood/SessionLogs"
+        )
+        assert (ok, changed, err) == (True, False, None)
+        assert not fake_git.ran("commit")
+        # status + (had it been dirty) add must carry the scope pathspec
+        assert any(
+            c[0] == "status" and c[-1] == "HumbleWood/SessionLogs" for c, _ in fake_git.calls
+        )
+
+    async def test_scoped_add_used_when_dirty(self, tmp_path, fake_git):
+        vdir = make_checkout(tmp_path, "v", head="a1", fake_git=fake_git)
+        fake_git.dirty.add(str(vdir))
+        ok, changed, err = await vault_sync.campaign_sync(
+            vdir, sessions_relpath="HumbleWood/SessionLogs"
+        )
+        assert (ok, changed, err) == (True, True, None)
+        adds = [c for c, _ in fake_git.calls if c[0] == "add"]
+        assert adds == [["add", "-A", "--", "HumbleWood/SessionLogs"]]
+
+    async def test_unscoped_fallback_commits_anything(self, tmp_path, fake_git):
+        vdir = make_checkout(tmp_path, "v", head="a1", fake_git=fake_git)
+        fake_git.dirty_outside.add(str(vdir))
+        ok, changed, err = await vault_sync.campaign_sync(vdir)  # no scope
+        assert (ok, changed, err) == (True, True, None)
+        assert fake_git.ran("commit")
 
 
 # ──────────────────────── start / loop ────────────────────────
