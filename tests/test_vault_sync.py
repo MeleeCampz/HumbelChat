@@ -104,6 +104,48 @@ def make_checkout(base: pathlib.Path, name: str, head: str = "h1",
 
 # ──────────────────────── parse_vaults ────────────────────────
 
+class TestRunGitRealOutput:
+    """Regression (real git): ``_git`` must return STDOUT on success.
+
+    The original implementation returned stderr, which is empty for successful
+    commands — so branch/HEAD/status reads all came back blank and every sync
+    tick failed with 'cannot determine branch'.
+    """
+
+    async def _init(self, tmp_path: pathlib.Path) -> None:
+        rc, out = await vault_sync._git(["init", "-q"], tmp_path)
+        assert rc == 0, out
+        rc, out = await vault_sync._git(
+            ["-c", "user.name=t", "-c", "user.email=t@t.l",
+             "commit", "--allow-empty", "-q", "-m", "x"],
+            tmp_path,
+        )
+        assert rc == 0, out
+
+    async def test_success_returns_stdout(self, tmp_path):
+        await self._init(tmp_path)
+        rc, branch = await vault_sync._git(
+            ["rev-parse", "--abbrev-ref", "HEAD"], tmp_path
+        )
+        assert rc == 0
+        assert branch in ("main", "master")  # the point: non-empty stdout
+
+    async def test_status_porcelain_shows_dirty(self, tmp_path):
+        await self._init(tmp_path)
+        (tmp_path / "note.md").write_text("hello")
+        rc, status = await vault_sync._git(["status", "--porcelain"], tmp_path)
+        assert rc == 0
+        assert "?? note.md" in status
+
+    async def test_failure_returns_error_text(self, tmp_path):
+        await self._init(tmp_path)
+        rc, out = await vault_sync._git(
+            ["rev-parse", "refs/heads/does-not-exist"], tmp_path
+        )
+        assert rc != 0
+        assert out.strip()  # error message must be surfaced, not blank
+
+
 class TestParseVaults:
     def test_multiple_entries(self):
         got = vault_sync.parse_vaults("humblewood=https://a.git; dnd_handbook=https://b.git")
