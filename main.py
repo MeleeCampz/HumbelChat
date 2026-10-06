@@ -496,7 +496,7 @@ async def remind_next_session_command(interaction: discord.Interaction, message:
 
 @bot.tree.command(
     name="session_notes",
-    description="Add a note or a .txt/.md document to the current session. Use /session_info to see what a session contains.",
+    description="Add a note or .txt/.md document to the current session.",
 )
 @app_commands.describe(note="The note text (free text)")
 @app_commands.describe(file="A .txt or .md file to add as a whole document")
@@ -512,7 +512,7 @@ async def session_notes_command(
 
 @bot.tree.command(
     name="session_info",
-    description="Show info about the current session — or the last ended one if none is active (notes, uploaded documents, transcripts).",
+    description="Show the current session's notes, uploads and transcripts.",
 )
 async def session_info_command(interaction: discord.Interaction) -> None:
     """Session info — delegated to commands/session_commands.py."""
