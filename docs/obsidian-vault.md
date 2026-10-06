@@ -90,12 +90,16 @@ git. No tokens needed client-side; tokens are only for the **bot** (below).
 Tokens were created in step B2. Now put everything in the bot's `.env`:
 
 ```dotenv
-# Semicolon-separated name=git_url entries (feature is OFF when empty)
-OBSIDIAN_VAULTS=humblewood=https://user:TOKEN@github.com/me/humblewood.git;dnd_handbook=https://user:TOKEN@github.com/me/dnd_handbook.git
-# The two-way vault that holds session notes (one of the names above; empty = all one-way)
+# Semicolon-separated name=git_url entries (feature is OFF when empty).
+# One entry per REPO — a repo may contain several vault/area folders
+# (e.g. HumblewoodObsidianVault holds DnDRules/ + HumbleWood/); everything
+# under the clone is indexed.
+OBSIDIAN_VAULTS=humblewood=https://MeleeCampz:TOKEN@github.com/MeleeCampz/HumblewoodObsidianVault.git
+# The two-way repo that holds session notes (one of the names above; empty = all one-way)
 OBSIDIAN_CAMPAIGN_VAULT=humblewood
-# Point session notes into the campaign vault (Docker path — see gotchas in docs/docker.md)
-SESSIONS_NOTES_DIR=/app/data/knowledge/humblewood/session_notes
+# Point session notes into the campaign vault (Docker path — compose pins KB_PATH
+# to /app/data/knowledge; for local dev via botctl.sh use <repo>/data/knowledge/…)
+SESSIONS_NOTES_DIR=/app/data/knowledge/humblewood/HumbleWood/SessionLogs
 # Pull/commit period in seconds (default 300; 0 = one startup pass only)
 OBSIDIAN_VAULT_PULL_INTERVAL=300
 ```
@@ -103,20 +107,22 @@ OBSIDIAN_VAULT_PULL_INTERVAL=300
 Then recreate the container: `docker compose up -d` (config is read at import —
 a plain `restart` is not enough for `.env` changes).
 
-### D. One-time migration of existing sessions
+### D. One-time migration of existing KB content
 
-Existing session folders live in `data/knowledge/session_notes/`. Move them into
-the campaign vault once, on the bot host:
+If the vault replaces folders that previously lived directly in
+`data/knowledge/` (rules dumps, worldbuilding notes, session notes):
 
-```bash
-mkdir -p data/knowledge/humblewood/session_notes
-mv data/knowledge/session_notes/* data/knowledge/humblewood/session_notes/
-rmdir data/knowledge/session_notes
-```
+1. Move the content into the repo (commit from Obsidian or on the bot host).
+2. **Delete the old folders from `data/knowledge/`** — move, never copy.
+   Leftover copies get indexed twice and retrieval returns duplicates.
+3. Point `SESSIONS_NOTES_DIR` at the session folder inside the clone (above);
+   the old `data/knowledge/session_notes/` goes away with it.
 
-The next sync tick picks the moved folders up as added files (the index
-self-heals via the normal changed-file path). If you use Obsidian, alternatively
-commit them from inside the vault and let the bot pull.
+The first sync tick picks everything up as added files (the index self-heals
+via the normal changed-file path). Done for this deployment 2026-10-07:
+`HumblewoodObsidianVault` (DnDRules + HumbleWood incl. SessionLogs) replaced
+the old `DnD5_5/`, `HumbleWood_GeneralInformation/`, `Trixy/` and
+`session_notes/` folders.
 
 ## What to expect
 
@@ -171,30 +177,23 @@ Behavioral notes:
   appear in Obsidian) is one `OBSIDIAN_VAULT_PULL_INTERVAL` (default 5 min).
 - The bot commits in the campaign vault as `HumbelChat (bot) <humbelchat-bot@localhost>`.
 
-## Outstanding questions (need your input)
+## Setup status (2026-10-07)
 
-Documented 2026-10-05 while you were away — answer these to finish setup:
-
-1. **Existing vault?** Do you already have an Obsidian vault with campaign notes
-   somewhere? If yes: where, and does it contain the player-handbook-style
-   reference material that should be split into its own one-way vault?
-2. **Repo names & layout.** Proposed: `humblewood` (campaign, two-way) +
-   `dnd_handbook` (reference, one-way). OK, or different names/more vaults
-   (e.g. a per-character vault)?
-3. **Who creates the GitHub repos?** I can create them from here via `gh`
-   (sandbox git auth works) once you confirm names — or you create them in the
-   GitHub UI and tell me when done.
-4. **Session notes migration.** Move the existing `data/knowledge/session_notes/`
-   folders into the campaign vault (recommended — full history visible in
-   Obsidian), or start fresh and leave old sessions where they are?
-5. **Pull interval.** 5 min default OK, or shorter (e.g. 2 min) at the cost of a
-   bit more git/embedding churn?
-6. **Images.** Do your notes already contain lots of large images/maps? If yes,
-   we should enable Git LFS in the repos from day one (the bot image would also
-   need `git-lfs` — currently plain git only).
-7. **Docker rebuild.** The next bot update needs `docker compose up -d --build`
-   (new `git` package). Fine to do at your convenience — the feature stays off
-   until the `.env` vars are set.
+- ✅ Repo: `MeleeCampz/HumblewoodObsidianVault` (private) with `DnDRules/`
+  (reference area) + `HumbleWood/` (campaign vault, incl. `SessionLogs/`).
+- ✅ `.gitignore` for per-machine Obsidian state (workspace.json, plugins/…).
+- ✅ Old KB folders removed from `data/knowledge/`; content now lives in the repo.
+- ✅ Bot `.env` entries in place (`OBSIDIAN_VAULTS`, `OBSIDIAN_CAMPAIGN_VAULT`,
+  `SESSIONS_NOTES_DIR`, interval).
+- ⬜ **Your step:** paste a fine-grained PAT (Contents: read+write, this repo
+  only) into the `OBSIDIAN_VAULTS` URL — it currently says
+  `PASTE_FINE_GRAINED_PAT_HERE`.
+- ⬜ **Your step:** deploy — `git pull` the bot branch +
+  `docker compose up -d --build`, then watch `logs/bot.log` for
+  `Vault sync: cloned …`.
+- ⬜ Optional: de-base64 the large image embeds in
+  `HumbleWood/Player Character/Summery.md` and `HumbleWood/Trixy/Images.md`
+  (they would otherwise create ~1 500 junk chunks in the RAG index).
 
 ## Manual fallback
 
