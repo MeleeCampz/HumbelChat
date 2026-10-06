@@ -27,9 +27,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import pathlib
+import re
 import subprocess
 
 log = logging.getLogger("bot.vault_sync")
+
+#: ``user:token@`` inside a URL — replaced before anything is logged.
+_CREDENTIAL_RE = re.compile(r"(?<=://)[^@/\s]+@")
+
+
+def _redact(text: str) -> str:
+    """Mask embedded credentials (``https://user:TOKEN@…``) for safe logging."""
+    return _CREDENTIAL_RE.sub("***@", text)
 
 #: Wall-clock cap for any single git call (clone/fetch/pull/push).
 GIT_TIMEOUT = 120.0
@@ -89,9 +98,14 @@ def parse_vaults(raw: str) -> dict[str, str]:
         name, sep, url = entry.partition("=")
         name, url = name.strip(), url.strip()
         if not sep or not name or not url:
-            log.warning("Vault sync: skipping malformed OBSIDIAN_VAULTS entry: %r", entry)
+            log.warning("Vault sync: skipping malformed OBSIDIAN_VAULTS entry: %r", _redact(entry))
             continue
-        if ".." in pathlib.PurePosixPath(name).parts or "/" in name or "\\" in name:
+        if (
+            ".." in pathlib.PurePosixPath(name).parts
+            or "/" in name
+            or "\\" in name
+            or name.startswith(".")  # dot-dirs are skipped by the KB indexer
+        ):
             log.warning("Vault sync: rejecting unsafe vault name: %r", name)
             continue
         vaults[name] = url
@@ -111,8 +125,8 @@ async def ensure_cloned(url: str, dir_path: pathlib.Path, *, two_way: bool = Fal
     dir_path.parent.mkdir(parents=True, exist_ok=True)
     rc, err = await _git(["clone", "--quiet", url, str(dir_path)], dir_path.parent)
     if rc != 0:
-        return f"clone failed: {err or 'unknown error'}"
-    log.info("Vault sync: cloned %s → %s", url.split("@")[-1][:80], dir_path)
+        return f"clone failed for {_redact(url)}: {(_redact(err) or 'unknown error')}"
+    log.info("Vault sync: cloned %s → %s", _redact(url).split("@")[-1][:80], dir_path)
     if two_way:
         for args in (
             ["config", "user.name", _BOT_GIT_NAME],
@@ -306,35 +320,40 @@ async def vault_sync_loop() -> None:
     )
 
     while True:
-        changed_names: list[str] = []
-        for name, url in vaults.items():
-            vdir = pathlib.Path(KB_PATH) / name
-            err = await ensure_cloned(url, vdir, two_way=(name == campaign))
-            if err is not None:
-                log.warning("Vault sync: %s: %s (retrying next tick)", name, err)
-                continue
-            if name == campaign:
-                ok, changed, err = await campaign_sync(vdir, sessions_relpath=scope)
-            else:
-                ok, changed, err = await mirror_pull(vdir)
-            if not ok and err:
-                log.warning("Vault sync: %s: %s (retrying next tick)", name, err)
-            elif changed:
-                changed_names.append(name)
+        try:
+            changed_names: list[str] = []
+            for name, url in vaults.items():
+                vdir = pathlib.Path(KB_PATH) / name
+                err = await ensure_cloned(url, vdir, two_way=(name == campaign))
+                if err is not None:
+                    log.warning("Vault sync: %s: %s (retrying next tick)", name, _redact(err))
+                    continue
+                if name == campaign:
+                    ok, changed, err = await campaign_sync(vdir, sessions_relpath=scope)
+                else:
+                    ok, changed, err = await mirror_pull(vdir)
+                if not ok and err:
+                    log.warning("Vault sync: %s: %s (retrying next tick)", name, _redact(err))
+                elif changed:
+                    changed_names.append(name)
 
-        if changed_names:
-            try:
-                from kb.retrievers import sync_kb_store
-                idx, report = await sync_kb_store()
-                count = idx.count() if idx is not None else 0
-                log.info(
-                    "Vault sync: %s changed — re-indexed %s file(s); index now %s chunk(s)",
-                    ", ".join(changed_names),
-                    report.get("changed_count", 0),
-                    f"{count:,}",
-                )
-            except Exception:
-                log.exception("Vault sync: KB re-index after vault changes failed")
+            if changed_names:
+                try:
+                    from kb.retrievers import sync_kb_store
+                    idx, report = await sync_kb_store()
+                    count = idx.count() if idx is not None else 0
+                    log.info(
+                        "Vault sync: %s changed — re-indexed %s file(s); index now %s chunk(s)",
+                        ", ".join(changed_names),
+                        report.get("changed_count", 0),
+                        f"{count:,}",
+                    )
+                except Exception:
+                    log.exception("Vault sync: KB re-index after vault changes failed")
+        except Exception:
+            # The loop must never die: an unexpected error (disk full, OS error
+            # in mkdir, …) is logged and retried on the next tick.
+            log.exception("Vault sync: unexpected error in sync tick — retrying")
 
         if interval <= 0:
             break
@@ -358,6 +377,7 @@ def start_vault_sync() -> None:
 
 __all__ = [
     "GIT_TIMEOUT",
+    "_redact",
     "parse_vaults",
     "ensure_cloned",
     "mirror_pull",

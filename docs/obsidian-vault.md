@@ -184,16 +184,21 @@ Behavioral notes:
 - ✅ `.gitignore` for per-machine Obsidian state (workspace.json, plugins/…).
 - ✅ Old KB folders removed from `data/knowledge/`; content now lives in the repo.
 - ✅ Bot `.env` entries in place (`OBSIDIAN_VAULTS`, `OBSIDIAN_CAMPAIGN_VAULT`,
-  `SESSIONS_NOTES_DIR`, interval).
-- ⬜ **Your step:** paste a fine-grained PAT (Contents: read+write, this repo
-  only) into the `OBSIDIAN_VAULTS` URL — it currently says
-  `PASTE_FINE_GRAINED_PAT_HERE`.
-- ⬜ **Your step:** deploy — `git pull` the bot branch +
-  `docker compose up -d --build`, then watch `logs/bot.log` for
-  `Vault sync: cloned …`.
-- ⬜ Optional: de-base64 the large image embeds in
-  `HumbleWood/Player Character/Summery.md` and `HumbleWood/Trixy/Images.md`
-  (they would otherwise create ~1 500 junk chunks in the RAG index).
+  `SESSIONS_NOTES_DIR`, interval) **with a working fine-grained PAT**
+  (Contents: read+write, this repo only).
+- ✅ De-base64'd the large image embeds (`Summery.md`, `Trixy/Images.md`,
+  Marvin) — images now live in `Images/` as real files.
+- ✅ First index build succeeded (56 files → 2 988 chunks; two batches fell
+  back to local embedding when the GPU endpoint returned 500 on the oversized
+  base64 chunks — transparent, nothing lost).
+- ✅ Fixed post-deploy: `_run_git` returned stderr instead of stdout, so every
+  sync tick failed with "cannot determine branch" (clone + first index were
+  unaffected). Campaign commits are also scoped to the session subpath and all
+  log output is credential-redacted.
+- ⏳ **Deploy** — `git pull` the bot branch + `docker compose up -d --build`,
+  then confirm in `logs/bot.log` that ticks run *without* the
+  "cannot determine branch" warning; the first tick pulls all repo edits made
+  while sync was broken and re-indexes the changed files.
 
 ## Manual fallback
 

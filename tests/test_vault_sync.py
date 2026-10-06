@@ -159,8 +159,30 @@ class TestParseVaults:
         got = vault_sync.parse_vaults("a/b=https://x.git;..=https://y.git;c\\d=https://z.git")
         assert got == {}
 
+    def test_dot_prefixed_names_rejected(self):
+        # dot-dirs are skipped by the KB indexer — such a vault would silently
+        # never be indexed, so reject it at parse time.
+        assert vault_sync.parse_vaults(".hidden=https://x.git") == {}
+
     def test_empty_string(self):
         assert vault_sync.parse_vaults("") == {}
+
+
+class TestRedact:
+    def test_user_token_masked(self):
+        assert (
+            vault_sync._redact("https://user:ghp_secret123@git.example.com/a.git")
+            == "https://***@git.example.com/a.git"
+        )
+
+    def test_no_credentials_untouched(self):
+        url = "https://git.example.com/a.git"
+        assert vault_sync._redact(url) == url
+
+    def test_credential_inside_error_text_masked(self):
+        err = ("fatal: unable to access 'https://u:t0k3n@git.example.com/a.git/': "
+               "Authentication failed")
+        assert "t0k3n" not in vault_sync._redact(err)
 
 
 # ──────────────────────── ensure_cloned ────────────────────────
@@ -337,6 +359,45 @@ class TestScopedCommits:
 
 
 # ──────────────────────── start / loop ────────────────────────
+
+class TestLoopResilience:
+    async def test_unexpected_error_does_not_kill_loop(self, tmp_path, monkeypatch):
+        """A raised exception (e.g. OSError from mkdir) must be caught and
+        logged — the tracked task must not die silently."""
+        import config.settings as settings
+        kb = tmp_path / "kb"
+        monkeypatch.setattr(settings, "KB_PATH", kb)
+        monkeypatch.setattr(settings, "OBSIDIAN_VAULTS", "v=https://u:t@git.example.com/v.git")
+        monkeypatch.setattr(settings, "OBSIDIAN_CAMPAIGN_VAULT", "")
+        monkeypatch.setattr(settings, "OBSIDIAN_VAULT_PULL_INTERVAL", 0)  # single pass
+
+        async def boom(url, dir_path, *, two_way=False):
+            raise OSError("disk on fire")
+
+        monkeypatch.setattr(vault_sync, "ensure_cloned", boom)
+        await vault_sync.vault_sync_loop()  # must not raise
+
+    async def test_clone_error_redacted_in_warning(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        import config.settings as settings
+        kb = tmp_path / "kb"
+        monkeypatch.setattr(settings, "KB_PATH", kb)
+        monkeypatch.setattr(
+            settings, "OBSIDIAN_VAULTS", "v=https://u:s3cret@git.example.com/v.git"
+        )
+        monkeypatch.setattr(settings, "OBSIDIAN_CAMPAIGN_VAULT", "")
+        monkeypatch.setattr(settings, "OBSIDIAN_VAULT_PULL_INTERVAL", 0)
+
+        async def failing(url, dir_path, *, two_way=False):
+            return f"clone failed for {url}: Authentication failed"
+
+        monkeypatch.setattr(vault_sync, "ensure_cloned", failing)
+        with caplog.at_level("WARNING", logger="bot.vault_sync"):
+            await vault_sync.vault_sync_loop()
+        assert "s3cret" not in caplog.text
+        assert "***@git.example.com" in caplog.text
+
 
 class TestStartAndLoop:
     @staticmethod
