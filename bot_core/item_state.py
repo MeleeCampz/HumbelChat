@@ -143,6 +143,28 @@ def prune(items: list[Item]) -> bool:
         return True
 
 
+def release_item(table: str, name: str) -> bool:
+    """Remove a single ``(table, name)`` mark from the consumed state.
+
+    Table match is case-insensitive (a trailing ``.csv`` is ignored); the
+    name must match exactly. Returns True when a mark was removed. Used by
+    ``/item_include`` to put one item back without resetting the table.
+    """
+    wanted = str(table).strip().lower().removesuffix(".csv")
+    with _lock:
+        state = load_state()
+        for t in [t for t in state if t.lower() == wanted]:
+            names = state[t]
+            if name not in names:
+                continue
+            state[t] = [n for n in names if n != name]
+            if not state[t]:
+                del state[t]
+            _save_state(state)
+            return True
+        return False
+
+
 def reset(table: str | None = None) -> int:
     """Clear consumed entries for one table (case-insensitive) or all.
 
