@@ -24,6 +24,8 @@ from config.settings import (
     DEFAULT_MODEL,
     DEFAULT_SESSION_MERGE_PROMPT,
     DEFAULT_SESSION_RECAP_PROMPT,
+    MERGE_LOG_REASONING_EFFORT,
+    RECAP_REASONING_EFFORT,
     SESSION_MERGE_PROMPT,
     SESSION_RECAP_PROMPT,
     SUMMARY_CALL_MAX_TOKENS,
@@ -211,7 +213,9 @@ async def _generate_recap(
 
     client = _make_client()
     try:
-        # Short output, no reasoning phase — same rationale as the overview.
+        # The stored session digest is accuracy-critical (#20): it stays at
+        # the model default (max effort) unless RECAP_REASONING_EFFORT lowers
+        # it — latency matters less than getting the recap right.
         summary = await complete_text(
             client,
             model=model,
@@ -221,7 +225,7 @@ async def _generate_recap(
             ],
             temperature=0.3,
             max_tokens=max(0, SUMMARY_CALL_MAX_TOKENS) or None,
-            disable_thinking=True,
+            reasoning_effort=RECAP_REASONING_EFFORT,
         )
         if not summary.strip():
             raise ValueError("empty recap")
@@ -270,10 +274,12 @@ async def _generate_merged_log(
     try:
         # Model-max output (max_tokens omitted): the merged log is a full
         # narrative record and benefits from the model's whole output capacity.
-        # Thinking stays ON here — long-form merging quality matters more than
-        # latency, and /end_session already defers (#9). complete_text runs
-        # streamed internally, so AI_TIMEOUT_S is an idle watchdog even for
-        # this long thinking+generation call (no total-time cap).
+        # Reasoning stays at the model default here — long-form merging quality
+        # matters more than latency, and /end_session already defers (#9).
+        # MERGE_LOG_REASONING_EFFORT (#20) can dial it down; when unset (None)
+        # the param is omitted entirely. complete_text runs streamed internally,
+        # so AI_TIMEOUT_S is an idle watchdog even for this long
+        # thinking+generation call (no total-time cap).
         merged = await complete_text(
             client,
             model=model,
@@ -282,6 +288,7 @@ async def _generate_merged_log(
                 {"role": "user", "content": user_content},
             ],
             temperature=0.2,
+            reasoning_effort=MERGE_LOG_REASONING_EFFORT,
         )
         if not merged.strip():
             raise ValueError("empty merged log")

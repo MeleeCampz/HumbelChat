@@ -36,6 +36,8 @@ _CATEGORIES: dict[str, str] = {
     "item_search": "D&D Items",
     "item_stats": "D&D Items",
     "reset_rolls": "D&D Items",
+    "item_exclude": "D&D Items",
+    "item_include": "D&D Items",
     "upload_kb": "Knowledge Base",
     "list_kb_docs": "Knowledge Base",
     "reindex_kb": "Knowledge Base",

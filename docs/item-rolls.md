@@ -73,6 +73,11 @@ come up again. Turn on `consume:true` to keep track of what you hand out:
   that shouldn't touch the campaign pool.
 - Every consuming roll's footer shows what's left (e.g. `— 361 of 365 remaining in magic_items`);
 an exhausted pool gets a friendly message instead of an empty roll.
+- Marks can also be set or cleared by hand: `/item_exclude <name>` marks one
+  item as used (e.g. the ones you didn't keep from a batch), and
+  `/item_include <name>` releases just that item — no full reset needed.
+  Manual marks live in the same state as rolled-out items, so `/reset_rolls`
+  clears them too, and `/item_stats` counts them as rolled out.
 
 ## Utility commands
 
@@ -82,6 +87,8 @@ an exhausted pool gets a friendly message instead of an empty roll.
 - **`/item_stats [table]`** — per-table totals: total / rolled out / remaining
   plus a per-rarity breakdown. Read-only.
 - **`/reset_rolls [table]`** — clears the consumed-item tracking (one table or all), so those items can come up again.
+- **`/item_exclude <name> [table]`** — manually mark one item as used (fuzzy name match; ambiguous names get a shortlist instead).
+- **`/item_include <name> [table]`** — release one marked/rolled item back into the pool, without resetting the table.
 
 ## Tuning tips
 
