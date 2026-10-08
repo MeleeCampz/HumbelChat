@@ -1,7 +1,9 @@
-"""Item-table utility commands: /item_search, /item_stats, /reset_rolls.
+"""Item-table utility commands: /item_search, /item_stats, /reset_rolls,
+/item_exclude, /item_include.
 
 Read-only lookups plus pool maintenance for the /roll_items tables. Search
-and stats never touch pool state; reset clears consumed entries (see
+and stats never touch pool state; reset clears consumed entries; exclude/
+include mark or release single items in the same consumed state (see
 ``bot_core.item_state``). These utilities do **not** seed sample tables —
 that is /roll_items' job on first use.
 """
@@ -20,6 +22,45 @@ log = logging.getLogger("bot.item_commands")
 
 def _scope_label(table: str | None) -> str:
     return table if table else "all tables"
+
+
+def _load_scope(table: str | None) -> dict[str, Any]:
+    """Load the item scope for pool-mutation commands; error dict on failure."""
+    try:
+        items = item_tables.load_items(table)
+    except LookupError:
+        tables = item_tables.list_tables()
+        avail = ", ".join(f"`{t}`" for t in tables) or "*(none)*"
+        return {"ok": False, "error": f"No table named `{table}`. Available tables: {avail}."}
+    if not items:
+        return {
+            "ok": False,
+            "error": "No item tables found — run `/roll_items` once (it seeds samples) or add CSVs to `data/items/`.",
+        }
+    return {"ok": True, "items": items}
+
+
+def _resolve_target(query: str, items: list[item_tables.Item]) -> dict[str, Any]:
+    """Fuzzy-match one item to act on, using /item_search scoring.
+
+    Acts (``single``) only when there is exactly one candidate AND it is in
+    a strong tier — exact / prefix / substring on the normalized names. The
+    difflib-ratio tier never acts on its own (ratios can reach 0.8+, so the
+    score alone cannot separate the tiers). Multiple candidates or only weak
+    matches yield ``ambiguous`` with up to five options; nothing found yields
+    ``none``.
+    """
+    matches = item_search.search_items(query, items, limit=5)
+    if not matches:
+        return {"status": "none"}
+    q = item_search.norm(query)
+    strong = [
+        (item, score) for item, score in matches
+        if (n := item_search.norm(item.name)) == q or n.startswith(q) or q in n
+    ]
+    if len(matches) == 1 and len(strong) == 1:
+        return {"status": "single", "item": strong[0][0]}
+    return {"status": "ambiguous", "candidates": [(i, s) for i, s in matches]}
 
 
 async def handle_item_search_command(
@@ -146,6 +187,105 @@ async def handle_item_stats_command(
             await interaction.followup.send("Item stats failed unexpectedly — check the bot logs.")
         except Exception:  # noqa: BLE001 - last-resort, nothing left to do
             pass
+
+
+def _mark_result_text(action: str, item: item_tables.Item) -> str:
+    table_label = f" ({item.table})" if item.table else ""
+    if action == "exclude":
+        return (
+            f"🚫 Marked **{item.name}**{table_label} as used — it won't come up in "
+            "consume rolls until you use `/item_include` or `/reset_rolls`."
+        )
+    return (
+        f"✅ Put **{item.name}**{table_label} back into the pool — it can come up "
+        "in consume rolls again."
+    )
+
+
+def _candidate_lines(candidates: list[tuple[item_tables.Item, float]]) -> str:
+    lines = []
+    for i, (item, _score) in enumerate(candidates, start=1):
+        where = f" — {item.table}" if item.table else ""
+        lines.append(f"{i}. **{item.name}** ({item.rarity}){where}")
+    return "\n".join(lines)
+
+
+async def _handle_mark_command(
+    interaction: discord.Interaction,
+    query: str,
+    table: str | None,
+    action: str,
+) -> None:
+    """Shared body for /item_exclude and /item_include."""
+    if table:
+        table = table.strip() or None
+    await interaction.response.defer()
+
+    def _mark() -> dict[str, Any]:
+        scope = _load_scope(table)
+        if not scope["ok"]:
+            return scope
+        resolved = _resolve_target(query, scope["items"])
+        if resolved["status"] == "none":
+            return {
+                "ok": False,
+                "error": f"No items matching `{query}` in {_scope_label(table)}.",
+            }
+        if resolved["status"] == "ambiguous":
+            return {
+                "ok": False,
+                "error": (
+                    f"Multiple or uncertain matches for `{query}` — tell me the exact name:\n"
+                    f"{_candidate_lines(resolved['candidates'])}"
+                ),
+            }
+        item = resolved["item"]
+        state = item_state.load_state()
+        already = item.name in state.get(item.table, [])
+        if action == "exclude":
+            if already:
+                return {"ok": True, "text": f"`{item.name}` is already marked as used."}
+            item_state.consume([item])
+            return {"ok": True, "text": _mark_result_text("exclude", item)}
+        # action == "include"
+        if not already:
+            return {"ok": True, "text": f"`{item.name}` wasn't marked — nothing to do."}
+        released = item_state.release_item(item.table, item.name)
+        return {
+            "ok": True,
+            "text": _mark_result_text("include", item) if released else f"Couldn't unmark `{item.name}` — check the bot logs.",
+        }
+
+    try:
+        result = await asyncio.to_thread(_mark)
+        if not result["ok"]:
+            await interaction.followup.send(result["error"])
+            return
+        await interaction.followup.send(result["text"])
+    except Exception:
+        log.exception("%s: unexpected error", action)
+        try:
+            await interaction.followup.send(f"{action.capitalize()} failed unexpectedly — check the bot logs.")
+        except Exception:  # noqa: BLE001 - last-resort, nothing left to do
+            pass
+
+
+async def handle_item_exclude_command(
+    interaction: discord.Interaction,
+    name: str,
+    table: str | None = None,
+) -> None:
+    """Mark one item as used (won't come up in consume rolls until unmarked)."""
+    await _handle_mark_command(interaction, name, table, "exclude")
+
+
+async def handle_item_include_command(
+    interaction: discord.Interaction,
+    name: str,
+    table: str | None = None,
+) -> None:
+    """Release one item from the consumed state without resetting the table."""
+    await _handle_mark_command(interaction, name, table, "include")
 
 
 async def handle_item_reset_rolls_command(

@@ -119,7 +119,23 @@ Per-table counts: total, rolled out, remaining, plus a per-rarity breakdown (foo
 /reset_rolls [table: <name>]
 ```
 
-Return consumed items to the pool — one table or all — and report how many came back.
+Return consumed items to the pool — one table or all — and report how many came back. Clears manual `/item_exclude` marks too.
+
+### `/item_exclude`
+
+```
+/item_exclude <name> [table: <name>]
+```
+
+Manually mark an item as used (fuzzy name match, emote prefixes ignored) so it won't come up in `consume` rolls until you put it back or reset. If the name is ambiguous, a shortlist is offered instead.
+
+### `/item_include`
+
+```
+/item_include <name> [table: <name>]
+```
+
+Put one marked/rolled item back into the pool without resetting the whole table.
 
 See **[docs/item-rolls.md](./item-rolls.md)** for the full picture: file layout, both CSV formats, rolling mechanics, the no-repeat pool, and tier tuning.
 

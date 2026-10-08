@@ -11,9 +11,15 @@ from config.settings import (
     DEFAULT_MODEL,
     FALLBACK_MODELS,
     SUMMARY_CALL_MAX_TOKENS,
+    SUMMARY_REASONING_EFFORT,
 )
 from bot_core.history import get_active_char_key, get_history
-from bot_core.ai_client import _make_client, _validate_model, complete_text
+from bot_core.ai_client import (
+    _create_with_reasoning_fallback,
+    _make_client,
+    _validate_model,
+    complete_text,
+)
 from bot_core.errors import extract_reply_text
 from config.characters import get_character
 
@@ -201,7 +207,13 @@ async def handle_ocr_command(
     )
     client = _make_client()
     try:
-        resp = await client.chat.completions.create(
+        # #20: OCR is mechanical — reasoning off by default (it previously ran
+        # uncontrolled at the model default effort); SUMMARY_REASONING_EFFORT
+        # overrides. 4xx fallback for backends without the param lives in the
+        # helper.
+        resp = await _create_with_reasoning_fallback(
+            client,
+            SUMMARY_REASONING_EFFORT or "off",
             model=model,
             messages=[
                 {
@@ -296,9 +308,10 @@ async def handle_summarize_command(
     for model in models_to_try:
         try:
             # Model-max output (max_tokens omitted unless SUMMARY_CALL_MAX_TOKENS
-            # caps it) + thinking disabled: a short factual summary gains
-            # nothing from the reasoning phase, which used to eat the whole
-            # 2048-token budget and leave no answer (#9).
+            # caps it) + reasoning off by default (#20): a short factual summary
+            # gains nothing from the reasoning phase, which used to eat the whole
+            # 2048-token budget and leave no answer (#9). Override with
+            # SUMMARY_REASONING_EFFORT if you want depth here.
             summary = await complete_text(
                 client,
                 model=model,
@@ -311,7 +324,7 @@ async def handle_summarize_command(
                 ],
                 temperature=0.3,
                 max_tokens=max(0, SUMMARY_CALL_MAX_TOKENS) or None,
-                disable_thinking=True,
+                reasoning_effort=SUMMARY_REASONING_EFFORT or "off",
             )
             if not summary.strip():
                 log.error("Summarize produced an empty answer with model %s", model)
@@ -368,7 +381,12 @@ async def handle_translate_command(
     model = await _validated_utility_model(interaction.guild_id, interaction.channel_id)
     client = _make_client()
     try:
-        resp = await client.chat.completions.create(
+        # #20: translation is mechanical — reasoning off by default (it
+        # previously ran uncontrolled at the model default effort);
+        # SUMMARY_REASONING_EFFORT overrides.
+        resp = await _create_with_reasoning_fallback(
+            client,
+            SUMMARY_REASONING_EFFORT or "off",
             model=model,
             messages=[
                 {

@@ -380,6 +380,38 @@ async def reset_rolls_command(
     await handle_item_reset_rolls_command(interaction, table=table)
 
 
+@bot.tree.command(name="item_exclude",
+                 description="Mark an item as used so it no longer comes up in consume rolls from its table.")
+@app_commands.describe(
+    name="Item name (fuzzy match; emote prefixes ignored)",
+    table="Optional table name; omit to search all tables",
+)
+async def item_exclude_command(
+    interaction: discord.Interaction,
+    name: str,
+    table: str | None = None,
+) -> None:
+    """Manual pool mark — delegated to commands/item_commands.py."""
+    from commands.item_commands import handle_item_exclude_command
+    await handle_item_exclude_command(interaction, name=name, table=table)
+
+
+@bot.tree.command(name="item_include",
+                  description="Put a marked/rolled item back into the pool without resetting the whole table.")
+@app_commands.describe(
+    name="Item name (fuzzy match; emote prefixes ignored)",
+    table="Optional table name; omit to search all tables",
+)
+async def item_include_command(
+    interaction: discord.Interaction,
+    name: str,
+    table: str | None = None,
+) -> None:
+    """Manual pool release — delegated to commands/item_commands.py."""
+    from commands.item_commands import handle_item_include_command
+    await handle_item_include_command(interaction, name=name, table=table)
+
+
 @bot.tree.command(name="ocr", description="Extract text from an image (OCR).")
 async def ocr_command(interaction: discord.Interaction, image: discord.Attachment | None = None) -> None:
     """Vision-based OCR — delegated to commands/utility_commands.py."""

@@ -54,6 +54,7 @@ from config.settings import (
     AI_RATE_LIMIT_MAX,
     AI_RATE_LIMIT_WINDOW,
     PROMPT_BUDGET_CHARS,
+    AI_REASONING_EFFORT,
 )
 
 log = logging.getLogger("bot.bot_core")
@@ -328,6 +329,49 @@ def _is_transient_api_failure(exc: BaseException) -> bool:
         "ConnectionError", "RemoteProtocolError",
         "TimeoutError",
     ) or "timed out" in str(exc).lower()
+
+
+def _reasoning_extra_body(effort: str | None) -> dict[str, Any] | None:
+    """Map a resolved reasoning-effort setting to the backend's extra_body (#20).
+
+    ``None`` → omit the param entirely (model default). ``"off"`` → the
+    proven ``enable_thinking=False`` path (Qwen3-style hybrid-thinking
+    models). ``low/medium/high/xhigh`` → graded ``reasoning_effort`` as
+    supported by newer LM Studio builds for Qwen3.8.
+    """
+    if effort is None:
+        return None
+    if effort == "off":
+        return {"enable_thinking": False}
+    return {"reasoning_effort": effort}
+
+
+async def _create_with_reasoning_fallback(
+    client: AsyncOpenAI, reasoning_effort: str | None, **kwargs: Any
+) -> Any:
+    """``chat.completions.create`` with a 4xx fallback for the reasoning param (#20).
+
+    Sends the resolved reasoning control via ``extra_body`` (see
+    :func:`_reasoning_extra_body`). If the backend rejects it with a 4xx
+    (older LM Studio builds don't know the param), one plain retry WITHOUT
+    ``extra_body`` follows. Timeouts / 5xx / connection errors propagate
+    immediately — retrying them would only double the silence before
+    surfacing (same rule as :func:`_call_completion_with_retry`).
+    """
+    body = _reasoning_extra_body(reasoning_effort)
+    if body is not None:
+        kwargs["extra_body"] = body
+    try:
+        return await client.chat.completions.create(**kwargs)
+    except APIStatusError as e:
+        if body is None or e.status_code is None or e.status_code >= 500:
+            raise
+        log.warning(
+            "Backend rejected reasoning control %s (HTTP %d); retrying once without it.",
+            body, e.status_code,
+        )
+        kwargs.pop("extra_body", None)
+        return await client.chat.completions.create(**kwargs)
 
 
 async def _call_completion_with_retry(client: AsyncOpenAI, **kwargs: Any) -> Any:
@@ -826,6 +870,7 @@ async def complete_text(
     max_tokens: int | None = None,
     timeout: float | None = None,
     disable_thinking: bool = False,
+    reasoning_effort: str | None = None,
 ) -> str:
     """Single-shot completion returning the visible reply text.
 
@@ -843,9 +888,12 @@ async def complete_text(
       (A non-streamed request would deliver no bytes until the WHOLE
       generation is done, turning the knob into a total-time cap — which is
       exactly how the Sep-30 merged-log timeout happened.)
-    * ``disable_thinking=True`` sends ``extra_body={"enable_thinking": False}``
-      (Qwen3-style hybrid-thinking models); if the backend rejects the param,
-      one plain retry follows (same pattern as kb/query_rewriter.py).
+    * ``disable_thinking=True`` / ``reasoning_effort=...`` control the hidden
+      reasoning phase (#20): ``disable_thinking=True`` wins and sends
+      ``extra_body={"enable_thinking": False}`` (Qwen3-style hybrid-thinking
+      models); otherwise ``reasoning_effort`` maps via
+      :func:`_reasoning_extra_body`. If the backend rejects the param with a
+      4xx, one plain retry without it follows.
     * A response cut off at the model's output limit with NO visible content
       raises ``AIResponseTruncatedError``; a PARTIAL answer is returned with a
       warning log. Callers keep their own fallback logic.
@@ -853,35 +901,25 @@ async def complete_text(
     from bot_core.errors import AIBackendError, AIResponseTruncatedError
 
     _timeout = timeout if timeout is not None else AI_TIMEOUT_S
+    _effort = "off" if disable_thinking else reasoning_effort
 
-    def _kwargs(disable_thinking: bool) -> dict[str, Any]:
-        kw: dict[str, Any] = dict(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            stream=True,
-            timeout=_timeout,
-        )
-        if max_tokens is not None:
-            kw["max_tokens"] = max_tokens
-        if disable_thinking:
-            kw["extra_body"] = {"enable_thinking": False}
-        return kw
+    base_kwargs: dict[str, Any] = dict(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        stream=True,
+        timeout=_timeout,
+    )
+    if max_tokens is not None:
+        base_kwargs["max_tokens"] = max_tokens
 
     try:
-        if disable_thinking:
-            try:
-                stream = await client.chat.completions.create(**_kwargs(True))
-            except APIStatusError as e:
-                # Only a 4xx rejection (e.g. the backend does not know the
-                # ``enable_thinking`` param) justifies a plain retry. Timeouts
-                # and connection/5xx failures must propagate immediately —
-                # retrying them would double the silence before surfacing.
-                if e.status_code is None or e.status_code >= 500:
-                    raise
-                stream = await client.chat.completions.create(**_kwargs(False))
-        else:
-            stream = await client.chat.completions.create(**_kwargs(False))
+        # Reasoning control + its 4xx retry-without-param fallback live in the
+        # shared helper (#20); it re-implements the old inline enable_thinking
+        # retry for ``disable_thinking=True``.
+        stream = await _create_with_reasoning_fallback(
+            client, _effort, **base_kwargs
+        )
 
         parts: list[str] = []
         finish_reason: str | None = None
@@ -975,10 +1013,30 @@ async def ask_ai(
         if ctx.max_tokens is not None:
             create_kwargs["max_tokens"] = ctx.max_tokens
 
+        # #20: per-task reasoning control for the /ai chat path.
+        reasoning_body = _reasoning_extra_body(AI_REASONING_EFFORT)
+        if reasoning_body is not None:
+            create_kwargs["extra_body"] = reasoning_body
+
         try:
-            # P1 #7: one bounded retry on transient 5xx/timeout/connection
-            # failures before we give up on the turn.
-            resp = await _call_completion_with_retry(ctx.client, **create_kwargs)
+            try:
+                # P1 #7: one bounded retry on transient 5xx/timeout/connection
+                # failures before we give up on the turn.
+                resp = await _call_completion_with_retry(ctx.client, **create_kwargs)
+            except APIStatusError as e:
+                # #20: only a 4xx rejection of the reasoning param justifies a
+                # plain retry without it (older backends don't know it).
+                if (reasoning_body is not None and e.status_code is not None
+                        and e.status_code < 500):
+                    log.warning(
+                        "Backend rejected reasoning control %s (HTTP %d); "
+                        "retrying once without it.",
+                        reasoning_body, e.status_code,
+                    )
+                    create_kwargs.pop("extra_body", None)
+                    resp = await _call_completion_with_retry(ctx.client, **create_kwargs)
+                else:
+                    raise
             # P1 #8: extract the reply safely — an empty `choices` array is a
             # malformed backend response (AIBackendError), and a response cut
             # off at the model's output limit with no visible answer raises
@@ -1074,8 +1132,13 @@ async def ask_ai_stream(
             if ctx.max_tokens is not None:
                 create_kwargs["max_tokens"] = ctx.max_tokens
 
+            # #20: per-task reasoning control for the /ai chat path (the 4xx
+            # retry-without-param fallback lives in the helper; mid-stream
+            # failures below it still are NOT retried).
             stream = cast("AsyncStream[ChatCompletionChunk]",
-                         await ctx.client.chat.completions.create(**create_kwargs))
+                         await _create_with_reasoning_fallback(
+                             ctx.client, AI_REASONING_EFFORT, **create_kwargs,
+                         ))
             try:
                 while True:
                     try:
