@@ -10,6 +10,9 @@ import pytest
 
 from bot_core import item_search, item_state, item_tables
 from commands.item_commands import (
+    _resolve_target,
+    handle_item_exclude_command,
+    handle_item_include_command,
     handle_item_reset_rolls_command,
     handle_item_search_command,
     handle_item_stats_command,
@@ -350,6 +353,172 @@ class TestUtilityCommands:
         asyncio.run(handle_item_reset_rolls_command(ix, table="nope"))
         (call,) = ix._calls
         assert call["embed"] is None and "No table named" in call["content"]
+
+
+# ── release_item (single-item unmark) ─────────────────────────────────────
+
+class TestReleaseItem:
+    def _it(self, name: str, table: str = "t") -> item_tables.Item:
+        return item_tables.Item(name=name, url="", rarity="common", notes="", table=table)
+
+    def test_release_persists_across_reload(self, items_dir):
+        item_state.consume([self._it("i0"), self._it("i1")])
+        assert item_state.release_item("t", "i0") is True
+        assert item_state.load_state() == {"t": ["i1"]}
+
+    def test_release_idempotent(self, items_dir):
+        item_state.consume([self._it("i0")])
+        assert item_state.release_item("t", "i0") is True
+        assert item_state.release_item("t", "i0") is False
+        assert item_state.load_state() == {}
+
+    def test_release_unknown_table_or_name_noop(self, items_dir):
+        item_state.consume([self._it("i0")])
+        assert item_state.release_item("nope", "i0") is False
+        assert item_state.release_item("t", "zzz") is False
+        assert item_state.load_state() == {"t": ["i0"]}
+
+    def test_release_leaves_other_marks_alone(self, items_dir):
+        item_state.consume([self._it("i0"), self._it("i1")])
+        item_state.release_item("t", "i0")
+        available, total = item_state.exclude_consumed([self._it(f"i{k}") for k in range(2)])
+        assert [i.name for i in available] == ["i0"] and total == 2
+
+    def test_release_table_case_and_suffix_insensitive(self, items_dir):
+        item_state.consume([self._it("i0", table="Loot")])
+        assert item_state.release_item("LOOT.csv", "i0") is True
+        assert item_state.load_state() == {}
+
+    def test_round_trip_consume_release(self, items_dir):
+        it = self._it("Only")
+        item_state.consume([it])
+        available, _ = item_state.exclude_consumed([it])
+        assert available == []
+        item_state.release_item("t", "Only")
+        available, _ = item_state.exclude_consumed([it])
+        assert [i.name for i in available] == ["Only"]
+
+
+# ── /item_exclude + /item_include ─────────────────────────────────────────
+
+class TestMarkCommands:
+    def test_resolve_single_strong_candidate(self):
+        items = [
+            item_tables.Item(name="🎒 Bag of Holding", table="loot"),
+            item_tables.Item(name="Sword of Fire", table="loot"),
+        ]
+        result = _resolve_target("bag", items)
+        assert result["status"] == "single"
+        assert result["item"].name == "🎒 Bag of Holding"
+
+    def test_resolve_exact_match(self):
+        items = [item_tables.Item(name="Bag of Tricks", table="loot")]
+        result = _resolve_target("bag of tricks", items)
+        assert result["status"] == "single"
+
+    def test_resolve_multiple_candidates_ambiguous(self):
+        items = [
+            item_tables.Item(name="Bag of Holding", table="loot"),
+            item_tables.Item(name="Bag of Tricks", table="loot"),
+        ]
+        result = _resolve_target("bag", items)
+        assert result["status"] == "ambiguous"
+        assert len(result["candidates"]) == 2
+
+    def test_resolve_weak_fuzzy_never_acts(self):
+        # Typo matches only via difflib ratio (< 0.8) → shortlist, no action.
+        items = [item_tables.Item(name="Bag of Holding", table="loot")]
+        result = _resolve_target("bag of poldin", items)
+        assert result["status"] == "ambiguous"
+
+    def test_resolve_no_match(self):
+        items = [item_tables.Item(name="Sword of Fire", table="loot")]
+        assert _resolve_target("zzz qqq", items)["status"] == "none"
+
+    def test_exclude_marks_item(self, items_dir):
+        write_table(items_dir, "loot.csv", [
+            ["🎒 Bag of Holding", "", "uncommon", ""],
+            ["Sword of Fire", "", "rare", ""],
+        ])
+        ix = make_ix()
+        import asyncio
+        asyncio.run(handle_item_exclude_command(ix, name="bag of holding"))
+        (call,) = ix._calls
+        assert "Bag of Holding" in call["content"] and "/item_include" in call["content"]
+        assert item_state.load_state() == {"loot": ["🎒 Bag of Holding"]}
+
+    def test_exclude_already_marked(self, items_dir):
+        write_table(items_dir, "loot.csv", [["Bag of Holding", "", "uncommon", ""]])
+        item_state.consume([item_tables.Item(name="Bag of Holding", table="loot")])
+        ix = make_ix()
+        import asyncio
+        asyncio.run(handle_item_exclude_command(ix, name="bag of holding"))
+        (call,) = ix._calls
+        assert "already marked as used" in call["content"]
+
+    def test_exclude_ambiguous_lists_candidates(self, items_dir):
+        write_table(items_dir, "loot.csv", [
+            ["Bag of Holding", "", "uncommon", ""],
+            ["Bag of Tricks", "", "uncommon", ""],
+        ])
+        ix = make_ix()
+        import asyncio
+        asyncio.run(handle_item_exclude_command(ix, name="bag"))
+        (call,) = ix._calls
+        assert "exact name" in call["content"]
+        assert "Bag of Holding" in call["content"] and "Bag of Tricks" in call["content"]
+        assert item_state.load_state() == {}  # nothing marked
+
+    def test_exclude_no_match(self, items_dir):
+        write_table(items_dir, "loot.csv", [["Sword of Fire", "", "rare", ""]])
+        ix = make_ix()
+        import asyncio
+        asyncio.run(handle_item_exclude_command(ix, name="zzz qqq"))
+        (call,) = ix._calls
+        assert "No items matching" in call["content"]
+
+    def test_exclude_unknown_table(self, items_dir):
+        write_table(items_dir, "loot.csv", [["Bag of Holding", "", "uncommon", ""]])
+        ix = make_ix()
+        import asyncio
+        asyncio.run(handle_item_exclude_command(ix, name="bag", table="nope"))
+        (call,) = ix._calls
+        assert "No table named `nope`" in call["content"] and "`loot`" in call["content"]
+
+    def test_include_releases_only_that_item(self, items_dir):
+        write_table(items_dir, "loot.csv", [
+            ["Bag of Holding", "", "uncommon", ""],
+            ["Sword of Fire", "", "rare", ""],
+        ])
+        item_state.consume([
+            item_tables.Item(name="Bag of Holding", table="loot"),
+            item_tables.Item(name="Sword of Fire", table="loot"),
+        ])
+        ix = make_ix()
+        import asyncio
+        asyncio.run(handle_item_include_command(ix, name="bag of holding"))
+        (call,) = ix._calls
+        assert "back into the pool" in call["content"]
+        assert item_state.load_state() == {"loot": ["Sword of Fire"]}
+
+    def test_include_unmarked_noop(self, items_dir):
+        write_table(items_dir, "loot.csv", [["Bag of Holding", "", "uncommon", ""]])
+        ix = make_ix()
+        import asyncio
+        asyncio.run(handle_item_include_command(ix, name="bag of holding"))
+        (call,) = ix._calls
+        assert "wasn't marked" in call["content"]
+
+    def test_manual_mark_survives_nothing_else_and_reset_clears(self, items_dir):
+        # Manual marks live in the consumed state: /reset_rolls clears them too.
+        write_table(items_dir, "loot.csv", [["Bag of Holding", "", "uncommon", ""]])
+        import asyncio
+        asyncio.run(handle_item_exclude_command(make_ix(), name="bag of holding"))
+        ix = make_ix()
+        asyncio.run(handle_item_reset_rolls_command(ix, table="loot"))
+        (call,) = ix._calls
+        assert "1 item(s) returned" in call["content"]
+        assert item_state.load_state() == {}
 
 
 # ── default table resolution ───────────────────────────────────────────────
