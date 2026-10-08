@@ -11,9 +11,10 @@ Sessions are a global (bot-wide) bookkeeping concept used by the
   on disk at any time:
 
       notes.md            -- the ONLY RAG-indexed file for the session:
-                             header + timestamped notes + a combined
+                             header + timestamped notes + brief end-of-session
+                             overview (when present) + a combined
                              ``## Documents`` section with the full text of
-                             every uploaded document / transcript + overview
+                             every uploaded document / transcript
       .attachments/       -- raw uploaded .txt/.md files (one per upload);
                              hidden dot-dir, so the KB indexer skips them
       .transcripts/       -- raw voice-channel transcripts; likewise hidden
@@ -324,8 +325,9 @@ def _session_file_content(session: dict[str, Any]) -> str:
     when the AI combined all player uploads into one de-duplicated record);
     without it — AI unavailable, stale auto-end, legacy sessions — uploaded
     documents and transcripts appear with their FULL text under ``##
-    Documents`` instead, so content stays reachable either way.  The overview,
-    when present, closes the file.
+    Documents`` instead, so content stays reachable either way.  The brief
+    end-of-session overview, when present, sits right after the notes —
+    before the session log / documents.
     """
     started = datetime.fromtimestamp(session["started_at"]).strftime("%Y-%m-%d %H:%M")
     ended = (datetime.fromtimestamp(session["ended_at"]).strftime("%Y-%m-%d %H:%M")
@@ -343,6 +345,10 @@ def _session_file_content(session: dict[str, Any]) -> str:
         lines.append(f"- ({t}) {text}")
     if not session.get("notes"):
         lines.append("(no notes)")
+    # The brief end-of-session overview leads the file after the notes (the
+    # reader gets the digest before the long log).
+    if session.get("overview"):
+        lines += ["", "## Overview (written when the session ended)", "", str(session["overview"]).strip()]
     # The AI-merged canonical log (written at end) replaces the mechanical
     # full-text copy — it is the de-duplicated combination of all uploads.
     # Without it (AI unavailable, stale auto-end, legacy sessions) the
@@ -352,8 +358,6 @@ def _session_file_content(session: dict[str, Any]) -> str:
                   "", str(session["merged_log"]).strip()]
     else:
         lines += _documents_section_lines(session)
-    if session.get("overview"):
-        lines += ["", "## Overview (written when the session ended)", "", str(session["overview"]).strip()]
     return "\n".join(lines) + "\n"
 
 
