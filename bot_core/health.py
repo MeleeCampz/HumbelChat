@@ -58,10 +58,12 @@ async def check_backend_health(timeout_sec: int | None = None) -> tuple[bool, st
 async def _health_monitor(interval_sec: int) -> None:
     """Continuously probe the backend at the configured interval.
 
-    Logs only on *state changes* (and once at start) so a long outage doesn't
-    spam dev.log every interval — see the module docstring.
+    Logs only on *state changes* so a long outage doesn't spam dev.log every
+    interval — see the module docstring. Seeded with ``True`` because the
+    initial probe (see :func:`start_backend_health_probe`) already logged the
+    startup state; a healthy boot stays silent from here on.
     """
-    last_state: bool | None = None
+    last_state = True
     while True:
         ok, detail = await check_backend_health()
         if ok != last_state:

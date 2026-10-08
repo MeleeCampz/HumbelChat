@@ -13,7 +13,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from discord import app_commands
+from discord import NotFound, app_commands
 
 
 class _FakeCommand:
@@ -86,6 +86,29 @@ class TestOnAppCommandError:
         ix.response.send_message = AsyncMock(side_effect=RuntimeError("4011: unknown interaction"))
         await main.on_app_command_error(ix, app_commands.CheckFailure())
         ix.followup.send.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_channel_when_webhook_gone(self):
+        """If the follow-up webhook is unknown (10015), post to the channel.
+
+        Regression: a /sync dispatched >3 s late during startup had no usable
+        response *or* follow-up webhook; the error used to vanish into the log.
+        """
+        import main
+        ix = _ix(done=True)
+
+        async def _gone(*args, **kwargs):
+            raise NotFound(MagicMock(), "10015: Unknown Webhook")
+
+        ix.followup.send = _gone
+        ix.channel = MagicMock()
+        ix.channel.send = AsyncMock()
+
+        err = app_commands.CommandInvokeError(_FakeCommand("explode"), ValueError("boom"))
+        await main.on_app_command_error(ix, err)
+
+        ix.channel.send.assert_awaited_once()
+        assert "failed" in ix.channel.send.call_args.args[0].lower()
 
 
 class TestOnShutdown:

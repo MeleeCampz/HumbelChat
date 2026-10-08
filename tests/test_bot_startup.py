@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 
 def test_bot_starts_without_startup_error():
     """Verify that importing and initializing the bot does not raise on startup.
@@ -70,6 +72,51 @@ def test_on_ready_does_not_raise():
                 pytest.fail(f"on_ready() raised {type(e).__name__}: {e}")
 
 
+@pytest.mark.asyncio
+async def test_on_ready_warms_models_in_worker_thread(monkeypatch):
+    """Model warmup must run off the event loop (regression: blocked /sync).
+
+    The synchronous sentence-transformers import + bge-m3 load (~30 s) used to
+    run inside ``on_ready()`` on the event-loop thread, stalling every
+    interaction during startup past Discord's 3 s response window (/sync →
+    404 Unknown interaction). It must now be dispatched to a worker thread.
+    """
+    import threading
+
+    from main import on_ready
+
+    mock_bot = MagicMock()
+    mock_bot.user = MagicMock()
+    mock_bot.user.display_name = "TestBot"
+    mock_bot.user.id = 123456789
+    mock_bot.guilds = []
+    mock_bot.tree = MagicMock()
+    mock_bot.tree.copy_global_to = AsyncMock()
+    mock_bot.tree.sync = AsyncMock()
+
+    main_thread = threading.current_thread()
+    seen: dict[str, threading.Thread] = {}
+
+    def fake_preload_embedder():
+        seen["embedder"] = threading.current_thread()
+
+    def fake_preload_reranker():
+        seen["reranker"] = threading.current_thread()
+
+    monkeypatch.setattr("kb.embedder.preload_local_embedder", fake_preload_embedder)
+    monkeypatch.setattr("kb.reranker.preload_reranker", fake_preload_reranker)
+
+    with patch("main.bot", mock_bot), patch("utils.kb_utils.log_top_kb_files"):
+        await on_ready()
+        for _ in range(1000):
+            if "embedder" in seen and "reranker" in seen:
+                break
+            await asyncio.sleep(0.01)
+
+    assert "embedder" in seen and "reranker" in seen, "warmup task never ran"
+    assert seen["embedder"] is not main_thread, "embedder preload blocked the event loop"
+    assert seen["reranker"] is not main_thread, "reranker preload blocked the event loop"
+
+
 if __name__ == "__main__":
-    import pytest
     pytest.main([__file__, "-v"])

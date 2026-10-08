@@ -22,6 +22,18 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 log = logging.getLogger("bot.commands.sync_command")
 
 
+async def _notify_channel(interaction: discord.Interaction, message: str) -> None:
+    """Best-effort channel fallback for when the interaction webhook is gone."""
+    try:
+        channel = getattr(interaction, "channel", None)
+        if channel is not None:
+            await channel.send(message)
+            return
+    except Exception as e:  # noqa: BLE001 - purely defensive
+        log.warning("/sync: channel fallback failed: %s", e)
+    log.warning("/sync: no usable delivery path for expired interaction")
+
+
 async def handle_sync_command(interaction: discord.Interaction) -> None:
     """Purge stale/duplicate command registrations and re-register the current set.
 
@@ -30,7 +42,18 @@ async def handle_sync_command(interaction: discord.Interaction) -> None:
     - Re-syncs (upserts) the current **global** command set.
     - Deletes any stale **global** command no longer present in the code.
     """
-    await interaction.response.defer()
+    try:
+        await interaction.response.defer()
+    except discord.NotFound:
+        # The interaction webhook expired before we could defer (dispatch was
+        # >3 s late — e.g. the event loop was busy during startup). A deferred
+        # response is impossible now; tell the user in the channel and bail out.
+        log.warning("/sync: interaction expired before defer — falling back to channel message")
+        await _notify_channel(
+            interaction,
+            "⚠️ That `/sync` timed out while the bot was busy. Please try again.",
+        )
+        return
     # interaction.client is the live bot (a commands.Bot at runtime); the stubs
     # only expose .tree on Bot, so narrow it for the call.
     client = cast("Bot", interaction.client)
