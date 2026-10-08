@@ -182,7 +182,8 @@ class TestHistoryPersistedEachTurn:
 
         payload = json.loads(path.read_text(encoding="utf-8"))
         stored = payload["history"][str(g)][str(c)]
-        assert {"role": "user", "content": "PING"} in stored
+        # user turns now carry the Discord display name (markdown-stripped)
+        assert {"role": "user", "content": "PING", "username": "Alice"} in stored
         assert {"role": "assistant", "content": "PONG"} in stored
 
     @pytest.mark.asyncio

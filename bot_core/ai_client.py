@@ -564,6 +564,56 @@ def _build_last_session_context(session: object) -> str:
         return ""
 
 
+def _render_history_block(history_msgs: list[dict[str, Any]]) -> str:
+    """Render stored chat history as ONE XML-tagged context block.
+
+    The block travels as a single ``user``-role message ahead of the current
+    turn, so weaker models see it as labelled background instead of loose
+    role messages whose open questions they may re-answer.  Each turn keeps
+    the Discord username (stored by :func:`_persist_turn`) and a header
+    instruction that these turns must NOT be re-answered.
+
+    Pure function — never raises on malformed entries (bad roles, missing
+    keys, non-str content); anything odd degrades to an escaped text node.
+    """
+    from xml.sax.saxutils import escape
+
+    def _esc(text: str) -> str:
+        return escape(str(text), {'"': "&quot;"})
+
+    turns: list[str] = []
+    i = 0
+    while i < len(history_msgs):
+        m = history_msgs[i] if isinstance(history_msgs[i], dict) else {}
+        role = str(m.get("role", "user"))
+        content = str(m.get("content", ""))
+        if role != "assistant":
+            name = str(m.get("username", "") or "")
+            name_attr = f' name="{_esc(name)}"' if name else ""
+            assistant = ""
+            if i + 1 < len(history_msgs):
+                nxt = history_msgs[i + 1]
+                if isinstance(nxt, dict) and str(nxt.get("role", "")) == "assistant":
+                    assistant = f"\n<assistant>{_esc(nxt.get('content', ''))}</assistant>"
+                    i += 1
+            turns.append(f"<turn>\n<user{name_attr}>{_esc(content)}</user>{assistant}\n</turn>")
+            i += 1
+        else:
+            # Orphan assistant message (no preceding user turn) — keep it, unpaired.
+            turns.append(f"<turn>\n<assistant>{_esc(content)}</assistant>\n</turn>")
+            i += 1
+
+    body = "\n".join(turns)
+    return (
+        "<history_context>\n"
+        "Earlier conversation in this channel, provided as background only. "
+        "Do NOT re-answer, repeat, or continue these turns — answer only the new "
+        "question that follows this block.\n"
+        f"{body}\n"
+        "</history_context>"
+    )
+
+
 def _append_user_message(username: str, user_message: str, rag_context: str,
                          session_context: str = "") -> str:
     """Build the *final* user-turn content: username decoration + optional
@@ -685,7 +735,10 @@ async def _build_ai_request(
     # P2-3: system prompt is persona-only (no RAG)
     if system_p:
         messages.append({"role": "system", "content": system_p})
-    messages.extend(recent_history)
+    # History travels as ONE XML-tagged background block (single user-role
+    # message), not loose role messages — see _render_history_block.
+    if recent_history:
+        messages.append({"role": "user", "content": _render_history_block(recent_history)})
 
     # P2-3: RAG context injected into the user message, right before the question
     messages.append({"role": "user", "content": _append_user_message(username, user_message, rag_context, session_ctx)})
@@ -728,14 +781,16 @@ async def _build_ai_request(
 
 
 def _persist_turn(guild_id: int, channel_id: int | None, user_message: str,
-                  reply_text: str) -> None:
+                  reply_text: str, username: str = "") -> None:
     """Append a (user, assistant) pair to history and persist it (P0 #2).
 
     Store the *clean* user message (not the RAG-inflated ``user_content``),
-    then write the trimmed tail to disk so a restart can't lose recent turns.
+    plus the Discord display name so rendered history can attribute turns.
+    Then write the trimmed tail to disk so a restart can't lose recent turns.
     """
+    safe_username = (username or "").replace("*", "")
     history = get_history(guild_id, channel_id)
-    history.append({"role": "user", "content": user_message})
+    history.append({"role": "user", "content": user_message, "username": safe_username})
     history.append({"role": "assistant", "content": reply_text})
     max_entries = 2 * CONTEXT_WINDOW if CONTEXT_WINDOW else 50
     set_history(guild_id, channel_id, history[-max_entries:])
@@ -937,7 +992,7 @@ async def ask_ai(
         log.debug("RAW_AI_RESPONSE_START\n%s\nRAW_AI_RESPONSE_END", reply_text)
 
         # ── Update history (P0 #2) ──────────────────────────────────────
-        _persist_turn(guild_id, channel_id, user_message, reply_text)
+        _persist_turn(guild_id, channel_id, user_message, reply_text, username=username)
 
         approx_tokens = max(1, len(reply_text) // 4)  # §4.3: char-based estimate, not word count
         return reply_text, {"model_used": ctx.effective_model, "tokens_approx": approx_tokens}
@@ -1089,6 +1144,6 @@ async def ask_ai_stream(
             )
 
         log.debug("RAW_AI_RESPONSE_START\n%s\nRAW_AI_RESPONSE_END", reply_text)
-        _persist_turn(guild_id, channel_id, user_message, reply_text)
+        _persist_turn(guild_id, channel_id, user_message, reply_text, username=username)
         # Final value: the complete reply (also the last delta).
         yield reply_text

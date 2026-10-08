@@ -238,6 +238,35 @@ never attached this way (its content is already in the channel history).
 | `LAST_SESSION_MAX_CHARS` | Char budget for the block (default `4000`; keep it small — recap only) |
 | `SESSION_MERGE_PROMPT` | Override the AI session-log merge prompt at `/end_session` (empty = built-in default) |
 
+## Conversation history block
+
+Stored channel history is **not** sent to the model as loose `user`/`assistant`
+role messages. It is rendered by `ai_client._render_history_block` into ONE
+XML-tagged `<history_context>` block that travels as a single `user`-role
+message ahead of the current turn:
+
+```
+<history_context>
+Earlier conversation in this channel, provided as background only. Do NOT
+re-answer, repeat, or continue these turns — answer only the new question…
+<turn>
+<user name="MeleeChan">show me the wizzard character table</user>
+<assistant>Here is the Wizard character table…</assistant>
+</turn>
+</history_context>
+```
+
+Why: with small local models, loose role messages whose last user turn was an
+unanswered question get *re-answered* instead of the new question (measured
+0/9 vs 4/4 on the same history after switching to the block). The header
+instruction plus the labelled, self-contained structure closes that loop.
+Each `<user>` node carries the Discord display name (`username` is stored per
+turn by `_persist_turn`, markdown asterisks stripped); entries persisted
+before this change render without a `name` attribute. All text is XML-escaped;
+malformed entries degrade to escaped text nodes and never raise. History is
+still trimmed oldest-first by the prompt budget *before* rendering, and no
+compaction/summarization is performed — the block always contains raw turns.
+
 ## Commands
 
 - `/upload_kb` — add files to the knowledge base
