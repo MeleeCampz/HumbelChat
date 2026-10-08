@@ -425,6 +425,29 @@ class TestMarkCommands:
         assert result["status"] == "ambiguous"
         assert len(result["candidates"]) == 2
 
+    def test_resolve_exact_match_outranks_fuzzy_siblings(self):
+        # Real-world regression: the magic-items table has difflib≥0.6
+        # neighbours for almost every name, so an exact-name query returns
+        # many matches — the unique exact match must still act.
+        items = [
+            item_tables.Item(name="🎒 Bag of Holding", table="loot"),
+            item_tables.Item(name="💍 Ring of Mind Shielding", table="loot"),
+            item_tables.Item(name="🧹 Broom of Flying", table="loot"),
+            item_tables.Item(name="🕊️ Wings of Flying", table="loot"),
+        ]
+        result = _resolve_target("Bag of Holding", items)
+        assert result["status"] == "single"
+        assert result["item"].name == "🎒 Bag of Holding"
+
+    def test_resolve_prefix_outranks_fuzzy_siblings(self):
+        items = [
+            item_tables.Item(name="Wand of Secrets", table="loot"),
+            item_tables.Item(name="Wand of Web", table="loot"),  # fuzzy ~0.86
+        ]
+        result = _resolve_target("wand of se", items)
+        assert result["status"] == "single"
+        assert result["item"].name == "Wand of Secrets"
+
     def test_resolve_weak_fuzzy_never_acts(self):
         # Typo matches only via difflib ratio (< 0.8) → shortlist, no action.
         items = [item_tables.Item(name="Bag of Holding", table="loot")]

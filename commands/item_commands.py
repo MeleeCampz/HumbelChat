@@ -43,11 +43,13 @@ def _load_scope(table: str | None) -> dict[str, Any]:
 def _resolve_target(query: str, items: list[item_tables.Item]) -> dict[str, Any]:
     """Fuzzy-match one item to act on, using /item_search scoring.
 
-    Acts (``single``) only when there is exactly one candidate AND it is in
-    a strong tier — exact / prefix / substring on the normalized names. The
-    difflib-ratio tier never acts on its own (ratios can reach 0.8+, so the
-    score alone cannot separate the tiers). Multiple candidates or only weak
-    matches yield ``ambiguous`` with up to five options; nothing found yields
+    Acts (``single``) when exactly one strong-tier candidate — exact /
+    prefix / substring on the normalized names — strictly outranks the
+    second-best match. The difflib-ratio tier never acts on its own (ratios
+    can reach 0.8+, so the score alone cannot separate the tiers); it only
+    counts as a tie-breaker against a strong candidate. Multiple strong
+    candidates, or a fuzzy match scoring at least as high as the sole strong
+    one, yield ``ambiguous`` with up to five options; nothing found yields
     ``none``.
     """
     matches = item_search.search_items(query, items, limit=5)
@@ -58,7 +60,7 @@ def _resolve_target(query: str, items: list[item_tables.Item]) -> dict[str, Any]
         (item, score) for item, score in matches
         if (n := item_search.norm(item.name)) == q or n.startswith(q) or q in n
     ]
-    if len(matches) == 1 and len(strong) == 1:
+    if len(strong) == 1 and (len(matches) == 1 or strong[0][1] > matches[1][1]):
         return {"status": "single", "item": strong[0][0]}
     return {"status": "ambiguous", "candidates": [(i, s) for i, s in matches]}
 
