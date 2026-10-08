@@ -116,6 +116,25 @@ class TestEndSession:
         assert "We did things." in content
         assert S.get_current_session() is None
 
+    def test_overview_renders_before_session_log(self):
+        """The brief overview leads the file: after the notes, BEFORE the
+        AI-merged session log (and the mechanical Documents fallback)."""
+        session, _ = S.start_session(name="S1")
+        S.add_note("a note", author="Bob")
+        S.end_session(overview="Brief recap.", merged_log="Long merged log body.")
+        content = pathlib.Path(session["file"]).read_text(encoding="utf-8")
+        i_notes = content.index("## Notes")
+        i_overview = content.index("## Overview (written when the session ended)")
+        i_log = content.index("## Session Log (combined from all uploads — AI-merged)")
+        assert i_notes < i_overview < i_log
+        # without a merged log, the overview still precedes the Documents section
+        session2, _ = S.start_session(name="S2")
+        S.add_document("doc body", title="D1", session=session2)
+        S.end_session(overview="Another recap.")
+        content2 = pathlib.Path(session2["file"]).read_text(encoding="utf-8")
+        assert content2.index("## Overview (written when the session ended)") \
+            < content2.index("## Documents")
+
     def test_end_with_name_renames(self):
         session, _ = S.start_session(name="Old name")
         ended = S.end_session(overview=None, name="New name")
