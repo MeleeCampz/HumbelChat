@@ -1,6 +1,7 @@
 """Application settings — all environment variables with defaults, typed."""
 from __future__ import annotations
 
+import logging
 import os
 import pathlib
 
@@ -136,6 +137,51 @@ AI_HEALTH_CHECK_TIMEOUT: int = _safe_int(os.getenv("AI_HEALTH_CHECK_TIMEOUT"), 5
 # header. The header value itself is clamped to [5, 120] s (see
 # bot_core.errors._parse_retry_after); this is only the no-header fallback.
 AI_RETRY_AFTER_FALLBACK_S: int = _safe_int(os.getenv("AI_RETRY_AFTER_FALLBACK_S"), 30)
+# ── Reasoning effort (per task family, #20) ───────────────────────
+# Qwen3-style hybrid-thinking models spend a hidden reasoning phase before
+# answering; at the model default (xhigh on Qwen3.8) even simple questions pay
+# for maximal reasoning. These knobs dial that per TASK FAMILY so latency-
+# sensitive calls can run shallow while long-form quality calls stay deep.
+# Values: off | low | medium | high | xhigh  ("off" = enable_thinking=False).
+#: /ai chat (ask_ai / ask_ai_stream). None = omit the param entirely →
+#: current behaviour (thinking on, model default effort).
+AI_REASONING_EFFORT: str | None
+#: Short mechanical calls: /summarize, /end_session recap, /translate, /ocr.
+#: Effective default "off" — a short factual answer gains nothing from the
+#: reasoning phase (same rationale already hard-coded for /summarize and the
+#: recap). Note: /translate and /ocr previously had NO thinking control at all
+#: (ran at the model default), so this is a deliberate latency fix.
+SUMMARY_REASONING_EFFORT: str | None
+#: /end_session merged log — long-form narrative merge where quality matters
+#: more than latency (runs deferred). None = omit the param → current
+#: behaviour (thinking on, model default effort).
+MERGE_LOG_REASONING_EFFORT: str | None
+
+def _reasoning_effort_env(name: str, raw: str | None) -> str | None:
+    """Parse a reasoning-effort env var against the allowlist.
+
+    Case-insensitive; empty/unset → ``None``. An unrecognised value logs a
+    warning and yields ``None`` (same fail-soft spirit as ``_safe_int``) so a
+    typo in .env can never break startup or requests.
+    """
+    if raw is None:
+        return None
+    v = raw.strip().lower()
+    if not v:
+        return None
+    allowed = ("off", "low", "medium", "high", "xhigh")
+    if v in allowed:
+        return v
+    logging.getLogger("bot.config.settings").warning(
+        "%s=%r is not a valid reasoning effort (allowed: %s); ignoring it.",
+        name, raw, "/".join(allowed),
+    )
+    return None
+
+AI_REASONING_EFFORT = _reasoning_effort_env("AI_REASONING_EFFORT", os.getenv("AI_REASONING_EFFORT"))
+SUMMARY_REASONING_EFFORT = _reasoning_effort_env("SUMMARY_REASONING_EFFORT", os.getenv("SUMMARY_REASONING_EFFORT"))
+MERGE_LOG_REASONING_EFFORT = _reasoning_effort_env("MERGE_LOG_REASONING_EFFORT", os.getenv("MERGE_LOG_REASONING_EFFORT"))
+
 # Retained for reference / backward compatibility: chat no longer applies a
 # global output cap — requests omit max_tokens so the backend (LM Studio)
 # lets the model use its maximum output length. A per-character ``max_tokens``
