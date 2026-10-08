@@ -25,10 +25,10 @@ from config.settings import (
     DEFAULT_SESSION_MERGE_PROMPT,
     DEFAULT_SESSION_RECAP_PROMPT,
     MERGE_LOG_REASONING_EFFORT,
+    RECAP_REASONING_EFFORT,
     SESSION_MERGE_PROMPT,
     SESSION_RECAP_PROMPT,
     SUMMARY_CALL_MAX_TOKENS,
-    SUMMARY_REASONING_EFFORT,
 )
 
 log = logging.getLogger("bot.session_commands")
@@ -213,8 +213,9 @@ async def _generate_recap(
 
     client = _make_client()
     try:
-        # Short output, reasoning off by default (#20) — same rationale as the
-        # overview; override with SUMMARY_REASONING_EFFORT if you want depth.
+        # The stored session digest is accuracy-critical (#20): it stays at
+        # the model default (max effort) unless RECAP_REASONING_EFFORT lowers
+        # it — latency matters less than getting the recap right.
         summary = await complete_text(
             client,
             model=model,
@@ -224,7 +225,7 @@ async def _generate_recap(
             ],
             temperature=0.3,
             max_tokens=max(0, SUMMARY_CALL_MAX_TOKENS) or None,
-            reasoning_effort=SUMMARY_REASONING_EFFORT or "off",
+            reasoning_effort=RECAP_REASONING_EFFORT,
         )
         if not summary.strip():
             raise ValueError("empty recap")
