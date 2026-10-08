@@ -167,6 +167,34 @@ async def test_missing_delete_is_swallowed():
 
 
 @pytest.mark.asyncio
+async def test_sync_handler_survives_expired_interaction():
+    """If defer() 404s (dispatch >3 s late, e.g. busy startup), use the channel.
+
+    Regression: during a blocked event loop at startup, /sync's defer() hit
+    '404 Unknown interaction (10062)' and the user got no feedback at all.
+    """
+    from unittest.mock import AsyncMock, patch
+    from tests._shared import Interaction
+    from commands.sync_command import handle_sync_command
+
+    ix = Interaction(client=MagicMock())
+
+    async def _expired(**kwargs):
+        raise discord.NotFound(MagicMock(), "10062: Unknown interaction")
+
+    ix.response.defer = _expired
+    ix.channel = MagicMock()
+    ix.channel.send = AsyncMock()
+
+    with patch.object(cs, "sync_commands") as mock_sync:
+        await handle_sync_command(ix)
+
+    mock_sync.assert_not_called()
+    ix.channel.send.assert_awaited_once()
+    assert "try again" in ix.channel.send.await_args.args[0].lower()
+
+
+@pytest.mark.asyncio
 async def test_sync_handler_shows_upload_failure():
     """When the upload is rejected, /sync must say FAILED — not 'synced'."""
     from unittest.mock import patch

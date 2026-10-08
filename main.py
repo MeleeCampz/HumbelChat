@@ -579,13 +579,17 @@ async def on_ready() -> None:
     # Warm in-process CPU models (embedding + optional reranker) if enabled, so the
     # first /ai RAG request isn't cold. No-ops when EMBED_BACKEND != "local" or when
     # reranking is disabled; idempotent on gateway reconnects (singletons).
-    try:
+    # Runs in a worker thread: importing sentence-transformers + loading the model
+    # are CPU-bound and take tens of seconds — doing that on the event loop stalls
+    # every Discord interaction (e.g. /sync) past its 3 s response window.
+    async def _warmup_local_models() -> None:
         from kb.embedder import preload_local_embedder
         from kb.reranker import preload_reranker
-        preload_local_embedder()
-        preload_reranker()
-    except Exception:  # pragma: no cover - never block startup on model warmup
-        log.exception("Local model preload failed (continuing)")
+
+        await asyncio.to_thread(preload_local_embedder)
+        await asyncio.to_thread(preload_reranker)
+
+    spawn_tracked_task(_warmup_local_models(), name="model-warmup")
 
     char_names = [c.name for c in _CHAR_CHOICES]
     log.info("Characters loaded: %s", ", ".join(char_names) or "(none)")
@@ -643,18 +647,32 @@ async def on_app_command_error(
         user_msg = "⚠️ That command failed. Please try again."
 
     # Best-effort: this handler may run after the interaction already responded
-    # (deferred → followed up) or not.  Try the primary response first, then
-    # fall back to a follow-up.
+    # (deferred → followed up) or not.  Try the primary response first, then a
+    # follow-up, then a plain channel message when the interaction webhook itself
+    # is gone (e.g. dispatch was >3 s late during startup — error 10015 Unknown
+    # Webhook), so the user still sees *something*.
     try:
         if not interaction.response.is_done():
             await interaction.response.send_message(user_msg, ephemeral=True)
             return
     except Exception:
         pass
+    webhook_gone = False
     try:
         await interaction.followup.send(user_msg, ephemeral=True)
+    except discord.NotFound:
+        webhook_gone = True
+        log.warning("on_app_command_error: follow-up webhook unavailable; falling back to channel")
     except Exception as e:  # pragma: no cover - purely defensive
         log.warning("on_app_command_error: follow-up send failed: %s", e)
+        return
+    if webhook_gone:
+        try:
+            channel = getattr(interaction, "channel", None)
+            if channel is not None:
+                await channel.send(user_msg)
+        except Exception as e:  # pragma: no cover - purely defensive
+            log.warning("on_app_command_error: channel fallback failed: %s", e)
 
 
 @bot.event
