@@ -7,8 +7,9 @@ Covers:
   * the 4xx retry-without-param fallback (and that 5xx gets NO plain retry)
   * ``complete_text`` reasoning control (disable_thinking + reasoning_effort)
   * call sites: /summarize, /translate, /ocr default to thinking-off and
-    honour SUMMARY_REASONING_EFFORT; recap honours the same var; merged log
-    omits the param when MERGE_LOG_REASONING_EFFORT is unset.
+    honour SUMMARY_REASONING_EFFORT; recap honours RECAP_REASONING_EFFORT
+    (omits the param → model max when unset); merged log omits the param
+    when MERGE_LOG_REASONING_EFFORT is unset.
 """
 from __future__ import annotations
 
@@ -456,17 +457,20 @@ class TestSummaryCallSites:
 class TestSessionCallSites:
 
     @pytest.mark.asyncio
-    async def test_recap_defaults_thinking_off(self, monkeypatch):
+    async def test_recap_defaults_to_model_max(self, monkeypatch):
+        """Unset RECAP_REASONING_EFFORT → param omitted → backend model default."""
         from commands import session_commands as sc
 
         monkeypatch.setattr(sc, "_make_client", lambda: MagicMock())
         monkeypatch.setattr(sc, "_validate_model", AsyncMock(return_value="m"))
+        monkeypatch.setattr(sc, "RECAP_REASONING_EFFORT", None)
         with patch.object(sc, "complete_text", AsyncMock(return_value="recap text")) as ct:
             out = await sc._generate_recap(
                 {"name": "T", "notes": [(1.0, "did a thing")]}, None, None
             )
         assert out == "recap text"
-        assert ct.await_args.kwargs.get("reasoning_effort") == "off"
+        # None → complete_text omits extra_body → model default (max effort).
+        assert ct.await_args.kwargs.get("reasoning_effort") is None
         assert "disable_thinking" not in ct.await_args.kwargs
 
     @pytest.mark.asyncio
@@ -475,12 +479,13 @@ class TestSessionCallSites:
 
         monkeypatch.setattr(sc, "_make_client", lambda: MagicMock())
         monkeypatch.setattr(sc, "_validate_model", AsyncMock(return_value="m"))
-        monkeypatch.setattr(sc, "SUMMARY_REASONING_EFFORT", "medium")
+        monkeypatch.setattr(sc, "RECAP_REASONING_EFFORT", "medium")
         with patch.object(sc, "complete_text", AsyncMock(return_value="recap text")) as ct:
             await sc._generate_recap(
                 {"name": "T", "notes": [(1.0, "did a thing")]}, None, None
             )
         assert ct.await_args.kwargs.get("reasoning_effort") == "medium"
+
 
     @pytest.mark.asyncio
     async def test_merged_log_omits_param_when_unset(self, monkeypatch, tmp_path):

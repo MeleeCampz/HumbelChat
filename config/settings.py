@@ -146,12 +146,15 @@ AI_RETRY_AFTER_FALLBACK_S: int = _safe_int(os.getenv("AI_RETRY_AFTER_FALLBACK_S"
 #: /ai chat (ask_ai / ask_ai_stream). None = omit the param entirely →
 #: current behaviour (thinking on, model default effort).
 AI_REASONING_EFFORT: str | None
-#: Short mechanical calls: /summarize, /end_session recap, /translate, /ocr.
-#: Effective default "off" — a short factual answer gains nothing from the
-#: reasoning phase (same rationale already hard-coded for /summarize and the
-#: recap). Note: /translate and /ocr previously had NO thinking control at all
-#: (ran at the model default), so this is a deliberate latency fix.
+#: Short mechanical calls: /summarize, /translate, /ocr. Effective default
+#: "off" — a short factual answer gains nothing from the reasoning phase.
+#: Note: /translate and /ocr previously had NO thinking control at all (ran at
+#: the model default), so this is a deliberate latency fix.
 SUMMARY_REASONING_EFFORT: str | None
+#: /end_session recap. None = omit the param → current behaviour (thinking on,
+#: model default effort = max). Accuracy of the stored session digest matters
+#: more than its latency, so it stays at the model default unless lowered.
+RECAP_REASONING_EFFORT: str | None
 #: /end_session merged log — long-form narrative merge where quality matters
 #: more than latency (runs deferred). None = omit the param → current
 #: behaviour (thinking on, model default effort).
@@ -180,6 +183,7 @@ def _reasoning_effort_env(name: str, raw: str | None) -> str | None:
 
 AI_REASONING_EFFORT = _reasoning_effort_env("AI_REASONING_EFFORT", os.getenv("AI_REASONING_EFFORT"))
 SUMMARY_REASONING_EFFORT = _reasoning_effort_env("SUMMARY_REASONING_EFFORT", os.getenv("SUMMARY_REASONING_EFFORT"))
+RECAP_REASONING_EFFORT = _reasoning_effort_env("RECAP_REASONING_EFFORT", os.getenv("RECAP_REASONING_EFFORT"))
 MERGE_LOG_REASONING_EFFORT = _reasoning_effort_env("MERGE_LOG_REASONING_EFFORT", os.getenv("MERGE_LOG_REASONING_EFFORT"))
 
 # Retained for reference / backward compatibility: chat no longer applies a
