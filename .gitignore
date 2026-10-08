@@ -111,3 +111,6 @@ whisper-api.env
 # machine/deployment-specific and must never be committed to the repo)
 .agents/skills/openterminal/
 .venv-linux/
+
+# Remote-pi relay broker deployment (local infra for the agent mesh, not repo content)
+remote-pi-relay/
