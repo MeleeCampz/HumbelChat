@@ -1,11 +1,17 @@
 """Item tables for /roll_items — CSV loading, CR tiers, and random rolling.
 
 Pure, unit-testable: no Discord, no AI. Data lives in ``ITEMS_DIR``
-(default ``data/items/``) as one CSV per table plus ``cr_tiers.csv``:
+(default ``data/items/``) as one CSV per table plus CR tier files:
 
-- item table columns:  name (required), url, rarity, notes
+- item table columns:  name (required), url, rarity, notes, price_gp (optional)
 - cr tier columns:     min_cr, rarities — where ``rarities`` holds
                        per-rarity count ranges, e.g. ``common:3-4;rare:1-2``
+
+Tier files come in two flavors: the shared ``cr_tiers.csv``, and optional
+per-table curves ``<table>_tiers.csv`` (e.g. ``gems_tiers.csv``) that take
+precedence for that table — useful when a table's "rarities" are value tiers
+(``10 gp``, ``250 gp``, …) with their own CR breakpoints. Any file ending in
+``_tiers.csv`` is reserved and never offered as a rollable table.
 
 Tier selection is a step function: the tier with the **highest** ``min_cr``
 that is ≤ the rolled CR wins (CR below every tier uses the first one). A
@@ -28,8 +34,11 @@ from pathlib import Path
 
 log = logging.getLogger("bot.item_tables")
 
-#: Filename reserved for the CR tier table — never offered as a rollable table.
+#: Filename of the shared CR tier table (fallback for every table).
 CR_TIERS_FILENAME = "cr_tiers.csv"
+
+#: Suffix reserved for per-table CR tier files (``<table>_tiers.csv``).
+TIERS_SUFFIX = "_tiers.csv"
 
 
 class NoCrTiersError(LookupError):
@@ -44,6 +53,7 @@ class Item:
     rarity: str = ""
     notes: str = ""
     table: str = ""
+    price_gp: int | None = None
 
 
 @dataclass(frozen=True)
@@ -104,11 +114,17 @@ def _samples_dir() -> Path:
     return Path(__file__).resolve().parent.parent / "item_samples"
 
 
+def _is_tiers_file(name: str) -> bool:
+    """True for any CR tier file: ``cr_tiers.csv`` or ``<table>_tiers.csv``."""
+    n = name.lower()
+    return n == CR_TIERS_FILENAME or n.endswith(TIERS_SUFFIX)
+
+
 def _has_tables(root: Path) -> bool:
     if not root.is_dir():
         return False
     return any(
-        p.is_file() and p.suffix.lower() == ".csv" and p.name != CR_TIERS_FILENAME
+        p.is_file() and p.suffix.lower() == ".csv" and not _is_tiers_file(p.name)
         for p in root.iterdir()
     )
 
@@ -148,14 +164,15 @@ def seed_from_samples() -> bool:
 def list_tables() -> list[str]:
     """Sorted rollable table names (CSV filenames without suffix).
 
-    ``cr_tiers.csv`` is excluded; a missing directory yields an empty list.
+    Tier files (``cr_tiers.csv``, ``*_tiers.csv``) are excluded; a missing
+directory yields an empty list.
     """
     root = _items_dir()
     if not root.is_dir():
         return []
     tables = [
         p.stem for p in sorted(root.iterdir())
-        if p.is_file() and p.suffix.lower() == ".csv" and p.name != CR_TIERS_FILENAME
+        if p.is_file() and p.suffix.lower() == ".csv" and not _is_tiers_file(p.name)
     ]
     return tables
 
@@ -204,6 +221,13 @@ def load_items(table: str | None = None) -> list[Item]:
                 log.warning("item_tables: skipping row without name in %s: %r", path.name, row)
                 continue
             rarity = (row.get("rarity") or "common").lower()
+            raw_price = row.get("price_gp", "")
+            price_gp = _parse_price(raw_price)
+            if raw_price and price_gp is None:
+                log.warning(
+                    "item_tables: ignoring unparseable price %r for %r in %s",
+                    raw_price, name, path.name,
+                )
             items.append(
                 Item(
                     name=name,
@@ -211,9 +235,28 @@ def load_items(table: str | None = None) -> list[Item]:
                     rarity=rarity,
                     notes=row.get("notes", ""),
                     table=table_name,
+                    price_gp=price_gp,
                 )
             )
     return items
+
+
+def _parse_price(raw: str) -> int | None:
+    """Parse an optional ``price_gp`` column: ``"100"``, ``"2,500 gp"`` → int.
+
+    Blank → ``None`` (item has no price). Garbage or negative → ``None``
+    (the caller logs a warning).
+    """
+    text = str(raw).strip().replace(",", "").replace("_", "")
+    if not text:
+        return None
+    if text.lower().endswith("gp"):
+        text = text[:-2].strip()
+    try:
+        value = int(float(text))
+    except ValueError:
+        return None
+    return value if value >= 0 else None
 
 
 # ── CR tiers ───────────────────────────────────────────────────────────────
@@ -247,21 +290,44 @@ def _parse_rarity_ranges(raw: str) -> list[RarityRange]:
     return ranges
 
 
-def load_cr_tiers() -> list[CrTier]:
-    """Parse ``cr_tiers.csv`` sorted by ``min_cr``. Missing file → []."""
-    path = _items_dir() / CR_TIERS_FILENAME
+def tier_filename(table: str) -> str:
+    """Per-table tier filename for a rollable table (``gems`` → ``gems_tiers.csv``).
+
+    Case-insensitive, trailing ``.csv`` tolerated — mirrors ``load_items``.
+    """
+    return f"{str(table).strip().lower().removesuffix('.csv')}{TIERS_SUFFIX}"
+
+
+def load_cr_tiers(table: str | None = None) -> list[CrTier]:
+    """Parse CR tiers sorted by ``min_cr``. Missing file → [].
+
+    When ``table`` is given, the per-table curve ``<table>_tiers.csv`` takes
+    precedence; when it doesn't exist (or no table is given), the shared
+    ``cr_tiers.csv`` is used.
+    """
+    root = _items_dir()
+    if table:
+        path = root / tier_filename(table)
+        if path.is_file():
+            return _parse_cr_tiers(path)
+    path = root / CR_TIERS_FILENAME
     if not path.is_file():
         return []
+    return _parse_cr_tiers(path)
+
+
+def _parse_cr_tiers(path: Path) -> list[CrTier]:
+    """Parse one tier CSV file into a sorted list of ``CrTier``."""
     tiers: list[CrTier] = []
     for row in _read_csv_rows(path):
         try:
             min_cr = parse_cr(row.get("min_cr", ""))
             ranges = _parse_rarity_ranges(row.get("rarities", ""))
         except ValueError as exc:
-            log.warning("item_tables: skipping bad cr_tiers row %r: %s", row, exc)
+            log.warning("item_tables: skipping bad %s row %r: %s", path.name, row, exc)
             continue
         if not ranges:
-            log.warning("item_tables: skipping cr_tiers row without rarities %r", row)
+            log.warning("item_tables: skipping %s row without rarities %r", path.name, row)
             continue
         tiers.append(CrTier(min_cr, tuple(ranges)))
     tiers.sort(key=lambda t: t.min_cr)

@@ -131,6 +131,14 @@ class TestTableResolution:
         write_table(items_dir, "loot.csv", [["A", "", "", ""]])
         assert item_tables.list_tables() == ["loot"]
 
+    def test_per_table_tiers_files_excluded(self, items_dir):
+        # Any *_tiers.csv is reserved for tier curves, never rollable.
+        (items_dir / "gems_tiers.csv").write_text(
+            "min_cr,rarities\n0,10 gp:2-4\n", encoding="utf-8"
+        )
+        write_table(items_dir, "gems.csv", [["Amber", "", "100 gp", ""]])
+        assert item_tables.list_tables() == ["gems"]
+
     def test_unknown_table_raises(self, items_dir):
         write_table(items_dir, "a.csv", [["A", "", "", ""]])
         with pytest.raises(LookupError):
@@ -205,6 +213,30 @@ class TestCrTiers:
     def test_missing_file_empty(self, items_dir):
         assert item_tables.load_cr_tiers() == []
 
+    def test_per_table_file_preferred(self, items_dir):
+        self._write_tiers(items_dir, [["0", "common:1-2"]])
+        (items_dir / "gems_tiers.csv").write_text(
+            "min_cr,rarities\n0,10 gp:2-4\n5,50 gp:2-4\n", encoding="utf-8"
+        )
+        tiers = item_tables.load_cr_tiers("gems")
+        assert [t.min_cr for t in tiers] == [0.0, 5.0]
+        assert tiers[0].ranges == (item_tables.RarityRange("10 gp", 2, 4),)
+
+    def test_fallback_to_shared_without_per_table_file(self, items_dir):
+        self._write_tiers(items_dir, [["0", "common:1-2"]])
+        assert item_tables.load_cr_tiers("gems") == item_tables.load_cr_tiers()
+
+    def test_none_table_uses_shared(self, items_dir):
+        self._write_tiers(items_dir, [["0", "common:1-2"]])
+        (items_dir / "gems_tiers.csv").write_text(
+            "min_cr,rarities\n0,10 gp:1-1\n", encoding="utf-8"
+        )
+        assert item_tables.load_cr_tiers(None) == item_tables.load_cr_tiers()
+
+    def test_tier_filename_helpers(self):
+        assert item_tables.tier_filename("gems") == "gems_tiers.csv"
+        assert item_tables.tier_filename(" Art_Objects.CSV ") == "art_objects_tiers.csv"
+
     def test_resolve_highest_matching_min_cr(self, items_dir):
         self._write_tiers(items_dir, [
             ["0", "common:1-2"],
@@ -229,6 +261,37 @@ class TestCrTiers:
 
 def _items(n: int, rarity: str = "common", prefix: str = "i") -> list[item_tables.Item]:
     return [item_tables.Item(name=f"{prefix}{k}", rarity=rarity) for k in range(n)]
+
+
+class TestPriceParsing:
+    def test_price_column_parsed(self, items_dir):
+        write_table(
+            items_dir, "gems.csv",
+            [["Amber", "", "100 gp", "resin", "100"],
+             ["Crown", "", "2500 gp", "gold", "2,500 gp"],
+             ["Ewer", "", "25 gp", "silver", ""]],
+            header=["name", "url", "rarity", "notes", "price_gp"],
+        )
+        items = item_tables.load_items("gems")
+        assert items[0].price_gp == 100
+        assert items[1].price_gp == 2500
+        assert items[2].price_gp is None  # blank → no price
+
+    def test_no_price_column_defaults_none(self, items_dir):
+        write_table(items_dir, "t.csv", [["A", "", "common", ""]])
+        assert item_tables.load_items("t")[0].price_gp is None
+
+    def test_garbage_price_ignored_with_warning(self, items_dir, caplog):
+        write_table(
+            items_dir, "g.csv",
+            [["Bad", "", "common", "", "lots"], ["Neg", "", "common", "", "-5"]],
+            header=["name", "url", "rarity", "notes", "price_gp"],
+        )
+        with caplog.at_level("WARNING"):
+            items = item_tables.load_items("g")
+        assert all(i.price_gp is None for i in items)
+        assert any("unparseable price" in r.message or "-5" in r.message
+                   for r in caplog.records)
 
 
 class TestRollItems:
@@ -363,7 +426,9 @@ class TestSeeding:
         assert item_tables.seed_from_samples() is True
         assert (d / "magic_items.csv").is_file()
         assert (d / item_tables.CR_TIERS_FILENAME).is_file()
-        assert item_tables.list_tables() == ["magic_items"]
+        # Tier files are seeded too but never offered as rollable tables.
+        assert (d / "gems_tiers.csv").is_file() and (d / "art_objects_tiers.csv").is_file()
+        assert item_tables.list_tables() == ["art_objects", "gems", "magic_items"]
         items = item_tables.load_items("magic_items")
         assert len(items) >= 20
         assert all(i.url.startswith("http") for i in items)
@@ -475,6 +540,33 @@ class TestHandler:
         await handle_roll_items_command(ix, table="loot", count=1, cr="2")
         (call,) = ix._calls
         assert call["embed"] is None and "cr_tiers.csv" in call["content"]
+        assert "loot_tiers.csv" in call["content"]
+
+    async def test_cr_roll_uses_per_table_tiers_and_total_price(self, items_dir):
+        # gems-style table: value tiers + per-table curve + prices.
+        write_table(
+            items_dir, "gems.csv",
+            [["Amber", "", "100 gp", "", "100"],
+             ["Garnet", "", "100 gp", "", "100"],
+             ["Azurite", "", "10 gp", "", "10"],
+             ["Jasper", "", "10 gp", "", "10"]],
+            header=["name", "url", "rarity", "notes", "price_gp"],
+        )
+        (items_dir / "gems_tiers.csv").write_text(
+            "min_cr,rarities\n0,10 gp:2-2\n5,100 gp:2-2\n", encoding="utf-8"
+        )
+        # A shared file that must NOT be used for this table.
+        (items_dir / item_tables.CR_TIERS_FILENAME).write_text(
+            "min_cr,rarities\n0,common:1-1\n", encoding="utf-8"
+        )
+        ix = make_ix()
+        await handle_roll_items_command(ix, table="gems", count=1, cr="7")
+        (call,) = ix._calls
+        embed = call["embed"]
+        assert len(embed.fields) == 2  # the per-table tier's two 100 gp gems
+        assert all("100 gp" in f.name for f in embed.fields)
+        assert "100 gp ×2" in embed.footer.text
+        assert "~200 gp total" in embed.footer.text
 
     async def test_exhausted_notice(self, items_dir):
         write_table(items_dir, "tiny.csv", [["Only", "", "common", ""]])

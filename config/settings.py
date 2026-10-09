@@ -408,7 +408,8 @@ OBSIDIAN_VAULT_PULL_INTERVAL: int = _safe_int(
 )
 
 # ── Item tables (/roll_items) ───────────────────────────────────────────────
-# One CSV per rollable table, plus cr_tiers.csv for CR-scaled rolls.
+# One CSV per rollable table, plus CR tier files (cr_tiers.csv and optional
+# per-table <table>_tiers.csv) for CR-scaled rolls.
 # Defaults to <repo_root>/data/items.
 ITEMS_DIR: pathlib.Path = pathlib.Path(
     _or_default(os.getenv("ITEMS_DIR"), str(_REPO_ROOT / "data" / "items"))

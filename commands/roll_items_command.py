@@ -37,6 +37,8 @@ def _build_embed(
         label = f"**{item.name}**"
         if item.rarity:
             label += f" — {item.rarity}"
+        if item.price_gp is not None:
+            label += f" ({item.price_gp:,} gp)"
         lines = []
         if item.url:
             lines.append(f"[Item page]({item.url})")
@@ -107,7 +109,8 @@ async def handle_roll_items_command(
 
             if cr is not None:
                 cr_value = item_tables.parse_cr(cr)
-                tiers = item_tables.load_cr_tiers()
+                # Per-table curve first (<table>_tiers.csv), shared fallback.
+                tiers = item_tables.load_cr_tiers(table)
                 if not tiers:
                     raise item_tables.NoCrTiersError("no CR tiers configured")
 
@@ -127,6 +130,9 @@ async def handle_roll_items_command(
                 footer_parts = [
                     f"CR {_fmt_cr(cr_value)} → tier (min CR {_fmt_cr(tier.min_cr)}): {breakdown}"
                 ]
+                priced = [i.price_gp for i in rolled if i.price_gp is not None]
+                if priced:
+                    footer_parts.append(f"~{sum(priced):,} gp total")
                 if exhausted:
                     footer_parts.append(f"some rarities ran out of items in {scope}")
                 if consume:
@@ -181,8 +187,10 @@ async def handle_roll_items_command(
             return {
                 "ok": False,
                 "error": (
-                    "No CR tier table found — expected `data/items/cr_tiers.csv` with columns "
-                    "`min_cr, rarities` (rarities = per-rarity ranges like `common:3-4;rare:1-2`)."
+                    f"No CR tier table found for `{scope}` — expected "
+                    f"`data/items/{item_tables.tier_filename(scope)}` (falls back to "
+                    f"`cr_tiers.csv`), with columns `min_cr, rarities` "
+                    "(rarities = per-rarity ranges like `common:3-4;rare:1-2`)."
                 ),
             }
         except LookupError:
