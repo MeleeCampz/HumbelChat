@@ -15,7 +15,7 @@ from typing import Any
 
 import discord
 
-from bot_core import item_search, item_state, item_tables
+from bot_core import item_search, item_state, item_tables, roll_buttons
 
 log = logging.getLogger("bot.item_commands")
 
@@ -115,14 +115,33 @@ async def handle_item_search_command(
             if per_item_table and item.table:
                 lines.append(f"table: `{item.table}`")
             embed.add_field(name=label, value="\n".join(lines) or "—", inline=False)
-        return {"ok": True, "embed": embed}
+        # One toggle button per match (per-item table — results may be mixed).
+        entries = [(item.table, item.name) for item, _ in matches if item.table]
+        return {"ok": True, "embed": embed, "entries": entries}
 
     try:
         result = await asyncio.to_thread(_search)
         if not result["ok"]:
             await interaction.followup.send(result["error"])
             return
-        await interaction.followup.send(embed=result["embed"])
+        entries: list[tuple[str, str]] = result.get("entries") or []
+        # Built on the loop thread — views created outside a running event
+        # loop never dispatch clicks in this discord.py version.
+        view = roll_buttons.build_view(entries) if entries else None
+        sent: discord.WebhookMessage | None = None
+        if view is not None:
+            sent = await interaction.followup.send(
+                embed=result["embed"], view=view, wait=True
+            )
+        else:
+            await interaction.followup.send(embed=result["embed"])
+        if view is not None and sent is not None:
+            try:
+                await asyncio.to_thread(
+                    roll_buttons.record_roll_message, sent.channel.id, sent.id, entries
+                )
+            except OSError:
+                log.warning("item_search: could not persist button record for message %s", sent.id)
     except Exception:
         log.exception("item_search: unexpected error")
         try:

@@ -165,6 +165,25 @@ def release_item(table: str, name: str) -> bool:
         return False
 
 
+def toggle_item(table: str, name: str) -> bool:
+    """Toggle a single ``(table, name)`` mark (the roll-button click path).
+
+    Returns True when the item is consumed *after* the toggle.
+    """
+    with _lock:
+        state = load_state()
+        bucket = state.setdefault(table, [])
+        if name in bucket:
+            bucket.remove(name)
+            if not bucket:
+                del state[table]
+            _save_state(state)
+            return False
+        bucket.append(name)
+        _save_state(state)
+        return True
+
+
 def reset(table: str | None = None) -> int:
     """Clear consumed entries for one table (case-insensitive) or all.
 

@@ -80,10 +80,12 @@ an exhausted pool gets a friendly message instead of an empty roll.
   Manual marks live in the same state as rolled-out items, so `/reset_rolls`
   clears them too, and `/item_stats` counts them as rolled out.
 
-### Item buttons on roll results
+### Item buttons on roll and search results
 
-Every roll reply carries one button per rolled item (up to 25). Clicking a
-button toggles that single item in the consumed list — no typing names:
+Every roll reply carries one button per rolled item, and every `/item_search`
+reply carries one per match (up to 25; search results may span several
+tables — each button knows its own table). Clicking a button toggles that
+single item in the consumed list — no typing names:
 
 - **🚫 <name>** (red) — not consumed; click marks it used.
 - **↩️ <name>** (green) — consumed; click puts it back in the pool.
@@ -101,7 +103,9 @@ gone; clicking one re-marks that single item.
 
 - **`/item_search <query> [table] [limit]`** — fuzzy-finds items (emote
   prefixes ignored; default top 10) and lists description, rarity, table, and
-  page link for each match.
+  page link for each match. Results carry the same per-item toggle buttons as
+  roll replies, so you can mark a found item used (or put it back) without
+  typing `/item_exclude`.
 - **`/item_stats [table]`** — per-table totals: total / rolled out / remaining
   plus a per-rarity breakdown. Read-only.
 - **`/reset_rolls [table]`** — clears the consumed-item tracking (one table or all), so those items can come up again.
