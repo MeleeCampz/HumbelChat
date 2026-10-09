@@ -7,7 +7,8 @@ How the item tables work: data layout, CSV formats, and rolling mechanics.
 | Location | Contents |
 |---|---|
 | `data/items/*.csv` | Your rollable tables (one CSV per table; gitignored) |
-| `data/items/cr_tiers.csv` | CR tier definitions for `/roll_items cr:…` |
+| `data/items/cr_tiers.csv` | Shared CR tier definitions for `/roll_items cr:…` |
+| `data/items/<table>_tiers.csv` | Optional per-table CR curve, e.g. `gems_tiers.csv` — wins over the shared file for that table |
 | `data/items/.rolled_state.json` | Consumed-item tracking for `consume:true` rolls (hidden, managed by the bot) |
 | `data/items/.roll_messages.json` | Which roll messages carry item buttons, so they keep working after a restart (hidden, managed by the bot) |
 | `item_samples/` | Built-in starter tables shipped with the repo |
@@ -30,10 +31,19 @@ Bag of Holding,https://example.com/items/bag-of-holding,uncommon,"Holds up to 50
 
 - **`name`** — the only required column. An emote prefix (e.g. `🎒 Bag of Holding`) is rendered as-is.
 - **`url`** — optional; shown as an "Item page" link.
-- **`rarity`** — optional, case-insensitive; blank = `common`. The 5e scale is `common / uncommon / rare / very rare / legendary`; other labels (e.g. `artifact`) never match a CR tier.
+- **`rarity`** — optional, case-insensitive; blank = `common`. The 5e scale is `common / uncommon / rare / very rare / legendary`; other labels (e.g. `artifact`) never match a CR tier. It's just a category label — the shipped `gems` and `art_objects` tables use it for **value tiers** (`10 gp`, `250 gp`, …).
 - **`notes`** — optional short description, shown in roll embeds and `/item_search`.
+- **`price_gp`** — optional integer price (commas and a trailing `gp` are tolerated: `2,500 gp`). Shown on each item in roll embeds; CR-scaled rolls add the sum as a `~N gp total` footer.
 
-## CR tier format (`data/items/cr_tiers.csv`)
+## CR tier format (`cr_tiers.csv` and `<table>_tiers.csv`)
+
+Two kinds of tier file exist. The **shared** `cr_tiers.csv` applies to every
+table that has no curve of its own; a **per-table** `<table>_tiers.csv`
+(e.g. `gems_tiers.csv`) takes precedence for that table — handy when the
+table's categories are value tiers with their own breakpoints. Any file
+ending in `_tiers.csv` is reserved and never offered as a rollable table.
+
+The shipped `cr_tiers.csv` (for magic items):
 
 ```csv
 min_cr,rarities
@@ -58,13 +68,17 @@ step up roughly every 1–2 CR within the four treasure bands (CR 0–4, 5–10,
 11–16, 17+).
 
 Each row is a tier. The tier with the **highest `min_cr` ≤ the rolled CR**
-wins (a CR below every tier uses the first one). `rarities` holds per-rarity
+wins (a CR below every tier uses the first one). `rarities` holds per-category
 count ranges (`rarity:min-max`, semicolon-separated): for each range a count
 is drawn uniformly and that many items are sampled. A range of `0-…` means
-"maybe"; rarities with no items in the table are skipped.
+"maybe"; categories with no items in the table are skipped.
 
-The full shipped table lives in [`item_samples/cr_tiers.csv`](../item_samples/cr_tiers.csv)
-(seeded into `data/items/` on first use).
+The shipped curves live in [`item_samples/cr_tiers.csv`](../item_samples/cr_tiers.csv),
+[`gems_tiers.csv`](../item_samples/gems_tiers.csv) and
+[`art_objects_tiers.csv`](../item_samples/art_objects_tiers.csv) (seeded into
+`data/items/` on first use). The gem/art curves follow the DMG treasure bands:
+10 gp gems / 25 gp art at low CR, stepping one value tier up per band, with
+fewer but pricier items as CR climbs.
 
 ## Rolling mechanics
 
@@ -76,8 +90,10 @@ in the footer.
 
 **CR-scaled roll** — `/roll_items cr:<rating>`: `cr` overrides `count`. The
 winning tier's per-rarity ranges decide how many of each rarity come up (e.g.
-CR 5 → tier `min_cr 5` → 1–2 uncommon, 1–2 rare). The footer shows the tier
-and the per-rarity breakdown.
+CR 5 → tier `min_cr 5` → 1–2 uncommon, 1–2 rare; CR 7 on the `gems` table →
+2–4 × 50 gp gems, maybe a 100 gp one). The footer shows the tier and the
+per-rarity breakdown, plus a `~N gp total` when the rolled items carry
+prices.
 
 ## Consuming items (`consume` flag)
 
