@@ -9,6 +9,7 @@ How the item tables work: data layout, CSV formats, and rolling mechanics.
 | `data/items/*.csv` | Your rollable tables (one CSV per table; gitignored) |
 | `data/items/cr_tiers.csv` | CR tier definitions for `/roll_items cr:…` |
 | `data/items/.rolled_state.json` | Consumed-item tracking for `consume:true` rolls (hidden, managed by the bot) |
+| `data/items/.roll_messages.json` | Which roll messages carry item buttons, so they keep working after a restart (hidden, managed by the bot) |
 | `item_samples/` | Built-in starter tables shipped with the repo |
 
 **First run.** A fresh clone works out of the box: the first `/roll_items`
@@ -78,6 +79,23 @@ an exhausted pool gets a friendly message instead of an empty roll.
   `/item_include <name>` releases just that item — no full reset needed.
   Manual marks live in the same state as rolled-out items, so `/reset_rolls`
   clears them too, and `/item_stats` counts them as rolled out.
+
+### Item buttons on roll results
+
+Every roll reply carries one button per rolled item (up to 25). Clicking a
+button toggles that single item in the consumed list — no typing names:
+
+- **🚫 <name>** (red) — not consumed; click marks it used.
+- **↩️ <name>** (green) — consumed; click puts it back in the pool.
+
+The button on the message *is* the state indicator, so a scroll-back still
+shows which items are out. Buttons work on plain rolls too (that's how you
+mark "didn't keep" items without `consume:true`). They survive bot restarts:
+each roll is remembered in `.roll_messages.json` and the buttons are
+re-registered at startup (deleted messages drop their record automatically).
+`/item_exclude`, `/item_include` and `/reset_rolls` operate on the same state
+— a reset just leaves old buttons showing 🚫 until the message is edited or
+gone; clicking one re-marks that single item.
 
 ## Utility commands
 

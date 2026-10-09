@@ -8,7 +8,7 @@ from typing import Any
 
 import discord
 
-from bot_core import item_state, item_tables
+from bot_core import item_state, item_tables, roll_buttons
 
 log = logging.getLogger("bot.roll_items_command")
 
@@ -199,12 +199,27 @@ async def handle_roll_items_command(
         if not result["ok"]:
             await interaction.followup.send(result["error"])
             return
-        await interaction.followup.send(
-            embed=_build_embed(result["title"], result["items"], result["footer"])
+        names = [i.name for i in result["items"]]
+        # Per-item toggle buttons. For consume rolls the rolled items are
+        # shown as already-consumed (↩️) even though the state write happens
+        # after the send lands — a failed send loses nothing.
+        view = await asyncio.to_thread(
+            roll_buttons.build_view, table, names,
+            {n for n in names} if result.get("consume") else None,
+        )
+        sent = await interaction.followup.send(
+            embed=_build_embed(result["title"], result["items"], result["footer"]),
+            view=view,
         )
         # Consume only after the reply landed — a failed send loses nothing.
         if result.get("consume"):
             await asyncio.to_thread(item_state.consume, result["consume"])
+        try:
+            await asyncio.to_thread(
+                roll_buttons.record_roll_message, sent.channel.id, sent.id, table, names
+            )
+        except OSError:
+            log.warning("roll_items: could not persist button record for message %s", sent.id)
     except Exception:
         log.exception("roll_items: unexpected error")
         try:
