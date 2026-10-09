@@ -633,6 +633,11 @@ async def on_ready() -> None:
     if n_rearmed:
         log.info("Re-armed %d pending reminder(s)", n_rearmed)
 
+    # Re-register per-item toggle buttons on roll messages from before this
+    # restart (persistent views; no-op when there are no recorded rolls).
+    from bot_core import roll_buttons
+    spawn_tracked_task(roll_buttons.rehydrate(bot), name="roll-button-rehydrate")
+
     # Crash durability: attach the voice recorder and recover any recording
     # left open by an unclean shutdown.
     try:

@@ -20,7 +20,9 @@ def items_dir(tmp_path, monkeypatch) -> pathlib.Path:
     d = tmp_path / "items"
     d.mkdir()
     from config import settings
+    from bot_core import roll_buttons
     monkeypatch.setattr(settings, "ITEMS_DIR", d)
+    roll_buttons.reset_records_for_tests()
     return d
 
 
@@ -36,8 +38,12 @@ def make_ix() -> MagicMock:
     """Mock Interaction capturing content AND embed kwargs on followup.send."""
     calls: list[dict] = []
 
-    async def on_send(content=None, *, embed=None, ephemeral=False):
-        calls.append({"content": content, "embed": embed})
+    async def on_send(content=None, *, embed=None, view=None, ephemeral=False):
+        calls.append({"content": content, "embed": embed, "view": view})
+        msg = MagicMock()
+        msg.id = 1
+        msg.channel.id = 1
+        return msg
 
     ix = MagicMock()
     ix.followup.send.side_effect = on_send
