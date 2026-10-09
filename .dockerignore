@@ -1,11 +1,18 @@
 # Keep the image lean: no VCS, no venvs, no runtime state (all bind-mounted).
+# Everything not needed at runtime is excluded — the context is uploaded to the
+# daemon on EVERY build, so big dirs here make `docker compose up --build` slow.
 .git
 .venv
+.venv-linux/
+.venv-test/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .pi/
 .agents/
+.commands_synced
 data/
 logs/
 hf-cache/
@@ -15,6 +22,7 @@ hf-cache/
 .migrate-staging/
 discord_ai_bot.egg-info/
 tests/
+remote-pi-relay/
 .coverage
 coverage.xml
 htmlcov/
