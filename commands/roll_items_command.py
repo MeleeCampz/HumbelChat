@@ -199,25 +199,25 @@ async def handle_roll_items_command(
         if not result["ok"]:
             await interaction.followup.send(result["error"])
             return
-        names = [i.name for i in result["items"]]
+        pairs: list[tuple[str, str]] = [(table, i.name) for i in result["items"]]
         # Per-item toggle buttons. For consume rolls the rolled items are
         # shown as already-consumed (↩️) even though the state write happens
         # after the send lands — a failed send loses nothing.
-        view = await asyncio.to_thread(
-            roll_buttons.build_view, table, names,
-            {n for n in names} if result.get("consume") else None,
+        # Built on the loop thread on purpose — see build_view's docstring:
+        # views created outside a running event loop never dispatch clicks.
+        view = roll_buttons.build_view(
+            pairs, set(pairs) if result.get("consume") else None
         )
         sent = await interaction.followup.send(
             embed=_build_embed(result["title"], result["items"], result["footer"]),
             view=view,
+            wait=True,  # we need the returned message id for the button record
         )
         # Consume only after the reply landed — a failed send loses nothing.
         if result.get("consume"):
             await asyncio.to_thread(item_state.consume, result["consume"])
         try:
-            await asyncio.to_thread(
-                roll_buttons.record_roll_message, sent.channel.id, sent.id, table, names
-            )
+            await asyncio.to_thread(roll_buttons.record_roll_message, sent.channel.id, sent.id, pairs)
         except OSError:
             log.warning("roll_items: could not persist button record for message %s", sent.id)
     except Exception:

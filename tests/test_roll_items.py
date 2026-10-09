@@ -38,7 +38,7 @@ def make_ix() -> MagicMock:
     """Mock Interaction capturing content AND embed kwargs on followup.send."""
     calls: list[dict] = []
 
-    async def on_send(content=None, *, embed=None, view=None, ephemeral=False):
+    async def on_send(content=None, *, embed=None, view=None, ephemeral=False, **kwargs):
         calls.append({"content": content, "embed": embed, "view": view})
         msg = MagicMock()
         msg.id = 1

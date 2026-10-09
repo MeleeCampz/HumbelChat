@@ -46,7 +46,7 @@ def make_ix() -> MagicMock:
     """Mock Interaction capturing content AND embed kwargs on followup.send."""
     calls: list[dict] = []
 
-    async def on_send(content=None, *, embed=None, view=None, ephemeral=False):
+    async def on_send(content=None, *, embed=None, view=None, ephemeral=False, **kwargs):
         calls.append({"content": content, "embed": embed, "view": view})
         msg = MagicMock()
         msg.id = 1
@@ -307,6 +307,27 @@ class TestUtilityCommands:
         asyncio.run(handle_item_search_command(ix, query="zzz"))
         (call,) = ix._calls
         assert call["embed"] is None and "No items matching" in call["content"]
+        assert call["view"] is None  # nothing to toggle
+
+    def test_search_results_get_toggle_buttons(self, items_dir):
+        from bot_core import roll_buttons as rb
+        write_table(items_dir, "loot.csv", [["Bag of Holding", "", "uncommon", ""]])
+        write_table(items_dir, "arcane.csv", [["Bag of Tricks", "", "uncommon", ""]])
+        ix = make_ix()
+        import asyncio
+        asyncio.run(handle_item_search_command(ix, query="bag"))
+        (call,) = ix._calls
+        view = call["view"]
+        assert view is not None and view.timeout is None  # persistent
+        buttons = list(view.children)
+        assert len(buttons) == 2
+        decoded = {rb.decode_custom_id(b.custom_id) for b in buttons}
+        assert decoded == {("loot", "Bag of Holding"), ("arcane", "Bag of Tricks")}
+        # Recorded so the view can be re-attached after a restart.
+        assert set(rb._message_pairs(1)) == {
+            ("loot", "Bag of Holding"),
+            ("arcane", "Bag of Tricks"),
+        }
 
     def test_stats_ignores_stale_state_entries(self, items_dir):
         # State for a row that no longer exists in the CSV must not count.

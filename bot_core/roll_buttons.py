@@ -1,353 +1,343 @@
-"""Per-item toggle buttons on /roll_items results.
+"""Per-item toggle buttons attached to roll (and item-search) result messages.
 
-Every roll reply carries one button per rolled item (classic message
-components, up to 5 rows x 5 buttons = 25 — the same cap as the ``count``
-argument). Clicking a button toggles that single item in the consumed list:
+Every rolled/searched item gets one button carrying the whole interaction:
 
-* not consumed  → button shows ``🚫 <name>`` (danger); click marks it used
-* consumed      → button shows ``↩️ <name>`` (success); click puts it back
+* 🚫  (red)   — item is *not* consumed → click marks it used
+* ↩️  (green) — item *is* consumed    → click puts it back into the pool
 
-The button label/style on the message itself is the persistent state
-indicator, so a scroll-back months later still shows which items are out.
+Buttons use stable ``custom_id`` values of the form ``ri1:<table>|<name>`` so a
+fresh view can be rebuilt for any message after a bot restart; messages that
+carry buttons are recorded in ``<ITEMS_DIR>/.roll_messages.json`` and their
+views are re-attached on startup (see :func:`rehydrate`).
 
-Buttons keep working after a bot restart: each roll records
-``(channel, message, table, item names)`` in ``<ITEMS_DIR>/.roll_messages.json``
-and :func:`rehydrate` re-registers the views on startup (persistent-view
-pattern — ``timeout=None`` + ``custom_id``s + ``client.add_view``). The
-``custom_id`` encodes the full ``(table, name)`` identity, so a click never
-needs per-message state beyond "which items were on this message" (taken
-from the record, with the rendered sibling buttons as fallback).
-
-All state mutations go through :mod:`bot_core.item_state` (locked + atomic),
-so button clicks and slash commands are safe to interleave. A click that
-cannot be answered edits the message with a short warning instead of dying
-silently.
+Dispatch model (discord.py 2.7.x): the library dispatches component clicks by
+calling ``item.callback(interaction)`` — there is no ``Button.click`` override
+hook in this version. Each button therefore gets an *instance* callback that
+shadows the class-level no-op, which keeps the normal ViewStore path
+(send-time registration + ``add_view`` rehydration) fully functional.
 """
+
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
 import tempfile
 import threading
-from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Optional, Sequence, Tuple
 
 import discord
+from discord import app_commands
 
-from bot_core import item_state, item_tables
+from . import item_state
 
-log = logging.getLogger("bot.roll_buttons")
+log = logging.getLogger(__name__)
 
-#: Prefix identifying our buttons (versioned so a future format change can
-#: ignore legacy custom_ids instead of misparsing them).
-CUSTOM_ID_PREFIX = "ri1:"
-_SEP = "|"
-#: Discord hard limits: custom_id 100 chars, button label 80 chars.
-_MAX_CUSTOM_ID = 100
-_MAX_LABEL = 80
-#: Max buttons rendered per message (5 action rows x 5 buttons).
-_MAX_BUTTONS = 25
-#: How many roll messages we keep rehydratable across restarts.
+# Bump if the custom_id format ever changes.
+_CUSTOM_ID_PREFIX = "ri1"
+
+# (table, name) pair identifying one rolled/searched item.
+Entry = Tuple[str, str]
+
+# How many message records to keep; oldest are dropped first.
 _MAX_RECORDS = 200
 
-EMOJI_EXCLUDE = "🚫"   # click → mark used
-EMOJI_INCLUDE = "↩️"   # click → put back
+
+def _records_path() -> str:
+    # Read at call time (not import time) so tests can monkeypatch settings.
+    from config import settings
+    return os.path.join(settings.ITEMS_DIR, ".roll_messages.json")
 
 
-# ── custom_id encoding ─────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# custom_id encoding
+# ---------------------------------------------------------------------------
 
-def encode_custom_id(table: str, name: str) -> str | None:
-    """``ri1:<table>|<name>`` — None when it would exceed Discord's 100 chars.
-
-    Decoding splits on the FIRST separator only, so item names may contain
-    ``|`` (table names come from filenames and never do).
-    """
-    cid = f"{CUSTOM_ID_PREFIX}{table}{_SEP}{name}"
-    if len(cid) > _MAX_CUSTOM_ID:
-        return None
+def encode_custom_id(table: str, name: str) -> str:
+    """Encode (table, name) into a button ``custom_id`` (max 100 chars)."""
+    cid = f"{_CUSTOM_ID_PREFIX}:{table}|{name}"
+    if len(cid) > 100:
+        # Keep the prefix + table intact; truncate the name.
+        budget = 100 - len(f"{_CUSTOM_ID_PREFIX}:{table}|")
+        cid = f"{_CUSTOM_ID_PREFIX}:{table}|{name[:budget]}"
     return cid
 
 
-def decode_custom_id(custom_id: str) -> tuple[str, str] | None:
-    """Inverse of :func:`encode_custom_id`; None for foreign/legacy ids."""
-    if not custom_id.startswith(CUSTOM_ID_PREFIX):
+def decode_custom_id(custom_id: Optional[str]) -> Optional[Tuple[str, str]]:
+    """Inverse of :func:`encode_custom_id`; ``None`` when not one of ours."""
+    if not custom_id or not custom_id.startswith(f"{_CUSTOM_ID_PREFIX}:"):
         return None
-    body = custom_id[len(CUSTOM_ID_PREFIX):]
-    table, sep, name = body.partition(_SEP)
-    if not sep or not table or not name:
+    rest = custom_id[len(_CUSTOM_ID_PREFIX) + 1:]
+    table, sep, name = rest.partition("|")
+    if not sep or not name or not table:
         return None
-    return table, name
+    return (table, name)
 
 
-# ── view construction ─────────────────────────────────────────────────────
-
-def _label(name: str, consumed: bool) -> str:
-    emoji = EMOJI_INCLUDE if consumed else EMOJI_EXCLUDE
-    budget = _MAX_LABEL - len(emoji) - 1  # emoji + one space
-    if len(name) > budget:
-        name = name[: max(budget - 1, 1)] + "…"
-    return f"{emoji} {name}"
+def _is_ours(custom_id: Optional[str]) -> bool:
+    return decode_custom_id(custom_id or "") is not None
 
 
-class _RollItemButton(discord.ui.Button):  # type: ignore[misc]  # discord.py ships no stubs for ui.Button
-    """One rolled item; click toggles its consumed state."""
+# ---------------------------------------------------------------------------
+# Buttons / view
+# ---------------------------------------------------------------------------
+
+class _RollItemButton(discord.ui.Button[discord.ui.View]):
+    """One toggle button for a single (table, name) item."""
 
     def __init__(self, table: str, name: str, consumed: bool) -> None:
+        label = f"{'↩️' if consumed else '🚫'} {name}"[:80]
         super().__init__(
             style=discord.ButtonStyle.success if consumed else discord.ButtonStyle.danger,
-            label=_label(name, consumed),
-            custom_id=f"{CUSTOM_ID_PREFIX}{table}{_SEP}{name}",
+            label=label,
+            custom_id=encode_custom_id(table, name),
         )
         self._table = table
         self._name = name
+        # Instance attribute shadows the class-level no-op `callback` that
+        # discord.py's ViewStore dispatch invokes. (This version of the
+        # library has no Button.click override hook.)
+        self.callback = self._on_click  # type: ignore[method-assign]
 
-    async def click(self, interaction: discord.Interaction) -> None:
+    async def _on_click(self, interaction: discord.Interaction) -> None:
         await _handle_toggle(interaction, self._table, self._name)
 
 
 def build_view(
-    table: str,
-    names: Sequence[str],
-    consumed_override: set[str] | None = None,
+    entries: Sequence[Entry],
+    consumed_override: Optional[set[Tuple[str, str]]] = None,
 ) -> discord.ui.View:
-    """A persistent view with one toggle button per name (max 25).
+    """Build a persistent view with one toggle button per (table, name).
 
-    Button styles reflect the consumed state at build time; rehydrate() and
-    every click rebuild the view, so labels always match the state file.
-    ``consumed_override`` forces a specific consumed set (used right after a
-    consume roll, before the state write has landed). Names without a valid
-    custom_id (>100 chars) are skipped with a warning.
+    ``consumed_override``, when given, is used *instead of* the state file —
+    the roll command passes the freshly rolled items so their buttons show as
+    consumed even though the state write happens after the send lands.
+
+    Must be called from a thread with a running event loop (the bot's async
+    handlers qualify). In this discord.py version a View constructed without
+    a running loop is never dispatched — clicks on it are silently dropped.
     """
-    consumed = (
-        set(consumed_override)
-        if consumed_override is not None
-        else set(item_state.load_state().get(table, []))
-    )
+    state: dict[str, list[str]] = {} if consumed_override is not None else item_state.load_state()
+
+    def _consumed(table: str, name: str) -> bool:
+        if consumed_override is not None:
+            return (table, name) in consumed_override
+        return name in state.get(table, [])
+
     view = discord.ui.View(timeout=None)
-    # A plain View auto-chunks added items into action rows of five; add up
-    # to 25 buttons (Discord's top-level component cap for legacy messages).
-    for name in names[:_MAX_BUTTONS]:
-        if encode_custom_id(table, name) is None:
-            log.warning("roll_buttons: skipping %r in %s — custom_id too long", name, table)
-            continue
-        view.add_item(_RollItemButton(table, name, name in consumed))
-    if len(names) > _MAX_BUTTONS:
-        log.warning("roll_buttons: %d items in %s exceed %d — only the first %d get buttons",
-                    len(names), table, _MAX_BUTTONS, _MAX_BUTTONS)
+    for table, name in entries:
+        view.add_item(_RollItemButton(table, name, _consumed(table, name)))
     return view
 
 
-# ── click handling ─────────────────────────────────────────────────────────
-
-def _message_names(message_id: int, table: str) -> list[str] | None:
-    """Items rendered on a roll message: record first, sibling buttons second."""
-    with _records_lock:
-        rec = _record_cache_locked().get(message_id)
-    if rec is not None and rec.get("table") == table:
-        return list(rec.get("items", []))
-    return None
+def build_roll_view(table: str, names: Sequence[str]) -> discord.ui.View:
+    """View for a roll result: every rolled item shown as consumed."""
+    pairs = [(table, n) for n in names]
+    return build_view(pairs, consumed_override=set(pairs))
 
 
-def _sibling_names(message: discord.Message | None) -> list[str] | None:
-    """Parse our custom_ids off the message's rendered buttons (fallback)."""
-    if message is None:
-        return None
-    names: list[str] = []
-    for component in getattr(message, "components", []) or []:
-        for child in getattr(component, "components", []) or []:
-            decoded = decode_custom_id(getattr(child, "custom_id", "") or "")
-            if decoded is not None:
-                names.append(decoded[1])
-    return names or None
+# ---------------------------------------------------------------------------
+# Message records (persisted so views survive restarts)
+# ---------------------------------------------------------------------------
 
-
-def _toggle(table: str, name: str) -> dict[str, Any]:
-    """Flip one item's consumed state; returns a plain result dict.
-
-    Identity-based (no live CSV row required): marking a row that was later
-    deleted just records stale state, which the next roll prunes. Each
-    mutation runs under item_state's own lock; the read-decide window is
-    tiny and both operations are idempotent, so no outer lock (the lock is
-    not reentrant).
-    """
-    consumed = set(item_state.load_state().get(table, []))
-    if name in consumed:
-        released = item_state.release_item(table, name)
-        if not released:
-            return {"ok": False, "error": f"⚠️ Couldn't put **{name}** back — check the bot logs."}
-        return {
-            "ok": True,
-            "consumed": False,
-            "text": f"✅ **{name}** is back in the pool — it can come up in consume rolls again.",
-        }
-    item = item_tables.Item(name=name, table=table)
-    item_state.consume([item])
-    return {
-        "ok": True,
-        "consumed": True,
-        "text": f"🚫 **{name}** is marked as used — it won't come up in consume rolls until put back.",
-    }
-
-
-async def _handle_toggle(interaction: discord.Interaction, table: str, name: str) -> None:
-    """Button-click body: toggle state, rebuild the row, confirm."""
-    try:
-        result = await asyncio.to_thread(_toggle, table, name)
-        if not result["ok"]:
-            await interaction.response.edit_message(content=result["error"])
-            return
-        names = _message_names(interaction.message.id, table) or _sibling_names(interaction.message)
-        if not names:
-            # No record and no parsable siblings (shouldn't happen) — the
-            # state still toggled; just confirm without touching components.
-            await interaction.response.edit_message(content=result["text"])
-            return
-        new_view = await asyncio.to_thread(build_view, table, names)
-        await interaction.response.edit_message(view=new_view, content=result["text"])
-    except discord.HTTPException:
-        # Message vanished / edit race — state is already consistent.
-        log.warning("roll_buttons: could not update message %s after toggle",
-                    getattr(interaction.message, "id", "?"), exc_info=True)
-    except Exception:
-        log.exception("roll_buttons: unexpected error toggling %s/%s", table, name)
-
-
-# ── roll-message records (restart rehydration) ─────────────────────────────
-
-RECORDS_FILENAME = ".roll_messages.json"
 _records_lock = threading.Lock()
-_cache: dict[int, dict[str, Any]] | None = None  # message_id → record
-#: Messages whose view is (or was) registered in this process — on_ready
-#: fires on every gateway reconnect, so rehydrate must not refetch/re-add.
-_live_messages: set[int] = set()
+_record_cache: Optional[dict[int, dict[str, Any]]] = None
 
 
-def _records_path() -> Path:
-    from config import settings
-    return Path(settings.ITEMS_DIR) / RECORDS_FILENAME
-
-
-def _load_cache() -> dict[int, dict[str, Any]]:
-    """Read the records file into a fresh dict (no locking — caller holds it)."""
-    path = _records_path()
-    raw: list[dict[str, Any]] = []
-    if path.is_file():
-        try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(loaded, list):
-                raw = [r for r in loaded if isinstance(r, dict)]
-        except (OSError, ValueError) as exc:
-            log.warning("roll_buttons: unreadable %s (%s) — starting fresh", path, exc)
-    return {
-        int(r["message"]): r
-        for r in raw
-        if isinstance(r.get("message"), int) and isinstance(r.get("table"), str)
-    }
-
-
-def _record_cache_locked() -> dict[int, dict[str, Any]]:
-    """In-memory records, loaded on first use. Caller must hold ``_records_lock``."""
-    global _cache
-    if _cache is None:
-        _cache = _load_cache()
-    return _cache
-
-
-def _save_records(cache: dict[int, dict[str, Any]]) -> None:
-    """Persist the given records (oldest-first by insertion, capped)."""
-    records = list(cache.values())[-_MAX_RECORDS:]
-    path = _records_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+def _normalize_record(rec: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Return {"channel": int, "message": int, "items": [[table, name], ...]}
+    or None if the record is unusable. Accepts the legacy single-table shape."""
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(records, fh, ensure_ascii=False, indent=1)
-        os.replace(tmp_name, path)
-    except OSError:
+        channel = int(rec["channel"])
+        message = int(rec["message"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    raw_items = rec.get("items")
+    if not isinstance(raw_items, list) or not raw_items:
+        return None
+    items: list[list[str]] = []
+    legacy_table = rec.get("table", "")
+    for entry in raw_items:
+        if isinstance(entry, str):  # legacy shape: names under one table
+            items.append([legacy_table, entry])
+        elif (
+            isinstance(entry, (list, tuple))
+            and len(entry) == 2
+            and all(isinstance(x, str) for x in entry)
+        ):
+            items.append([entry[0], entry[1]])
+    if not items:
+        return None
+    return {"channel": channel, "message": message, "items": items}
+
+
+def _load_cache_locked() -> dict[int, dict[str, Any]]:
+    global _record_cache
+    if _record_cache is not None:
+        return _record_cache
+    path = _records_path()
+    data: list[dict[str, Any]] = []
+    if os.path.exists(path):
         try:
-            os.unlink(tmp_name)
+            with open(path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, list):
+                data = loaded
+        except (OSError, json.JSONDecodeError) as e:
+            log.warning("roll_buttons: could not read %s (%s); starting empty", path, e)
+    cache: dict[int, dict[str, Any]] = {}
+    for rec in data:
+        if isinstance(rec, dict):
+            norm = _normalize_record(rec)
+            if norm is not None:
+                cache[norm["message"]] = norm
+    _record_cache = cache
+    return cache
+
+
+def _save_records_locked() -> None:
+    """Persist the record cache (caller must hold ``_records_lock``)."""
+    records = [
+        {"channel": rec["channel"], "message": mid, "items": rec["items"]}
+        for mid, rec in _load_cache_locked().items()
+    ]
+    path = _records_path()
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(records, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
         except OSError:
             pass
         raise
 
 
-def record_roll_message(channel_id: int, message_id: int, table: str, names: list[str]) -> None:
-    """Remember a roll message so its buttons survive a restart."""
-    _live_messages.add(message_id)
+def record_roll_message(
+    channel_id: int, message_id: int, entries: Sequence[Entry]
+) -> None:
+    """Remember that ``message_id`` in ``channel_id`` carries these buttons."""
     with _records_lock:
-        cache = _record_cache_locked()
-        cache[message_id] = {
+        cache = _load_cache_locked()
+        cache[int(message_id)] = {
             "channel": int(channel_id),
-            "message": int(message_id),
-            "table": table,
-            "items": [str(n) for n in names],
+            "items": [[t, n] for t, n in entries],
         }
-        # Rebuild the file from insertion order (dict preserves it).
-        _save_records(cache)
+        # Drop oldest records beyond the cap (insertion order = recency).
+        while len(cache) > _MAX_RECORDS:
+            cache.pop(next(iter(cache)))
+        try:
+            _save_records_locked()
+        except OSError as e:
+            log.error("roll_buttons: could not save message records: %s", e)
 
 
 def forget_record(message_id: int) -> None:
     with _records_lock:
-        cache = _record_cache_locked()
-        if message_id in cache:
-            del cache[message_id]
-            _save_records(cache)
+        if _load_cache_locked().pop(int(message_id), None) is not None:
+            try:
+                _save_records_locked()
+            except OSError as e:
+                log.error("roll_buttons: could not save message records: %s", e)
 
 
 def reset_records_for_tests() -> None:
-    """Clear in-memory state (tests point ITEMS_DIR at fresh temp dirs)."""
-    global _cache
+    """Clear the in-memory record cache (tests only)."""
+    global _record_cache
     with _records_lock:
-        _cache = None
-    _live_messages.clear()
+        _record_cache = None
 
 
-# ── startup rehydration ────────────────────────────────────────────────────
+def _message_pairs(message_id: int) -> Optional[list[Entry]]:
+    with _records_lock:
+        rec = _load_cache_locked().get(int(message_id))
+        return [tuple(x) for x in rec["items"]] if rec else None
 
-async def rehydrate(bot: discord.Client) -> int:
-    """Re-register button views for roll messages from before a restart.
 
-    Called from ``on_ready``. Fetches each recorded message (skipping
-    channels that are gone, deleting records whose message vanished) and
-    calls ``bot.add_view`` with a fresh view. Returns how many were restored.
-    Never raises — button persistence must not break startup.
-    """
-    try:
-        with _records_lock:
-            records = [
-                r for r in _record_cache_locked().values()
-                if int(r["message"]) not in _live_messages
-            ]
-        restored = 0
-        for rec in records:
-            message_id = int(rec["message"])
+def _sibling_pairs(message: discord.Message) -> list[Entry]:
+    """(table, name) pairs of our buttons as currently rendered on the message."""
+    pairs: list[Entry] = []
+    for row in getattr(message.components, "rows", []):
+        for comp in getattr(row, "components", []):
+            decoded = decode_custom_id(getattr(comp, "custom_id", None))
+            if decoded is not None:
+                pairs.append(decoded)
+    return pairs
+
+
+async def rehydrate(bot: discord.Client) -> None:
+    """Re-attach persistent views to recorded messages after a restart."""
+    with _records_lock:
+        records = list(_load_cache_locked().items())
+    alive = 0
+    for message_id, rec in records:
+        try:
             channel = bot.get_channel(rec["channel"])
-            if channel is None:
-                try:
-                    channel = await bot.fetch_channel(rec["channel"])
-                except discord.HTTPException:
-                    channel = None
-            if channel is None:
-                continue  # not cached yet / no access — retry next startup
-            try:
-                await channel.fetch_message(message_id)  # raises when gone
-            except discord.NotFound:
-                forget_record(message_id)
+            if channel is None or not hasattr(channel, "fetch_message"):
                 continue
-            except discord.HTTPException:
-                continue  # transient — retry next startup
+            await channel.fetch_message(message_id)
+            # Rebuild from the live state file so labels are current.
+            bot.add_view(build_view([tuple(x) for x in rec["items"]]))
+            alive += 1
+        except discord.HTTPException:
+            forget_record(message_id)  # deleted / inaccessible
+        except Exception as e:  # noqa: BLE001 - one bad record must not kill the rest
+            log.warning("roll_buttons: rehydrate failed for message %s: %s", message_id, e)
+    if records:
+        log.info("roll_buttons: rehydrated %d/%d roll messages", alive, len(records))
+
+
+# ---------------------------------------------------------------------------
+# Click handling
+# ---------------------------------------------------------------------------
+
+async def _handle_toggle(interaction: discord.Interaction, table: str, name: str) -> None:
+    """Toggle consumption for (table, name) and refresh the message's buttons."""
+    msg = interaction.message
+    if msg is None:
+        return
+
+    # The consumed list is shared guild state (like /item_exclude), so any
+    # member may toggle — no per-user ownership check.
+    pairs = _sibling_pairs(msg) or _message_pairs(msg.id)
+    if pairs is None:
+        # Message components were stripped but we still know the items.
+        pairs = [(table, name)]
+
+    consumed = item_state.toggle_item(table, name)
+    new_view = build_view(pairs)  # labels reflect the state *after* the toggle
+    try:
+        await msg.edit(view=new_view)
+    except discord.HTTPException as e:
+        item_state.toggle_item(table, name)  # roll back — edit failed
+        await _respond(interaction, f"⚠️ Could not update the message: {e}", ephemeral=True)
+        return
+    text = f"✅ Marked as used: **{name}**" if consumed else f"↩️ Put back: **{name}**"
+    try:
+        await interaction.response.send_message(text, ephemeral=True)
+    except discord.HTTPException:
+        pass  # cosmetic only; the state change already happened
+
+    with _records_lock:
+        cache = _load_cache_locked()
+        if msg.id in cache:
+            cache[msg.id]["items"] = [[t, n] for t, n in pairs]
             try:
-                bot.add_view(build_view(rec["table"], rec["items"]))
-                _live_messages.add(message_id)
-                restored += 1
-            except Exception:
-                log.exception("roll_buttons: failed to rebuild view for message %s", message_id)
-        if records:
-            log.info("roll_buttons: rehydrated buttons on %d/%d roll message(s)",
-                     restored, len(records))
-        return restored
-    except Exception:
-        log.exception("roll_buttons: rehydrate failed (buttons on old messages stay dead until next restart)")
-        return 0
+                _save_records_locked()
+            except OSError as e:
+                log.error("roll_buttons: could not save message records: %s", e)
+
+
+async def _respond(
+    interaction: discord.Interaction, content: str, *, ephemeral: bool = False
+) -> None:
+    """Respond to the interaction, degrading gracefully if it's too late."""
+    try:
+        await interaction.response.send_message(content, ephemeral=ephemeral)
+    except app_commands.AppCommandError:
+        try:
+            await interaction.followup.send(content, ephemeral=ephemeral)
+        except discord.HTTPException:
+            pass
