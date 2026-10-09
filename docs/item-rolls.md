@@ -37,18 +37,34 @@ Bag of Holding,https://example.com/items/bag-of-holding,uncommon,"Holds up to 50
 
 ```csv
 min_cr,rarities
-0,common:0-1;uncommon:1-2
-3,common:0-1;uncommon:2-3;rare:1-2
-6,uncommon:1-2;rare:2-3
-10,rare:2-3;very rare:1-2
-14,very rare:2-3;legendary:1-2
+0,common:1-2;uncommon:0-1
+1,common:1-2;uncommon:1-2
+2,common:1-2;uncommon:2-3
+3,common:0-1;uncommon:2-3
+4,uncommon:2-3;rare:0-1
+5,uncommon:1-2;rare:1-2
+7,uncommon:1-2;rare:2-3
+9,rare:2-3;very rare:0-1
+11,rare:2-3;very rare:1-2
+13,rare:1-2;very rare:2-3
+15,rare:1-2;very rare:2-3;legendary:0-1
+17,very rare:2-3;legendary:1-2
+19,very rare:2-3;legendary:2-3
 ```
+
+The shipped tiers follow the 5e DMG's rarity guidance — common items from CR 0,
+uncommon by CR 1, rare by CR 5, very rare by CR 11, legendary by CR 17 — and
+step up roughly every 1–2 CR within the four treasure bands (CR 0–4, 5–10,
+11–16, 17+).
 
 Each row is a tier. The tier with the **highest `min_cr` ≤ the rolled CR**
 wins (a CR below every tier uses the first one). `rarities` holds per-rarity
 count ranges (`rarity:min-max`, semicolon-separated): for each range a count
 is drawn uniformly and that many items are sampled. A range of `0-…` means
 "maybe"; rarities with no items in the table are skipped.
+
+The full shipped table lives in [`item_samples/cr_tiers.csv`](../item_samples/cr_tiers.csv)
+(seeded into `data/items/` on first use).
 
 ## Rolling mechanics
 
@@ -60,8 +76,8 @@ in the footer.
 
 **CR-scaled roll** — `/roll_items cr:<rating>`: `cr` overrides `count`. The
 winning tier's per-rarity ranges decide how many of each rarity come up (e.g.
-CR 5 → tier `min_cr 3` → maybe 1 common, 2–3 uncommon, 1–2 rare). The footer
-shows the tier and the per-rarity breakdown.
+CR 5 → tier `min_cr 5` → 1–2 uncommon, 1–2 rare). The footer shows the tier
+and the per-rarity breakdown.
 
 ## Consuming items (`consume` flag)
 
