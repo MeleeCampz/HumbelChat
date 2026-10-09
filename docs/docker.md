@@ -78,6 +78,17 @@ Discord drops for a few seconds during the recreate; the bot re-logs in on
 start. Run `/sync` in the bot's channel if slash commands misbehave after an
 update.
 
+### Build speed
+
+- Code-only changes: everything is layer-cached, rebuild takes ~1 s.
+- `requirements.txt` changes: pip wheels (incl. the ~900 MB CPU torch) are
+  served from a daemon-side BuildKit cache mount — no re-download.
+- The `.dockerignore` keeps the uploaded build context small (no venvs,
+  caches, or runtime state). If you add big directories to the repo, add them
+  there too — the whole context is transferred on every build.
+- A truly fresh machine (empty Docker cache) still pays one full download:
+  base image + torch + requirements ≈ a few GB.
+
 ## Caveats
 
 - **One process at a time.** Don't run a local `python main.py` dev session
