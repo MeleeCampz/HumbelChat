@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime
+from pathlib import Path
 
 import asyncio
 from collections.abc import AsyncIterator
@@ -49,6 +50,7 @@ from config.settings import (
     RAG_WINDOW_LINES,
     LAST_SESSION_CONTEXT_ENABLED,
     LAST_SESSION_MAX_CHARS,
+    WORLD_CONTEXT_FILE,
     RAG_RETRIEVAL_METHOD,
     MAX_INPUT_CHARS,
     AI_RATE_LIMIT_MAX,
@@ -537,15 +539,39 @@ class _AIRequestContext:
         self.timeout_sec = timeout_sec
 
 
-def _compose_system_prompt(char_obj: Character | None) -> str:
-    """Persona prompt + the global response-format appendix (stat blocks).
+def _load_world_context() -> str:
+    """Read the campaign world-info file for this turn (backlog #25).
 
-    The appendix lives in settings (env-overridable via ``STAT_BLOCK_FORMAT_RULES``)
-    so characters.json stays pure persona; every character gets the same
-    formatting rules.
+    Re-read on every call so in-place edits apply without a restart. A
+    missing or unreadable file simply disables the block (``""``); errors
+    are logged, never raised — world context must not break a turn.
+    """
+    try:
+        path = Path(WORLD_CONTEXT_FILE)
+        if not path.is_file():
+            return ""
+        return path.read_text(encoding="utf-8-sig").strip()
+    except OSError as e:
+        log.warning("world context file %s unreadable: %s", WORLD_CONTEXT_FILE, e)
+        return ""
+
+
+def _compose_system_prompt(char_obj: Character | None) -> str:
+    """Persona + campaign world info + the global response-format appendix.
+
+    The world block (backlog #25) comes from ``WORLD_CONTEXT_FILE`` — free-form
+    campaign facts (setting, party names, …) sent with EVERY prompt. The
+    stat-block appendix lives in settings (env-overridable via
+    ``STAT_BLOCK_FORMAT_RULES``) so characters.json stays pure persona; every
+    character gets the same formatting rules. Order: persona, world, format
+    rules — rules last so they stay closest to the reply. With no world file
+    the output is byte-identical to the old persona+rules concatenation.
     """
     base = getattr(char_obj, "system_prompt", None) or DEFAULT_SYSTEM_PROMPT \
         or "You are a helpful AI assistant."
+    world = _load_world_context()
+    if world:
+        base = f"{base}\n\n[Campaign world]\n{world}"
     return base + STAT_BLOCK_FORMAT_RULES
 
 

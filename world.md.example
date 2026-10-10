@@ -1,0 +1,26 @@
+# Campaign world context
+
+Copy this file to `world.md` (repo root) and fill it in. Everything here is
+sent with **every** AI prompt, so keep it short — a few tight paragraphs or
+bullet lists, not a novel. Long-form lore belongs in the knowledge base
+(`KB_PATH`) where RAG retrieves it on demand; this file is for facts the bot
+should *always* know.
+
+## Setting
+
+This is a D&D 5e campaign in the HumbleWood setting. <one or two sentences on
+tone, era, and what makes this world tick>
+
+## The party
+
+- <Character name> — <class/level>, <one-line hook>
+- <Character name> — <class/level>, <one-line hook>
+
+## Ongoing plot
+
+- <current hook / quest in one line>
+- <important NPC and what they want, in one line>
+
+## Ground rules (optional)
+
+- <e.g. "the party is currently in <location>", "tone: gritty but humorous">
