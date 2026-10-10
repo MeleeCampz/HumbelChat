@@ -152,3 +152,44 @@ class TestRewriteAllQueriesFlag:
         monkeypatch.setenv("RAG_REWRITE_ALL_QUERIES", "0")
         importlib.reload(settings)
         assert settings.RAG_REWRITE_ALL_QUERIES is False
+
+
+# ─────────────── Diacritic normalization (BM25 + keyword fallback) ───────────────
+# The old tokenizers used [a-z0-9']+ / [a-zA-Z_]{3,} which SPLIT on umlauts:
+# "Kettenrüstung" → ["kettenr", "stung"] — German terms with umlauts could never
+# exact-match (e.g. against the German session notes). Both tokenizers now strip
+# diacritics first (kb.lexical.strip_diacritics), so both sides normalize to
+# "kettenrustung" and match.
+
+class TestDiacriticTokenization:
+    def test_tokenize_strips_umlauts(self):
+        from kb.lexical import tokenize
+
+        assert tokenize("Kettenrüstung") == ["kettenrustung"]
+        assert tokenize("für") == ["fur"]
+        assert tokenize("Heiltrank für Stufe 3") == ["heiltrank", "fur", "stufe", "3"]
+
+    def test_tokenize_untouched_ascii_and_apostrophes(self):
+        from kb.lexical import tokenize
+
+        assert tokenize("don't stop") == ["don't", "stop"]
+        assert tokenize("Chain Mail AC 16") == ["chain", "mail", "ac", "16"]
+
+    def test_bm25_matches_umlaut_bearing_terms(self):
+        from kb.lexical import BM25
+
+        docs = [
+            "Die Kettenrüstung hat Rüstungsklasse 14 und wiegt 55 Pfund.",
+            "A plain english row about padded armor.",
+        ]
+        scores = BM25(docs).scores("Kettenrüstung")
+        assert scores[0] > 0, "umlaut term must score the German doc"
+        assert scores[0] > scores[1]
+
+    def test_reader_normalize_query_normalizes_umlauts(self):
+        from kb.reader import _normalize_query
+
+        terms = _normalize_query("Was ist die Kettenrüstung wert?")
+        assert "kettenrustung" in terms
+        # No term may contain a non-ASCII (un-normalized) character.
+        assert all(t.isascii() for t in terms)

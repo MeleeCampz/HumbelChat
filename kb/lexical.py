@@ -13,15 +13,35 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from collections import Counter
 
 # Lowercase alphanumerics + apostrophes (keeps "don't" / names with ' intact).
 _TOKEN_RE = re.compile(r"[a-z0-9']+")
 
 
+def strip_diacritics(text: str) -> str:
+    """Map accented letters to their base Latin form (ü → u, ä → a).
+
+    NFD-decomposes and drops combining marks.  Shared by the BM25 tokenizer and
+    the keyword fallback in ``kb.reader`` so both sides of a match normalize
+    identically ("Rüstung" → "rustung" on query AND index side).
+    """
+    return "".join(
+        ch for ch in unicodedata.normalize("NFD", text) if not unicodedata.combining(ch)
+    )
+
+
 def tokenize(text: str) -> list[str]:
-    """Lowercase *text* into a list of BM25 tokens."""
-    return _TOKEN_RE.findall((text or "").lower())
+    """Lowercase *text* into a list of BM25 tokens.
+
+    Diacritics are stripped BEFORE tokenizing: the ``[a-z0-9']+`` pattern splits
+    on umlauts, so un-normalized German input shattered ("Kettenrüstung" →
+    ["kettenr", "stung"]) and could never exact-match umlaut-bearing terms in the
+    German session notes.  Now: ["kettenrustung"] — matching consistently on both
+    sides of the index.
+    """
+    return _TOKEN_RE.findall(strip_diacritics((text or "").lower()))
 
 
 class BM25:
