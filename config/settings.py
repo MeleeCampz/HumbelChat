@@ -382,6 +382,14 @@ CHARACTERS_FILE: pathlib.Path = pathlib.Path(
     _or_default(os.getenv("CHARACTERS_FILE"), str(_REPO_ROOT / "characters.json"))
 )
 
+# Free-form campaign/world info sent with EVERY AI prompt (backlog #25):
+# setting, party names, ongoing plot hooks, … A markdown file the user edits
+# in place; re-read on every turn so edits apply without a restart. Missing
+# or empty file → no world block (feature off).
+WORLD_CONTEXT_FILE: str = _or_default(
+    os.getenv("WORLD_CONTEXT_FILE"), str(_REPO_ROOT / "world.md")
+)
+
 # ── Session notes location ────────────────────────────────────────────────
 # Where per-session folders live. Inside the KB by default so each session's
 # combined notes.md is automatically RAG-indexed (and shows up in

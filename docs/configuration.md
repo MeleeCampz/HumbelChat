@@ -86,6 +86,7 @@ One thing to know:
 | `REMINDERS_PERSIST_FILE` | Where `/remind` reminders are stored so they survive restarts; set empty to disable persistence | `<repo_root>/data/reminders.json` |
 | `SESSIONS_PERSIST_FILE` | Where session state (active session + queued next-session reminders) is stored so it survives restarts; set empty to disable persistence. Session notes files live under `SESSIONS_NOTES_DIR` (default `<KB_PATH>/session_notes/`) | `<repo_root>/data/sessions.json` |
 | `SESSIONS_NOTES_DIR` | Where per-session folders live — point inside an Obsidian campaign vault for two-way sync (see below) | `<KB_PATH>/session_notes` |
+| `WORLD_CONTEXT_FILE` | Campaign world-info file appended to **every** AI prompt (backlog #25): setting, party names, ongoing hooks. Re-read each turn; missing/empty = feature off. Start from `world.md.example` | `<repo_root>/world.md` |
 
 ## Voice recording and STT
 

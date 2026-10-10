@@ -7,6 +7,8 @@ tests pass whether or not `sentence-transformers` is installed in the venv.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 
@@ -401,10 +403,13 @@ def test_build_last_session_context_capped(monkeypatch):
     assert "keep me" not in out   # notes are no longer attached at all
 
 
-def test_compose_system_prompt_appends_stat_block_rules(monkeypatch):
+def test_compose_system_prompt_appends_stat_block_rules(monkeypatch, tmp_path):
     """Every character's system prompt gets the stat-block format appendix;
     missing persona falls back to the default, rules still appended."""
     from bot_core import ai_client as A
+
+    # No world file in this test — a user's world.md must not leak in.
+    monkeypatch.setattr(A, "WORLD_CONTEXT_FILE", str(tmp_path / "no-world.md"))
 
     class C:
         system_prompt = "You are Marvin."
@@ -422,6 +427,73 @@ def test_compose_system_prompt_appends_stat_block_rules(monkeypatch):
 
     fallback = A._compose_system_prompt(Bare())
     assert "helpful AI assistant" in fallback and "<stat-block-format>" in fallback
+
+
+class TestWorldContext:
+    """Backlog #25: campaign world info sent with every prompt."""
+
+    def _write_world(self, tmp_path, text: str) -> str:
+        f = tmp_path / "world.md"
+        f.write_text(text, encoding="utf-8")
+        return str(f)
+
+    def test_world_block_between_persona_and_rules(self, monkeypatch, tmp_path):
+        from bot_core import ai_client as A
+        monkeypatch.setattr(A, "WORLD_CONTEXT_FILE", self._write_world(
+            tmp_path,
+            "This is a D&D campaign in the HumbleWood setting.\n"
+            "Party: Fern (rogue), Bram (cleric).",
+        ))
+
+        class C:
+            system_prompt = "You are Marvin."
+
+        out = A._compose_system_prompt(C())
+        assert "[Campaign world]" in out
+        assert "HumbleWood" in out and "Fern (rogue)" in out
+        # Order: persona → world block → format rules.
+        assert out.index("You are Marvin.") < out.index("[Campaign world]") \
+            < out.index("<stat-block-format>")
+
+    def test_missing_file_is_byte_identical_to_old_behavior(self, monkeypatch, tmp_path):
+        from bot_core import ai_client as A
+        monkeypatch.setattr(A, "WORLD_CONTEXT_FILE", str(tmp_path / "nope.md"))
+
+        class C:
+            system_prompt = "You are Marvin."
+
+        assert A._compose_system_prompt(C()) == \
+            C().system_prompt + A.STAT_BLOCK_FORMAT_RULES
+
+    def test_blank_file_disables_block(self, monkeypatch, tmp_path):
+        from bot_core import ai_client as A
+        monkeypatch.setattr(A, "WORLD_CONTEXT_FILE", self._write_world(tmp_path, "  \n\n"))
+        assert A._load_world_context() == ""
+
+    def test_bom_and_crlf_tolerated(self, monkeypatch, tmp_path):
+        from bot_core import ai_client as A
+        f = tmp_path / "world.md"
+        f.write_bytes("HumbleWood rules.\r\n".encode("utf-8-sig"))
+        monkeypatch.setattr(A, "WORLD_CONTEXT_FILE", str(f))
+        assert A._load_world_context() == "HumbleWood rules."
+
+    def test_directory_target_is_ignored(self, monkeypatch, tmp_path):
+        from bot_core import ai_client as A
+        monkeypatch.setattr(A, "WORLD_CONTEXT_FILE", str(tmp_path))
+        assert A._load_world_context() == ""
+
+    def test_read_error_never_raises(self, monkeypatch, tmp_path, caplog):
+        from bot_core import ai_client as A
+        monkeypatch.setattr(A, "WORLD_CONTEXT_FILE", self._write_world(tmp_path, "x"))
+
+        class _BoomPath(Path):
+            def read_text(self, *a, **k):
+                raise OSError("disk on fire")
+
+        monkeypatch.setattr(A, "Path", _BoomPath)
+        with caplog.at_level("WARNING"):
+            assert A._load_world_context() == ""
+        assert any("unreadable" in r.message for r in caplog.records)
 
 
 def test_append_user_message_includes_session_block():
