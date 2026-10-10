@@ -73,6 +73,7 @@ secrets/
 ISSUES_AND_TODOS.md
 TODOs.txt
 characters.json
+world.md
 # Personal pi agent config/extensions (force-add with `git add -f` to share)
 .pi/
 
