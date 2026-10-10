@@ -358,6 +358,15 @@ def effective_embedding_model() -> str:
 # to plain vector order on any failure/timeout so retrieval never breaks.
 RERANK_ENABLED: bool = _safe_bool(os.getenv("RERANK_ENABLED"), False)
 RERANK_MODEL: str = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
+# Backend mode: "local" = in-process CPU cross-encoder (sentence-transformers);
+# "http" = remote /rerank endpoint (e.g. Hugging Face TEI on a GPU — see
+# docs/internal/Todo_Reranker.md). HTTP keeps the heavy model out of the bot
+# process and off its CPU, and avoids evicting the main chat LLM from an
+# inference server that only serves one model at a time.
+RERANK_MODE: str = os.getenv("RERANK_MODE", "local").strip().lower()
+# Base URL for RERANK_MODE=http (no trailing slash), e.g. http://reranker:80
+# or http://host.docker.internal:8081. Ignored in local mode.
+RERANK_API_BASE: str = os.getenv("RERANK_API_BASE", "").rstrip("/")
 # Number of candidate chunks handed to the reranker (was hardcoded 6*4=24).
 # The correctly-named env var RERANK_TOP_K wins; the historical (misnamed)
 # RAG_VECTOR_TOP_K stays supported as an alias for existing deployments.
