@@ -758,6 +758,12 @@ async def on_shutdown() -> None:
         await close_client()
     except Exception as e:
         log.warning("Embeddings client shutdown failed: %s", e)
+    # 5. Close the shared rerank HTTP client (RERANK_MODE=http) the same way.
+    from kb.reranker import close_client as close_rerank_client
+    try:
+        await close_rerank_client()
+    except Exception as e:
+        log.warning("Rerank client shutdown failed: %s", e)
     log.info("Bot shutdown complete")
 
 
