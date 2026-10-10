@@ -28,6 +28,14 @@ os.environ.setdefault(
     "KB_PATH", str(pathlib.Path(__file__).resolve().parent.parent / "data" / "knowledge")
 )
 #
+# Same hazard for the reranker: the host .env sets RERANK_MODE=http +
+# RERANK_API_BASE (TEI on GPU 1). If main.py's load_dotenv() runs before a
+# config.settings re-import, tests would silently switch to HTTP mode and make
+# real network calls. Pin both so tests always observe the in-process local
+# default unless they monkeypatch them explicitly.
+os.environ.setdefault("RERANK_MODE", "local")
+os.environ.setdefault("RERANK_API_BASE", "")
+#
 # NOTE: .env is intentionally NOT loaded here (a full load_dotenv() would
 # leak KB_PATH/CHUNK_SIZE/etc. into every test and break the assumptions of
 # tests that monkeypatch env explicitly).  A few modules bake env values at
