@@ -1,6 +1,8 @@
 # Campaign world context
 
-Copy this file to `world.md` (repo root) and fill it in. Everything here is
+Fill this in and save it as `world.md` (repo root) — or, so you can edit it in
+Obsidian alongside the rest of the campaign, into your vault and point
+`WORLD_CONTEXT_FILE` at it (see `.env`). Everything here is
 sent with **every** AI prompt, so keep it short — a few tight paragraphs or
 bullet lists, not a novel. Long-form lore belongs in the knowledge base
 (`KB_PATH`) where RAG retrieves it on demand; this file is for facts the bot
