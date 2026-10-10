@@ -34,6 +34,7 @@ import asyncio
 import importlib.util
 import logging
 import threading
+import time
 from typing import Any
 
 import httpx
@@ -192,6 +193,7 @@ async def rerank(
         return [(c, 0.0) for c in chunks]
 
     from config.settings import RERANK_TIMEOUT_SECONDS, RERANK_API_BASE
+    t0 = time.monotonic()
     try:
         if _mode() == "http":
             scores = await asyncio.wait_for(
@@ -218,7 +220,12 @@ async def rerank(
         return [(c, 0.0) for c in chunks]
 
     scored = sorted(zip(chunks, scores), key=lambda t: t[1], reverse=True)
+    final_n = len(scored)
     if top_n is not None and top_n > 0:
         scored = scored[:top_n]
-    logger.debug("Reranked %d chunk(s); top score=%.3f", len(scored), scored[0][1] if scored else 0.0)
+    logger.debug(
+        "Reranked %d candidate(s) -> %d kept in %.0f ms; top score=%.3f",
+        len(chunks), final_n, (time.monotonic() - t0) * 1000,
+        scored[0][1] if scored else 0.0,
+    )
     return scored
