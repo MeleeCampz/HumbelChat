@@ -73,6 +73,17 @@ Fix:
 - Use `./botctl.sh restart` (or `stop` then `start`) — it kills the existing tmux session and starts fresh
 - If `./botctl.sh start` reports "Bot already running", remove the stale `.bot.pid` file in the project root (the process is dead, so nothing else needs cleaning up)
 
+## Bot crashed during an active session (session never ended)
+
+If the bot dies (crash, OOM, power loss) while a session is active, the session stays open in `data/sessions.json`. On the next start the bot **resumes it automatically** (crash recovery, #28):
+
+- the startup log says `Resumed active session … after restart` — the old session continues; notes, document uploads and `/session_info` all work against it as usual;
+- its `notes.md` is re-read from disk (edits made via Obsidian while the bot was down are picked up) and re-indexed for RAG in `on_ready`;
+- if the notes file/folder was lost, it is recreated from the stored state;
+- a session that is already older than 12 h on resume gets a loud warning — the next `/start_session` will auto-end it as stale (no AI overview). End it explicitly with `/end_session` first if you want the overview.
+
+If instead `/start_session` refuses, it names the active session: `A session is already active: **<name>** (started …)` — that session was resumed and can be continued or ended with `/end_session`.
+
 ## New commands not appearing after code changes
 
 Likely cause: bot was restarted but commands weren't re-synced, or Discord hasn't propagated the update yet.

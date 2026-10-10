@@ -37,6 +37,12 @@ Safety rules enforced by :func:`start_session`:
 
 * while an active session is younger than 12 h, the user must end it first;
 * an active session older than 12 h is considered stale and is auto-ended.
+
+Crash recovery (#28): if the bot stopped (or crashed) while a session was
+still active, :func:`load_persisted` resumes that session at startup —
+validates it, recreates its notes file when missing, re-reads user edits
+from disk and logs loudly so the session is *continued* instead of silently
+lost or blocking ``/start_session`` with an unexplained refusal.
 """
 from __future__ import annotations
 
@@ -160,6 +166,118 @@ def load_persisted() -> None:
     except Exception as e:
         log.warning("Could not load sessions file: %s", e)
 
+    # Crash recovery (#28): a session that was active when the bot last
+    # stopped must be resumed, validated and made usable again.
+    try:
+        recover_active_session()
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("Active-session recovery failed: %s", e)
+
+
+def recover_active_session() -> dict[str, Any] | None:
+    """Resume and repair the session that was active when the bot last stopped.
+
+    Called from :func:`load_persisted` at startup.  A crashed (or never
+    cleanly stopped) bot leaves ``session`` set in the persisted file; this
+    makes sure the resumed session is usable again:
+
+    * a missing/pointless notes file is recreated from the stored state;
+    * notes are re-read from disk so edits made while the bot was down
+      (e.g. via Obsidian) are picked up;
+    * a corrupt persisted session (no usable ``started_at`` / no location)
+      is dropped and persisted as such, so it cannot block ``/start_session``
+      forever;
+    * the resume is logged loudly (age included) so the operator sees that
+      the old session continues instead of a new one being started.
+
+    Returns the resumed session, or None when no session was active.  Indexing
+    is best-effort here — at import time there is usually no event loop yet;
+    :func:`index_current_session` covers that from ``on_ready``.
+    """
+    s = _state.get("session")
+    if not isinstance(s, dict):
+        return None
+    if s.get("ended_at"):
+        # Defensive: an ended session belongs in last_ended, not active.
+        log.info("Persisted 'session' already ended (%s) — treating as no active session",
+                 s.get("name"))
+        _state["session"] = None
+        _save()
+        return None
+    started = s.get("started_at")
+    if not isinstance(started, (int, float)) or started <= 0:
+        log.warning("Dropping corrupt persisted active session (no usable started_at): %r",
+                    {k: v for k, v in s.items() if k not in ("notes", "overview", "merged_log")})
+        _state["session"] = None
+        _save()
+        return None
+    # Re-point the notes file when it is missing but the dir's copy exists.
+    path = pathlib.Path(s["file"]) if s.get("file") else None
+    if (path is None or not path.exists()) and s.get("dir") \
+            and (pathlib.Path(s["dir"]) / "notes.md").exists():
+        path = pathlib.Path(s["dir"]) / "notes.md"
+        s["file"] = str(path)
+    file_missing = path is None or not path.exists()
+    if file_missing:
+        if path is not None and path.parent.is_dir():
+            # The folder survived but notes.md didn't — recreate it in place.
+            pass
+        else:
+            # No usable location at all — rebuild the location from state so
+            # the session keeps working (crash mid-creation, folder deleted,
+            # a vault sync that did not pull it back).  Bump past any existing
+            # sibling folders, same guard as start_session.
+            file_path = _session_file_path(started, s.get("name") or None, 1)
+            while file_path.parent.exists():
+                file_path = _bump_file_index(file_path, started, s.get("name") or None)
+            path = file_path
+            s["file"] = str(file_path)
+            s["dir"] = str(file_path.parent)
+        log.warning("Resumed session %r had no notes file on disk — recreating at %s",
+                    s.get("name"), s["file"])
+    if file_missing:
+        _write_session_file(s)      # recreate from state (nothing to clobber)
+    else:
+        # Disk is the source of truth: re-read user edits made while the bot
+        # was down WITHOUT re-rendering (a render would drop any manual
+        # changes outside the ## Notes section).
+        _reindex_notes_file(s)      # indexing inside is best-effort
+    age_h = (time.time() - started) / 3600
+    if age_h >= STALE_SESSION_SEC / 3600:
+        log.warning(
+            "Resumed active session %r after restart, but it is already %.1f h old — "
+            "the next /start_session will auto-end it as stale (>%d h). End it "
+            "explicitly with /end_session if you want an AI overview.",
+            s.get("name") or "(untitled)", age_h, STALE_SESSION_SEC // 3600)
+    else:
+        log.info(
+            "Resumed active session %r after restart (started %.1f h ago) — the session "
+            "continues; end it with /end_session or upload documents/notes as usual.",
+            s.get("name") or "(untitled)", age_h)
+    return s
+
+
+async def index_current_session() -> bool:
+    """(Re)index the active session's notes file into the KB (best-effort).
+
+    Called from ``on_ready`` after a restart with a resumed session, when an
+    event loop exists — so RAG serves the latest content even if the notes
+    were edited while the bot was down.  Returns True when indexing succeeded.
+    """
+    s = get_current_session()
+    if s is None:
+        return False
+    paths = _session_index_paths(s)
+    if not paths:
+        return False
+    from kb.retrievers import update_kb_document
+    results = [await update_kb_document(p) for p in paths]
+    ok = all(results)
+    if not ok:
+        log.warning("Re-index of resumed session %r failed — run /reindex_kb.",
+                    s.get("name"))
+    return ok
+
 
 # ── Session helpers ──────────────────────────────────────────────────────
 
@@ -225,6 +343,18 @@ def _session_file_path(started_at: float, name: str | None, index: int) -> pathl
     safe = _sanitize_name(name)
     stem = f"{dt.strftime('%Y-%m-%d')}_{index:02d}" + (f"_{safe}" if safe else "")
     return notes_dir() / stem / "notes.md"
+
+
+def _bump_file_index(file_path: pathlib.Path, started_at: float,
+                     name: str | None) -> pathlib.Path:
+    """Next free sibling path for the same date/name (folder index +1).
+
+    Used by :func:`start_session`'s collision guard and by crash recovery so
+    a recreated session never points at an existing folder.
+    """
+    m = re.match(r"^\d{4}-\d{2}-\d{2}_(\d{2})(?:_|$)", file_path.parent.name)
+    index = (int(m.group(1)) + 1) if m else 2
+    return _session_file_path(started_at, name, index)
 
 
 def _unique_path(directory: pathlib.Path, stem: str, ext: str) -> pathlib.Path:
@@ -614,8 +744,14 @@ def start_session(name: str | None = None) -> tuple[dict[str, Any], dict[str, An
             closed_info = {"kind": "stale", "session": closed}
             log.info("Auto-ended stale session %s (age %.1f h)", current.get("name"), age / 3600)
         else:
-            msg = ("A session is already active — end it first with `/end_session` "
-                   "(or start again once it is older than 12 h to auto-end it).")
+            # Name the active session explicitly — after a restart the user
+            # should see that the old session was resumed and can continue it
+            # (#28) instead of getting an unexplained refusal.
+            started_when = datetime.fromtimestamp(current["started_at"]).strftime("%Y-%m-%d %H:%M")
+            msg = (f"A session is already active: **{current.get('name') or 'Untitled'}** "
+                   f"(started {started_when}) — you can continue it as usual, or end it "
+                   "first with `/end_session` (or start again once it is older than 12 h "
+                   "to auto-end it).")
             log.info("start_session refused: session %s still active (age %.1f h)",
                      current.get("name"), age / 3600)
             raise ValueError(msg)
@@ -636,8 +772,7 @@ def start_session(name: str | None = None) -> tuple[dict[str, Any], dict[str, An
     # folder, no matter how it got there (manual rename, clock skew, a
     # partially-created session). Bump until the path is free.
     while file_path.parent.exists():
-        index += 1
-        file_path = _session_file_path(now, safe_name, index)
+        file_path = _bump_file_index(file_path, now, safe_name)
     session = {
         "id": dt.strftime("%Y%m%d%H%M%S"),
         "name": safe_name,

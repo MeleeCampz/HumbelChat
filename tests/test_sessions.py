@@ -1,8 +1,11 @@
 """Tests for the global session store (bot_core.sessions)."""
 from __future__ import annotations
 
+import json
+import os
 import pathlib
 import re
+import shutil
 import time
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
@@ -580,6 +583,126 @@ class TestNextSessionReminders:
     async def test_deliver_empty_queue(self):
         bot = MagicMock()
         assert await S.deliver_queued_reminders(bot) == 0
+
+
+class TestRecovery:
+    """#28 — crash recovery: a session that was active when the bot stopped
+    (cleanly or by crash) must be resumed at startup and continued, not lost."""
+
+    def _simulated_restart(self):
+        """Wipe in-memory state and reload from disk, like a process restart."""
+        S._state["session"] = None
+        S._state["last_ended"] = None
+        S._state["last_start_at"] = None
+        S._state["next_session_reminders"] = []
+        S.load_persisted()
+
+    def test_resume_active_session_after_restart(self):
+        session, _ = S.start_session(name="Resume Me")
+        S.add_note("keep going")
+        self._simulated_restart()
+        resumed = S.get_current_session()
+        assert resumed is not None
+        assert resumed["name"] == "Resume Me"
+        assert resumed["file"] == session["file"]
+        assert any("keep going" in t for _ts, t in S.get_notes())
+        # The session is usable again: notes keep working against it.
+        updated = S.add_note("after restart")
+        assert len(updated["notes"]) == 2
+
+    def test_recovery_recreates_missing_notes_file_in_place(self):
+        """Folder survived, notes.md did not (crash mid-write / manual delete)."""
+        session, _ = S.start_session(name="Rebuild")
+        S.add_note("note before crash")
+        pathlib.Path(session["file"]).unlink()
+        self._simulated_restart()
+        resumed = S.get_current_session()
+        assert resumed is not None
+        # Recreated in the SAME folder (no sibling _02_ duplicate).
+        assert resumed["dir"] == session["dir"]
+        content = pathlib.Path(resumed["file"]).read_text(encoding="utf-8")
+        assert "note before crash" in content
+
+    def test_recovery_rebuilds_location_when_folder_gone(self):
+        """Whole folder gone — the session is rebuilt at a free sibling path."""
+        session, _ = S.start_session(name="Gone")
+        S.add_note("survive in state")
+        shutil.rmtree(session["dir"])
+        self._simulated_restart()
+        resumed = S.get_current_session()
+        assert resumed is not None
+        assert pathlib.Path(resumed["file"]).exists()
+        content = pathlib.Path(resumed["file"]).read_text(encoding="utf-8")
+        assert "survive in state" in content
+
+    def test_recovery_repoints_when_only_dir_survives(self):
+        """Persisted state lost its ``file`` key — the dir's notes.md is used."""
+        session, _ = S.start_session(name="DirOnly")
+        S.add_note("x")
+        p = pathlib.Path(os.environ["SESSIONS_PERSIST_FILE"])
+        raw = json.loads(p.read_text(encoding="utf-8"))
+        del raw["session"]["file"]  # corrupt state on disk: no file key
+        p.write_text(json.dumps(raw), encoding="utf-8")
+        self._simulated_restart()
+        resumed = S.get_current_session()
+        assert resumed is not None
+        assert resumed["file"] == str(pathlib.Path(session["dir"]) / "notes.md")
+
+    def test_recovery_picks_up_external_edits(self):
+        """Notes edited on disk while the bot was down are picked up."""
+        session, _ = S.start_session(name="Edited")
+        f = pathlib.Path(session["file"])
+        stamp = datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d %H:%M")
+        with f.open("a", encoding="utf-8") as fh:
+            fh.write(f"\n- ({stamp}) edited while bot was down\n")
+        self._simulated_restart()
+        notes = S.get_notes()
+        assert any("edited while bot was down" in t for _ts, t in notes)
+
+    def test_recovery_drops_corrupt_session(self):
+        """A persisted session without a usable started_at is dropped — it must
+        not block /start_session forever."""
+        path = pathlib.Path(os.environ["SESSIONS_PERSIST_FILE"])
+        path.write_text(json.dumps({
+            "session": {"name": "Broken", "notes": []},
+            "last_ended": None, "last_start_at": None,
+            "next_session_reminders": [],
+        }), encoding="utf-8")
+        self._simulated_restart()
+        assert S.get_current_session() is None
+        # And the drop is persisted, so the next restart stays clean.
+        reloaded = json.loads(path.read_text(encoding="utf-8"))
+        assert reloaded["session"] is None
+        # A new session can start without refusal.
+        session, _ = S.start_session(name="Fresh")
+        assert session["name"] == "Fresh"
+
+    def test_recovery_ignores_already_ended_session(self):
+        path = pathlib.Path(os.environ["SESSIONS_PERSIST_FILE"])
+        now = time.time()
+        path.write_text(json.dumps({
+            "session": {"name": "Old", "started_at": now - 3600,
+                        "ended_at": now, "notes": []},
+            "last_ended": None, "last_start_at": None,
+            "next_session_reminders": [],
+        }), encoding="utf-8")
+        self._simulated_restart()
+        assert S.get_current_session() is None
+
+    def test_stale_resume_logs_warning(self, caplog):
+        """A resumed session older than the stale threshold gets a loud warning."""
+        S.start_session(name="OldTimer")
+        S.get_current_session()["started_at"] = time.time() - 13 * 3600
+        S._save()  # persist the backdated state so the restart sees it
+        self._simulated_restart()
+        assert S.get_current_session() is not None
+        assert any("stale" in rec.message for rec in caplog.records
+                   if rec.name == "bot.sessions")
+
+    def test_start_refusal_names_active_session(self):
+        S.start_session(name="The Ongoing One")
+        with pytest.raises(ValueError, match="The Ongoing One"):
+            S.start_session(name="Other")
 
 
 class TestNaming:

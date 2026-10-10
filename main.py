@@ -153,7 +153,9 @@ if CHAT_HISTORY_RESET:
     reset_all_history()
 
 # Restore session state (active session + queued next-session reminders).
-# Nothing to re-arm — reminders fire from the /start_session handler.
+# Nothing to re-arm — reminders fire from the /start_session handler.  A
+# session that was active when the bot last stopped is resumed here (crash
+# recovery, #28); its RAG re-index runs later in on_ready.
 from bot_core.sessions import load_persisted as load_sessions
 load_sessions()
 
@@ -644,6 +646,14 @@ async def on_ready() -> None:
         _recover_crashed_recordings(bot)
     except Exception:  # pragma: no cover - never block startup on recovery
         log.exception("Crashed-recording recovery failed (continuing)")
+
+    # Session crash recovery (#28): load_sessions() already resumed any session
+    # that was active before the shutdown (at import time) — now that an event
+    # loop exists, re-index its notes so RAG serves content edited while the
+    # bot was down. No-op when no session is active.
+    from bot_core.sessions import get_current_session, index_current_session
+    if get_current_session() is not None:
+        spawn_tracked_task(index_current_session(), name="session-reindex")
 
 
 @bot.tree.error
