@@ -120,6 +120,10 @@ Expansions:
         # reasoning and return no content ("full token budget on reasoning"). This is
         # a short utility call — disable thinking. Measured: 0.5s with it off vs
         # 5.7s of pure thinking (see docs/internal/RAG_ANALYSIS_2026-09-27.md).
+        # Backend-specific params, sent together: llama.cpp/unsloth-studio honours
+        # reasoning_effort="none" (silently ignores enable_thinking); LM Studio
+        # honours enable_thinking. A backend that rejects the combo falls back to
+        # enable_thinking alone, then to a plain call.
         # Kwargs are passed inline (not via a dict) so mypy can match each against
         # the AsyncCompletions.create overload.
         try:
@@ -129,10 +133,10 @@ Expansions:
                 temperature=0.3,  # Low for consistent, focused expansions
                 max_tokens=256,
                 timeout=self.REWRITE_TIMEOUT_SEC,
-                extra_body={"enable_thinking": False},
+                extra_body={"reasoning_effort": "none", "enable_thinking": False},
             )
         except Exception:
-            # Backend rejected the extra param (or transient failure) — retry plain.
+            # Backend rejected the combo — try the LM-Studio-only param, then plain.
             try:
                 response = await self._client.chat.completions.create(
                     model=self.model_slug,
@@ -140,10 +144,20 @@ Expansions:
                     temperature=0.3,
                     max_tokens=256,
                     timeout=self.REWRITE_TIMEOUT_SEC,
+                    extra_body={"enable_thinking": False},
                 )
-            except Exception as exc:
-                logger.warning("Query rewrite attempt failed (%s); returning no expansions", exc)
-                return []
+            except Exception:
+                try:
+                    response = await self._client.chat.completions.create(
+                        model=self.model_slug,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.3,
+                        max_tokens=256,
+                        timeout=self.REWRITE_TIMEOUT_SEC,
+                    )
+                except Exception as exc:
+                    logger.warning("Query rewrite attempt failed (%s); returning no expansions", exc)
+                    return []
 
         # P1 #8: empty `choices` raises AIBackendError → caught below →
         # no expansions (instead of an IndexError from `choices[0]`).
