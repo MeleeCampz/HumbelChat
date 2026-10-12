@@ -338,6 +338,36 @@ def reciprocal_rank_fusion(
     return [(name, contents[name], scores[name]) for name in merged]
 
 
+async def _llm_expansions(query: str, rewrite_model: str = "") -> list[str]:
+    """LLM query expansion ONLY (no embedding/ranking). Never raises.
+
+    Returns the expansion strings (original excluded — its ranking is already
+    known and must not be double-weighted), or ``[]`` when rewriting is disabled
+    or fails.  Bounded by ``RAG_REWRITE_BUDGET_SECONDS``.  Split out of
+    :func:`_expand_low_confidence_query` so the (independent) LLM call can run
+    CONCURRENTLY with the dense query ranking — see ``_retrieve_vector``.
+    """
+    from config.settings import RAG_QUERY_REWRITER, RAG_REWRITE_BUDGET_SECONDS
+
+    if not RAG_QUERY_REWRITER:
+        return []
+    try:
+        from kb.query_rewriter import create_query_rewriter
+
+        # Use the SAME model as the main completion call — on a single-model
+        # local backend a different slug would either fail or evict the loaded
+        # weights.  Empty string = rewriter falls back to DEFAULT_MODEL.
+        rewriter = create_query_rewriter(model_slug=rewrite_model)
+        expanded = await asyncio.wait_for(
+            rewriter.expand(query), timeout=RAG_REWRITE_BUDGET_SECONDS
+        )
+        # expand() returns [original, *expansions] — drop the original.
+        return [e for e in expanded[1:] if e and e.strip()]
+    except Exception as exc:  # noqa: BLE001 — rewrite is a pure enhancement
+        logger.warning("Query rewrite failed (%s); using original ranking only", exc)
+        return []
+
+
 async def _expand_low_confidence_query(
     idx: "KBVectorIndex",
     query: str,
@@ -354,39 +384,15 @@ async def _expand_low_confidence_query(
     Returns ``([], 0.0, [])`` when rewriting is disabled or produces nothing.
     Never raises: callers fall back to the original ranking alone.
     """
-    from config.settings import (
-        RAG_QUERY_REWRITER,
-        RAG_REWRITE_BUDGET_SECONDS,
-    )
-
-    if not RAG_QUERY_REWRITER:
-        return [], 0.0, []
-
     t0 = time.monotonic()
-    try:
-        from kb.query_rewriter import create_query_rewriter
-
-        # Use the SAME model as the main completion call — on a single-model
-        # local backend a different slug would either fail or evict the loaded
-        # weights.  Empty string = rewriter falls back to DEFAULT_MODEL.
-        rewriter = create_query_rewriter(model_slug=rewrite_model)
-        expanded = await asyncio.wait_for(
-            rewriter.expand(query), timeout=RAG_REWRITE_BUDGET_SECONDS
-        )
-        # expand() returns [original, *expansions]; the original's ranking is
-        # already known — drop it so its chunks are not double-weighted.
-        extra = [e for e in expanded[1:] if e and e.strip()]
-    except Exception as exc:
-        logger.warning("Low-confidence rewrite failed (%s); using original ranking only", exc)
-        return [], time.monotonic() - t0, []
-
+    extra = await _llm_expansions(query, rewrite_model=rewrite_model)
     if not extra:
         return [], 0.0, []
 
     try:
         from config.settings import RAG_DENSE_TOP_K
         rankings = await idx.rank_texts(extra, top_n=RAG_DENSE_TOP_K)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — the lexical leg is a pure enhancement
         logger.warning("Expansion embedding failed (%s); using original ranking only", exc)
         return [], time.monotonic() - t0, []
 
@@ -489,12 +495,30 @@ async def _retrieve_vector(
         logger.warning("Vector index unavailable or empty for '%s'; falling back to keyword", kb_path)
         return await _keyword_fallback(query, kb_path, top_n, window_lines)
 
+    from config.settings import (
+        RAG_DENSE_TOP_K,
+        RAG_QUERY_REWRITER,
+        RAG_REWRITE_ALL_QUERIES,
+        RAG_REWRITE_MIN_SCORE,
+        RAG_MIN_ATTACH_SCORE,
+    )
+
+    # ── Parallel rewrite (latency) ────────────────────────────────────────
+    # With RAG_REWRITE_ALL_QUERIES the LLM expansion is unconditional and
+    # depends on NOTHING from the dense ranking — so start it as a task BEFORE
+    # the query embedding and let the ~0.5–2 s rewrite call overlap with the
+    # embed+rank instead of serializing behind it.
+    _rewrite_task: asyncio.Task | None = None
+    if RAG_QUERY_REWRITER and RAG_REWRITE_ALL_QUERIES:
+        _rewrite_task = asyncio.create_task(_llm_expansions(query, rewrite_model=rewrite_model))
+
     # One embedding call: rank the in-memory chunks AND keep the query vector.
     # Pool size is tunable (RAG_DENSE_TOP_K) — a larger candidate set improves
     # recall for hard lookups at negligible cost while the reranker is off.
-    from config.settings import RAG_DENSE_TOP_K
     ranked, _q_emb = await idx.query_with_embeddings(query, top_n=RAG_DENSE_TOP_K)
     if not ranked:
+        if _rewrite_task is not None:
+            _rewrite_task.cancel()  # keyword fallback needs no expansions
         logger.warning("Vector query returned no hits for '%s'; falling back to keyword", kb_path)
         return await _keyword_fallback(query, kb_path, top_n, window_lines)
 
@@ -509,12 +533,6 @@ async def _retrieve_vector(
     logger.info(
         "Vector scores for %r: top=%.3f median=%.3f min=%.3f (%d chunks)",
         query, top_scores[0], top_scores[len(top_scores) // 2], top_scores[-1], len(ranked),
-    )
-
-    from config.settings import (
-        RAG_REWRITE_ALL_QUERIES,
-        RAG_REWRITE_MIN_SCORE,
-        RAG_MIN_ATTACH_SCORE,
     )
 
     # ── Min-attachment relevance floor (opt-in) ───────────────────────
@@ -539,9 +557,25 @@ async def _retrieve_vector(
     # the rewrite call costs ~0.5-1s and fixes both German queries and mangled
     # English alike. Fallback mode: only German or low-confidence queries.
     if RAG_REWRITE_ALL_QUERIES or low_confidence or german_query:
-        expansion_rankings, elapsed, expansion_texts = await _expand_low_confidence_query(
-            idx, query, top_n, rewrite_model=rewrite_model
-        )
+        if _rewrite_task is not None:
+            # All-queries path: the LLM call already ran in parallel with the
+            # dense ranking above — just await it, then embed+rank the results.
+            t0 = time.monotonic()
+            expansion_texts = await _rewrite_task
+            expansion_rankings: list[list[tuple[str, str, float]]] = []
+            if expansion_texts:
+                try:
+                    all_ranked = await idx.rank_texts(
+                        expansion_texts, top_n=RAG_DENSE_TOP_K
+                    )
+                    expansion_rankings = [r for r in all_ranked if r]
+                except Exception as exc:  # noqa: BLE001 — pure enhancement
+                    logger.warning("Expansion embedding failed (%s); using original ranking only", exc)
+            elapsed = time.monotonic() - t0
+        else:
+            expansion_rankings, elapsed, expansion_texts = await _expand_low_confidence_query(
+                idx, query, top_n, rewrite_model=rewrite_model
+            )
         if expansion_rankings:
             merged = reciprocal_rank_fusion([ranked] + expansion_rankings)
             reason = (

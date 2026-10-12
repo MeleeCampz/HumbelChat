@@ -152,3 +152,157 @@ class TestRewriteAllQueriesFlag:
         monkeypatch.setenv("RAG_REWRITE_ALL_QUERIES", "0")
         importlib.reload(settings)
         assert settings.RAG_REWRITE_ALL_QUERIES is False
+
+
+# ─────────────── Diacritic normalization (BM25 + keyword fallback) ───────────────
+# The old tokenizers used [a-z0-9']+ / [a-zA-Z_]{3,} which SPLIT on umlauts:
+# "Kettenrüstung" → ["kettenr", "stung"] — German terms with umlauts could never
+# exact-match (e.g. against the German session notes). Both tokenizers now strip
+# diacritics first (kb.lexical.strip_diacritics), so both sides normalize to
+# "kettenrustung" and match.
+
+class TestDiacriticTokenization:
+    def test_tokenize_strips_umlauts(self):
+        from kb.lexical import tokenize
+
+        assert tokenize("Kettenrüstung") == ["kettenrustung"]
+        assert tokenize("für") == ["fur"]
+        assert tokenize("Heiltrank für Stufe 3") == ["heiltrank", "fur", "stufe", "3"]
+
+    def test_tokenize_untouched_ascii_and_apostrophes(self):
+        from kb.lexical import tokenize
+
+        assert tokenize("don't stop") == ["don't", "stop"]
+        assert tokenize("Chain Mail AC 16") == ["chain", "mail", "ac", "16"]
+
+    def test_bm25_matches_umlaut_bearing_terms(self):
+        from kb.lexical import BM25
+
+        docs = [
+            "Die Kettenrüstung hat Rüstungsklasse 14 und wiegt 55 Pfund.",
+            "A plain english row about padded armor.",
+        ]
+        scores = BM25(docs).scores("Kettenrüstung")
+        assert scores[0] > 0, "umlaut term must score the German doc"
+        assert scores[0] > scores[1]
+
+    def test_reader_normalize_query_normalizes_umlauts(self):
+        from kb.reader import _normalize_query
+
+        terms = _normalize_query("Was ist die Kettenrüstung wert?")
+        assert "kettenrustung" in terms
+        # No term may contain a non-ASCII (un-normalized) character.
+        assert all(t.isascii() for t in terms)
+
+
+# ─────────────────── Parallel rewrite (latency optimization) ───────────────────
+# With RAG_REWRITE_ALL_QUERIES the LLM expansion depends on nothing from the dense
+# ranking, so _retrieve_vector starts it as a task BEFORE embedding/ranking the
+# query. This test proves the overlap (expand() is entered while
+# query_with_embeddings is still in flight) and that the expansion-derived chunks
+# still reach the final selection.
+
+class TestParallelRewrite:
+    async def test_rewrite_overlaps_dense_ranking(self, monkeypatch):
+        import asyncio
+
+        import kb.retrievers as R
+
+        monkeypatch.setattr("config.settings.RAG_REWRITE_ALL_QUERIES", True)
+        monkeypatch.setattr("config.settings.RAG_QUERY_REWRITER", True)
+        monkeypatch.setattr("config.settings.RAG_HYBRID_ENABLED", False)  # isolate
+        monkeypatch.setattr("config.settings.RERANK_ENABLED", False)
+        monkeypatch.setattr("config.settings.RAG_MIN_ATTACH_SCORE", 0.0)
+        monkeypatch.setattr("config.settings.RAG_ATTACH_FLOOR", 0.0)
+
+        events: dict[str, bool] = {"expand_called": False}
+
+        class FakeIdx:
+            def is_empty(self):
+                return False
+
+            async def query_with_embeddings(self, text, top_n=5):
+                await asyncio.sleep(0.2)  # simulate the embed+rank window
+                events["expand_seen_during_rank"] = events["expand_called"]
+                return [(("a.md [Sec]", "alpha content", 0.6))], [0.1]
+
+            async def rank_texts(self, texts, top_n=5):
+                assert texts == ["armor table english"]
+                return [[(("b.md [Exp]", "beta content", 0.7))]]
+
+        class FakeStore:
+            def get_index(self):
+                return FakeIdx()
+
+        monkeypatch.setattr(R, "_index_store", FakeStore())
+
+        class FakeRewriter:
+            async def expand(self, q):
+                events["expand_called"] = True
+                await asyncio.sleep(0.1)  # simulate the LLM round-trip
+                return [q, "armor table english"]
+
+        monkeypatch.setattr(
+            "kb.query_rewriter.create_query_rewriter",
+            lambda model_slug="": FakeRewriter(),
+        )
+
+        docs = await R._retrieve_vector("Kettenrüstung?", "/nonexistent-kb", top_n=4)
+        names = [n for n, _ in docs]
+
+        assert events["expand_called"], "rewriter must be invoked (all-queries mode)"
+        assert events["expand_seen_during_rank"], (
+            "rewrite LLM call must START before the dense ranking completes"
+        )
+        assert any("b.md" in n for n in names), (
+            "expansion-derived chunk must survive RRF merge into the selection"
+        )
+
+    async def test_no_parallel_task_when_all_queries_off(self, monkeypatch):
+        """Kill-switch path: with RAG_REWRITE_ALL_QUERIES=0 and a confident
+        non-German query, no rewrite happens at all (old serial behaviour)."""
+        import asyncio
+
+        import kb.retrievers as R
+
+        monkeypatch.setattr("config.settings.RAG_REWRITE_ALL_QUERIES", False)
+        monkeypatch.setattr("config.settings.RAG_QUERY_REWRITER", True)
+        monkeypatch.setattr("config.settings.RAG_HYBRID_ENABLED", False)
+        monkeypatch.setattr("config.settings.RERANK_ENABLED", False)
+        monkeypatch.setattr("config.settings.RAG_MIN_ATTACH_SCORE", 0.0)
+        monkeypatch.setattr("config.settings.RAG_ATTACH_FLOOR", 0.0)
+
+        calls: list[str] = []
+
+        class FakeIdx:
+            def is_empty(self):
+                return False
+
+            async def query_with_embeddings(self, text, top_n=5):
+                await asyncio.sleep(0.01)
+                return [(("a.md [Sec]", "alpha content", 0.9))], [0.1]  # confident
+
+            async def rank_texts(self, texts, top_n=5):
+                calls.append("rank_texts")
+                return []
+
+        class FakeStore:
+            def get_index(self):
+                return FakeIdx()
+
+        monkeypatch.setattr(R, "_index_store", FakeStore())
+
+        class FakeRewriter:
+            async def expand(self, q):
+                calls.append("expand")
+                return [q]
+
+        monkeypatch.setattr(
+            "kb.query_rewriter.create_query_rewriter",
+            lambda model_slug="": FakeRewriter(),
+        )
+
+        docs = await R._retrieve_vector("fireball spell", "/nonexistent-kb", top_n=4)
+        assert calls == [], f"confident English query must not trigger a rewrite, got {calls}"
+        # select_ranked_chunks collapses to per-file stems (no section suffix).
+        assert [n for n, _ in docs] == ["a.md"]
