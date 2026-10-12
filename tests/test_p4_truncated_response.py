@@ -209,7 +209,7 @@ class TestCompleteText:
         kwargs = client.chat.completions.create.call_args.kwargs
         assert "max_tokens" not in kwargs
         assert kwargs["stream"] is True  # streamed internally → idle watchdog
-        assert kwargs["extra_body"] == {"enable_thinking": False}
+        assert kwargs["extra_body"] == {"reasoning_effort": "none", "enable_thinking": False}
         assert kwargs["timeout"] == pytest.approx(ai_client.AI_TIMEOUT_S)
         assert stream.closed  # HTTP connection released after collection
 
@@ -263,7 +263,7 @@ class TestCompleteText:
         assert client.chat.completions.create.await_count == 2
         first_kwargs = client.chat.completions.create.call_args_list[0].kwargs
         second_kwargs = client.chat.completions.create.call_args_list[1].kwargs
-        assert first_kwargs["extra_body"] == {"enable_thinking": False}
+        assert first_kwargs["extra_body"] == {"reasoning_effort": "none", "enable_thinking": False}
         assert "extra_body" not in second_kwargs
 
     @pytest.mark.asyncio

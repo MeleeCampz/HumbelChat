@@ -99,8 +99,8 @@ class TestReasoningExtraBody:
     def test_none_omits_param(self):
         assert ai_client._reasoning_extra_body(None) is None
 
-    def test_off_maps_to_enable_thinking_false(self):
-        assert ai_client._reasoning_extra_body("off") == {"enable_thinking": False}
+    def test_off_maps_to_both_off_switches(self):
+        assert ai_client._reasoning_extra_body("off") == {"reasoning_effort": "none", "enable_thinking": False}
 
     @pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh"])
     def test_graded_efforts_map_to_reasoning_effort(self, effort):
@@ -243,7 +243,7 @@ class TestAskAiStreamReasoning:
         assert text == "PONG"
         calls = client.chat.completions.create.await_args_list
         assert len(calls) == 2
-        assert calls[0].kwargs.get("extra_body") == {"enable_thinking": False}
+        assert calls[0].kwargs.get("extra_body") == {"reasoning_effort": "none", "enable_thinking": False}
         assert "extra_body" not in calls[1].kwargs
 
 
@@ -304,7 +304,7 @@ class TestCompleteTextReasoning:
         )
         assert text == "hi"
         kw = client.chat.completions.create.await_args.kwargs
-        assert kw.get("extra_body") == {"enable_thinking": False}
+        assert kw.get("extra_body") == {"reasoning_effort": "none", "enable_thinking": False}
 
     @pytest.mark.asyncio
     async def test_reasoning_effort_param_maps_through(self):
@@ -374,7 +374,7 @@ class TestSummaryCallSites:
             await uc.handle_summarize_command(ix)
 
         kw = inst.chat.completions.create.await_args.kwargs
-        assert kw.get("extra_body") == {"enable_thinking": False}
+        assert kw.get("extra_body") == {"reasoning_effort": "none", "enable_thinking": False}
 
     @pytest.mark.asyncio
     async def test_summarize_honours_env_override(self, ix, monkeypatch):
@@ -414,7 +414,7 @@ class TestSummaryCallSites:
             )
 
         kw = inst.chat.completions.create.await_args.kwargs
-        assert kw.get("extra_body") == {"enable_thinking": False}
+        assert kw.get("extra_body") == {"reasoning_effort": "none", "enable_thinking": False}
 
     @pytest.mark.asyncio
     async def test_translate_honours_env_override(self, ix, monkeypatch):
@@ -451,7 +451,7 @@ class TestSummaryCallSites:
             await uc.handle_ocr_command(ix, image=image)
 
         kw = inst.chat.completions.create.await_args.kwargs
-        assert kw.get("extra_body") == {"enable_thinking": False}
+        assert kw.get("extra_body") == {"reasoning_effort": "none", "enable_thinking": False}
 
 
 class TestSessionCallSites:
