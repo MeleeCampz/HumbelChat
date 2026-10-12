@@ -68,6 +68,12 @@ DISCORD_TOKEN: str = os.getenv("DISCORD_BOT_TOKEN", "")
 # ════════════════════════════════════
 INFER_URL: str = os.getenv("INFER_URL", "http://127.0.0.1:11434/v1")
 INFER_API_KEY: str = os.getenv("INFER_API_KEY", "")  # sometimes empty for local
+# Optional dedicated endpoint for the /embeddings API (index builds). When the
+# chat backend doesn't serve embedding models, point EMBED_URL at the backend
+# that does (e.g. unsloth studio with bge-m3 loaded) so chat and index writes
+# never force a model swap on either side. Defaults to INFER_URL/INFER_API_KEY.
+EMBED_URL: str = os.getenv("EMBED_URL", "") or INFER_URL
+EMBED_API_KEY: str = os.getenv("EMBED_API_KEY", "") or INFER_API_KEY
 
 # ════════════════════════════════════
 #  CHARACTER defaults (per-char in characters.json)
