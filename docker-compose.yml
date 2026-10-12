@@ -26,3 +26,28 @@ services:
       - ./data:/app/data        # KB docs + .vector_index_cache + recordings + history.json
       - ./logs:/app/logs        # RotatingFileHandler output, readable from host
       - ./hf-cache:/models/hf   # bge-m3 + whisper models (downloaded once)
+    depends_on:
+      - reranker
+
+  # GPU cross-encoder reranker for RAG (see docs/internal/Todo_Reranker.md).
+  # Hugging Face Text Embeddings Inference serving BAAI/bge-reranker-v2-m3 on
+  # GPU 1 — deliberately NOT the Unsloth Studio endpoint, which would evict the
+  # main chat LLM. The bot reaches it over the compose network (http://reranker:80);
+  # no host port is published. First start downloads the model (~1 GB) into the
+  # shared hf-cache/ volume.
+  reranker:
+    image: ghcr.io/huggingface/text-embeddings-inference:latest
+    container_name: humbelchat-reranker
+    restart: unless-stopped
+    volumes:
+      - ./hf-cache:/data        # same HF cache as the bot (separate model subdir)
+    environment:
+      - HF_HOME=/data
+    command: --model-id BAAI/bge-reranker-v2-m3
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]

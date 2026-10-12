@@ -37,6 +37,11 @@ def _normalize_query(query: str) -> list[str]:
 
     Filters out common English stop words that pollute relevance scoring,
     since they appear in nearly every document and drown out real signals.
+
+    Diacritics are stripped before tokenizing (shared ``strip_diacritics`` from
+    ``kb.lexical``): the old ``[a-zA-Z_]{3,}`` pattern split on umlauts, so a
+    German query term like "Kettenrüstung" became two junk terms ("kettenr",
+    "stung") that could never match anything.
     """
     _STOP_WORDS = frozenset({
         # pronouns & determiners
@@ -55,7 +60,8 @@ def _normalize_query(query: str) -> list[str]:
         'why', 'how', 'all', 'each', 'every', 'both', 'few',
         'more', 'most', 'some', 'such', 'no', 'not', 'only',
     })
-    words = re.findall(r"[a-zA-Z_]{3,}", query.lower())
+    from kb.lexical import strip_diacritics
+    words = re.findall(r"[a-z_]{3,}", strip_diacritics(query.lower()))
     seen: set[str] = set()
     unique: list[str] = []
     for w in words:
