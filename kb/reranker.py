@@ -192,17 +192,21 @@ async def rerank(
         logger.debug("Rerank disabled/unavailable — returning original order")
         return [(c, 0.0) for c in chunks]
 
-    from config.settings import RERANK_TIMEOUT_SECONDS, RERANK_API_BASE
+    from config.settings import RERANK_TIMEOUT_SECONDS, RERANK_API_BASE, RERANK_MAX_CHARS
+    # Score truncated copies when configured: entry chunks lead with title + type +
+    # core mechanics, so the head carries the answer signal. Originals are zipped
+    # back with the scores below — callers must receive full chunk text untouched.
+    score_input = [c[:RERANK_MAX_CHARS] for c in chunks] if RERANK_MAX_CHARS > 0 else chunks
     t0 = time.monotonic()
     try:
         if _mode() == "http":
             scores = await asyncio.wait_for(
-                _rerank_http(RERANK_API_BASE, query, chunks),
+                _rerank_http(RERANK_API_BASE, query, score_input),
                 timeout=RERANK_TIMEOUT_SECONDS,
             )
         else:
             scores = await asyncio.wait_for(
-                asyncio.to_thread(_score_sync, query, chunks),
+                asyncio.to_thread(_score_sync, query, score_input),
                 timeout=RERANK_TIMEOUT_SECONDS,
             )
     except asyncio.TimeoutError:

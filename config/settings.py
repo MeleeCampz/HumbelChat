@@ -379,6 +379,11 @@ RERANK_API_BASE: str = os.getenv("RERANK_API_BASE", "").rstrip("/")
 RERANK_TOP_K: int = _safe_int(
     os.getenv("RERANK_TOP_K", os.getenv("RAG_VECTOR_TOP_K")), 15
 )
+# Chunks are truncated to this many characters before cross-encoder scoring
+# (0 = no truncation). Entry-style chunks lead with title + type + core
+# mechanics, so a 1200-char head keeps the answer signal while roughly halving
+# scoring cost — what makes a wide RERANK_TOP_K window affordable.
+RERANK_MAX_CHARS: int = _safe_int(os.getenv("RERANK_MAX_CHARS"), 1200)
 RERANK_TIMEOUT_SECONDS: int = _safe_int(os.getenv("RERANK_TIMEOUT_SECONDS"), 8)
 # Enable the hybrid lexical (BM25) leg that is RRF-fused with dense vectors.
 # On by default (part of the high-quality pipeline); set to 0 to use dense-only.

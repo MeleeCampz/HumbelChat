@@ -51,6 +51,7 @@ Rules:
 - Write EVERY expansion in ENGLISH using standard D&D 5e terminology
 - If the original query is in another language (e.g. German), translate its key terms into English D&D 5e vocabulary first (e.g. "Rüstung" → "armor", "Zauberspruch" → "spell", "Heiltrank" → "potion of healing", "Statblock" → "stat block")
 - Focus on synonyms, related concepts, and contextual meanings — not rephrasing the entire question
+- DO NOT repeat book titles, source books, or publication names from the original query (e.g. a book name in the question is a SOURCE hint, not the item's name). Describe the mechanics asked about instead
 - Stay strictly within the domain: {kb_domain}
 - DO NOT include the original query in your output
 - Output ONLY the expansions, one per line, with no numbering or extra text
