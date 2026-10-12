@@ -334,15 +334,17 @@ def _is_transient_api_failure(exc: BaseException) -> bool:
 def _reasoning_extra_body(effort: str | None) -> dict[str, Any] | None:
     """Map a resolved reasoning-effort setting to the backend's extra_body (#20).
 
-    ``None`` → omit the param entirely (model default). ``"off"`` → the
-    proven ``enable_thinking=False`` path (Qwen3-style hybrid-thinking
-    models). ``low/medium/high/xhigh`` → graded ``reasoning_effort`` as
-    supported by newer LM Studio builds for Qwen3.8.
+    ``None`` → omit the param entirely (model default). ``"off"`` → send both
+    known off-switches: ``reasoning_effort="none"`` (llama.cpp / unsloth
+    studio; ignores enable_thinking) and ``enable_thinking=False`` (LM
+    Studio / vLLM-style servers; ignores reasoning_effort). Each backend
+    picks the one it understands; a 4xx rejection falls back via
+    :func:`_create_with_reasoning_fallback`.
     """
     if effort is None:
         return None
     if effort == "off":
-        return {"enable_thinking": False}
+        return {"reasoning_effort": "none", "enable_thinking": False}
     return {"reasoning_effort": effort}
 
 
