@@ -51,3 +51,25 @@ services:
             - driver: nvidia
               device_ids: ["1"]
               capabilities: [gpu]
+
+  # Optional Qwen3-Embedding host for the RAG embedding swap (Phase 2 — see
+  # docs/internal/EVAL_QWEN3_EMBEDDING.md). Inactive unless started with
+  # `docker compose --profile qwen-embed up -d embedder-qwen`.
+  # After first start: `docker compose exec embedder-qwen ollama pull
+  # qwen3-embedding:8b-q8_0` (8 GB) or `:8b` (4.7 GB Q4_K_M), then point the
+  # bot at it: EMBED_URL=http://embedder-qwen:11434/v1 (+EMBEDDING_MODEL /
+  # INDEX_EMBED_MODEL, /reindex_kb). Shares GPU 1 with the reranker.
+  embedder-qwen:
+    image: ollama/ollama:latest
+    container_name: humbelchat-embedder-qwen
+    profiles: ["qwen-embed"]
+    restart: unless-stopped
+    volumes:
+      - ./ollama-models:/root/.ollama   # model store, outside the repo tree
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
