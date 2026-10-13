@@ -343,6 +343,13 @@ INDEX_EMBED_BACKEND: str = os.getenv("INDEX_EMBED_BACKEND", "backend").strip().l
 # breaks; it defaults to that so the two stay in lockstep. Override only if your
 # backend names the loaded bge-m3 differently.
 INDEX_EMBED_MODEL: str = os.getenv("INDEX_EMBED_MODEL", LOCAL_EMBED_MODEL)
+# Whether index builds may fall back to in-process CPU embedding when the
+# backend is unreachable mid-build. "auto" (default) enables it only when
+# INDEX_EMBED_MODEL == LOCAL_EMBED_MODEL — with different models a fallback
+# would silently mix two incompatible vector spaces into one index. Set 1/true
+# to force-enable when the names differ but are the same model under the hood
+# (e.g. gpustack/bge-m3-GGUF vs BAAI/bge-m3), or 0/false to never fall back.
+INDEX_EMBED_FALLBACK_LOCAL: str = os.getenv("INDEX_EMBED_FALLBACK_LOCAL", "auto").strip().lower()
 
 
 def effective_embedding_model() -> str:
