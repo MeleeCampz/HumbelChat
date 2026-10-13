@@ -284,5 +284,42 @@ class MagicIdx:
         return self._count == 0
 
 
+class TestIndexEmbedderFallback:
+    """_make_index_embedder: local CPU fallback must only be enabled when it
+    would produce vectors in the SAME space as the backend model."""
+
+    def _build(self, index_model, local_model, flag):
+        from kb.index import KBIndexStore
+        captured = {}
+
+        class CapturingEmbedder(FakeEmbedder):
+            def __init__(self, *a, **k):
+                super().__init__(*a, **k)
+                captured.update(k)
+
+        with patch("kb.index.Embedder", CapturingEmbedder), \
+             patch("config.settings.INDEX_EMBED_BACKEND", "backend"), \
+             patch("config.settings.INDEX_EMBED_MODEL", index_model), \
+             patch("config.settings.LOCAL_EMBED_MODEL", local_model), \
+             patch("config.settings.INDEX_EMBED_FALLBACK_LOCAL", flag):
+            KBIndexStore(pathlib.Path("/tmp/fake-kb"), model_name="fake")
+        return captured["fallback_local"]
+
+    def test_auto_same_model_enables_fallback(self):
+        assert self._build("m", "m", "auto") is True
+
+    def test_auto_different_models_disables_fallback(self):
+        # Different models => a mid-build outage must fail loudly rather than
+        # silently mix two vector spaces.
+        assert self._build("qwen-8b", "bge-m3", "auto") is False
+
+    def test_explicit_override_for_same_model_other_name(self):
+        # e.g. gpustack/bge-m3-GGUF vs BAAI/bge-m3: same model, different slug.
+        assert self._build("gpustack/bge-m3-GGUF", "BAAI/bge-m3", "1") is True
+
+    def test_explicit_disable_wins_over_name_match(self):
+        assert self._build("m", "m", "0") is False
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

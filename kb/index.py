@@ -272,12 +272,16 @@ class KBIndexStore:
 
         ``INDEX_EMBED_BACKEND`` selects the source: ``"backend"`` builds via
         INFER_URL's /embeddings (GPU — fast for one-time reindexes); ``"local"``
-        builds in-process on CPU. Either way it falls back to local CPU if the
-        backend is down so a reindex never hard-fails. The build model must match
-        the query embedder or similarity breaks.
+        builds in-process on CPU. When the build model differs from the local
+        fallback model, a mid-build backend outage would silently mix two
+        incompatible vector spaces into one index — so the local fallback is
+        only enabled when both sides use the SAME model (then a reindex never
+        hard-fails). With mismatched models a downed backend fails loudly and
+        the existing index stays intact; re-run /sync_kb once it recovers.
         """
         from config.settings import (
             INDEX_EMBED_BACKEND,
+            INDEX_EMBED_FALLBACK_LOCAL,
             INDEX_EMBED_MODEL,
             LOCAL_EMBED_MODEL,
             RAG_EMBED_BATCH_SIZE,
@@ -285,14 +289,25 @@ class KBIndexStore:
         if INDEX_EMBED_BACKEND == "backend":
             if INDEX_EMBED_MODEL != LOCAL_EMBED_MODEL:
                 logger.warning(
-                    "INDEX_EMBED_MODEL (%s) differs from the query model LOCAL_EMBED_MODEL "
-                    "(%s); index and query vectors may be incompatible.",
-                    INDEX_EMBED_MODEL, LOCAL_EMBED_MODEL,
+                    "INDEX_EMBED_MODEL (%s) differs from the local fallback model "
+                    "LOCAL_EMBED_MODEL (%s); index and query vectors are only "
+                    "compatible when the QUERY embedder also uses %s.",
+                    INDEX_EMBED_MODEL, LOCAL_EMBED_MODEL, INDEX_EMBED_MODEL,
                 )
+            # Local CPU fallback only produces vectors in the same space when it
+            # runs the identical model — otherwise a mid-build backend outage
+            # would corrupt the index silently. "auto" decides by name equality;
+            # explicit 1/0 overrides for same-model-different-name pairs.
+            if INDEX_EMBED_FALLBACK_LOCAL in ("1", "true", "yes"):
+                fallback = True
+            elif INDEX_EMBED_FALLBACK_LOCAL in ("0", "false", "no"):
+                fallback = False
+            else:  # auto
+                fallback = INDEX_EMBED_MODEL == LOCAL_EMBED_MODEL
             return Embedder(
                 model_name=INDEX_EMBED_MODEL,
                 backend="remote",
-                fallback_local=True,
+                fallback_local=fallback,
                 batch_size=RAG_EMBED_BATCH_SIZE,
             )
         return Embedder(
