@@ -94,13 +94,13 @@ Quantized GGUF tags (official library):
 
 | tag | size | notes |
 |---|---|---|
-| **`qwen3-embedding:4b-q8_0`** | **4.3 GB** | **recommended — tested, quality ≈ 8B** |
-| `qwen3-embedding:4b` | 2.5 GB | Q4_K_M default — untested fallback if VRAM is tight |
+| **`qwen3-embedding:4b`** | **2.5 GB** | **recommended — Q4_K_M, tested, quality ≈ Q8_0 ≈ 8B** |
+| `qwen3-embedding:4b-q8_0` | 4.3 GB | tested; no measurable gain over Q4 on our corpus |
 | `qwen3-embedding:8b-q8_0` | 8.0 GB | tested; no measurable gain over the 4B on our corpus |
 | `qwen3-embedding:8b` | 4.7 GB | Q4_K_M default — fine for embeddings, slightly more loss |
 
-GPU 1 currently runs the TEI reranker (~2.3 GB): 4b-q8_0 needs ~6.6 GB total
-(fits an 8 GB card), 8b-q8_0 ~10.5 GB. Bonus: Ollama also hosts **Qwen3-Reranker-4B** with a `/api/rerank`
+GPU 1 currently runs the TEI reranker (~2.3 GB): `:4b` needs ~4.8 GB total,
+leaving headroom on an 8 GB card for a later Qwen3-Reranker upgrade. Bonus: Ollama also hosts **Qwen3-Reranker-4B** with a `/api/rerank`
 endpoint — a future reranker upgrade path (our `kb/reranker.py` speaks the TEI
 dialect `{query, texts}` → `[{index, score}]`; Ollama wants
 `{model, query, documents}` → `{results: [...]}`, a small adapter flag).
@@ -217,13 +217,29 @@ time per query. Option B is **not recommended**.
 
 The 4B matches the 8B end-to-end (13/13 + 2 NEG, case 0 passes) and is pool-
 equivalent to it, at half the size: `Qwen/Qwen3-Embedding-4B-GGUF` on HF has
-official quants Q4_K_M 2.5 GB / Q5_K_M 2.9 GB / **Q8_0 4.3 GB** / f16 8 GB;
-Ollama ships `qwen3-embedding:4b-q8_0` (4.3 GB) and `:4b` (2.5 GB Q4).
+official quants Q4_K_M 2.5 GB / Q5_K_M 2.9 GB / Q6_K 3.3 GB / Q8_0 4.3 GB /
+f16 8 GB; Ollama ships `qwen3-embedding:4b` (2.5 GB Q4_K_M) and
+`:4b-q8_0` (4.3 GB).
 
-**Recommendation: swap to the 4B (Q8_0), not the 8B.** Same retrieval quality,
-half the VRAM, faster per-token embedding. Hosting = Option A with the 4B tag
-(Ollama sidecar on GPU 1 next to the reranker: ~6.6 GB total, fits an 8 GB
-card).
+**Quantization sweep (all three tested, same harness, 2026-10-14):**
+
+| Quant | Size | Worst pool rank | End-to-end |
+|---|---|---|---|
+| Q8_0 | 4.28 GB | 7 | 13 PASS + 2 NEG |
+| Q6_K | 3.31 GB | 9 | 13 PASS + 2 NEG |
+| **Q4_K_M** | **2.50 GB** | **10** | **13 PASS + 2 NEG** |
+
+Case 0 (the discriminating TQ case) sits at pool rank 3 in **all three**
+quants; the worst-rank drift (7→9→10) is in mid-tier cases and changes no
+outcome — every marker stays ≤10, ten times inside the rerank window.
+**Quantization level does not matter on our corpus.**
+
+**Recommendation: swap to the 4B Q4_K_M (2.5 GB), not the 8B.** Same measured
+retrieval quality as the 8B and the Q8_0 quant, at a third of the 8B's VRAM.
+Hosting = Option A with `qwen3-embedding:4b` (Ollama sidecar on GPU 1 next to
+the reranker: ~4.8 GB total with bge-reranker-v2-m3; leaves headroom for a
+Qwen3-Reranker-4B (~2.5 GB Q4) later — ~7.3 GB even with an 8B reranker Q4).
+If VRAM is not tight, Q6_K/Q8_0 buy nothing measurable on this corpus.
 
 ### :8888 on-demand download (new capability, tested)
 
