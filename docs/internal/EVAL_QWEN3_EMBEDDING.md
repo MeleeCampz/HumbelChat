@@ -107,13 +107,14 @@ dialect `{query, texts}` → `[{index, score}]`; Ollama wants
 ### Option B — CPU in-process, Qwen3-Embedding-0.6B (no new infrastructure)
 
 Same pattern as today's bge-m3 (`EMBED_BACKEND=local`). Measured on this box
-(real index chunks, avg 796 chars): bge-m3 ≈ 1.05 s/chunk, **0.6B ≈ 2.8 s/chunk**
-(≈2.7×); per-query embedding ≈ 2.6 s (bge-m3) vs ≈ 5 s (0.6B) for one variant.
+(real index chunks, avg 796 chars): bge-m3 ≈ 1.05 s/chunk, **0.6B ≈ 1.5–2.8
+s/chunk** (≈2–2.7×); per-query embedding (one batched call of ~4 short
+variants) roughly doubles vs bge-m3.
 The 0.6B has the same 1024-dim output as bge-m3 and is instruction-aware.
-Quality on our torture suite: tested in this session (full CPU index build +
-eval) — see "Qwen3-Embedding-0.6B CPU results" below when finished. Index build
-is one-time (~4 h on this sandbox's CPU; faster if the 0.6B is added to the
-:8888 model list and built via `INDEX_EMBED_BACKEND=backend` like today).
+**Tested — does not beat current production end-to-end** (12/13 + 2 NEG vs
+bge-m3's 13/13 + 2 NEG; loses case 0 to sibling-item reranker confusion) and
+costs ≈2.7× the CPU embedding time per query. Full data: "Qwen3-Embedding-0.6B
+(Option B) — full results" below. **Not recommended.**
 
 ### Option C — TEI embeddings sidecar
 
@@ -145,34 +146,60 @@ PR branch for the production chat backend; revisit when it ships.
 - **Quantization loss** for embeddings is small (Q8_0 ≈ fp on our corpus);
   Q4_K_M acceptable, Q8_0 preferred when VRAM allows.
 
-### Recipe when approved (Options A/B/C)
+### Recipe when approved (Options A or C)
 
-Set `EMBED_BACKEND=remote` (A/C) or keep `local` with `LOCAL_EMBED_MODEL=
-Qwen/Qwen3-Embedding-0.6B` (B), set `EMBEDDING_MODEL`/`INDEX_EMBED_MODEL`
-accordingly, drop `INDEX_EMBED_FALLBACK_LOCAL=1` (auto → off for mismatched
-models; keep `=1` only for same-model slug pairs), rebuild container,
-`/reindex_kb`. The model-name change in index metadata triggers the one-time
-reindex automatically (~7 min on GPU, ~4 h on CPU).
+Set `EMBED_BACKEND=remote` (A/C) with `EMBED_URL` pointed at the new service,
+set `EMBEDDING_MODEL`/`INDEX_EMBED_MODEL` to the Qwen slug accordingly, drop
+`INDEX_EMBED_FALLBACK_LOCAL=1` (auto → off for mismatched models; keep `=1`
+only for same-model slug pairs), rebuild container, `/reindex_kb`. The
+model-name change in index metadata triggers the one-time reindex
+automatically (~7 min on GPU). Option B is excluded — see its results section.
 
 **Reranker:** keep `bge-reranker-v2-m3` on the TEI GPU service. With markers landing
 in the top ~12 of the pool, the cross-encoder's job is ordering + gating, which it
 already does; jina-reranker-v3 / bge-reranker-v2-gemma are available upgrades but
 buy little now and cost setup/VRAM.
 
-## Qwen3-Embedding-0.6B (Option B) — quality unverified
+## Qwen3-Embedding-0.6B (Option B) — full results (2026-10-14)
 
-The full 5,387-chunk CPU index build was started and then killed (CPU load),
-so the torture-suite comparison for the 0.6B is **not done**. Speed data from
-the same session: ≈2.8 s/chunk vs bge-m3's ≈1.05 s on this box; per-query
-embedding ≈5 s vs ≈2.6 s (one variant).
+Full 5,387-chunk index built in-process on CPU (batch 8 fastest: ≈0.86 s/chunk
+on an idle box; the actual build took 2 h 18 m under shared load), then pool
+sweep + 15-case torture eval with the same fixed variants.
 
-Verification recipe when convenient (GPU build, ~5 min, no CPU load):
-add `Qwen/Qwen3-Embedding-0.6B` to the :8888 model list, run
-`/tmp/rag_qwen06.py` with `INDEX_EMBED_BACKEND=backend`,
-`LOCAL_EMBED_MODEL=EMBEDDING_MODEL=<that slug>` (query embedder local or
-remote — same space either way), read the pool sweep + 15-case results.
-If it clearly beats bge-m3 on the cross-lingual cases, Option B becomes a
-zero-new-infrastructure upgrade; if not, go straight to Option A (8B).
+**Pool sweep, d96_l96_k60 — worst-marker rank per case:**
+
+| Case | bge-m3 | Qwen-0.6B | Qwen-8B |
+|---|---|---|---|
+| 0 (TQ DE) | 12 | 12–13 | 4 |
+| 1 | 16 | 8 | 5 |
+| 2 | 12 | 6 | 6 |
+| 3 | 14 | 4 | 6 |
+| 4 | 15 | 1 | 6 |
+| 5 | 13 | 1 | 5 |
+| 6 | 17 | 2 | 6 |
+| 7 | 12 | 3 | 5 |
+| 8 | 12 | 2 | 4 |
+| 9 | 12 | 5 | 5 |
+| 10 | 13 | 5 | 5 |
+| 11 | 17 | 1 | 6 |
+| 14 | 12 | 1 | 4 |
+| **worst** | **17** | **12–13** | **6** |
+
+The 0.6B sits **between** bge-m3 and the 8B at pool level: clearly better than
+bge-m3 (worst case 12 vs 17, most cases 1–8), clearly below the 8B (worst 6).
+
+**Full pipeline (CPU rerank, window 100): 12 PASS + 2 NEG — case 0 FAILS.**
+Deep dive: TQ is at pool rank 13, but ~13 of the top-25 pool entries are other
+Griffon's Saddlebag items; the cross-encoder then picks sibling items
+(Vigilante's Mantle, Blazeblood Rapier) over TQ. The 8B puts TQ at pool rank 4
+with far fewer siblings above it, so it wins easily; bge-m3 passes with a
+different (luckier) sibling ordering. It is a reranker-confusion failure inside
+a dense sibling cluster, not a retrieval miss.
+
+**Verdict:** the 0.6B does **not** beat current production end-to-end (it trades
+case 0 for better pool ranks elsewhere), while costing ≈2.7× the CPU embedding
+time per query. Option B is **not recommended**; if upgrading, go straight to
+the 8B (Option A).
 
 ## Reproducibility
 
