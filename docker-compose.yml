@@ -43,7 +43,11 @@ services:
       - ./hf-cache:/data        # same HF cache as the bot (separate model subdir)
     environment:
       - HF_HOME=/data
-    command: --model-id BAAI/bge-reranker-v2-m3
+    # :latest moved under us (2026-10-15): newer TEI caps /rerank at
+    # max-batch-size 32, which rejected our RERANK_TOP_K=100 requests with 422.
+    # Raise the server-side cap; kb/reranker.py ALSO chunks requests to <=32 so
+    # the bot survives any future TEI default. Pin this tag if it moves again.
+    command: --model-id BAAI/bge-reranker-v2-m3 --max-batch-size 128
     deploy:
       resources:
         reservations:

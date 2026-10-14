@@ -44,7 +44,9 @@ class _FakeTEIClient:
             raise self.raise_exc
         assert url.endswith("/rerank")
         _FakeTEIClient.requests.append({"url": url, "json": json})
-        return _Resp(self.payload)
+        payload_fn = getattr(_FakeTEIClient, "payload_fn", None)
+        payload = payload_fn(json) if payload_fn is not None else self.payload
+        return _Resp(payload)
 
     async def aclose(self):
         self.aclose_called += 1
@@ -58,6 +60,7 @@ async def _isolate(monkeypatch):
     monkeypatch.setattr(S, "RERANK_API_BASE", "http://reranker.test:80")
     monkeypatch.setattr(S, "RERANK_TIMEOUT_SECONDS", 1)
     _FakeTEIClient.payload = None
+    _FakeTEIClient.payload_fn = None
     _FakeTEIClient.raise_exc = None
     _FakeTEIClient.sleep_s = 0
     _FakeTEIClient.requests = []
@@ -143,6 +146,39 @@ class TestHttpRerank:
             out = await R.rerank("q", [])
         assert out == []
         assert recorded == []
+
+    @pytest.mark.asyncio
+    async def test_large_input_chunked_to_tei_batch_cap(self):
+        """Newer TEI images 422 any /rerank call with >32 texts (max-batch-size).
+
+        The bot must split RERANK_TOP_K=100 into TEI-safe batches, keep the query
+        on every request, send contiguous slices in order, and merge scores back
+        to their original positions.
+        """
+        chunks = [f"c{i}" for i in range(100)]
+        offset = 0
+
+        def payload_fn(body):  # body = the request's JSON dict
+            nonlocal offset
+            texts = body["texts"]
+            # deterministic GLOBAL score: later original position -> higher score
+            result = [{"index": i, "score": float(offset + i + 1)} for i in range(len(texts))]
+            offset += len(texts)
+            return result
+
+        _FakeTEIClient.payload_fn = payload_fn
+        recorded: list[dict] = []
+        with patch.object(R.httpx, "AsyncClient", _factory(recorded)):
+            out = await R.rerank("q", chunks, top_n=5)
+
+        sizes = [len(r["json"]["texts"]) for r in _FakeTEIClient.requests]
+        assert sizes == [32, 32, 32, 4], "must split into TEI-safe batches"
+        assert all(r["json"]["query"] == "q" for r in _FakeTEIClient.requests)
+        sent = [t for r in _FakeTEIClient.requests for t in r["json"]["texts"]]
+        assert sent == chunks, "batches must be contiguous slices in original order"
+        # merged scores must map back to the ORIGINAL positions (best = c99)
+        assert [c for c, _ in out] == ["c99", "c98", "c97", "c96", "c95"]
+        assert [s for _, s in out] == [100.0, 99.0, 98.0, 97.0, 96.0]
 
 
 class TestHttpAvailability:
