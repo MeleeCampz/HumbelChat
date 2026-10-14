@@ -86,7 +86,7 @@ for the next chat completion — measured first-call load ~13 s. That is exactly
 per-request model-swap problem `EMBED_BACKEND=local` was introduced to avoid.
 CPU-local 8B is far too slow per query.
 
-### Option A — Ollama sidecar (recommended if a GPU slot exists)
+### Option A — Ollama sidecar (recommended; **use the 4B**)
 
 New compose service next to `reranker`; Ollama serves the OpenAI-compatible
 `/v1/embeddings` our `Embedder` already speaks, so only `EMBED_URL` changes.
@@ -94,12 +94,13 @@ Quantized GGUF tags (official library):
 
 | tag | size | notes |
 |---|---|---|
-| `qwen3-embedding:8b-q8_0` | 8.0 GB | near-lossless (our gemma Q8_0 check: cosine 0.9998 vs fp) |
+| **`qwen3-embedding:4b-q8_0`** | **4.3 GB** | **recommended — tested, quality ≈ 8B** |
+| `qwen3-embedding:4b` | 2.5 GB | Q4_K_M default — untested fallback if VRAM is tight |
+| `qwen3-embedding:8b-q8_0` | 8.0 GB | tested; no measurable gain over the 4B on our corpus |
 | `qwen3-embedding:8b` | 4.7 GB | Q4_K_M default — fine for embeddings, slightly more loss |
-| `qwen3-embedding:4b-q8_0` | 4.3 GB | fallback if VRAM is tight |
 
-GPU 1 currently runs the TEI reranker (~2.3 GB): 8b-q8_0 needs ~10.5 GB total,
-8b-Q4 ~7 GB. Bonus: Ollama also hosts **Qwen3-Reranker-4B** with a `/api/rerank`
+GPU 1 currently runs the TEI reranker (~2.3 GB): 4b-q8_0 needs ~6.6 GB total
+(fits an 8 GB card), 8b-q8_0 ~10.5 GB. Bonus: Ollama also hosts **Qwen3-Reranker-4B** with a `/api/rerank`
 endpoint — a future reranker upgrade path (our `kb/reranker.py` speaks the TEI
 dialect `{query, texts}` → `[{index, score}]`; Ollama wants
 `{model, query, documents}` → `{results: [...]}`, a small adapter flag).
@@ -166,27 +167,39 @@ Full 5,387-chunk index built in-process on CPU (batch 8 fastest: ≈0.86 s/chunk
 on an idle box; the actual build took 2 h 18 m under shared load), then pool
 sweep + 15-case torture eval with the same fixed variants.
 
-**Pool sweep, d96_l96_k60 — worst-marker rank per case:**
+**Pool sweep, d96_l96_k60 — worst-marker rank per case**
+(4B = `Qwen/Qwen3-Embedding-4B-GGUF:Q8_0` via :8888, GPU build 329 s):
 
-| Case | bge-m3 | Qwen-0.6B | Qwen-8B |
-|---|---|---|---|
-| 0 (TQ DE) | 12 | 12–13 | 4 |
-| 1 | 16 | 8 | 5 |
-| 2 | 12 | 6 | 6 |
-| 3 | 14 | 4 | 6 |
-| 4 | 15 | 1 | 6 |
-| 5 | 13 | 1 | 5 |
-| 6 | 17 | 2 | 6 |
-| 7 | 12 | 3 | 5 |
-| 8 | 12 | 2 | 4 |
-| 9 | 12 | 5 | 5 |
-| 10 | 13 | 5 | 5 |
-| 11 | 17 | 1 | 6 |
-| 14 | 12 | 1 | 4 |
-| **worst** | **17** | **12–13** | **6** |
+| Case | bge-m3 | Qwen-0.6B | Qwen-4B | Qwen-8B |
+|---|---|---|---|---|
+| 0 (TQ DE) | 12 | 12–13 | **3** | 4 |
+| 1 | 16 | 8 | 3 | 5 |
+| 2 | 12 | 6 | 7 | 6 |
+| 3 | 14 | 4 | 5 | 6 |
+| 4 | 15 | 1 | 1 | 6 |
+| 5 | 13 | 1 | 2 | 5 |
+| 6 | 17 | 2 | 2 | 6 |
+| 7 | 12 | 3 | 2 | 5 |
+| 8 | 12 | 2 | 2 | 4 |
+| 9 | 12 | 5 | 5 | 5 |
+| 10 | 13 | 5 | 7 | 5 |
+| 11 | 17 | 1 | 1 | 6 |
+| 14 | 12 | 1 | 1 | 4 |
+| **worst** | **17** | **12–13** | **7** | **6** |
 
-The 0.6B sits **between** bge-m3 and the 8B at pool level: clearly better than
-bge-m3 (worst case 12 vs 17, most cases 1–8), clearly below the 8B (worst 6).
+The 0.6B sits between bge-m3 and the larger Qwens at pool level (worst case
+12 vs 17, most cases 1–8). The **4B is statistically indistinguishable from
+the 8B** (worst 7 vs 6; it even beats the 8B on case 0: rank 3 vs 4) at half
+the size.
+
+**Full pipeline (CPU rerank, window 100):**
+
+| Model | Result |
+|---|---|
+| bge-m3 (96/96/100) | 13 PASS + 2 NEG |
+| Qwen-0.6B | **12 PASS** + 2 NEG — case 0 FAILS |
+| Qwen-4B | **13 PASS** + 2 NEG |
+| Qwen-8B | 13 PASS + 2 NEG (TQ final rank 1) |
 
 **Full pipeline (CPU rerank, window 100): 12 PASS + 2 NEG — case 0 FAILS.**
 Deep dive: TQ is at pool rank 13, but ~13 of the top-25 pool entries are other
@@ -198,8 +211,47 @@ a dense sibling cluster, not a retrieval miss.
 
 **Verdict:** the 0.6B does **not** beat current production end-to-end (it trades
 case 0 for better pool ranks elsewhere), while costing ≈2.7× the CPU embedding
-time per query. Option B is **not recommended**; if upgrading, go straight to
-the 8B (Option A).
+time per query. Option B is **not recommended**.
+
+## Qwen3-Embedding-4B — the sweet spot (2026-10-14)
+
+The 4B matches the 8B end-to-end (13/13 + 2 NEG, case 0 passes) and is pool-
+equivalent to it, at half the size: `Qwen/Qwen3-Embedding-4B-GGUF` on HF has
+official quants Q4_K_M 2.5 GB / Q5_K_M 2.9 GB / **Q8_0 4.3 GB** / f16 8 GB;
+Ollama ships `qwen3-embedding:4b-q8_0` (4.3 GB) and `:4b` (2.5 GB Q4).
+
+**Recommendation: swap to the 4B (Q8_0), not the 8B.** Same retrieval quality,
+half the VRAM, faster per-token embedding. Hosting = Option A with the 4B tag
+(Ollama sidecar on GPU 1 next to the reranker: ~6.6 GB total, fits an 8 GB
+card).
+
+### :8888 on-demand download (new capability, tested)
+
+Unsloth Studio now downloads missing models on request using the
+`repo:QUANT` slug format (`Qwen/Qwen3-Embedding-4B-GGUF:Q8_0`). First request
+returns `{"error": {"message": "Downloading '…' (4.3 GB). Retry shortly."}}`,
+the model then appears in `/v1/models`. Two gotchas hit during testing:
+
+1. **Bare HF repo names silently fall back** — requesting `Qwen/Qwen3-Embedding-4B`
+   (no `-GGUF:QUANT`) returned 1024-dim bge-m3 embeddings with no error.
+   Always verify the dimensionality after a model change (4B = 2560).
+2. **Swap-in latency vs `EMBED_TIMEOUT=30`** — the first embedding batch after
+   the chat model was resident took >30 s (model load ≈16 s), so all three
+   retries failed and the index build aborted with an empty error. The test
+   run used `EMBED_TIMEOUT=300` + a warm-up call before starting. If :8888 is
+   ever used as the *production* query embedder, raise `EMBED_TIMEOUT` (or keep
+   the embedder warm) — a dedicated Ollama service has no such swap at all.
+
+### Qwen3-Reranker-4B (companion cross-encoder)
+
+Exists in the same family (0.6B/4B/8B). No official Ollama library tag yet;
+community GGUFs are pullable (`ollama pull <user>/qwen3-reranker-…`). llama.cpp
+/:8888 has no rerank endpoint, so it needs the Ollama sidecar (or TEI if it
+gains support). Our `kb/reranker.py` speaks the TEI dialect and would need a
+small adapter for Ollama's `/api/rerank` (`{model, query, documents}` →
+`{results: [{index, score}]}`). Quality untested — defer until the embedder
+swap lands; with markers already at pool rank ≤7 the current bge-reranker-v2-m3
+doing fine is the baseline to beat.
 
 ## Reproducibility
 
