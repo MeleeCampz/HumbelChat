@@ -324,6 +324,16 @@ EMBED_BACKEND: str = os.getenv("EMBED_BACKEND", "remote").strip().lower()
 # In-process embedding model used when EMBED_BACKEND == "local". bge-m3 is a
 # strong hybrid dense/sparse, multilingual embedder that runs well on CPU.
 LOCAL_EMBED_MODEL: str = os.getenv("LOCAL_EMBED_MODEL", "BAAI/bge-m3")
+# Optional query-side task instruction for instruction-aware embedding models
+# (Qwen3-Embedding). When non-empty, every QUERY is wrapped as
+# 'Instruct: {EMBED_QUERY_INSTRUCT}\nQuery:{text}' before encoding; document /
+# index embeddings are NEVER wrapped (the model expects plain documents).
+# Keep the instruction in English even for German queries (Qwen guidance).
+# Measured on the 33-query golden set with Qwen3-Embedding-4B Q4_K_M:
+# found 30/33 -> 32/33, hit@10 26 -> 31, worst top-20 rank 16 -> 13.
+# Empty (default) = off — vector spaces stay exactly as before, so it can be
+# toggled after a Qwen index exists without reindexing (queries only).
+EMBED_QUERY_INSTRUCT: str = os.getenv("EMBED_QUERY_INSTRUCT", "")
 
 # ── Index-build embedding source (GPU reindex) ─────────────────────────────
 # Per-request QUERIES always embed in-process on CPU (EMBED_BACKEND=local: fast,

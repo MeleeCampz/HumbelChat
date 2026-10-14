@@ -27,6 +27,23 @@ from kb.reader import _extract_ext
 from kb.embedder import Embedder
 
 
+def _wrap_query_instruct(text: str) -> str:
+    """Apply the optional query-side task instruction (Qwen3-Embedding style).
+
+    Instruction-aware embedding models rank queries better when each query is
+    prefixed with a short English task description while documents stay plain.
+    Reads ``config.settings.EMBED_QUERY_INSTRUCT`` at call time so tests can
+    monkeypatch it; empty (default) = pass-through, which keeps every existing
+    vector space untouched. Applied to QUERIES only — index/document embedding
+    paths never call this.
+    """
+    from config import settings
+    instr = settings.EMBED_QUERY_INSTRUCT
+    if instr:
+        return f"Instruct: {instr}\nQuery:{text}"
+    return text
+
+
 # ──────────────────────────── Data structures ─────────────────────────
 
 @dataclass
@@ -286,7 +303,7 @@ class KBVectorIndex:
             return []
 
         try:
-            q_embs = await self._embedder.encode([text])
+            q_embs = await self._embedder.encode([_wrap_query_instruct(text)])
             q_emb = q_embs[0]
         except Exception:
             return []
@@ -312,7 +329,7 @@ class KBVectorIndex:
             return [], []
 
         try:
-            q_emb = (await self._embedder.encode([text]))[0]
+            q_emb = (await self._embedder.encode([_wrap_query_instruct(text)]))[0]
         except Exception:
             return [], []
 
@@ -340,7 +357,8 @@ class KBVectorIndex:
         if self.is_empty():
             return [[] for _ in texts]
 
-        embeddings = await self._embedder.encode(texts)  # one batched call (dedups inside)
+        # one batched call (dedups inside); queries get the optional instruct wrap
+        embeddings = await self._embedder.encode([_wrap_query_instruct(t) for t in texts])
 
         results: list[list[tuple[str, str, float]]] = []
         for emb in embeddings:
