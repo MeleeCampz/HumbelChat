@@ -111,24 +111,37 @@ async def close_client() -> None:
             _http_client = None
 
 
+# Newer TEI images validate /rerank against --max-batch-size (default 32) and
+# answer 422 above it; our RERANK_TOP_K is 100. Chunk to the smallest common
+# server cap so any TEI version accepts our requests (docker-compose.yml also
+# raises the cap for speed — this keeps the bot safe across image updates).
+_MAX_TEXTS_PER_RERANK_REQUEST = 32
+
+
 async def _rerank_http(base_url: str, query: str, chunks: list[str]) -> list[float]:
     """Score chunks against the query via a TEI-compatible ``/rerank`` endpoint.
 
-    Returns one score per chunk, aligned to the input order. Raises on any HTTP /
-    schema problem — the caller (``rerank``) degrades to the original order.
+    Sends at most ``_MAX_TEXTS_PER_RERANK_REQUEST`` texts per request and merges
+    the partial results. Returns one score per chunk, aligned to the input order.
+    Raises on any HTTP / schema problem — the caller (``rerank``) degrades to the
+    original order.
     """
     client = await _get_http_client()
-    resp = await client.post(f"{base_url}/rerank", json={"query": query, "texts": chunks})
-    resp.raise_for_status()
-    data = resp.json()
-    if not isinstance(data, list):
-        raise ValueError(f"unexpected /rerank response type: {type(data).__name__}")
     scores = [0.0] * len(chunks)
-    for item in data:
-        idx = int(item["index"])
-        if not 0 <= idx < len(chunks):
-            raise ValueError(f"/rerank returned out-of-range index {idx}")
-        scores[idx] = float(item["score"])
+    for start in range(0, len(chunks), _MAX_TEXTS_PER_RERANK_REQUEST):
+        batch = chunks[start : start + _MAX_TEXTS_PER_RERANK_REQUEST]
+        resp = await client.post(
+            f"{base_url}/rerank", json={"query": query, "texts": batch}
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, list):
+            raise ValueError(f"unexpected /rerank response type: {type(data).__name__}")
+        for item in data:
+            idx = int(item["index"])
+            if not 0 <= idx < len(batch):
+                raise ValueError(f"/rerank returned out-of-range index {idx}")
+            scores[start + idx] = float(item["score"])
     return scores
 
 
