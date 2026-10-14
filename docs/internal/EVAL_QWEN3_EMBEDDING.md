@@ -269,10 +269,46 @@ small adapter for Ollama's `/api/rerank` (`{model, query, documents}` →
 swap lands; with markers already at pool rank ≤7 the current bge-reranker-v2-m3
 doing fine is the baseline to beat.
 
+## Query-side instruct (2026-10-14, backlog #33)
+
+Qwen's README recommends prefixing each QUERY with a short English task
+instruction (`Instruct: {task}\nQuery:{q}`; documents stay plain) and claims a
+1–5 % retrieval gain. Tested on our corpus: fresh Q4_K_M index of the live KB
+(5,387 chunks via :8888), all 33 golden-set queries (`scripts/rag_eval.py`) embedded
+twice — plain vs with
+`"Given a question about rules, items, monsters, or lore from a Dungeons &
+Dragons 5e campaign, retrieve relevant passages that answer the question."`
+— dense top-20 file-stem ranking:
+
+| arm | found (top-20) | hit@10 | best | worst |
+|---|---|---|---|---|
+| plain | 30/33 | 26 | 1 | 16 |
+| **instruct** | **32/33** | **31** | 1 | **13** |
+
+The wins concentrate exactly where Qwen's training data is strongest: German
+rule/table/stat-block lookups (e.g. *Gib mir alle Heilzauber bis Stufe 3*
+None→13, *Zeig mir die Magier Tabelle* 16→2, *wizard class table* 14→1) and
+lore-file disambiguation (*Welche Hintergründe gibt es in Humblewood?* None→6).
+No query regressed beyond a rank-1↔2 swap. **Recommendation: enable it for the
+Phase-2 Qwen deployment.**
+
+Implementation: `EMBED_QUERY_INSTRUCT` (default empty = off). When set, query
+paths in `kb/vector_db.py` (`query`, `query_with_embeddings`, `rank_texts`) wrap
+texts before encoding; document/index paths never do — so it can be toggled
+**without reindexing**. Tests: `tests/test_query_instruct.py` (8).
+Suggested value for `.env`:
+```
+EMBED_QUERY_INSTRUCT=Given a question about rules, items, monsters, or lore from a Dungeons & Dragons 5e campaign, retrieve relevant passages that answer the question
+```
+Verify with the torture questions in Discord after the Phase-2 swap (case 0 is
+the canary).
+
 ## Reproducibility
 
 Probe scripts lived in `/tmp` (disposable): `rag_opt1.py` (variant cache),
 `rag_opt2.py` (bge-m3 pool sweep), `rag_opt3.py` (Qwen index build + sweep),
-`rag_opt4.py` (full pipeline eval), `rag_opt5.py` (score distributions).
-The standing 33-query golden set in `scripts/rag_eval.py` should be re-run after the
-Phase-1 `.env` changes land in the container; expected: no regressions, TQ case stable.
+`rag_opt4.py` (full pipeline eval), `rag_opt5.py` (score distributions),
+`instruct_ab.py` (index build + plain/instruct golden-set A/B, rows in
+`/tmp/instruct_ab_rows.json`). The standing 33-query golden set in
+`scripts/rag_eval.py` should be re-run after the Phase-1 `.env` changes land in
+the container; expected: no regressions, TQ case stable.

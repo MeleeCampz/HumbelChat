@@ -289,6 +289,7 @@ compaction/summarization is performed — the block always contains raw turns.
 | `RAG_REWRITE_BUDGET_SECONDS` | Wall-clock cap for the LLM rewrite call |
 | `EMBED_BACKEND` | `local` (in-process CPU query embeddings, recommended) or `remote` (legacy backend `/embeddings`) |
 | `LOCAL_EMBED_MODEL` | In-process query-embedding model (default `BAAI/bge-m3`) |
+| `EMBED_QUERY_INSTRUCT` | Optional task instruction for instruction-aware models (Qwen3-Embedding): when non-empty, every QUERY is wrapped as `Instruct: {text}\nQuery:{query}` before encoding — documents are never wrapped. Keep it in English even for German queries. Empty = off; toggling needs no reindex (queries only). Measured on the 33-query golden set with Qwen3-Embedding-4B: hit@10 26→31, found 30/33→32/33 | *(empty)* |
 | `INDEX_EMBED_BACKEND` | Where index builds run: `backend` (GPU, default) or `local` (CPU) |
 | `INDEX_EMBED_MODEL` | Exact name your backend serves for `/embeddings` during index builds (same model as `LOCAL_EMBED_MODEL`; on Unsloth use the GGUF server name, e.g. `gpustack/bge-m3-GGUF`, to hit the GPU path) |
 | `RAG_HYBRID_ENABLED` | Fuse dense + BM25 via RRF (`1`/`0`, default on) |
