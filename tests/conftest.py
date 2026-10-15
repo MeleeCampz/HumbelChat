@@ -35,6 +35,15 @@ os.environ.setdefault(
 # default unless they monkeypatch them explicitly.
 os.environ.setdefault("RERANK_MODE", "local")
 os.environ.setdefault("RERANK_API_BASE", "")
+# The 2026-10-15 reranker swap added two more .env vars with the same hazard:
+# a reload bakes RERANK_API_FORMAT=jina / RERANK_INSTRUCT into config.settings
+# and later TEI-format tests then see jina payloads (KeyError 'texts').
+os.environ.setdefault("RERANK_API_FORMAT", "tei")
+os.environ.setdefault("RERANK_INSTRUCT", "")
+# Same hazard for the Qwen3-Embedding query-side instruct: .env sets it for the
+# host deployment, but tests must observe the empty (off) default unless a test
+# sets it explicitly (test_query_instruct::test_query_plain_by_default et al.).
+os.environ.setdefault("EMBED_QUERY_INSTRUCT", "")
 #
 # NOTE: .env is intentionally NOT loaded here (a full load_dotenv() would
 # leak KB_PATH/CHUNK_SIZE/etc. into every test and break the assumptions of
