@@ -205,3 +205,79 @@ class TestHttpAvailability:
         import importlib.util
         with patch.object(importlib.util, "find_spec", return_value=None):
             assert R.is_available() is False
+
+
+# ─────────── jina wire format (vLLM Qwen3-Reranker sidecar) ───────────
+# vLLM's Jina-compatible /rerank differs from TEI in three ways: the docs field
+# is "documents", the response is an OBJECT with a "results" list, and scores
+# are called "relevance_score". The optional per-request "instruction" field is
+# folded into the model's <Instruct> slot (deploy/qwen3_reranker.jinja).
+
+class TestJinaFormat:
+
+    @pytest.mark.asyncio
+    async def test_documents_field_and_relevance_score(self, monkeypatch):
+        monkeypatch.setattr(S, "RERANK_API_FORMAT", "jina")
+        monkeypatch.setattr(S, "RERANK_INSTRUCT", "find D&D items")
+        chunks = ["alpha", "beta", "gamma"]
+        _FakeTEIClient.payload = {
+            "results": [
+                {"index": 2, "relevance_score": 0.9},
+                {"index": 1, "relevance_score": 0.5},
+                {"index": 0, "relevance_score": 0.1},
+            ]
+        }
+        with patch.object(R.httpx, "AsyncClient", _factory([])):
+            out = await R.rerank("q", chunks, top_n=2)
+
+        assert [c for c, _ in out] == ["gamma", "beta"]
+        req = _FakeTEIClient.requests[0]
+        assert req["json"] == {
+            "query": "q",
+            "documents": chunks,
+            "instruction": "find D&D items",
+        }
+
+    @pytest.mark.asyncio
+    async def test_no_instruction_omits_field(self, monkeypatch):
+        """Empty RERANK_INSTRUCT must not send the field (server default applies)."""
+        monkeypatch.setattr(S, "RERANK_API_FORMAT", "jina")
+        monkeypatch.setattr(S, "RERANK_INSTRUCT", "")
+        _FakeTEIClient.payload = {"results": [{"index": 0, "relevance_score": 0.5}]}
+        with patch.object(R.httpx, "AsyncClient", _factory([])):
+            await R.rerank("q", ["a"])
+        assert "instruction" not in _FakeTEIClient.requests[0]["json"]
+
+    @pytest.mark.asyncio
+    async def test_missing_results_key_falls_back(self, monkeypatch):
+        """A TEI-shaped bare-list response under jina format is malformed — the
+        never-breaks-retrieval contract keeps the original order."""
+        monkeypatch.setattr(S, "RERANK_API_FORMAT", "jina")
+        _FakeTEIClient.payload = [{"index": 0, "score": 0.9}]
+        with patch.object(R.httpx, "AsyncClient", _factory([])):
+            out = await R.rerank("q", ["a", "b"])
+        assert [c for c, _ in out] == ["a", "b"]
+        assert all(s == 0.0 for _, s in out)
+
+    @pytest.mark.asyncio
+    async def test_chunking_applies_to_jina_batches(self, monkeypatch):
+        monkeypatch.setattr(S, "RERANK_API_FORMAT", "jina")
+        chunks = [f"c{i}" for i in range(40)]  # > 32 cap → two batches
+
+        def payload_fn(req):
+            n = len(req["documents"])
+            start = 0 if n == 32 else 32  # batch offset → globally monotonic scores
+            return {
+                "results": [
+                    {"index": i, "relevance_score": float(start + i)}
+                    for i in range(n)
+                ]
+            }
+
+        _FakeTEIClient.payload_fn = payload_fn
+        with patch.object(R.httpx, "AsyncClient", _factory([])):
+            out = await R.rerank("q", chunks)
+        assert len(_FakeTEIClient.requests) == 2
+        # best overall chunk is c39 (last of batch 2); scores stay aligned.
+        assert out[0][0] == "c39"
+        assert {c for c, _ in out} == set(chunks)

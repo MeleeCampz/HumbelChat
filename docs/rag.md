@@ -288,6 +288,9 @@ compaction/summarization is performed — the block always contains raw turns.
 | `RAG_QUERY_MAX_EXPANSIONS` | Max alternative phrasings generated per rewrite |
 | `RAG_REWRITE_BUDGET_SECONDS` | Wall-clock cap for the LLM rewrite call |
 | `RERANK_USE_EXPANSION` | When expansions exist, also rerank against the first expansion and keep the max score per chunk (`1`/`0`, default on). Fixes cross-lingual rerank blindness: bge-reranker-v2-m3 scores German-question/English-chunk pairs near-noise (right chunk rank 25 @0.003) but ranks it #1 @0.963 against the English expansion | `1` |
+| `RERANK_API_BASE` | Base URL of the HTTP reranker (`http://reranker-qwen:8000` for the vLLM Qwen3-Reranker sidecar; old TEI at `http://reranker:80`). The client appends `/rerank` |
+| `RERANK_API_FORMAT` | Wire format of that endpoint: `jina` (vLLM: `{"query","documents","instruction"}` → `{"results":[{"index","relevance_score"}]}`) or `tei` (HF TEI: `{"query","texts"}` → bare list). Must match the running service |
+| `RERANK_INSTRUCT` | Task instruction sent with each jina-format request; folded into the Qwen3-Reranker chat template's `<Instruct>` slot (see `deploy/qwen3_reranker.jinja`). Empty = server default. Ignored in tei format | *(empty)* |
 | `EMBED_BACKEND` | `local` (in-process CPU query embeddings, recommended) or `remote` (legacy backend `/embeddings`) |
 | `LOCAL_EMBED_MODEL` | In-process query-embedding model (default `BAAI/bge-m3`) |
 | `EMBED_QUERY_INSTRUCT` | Optional task instruction for instruction-aware models (Qwen3-Embedding): when non-empty, every QUERY is wrapped as `Instruct: {text}\nQuery:{query}` before encoding — documents are never wrapped. Keep it in English even for German queries. Empty = off; toggling needs no reindex (queries only). Measured on the 33-query golden set with Qwen3-Embedding-4B: hit@10 26→31, found 30/33→32/33 | *(empty)* |

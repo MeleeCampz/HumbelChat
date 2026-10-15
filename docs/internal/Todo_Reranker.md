@@ -125,3 +125,43 @@ container, results to `data/rag_eval_*.json`). Remaining manual checks:
 - [x] Ambiguous rules questions no longer lead with generic stat blocks (eval:
       recall@1 36%→70%, monsters-A-Z crowding resolved).
 - [ ] Verify consecutive live prompts remain fast while the reranker stays resident.
+
+## Reranker swap: bge-reranker-v2-m3 (TEI) → Qwen3-Reranker-4B (vLLM), 2026-10-15
+
+**Why:** TEI cannot serve Qwen3-Reranker — it only supports BERT/XLM-RoBERTa
+cross-encoders; the Qwen3ForSequenceClassification path is still an open issue
+(huggingface/text-embeddings-inference#643, all PRs closed unmerged). vLLM has
+native support (`--hf_overrides ... "is_original_qwen3_reranker": true`).
+
+**What changed:**
+
+- `docker-compose.yml`: new `reranker-qwen` service — `vllm/vllm-openai:v0.31.0`
+  (pinned), `Qwen/Qwen3-Reranker-4B` with `--quantization bitsandbytes` (NF4,
+  ~2.6 GB weights instead of ~8 GB fp16 — first-party weights, no third-party
+  checkpoint), `--gpu-memory-utilization 0.5`, `--max-model-len 2048`, GPU 1.
+  The chat template is vendored at `deploy/qwen3_reranker.jinja` (vLLM's own
+  example, Apache-2.0) and mounted in — without it the model scores with the
+  wrong prompt format. The old TEI `reranker` service is profile-gated
+  (`tei-rerank`) for rollback.
+- `kb/reranker.py`: `_rerank_http()` now speaks both wire formats via
+  `RERANK_API_FORMAT` — `tei` (unchanged) and `jina` (vLLM's Jina-compatible
+  `/rerank`: `documents` field, object response with `results`,
+  `relevance_score`). The ≤32 chunking applies to both.
+- `.env`: `RERANK_API_BASE=http://reranker-qwen:8000`,
+  `RERANK_API_FORMAT=jina`, `RERANK_INSTRUCT=<D&D task instruction>` (folded
+  into the template's `<Instruct>` slot per request).
+
+**VRAM budget GPU 1 (16 GB):** vLLM reserves 0.5×16 = 8 GB (NF4 weights + KV);
+the Ollama `embedder-qwen` sidecar keeps ~2.5–3 GB outside that reservation.
+Headroom for a future Qwen3-Reranker-8B or fp16: limited — plan around it.
+
+**Rollback:** `docker compose --profile tei-rerank up -d reranker`, then set
+`RERANK_API_BASE=http://reranker:80` + `RERANK_API_FORMAT=tei` in `.env`.
+
+**Fallbacks if NF4 load fails on first start:** swap the model id to
+`boboliu/Qwen3-Reranker-4B-W4A16-G128` with `--quantization gptq`, or drop
+`--quantization` entirely (fp16, ~8 GB, still fits the 0.5 reservation).
+
+**First start:** downloads the fp16 weights (~8 GB) into `hf-cache/`; bnb
+quantizes at load time (extra ~1–2 min). Watch `docker compose logs -f
+reranker-qwen` for the "Uvicorn running on" line before testing in Discord.

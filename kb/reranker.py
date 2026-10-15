@@ -119,29 +119,50 @@ _MAX_TEXTS_PER_RERANK_REQUEST = 32
 
 
 async def _rerank_http(base_url: str, query: str, chunks: list[str]) -> list[float]:
-    """Score chunks against the query via a TEI-compatible ``/rerank`` endpoint.
+    """Score chunks against the query via a remote ``/rerank`` endpoint.
+
+    Two wire formats (``RERANK_API_FORMAT``):
+
+    * ``tei`` — Hugging Face TEI: ``{"query", "texts"}`` → bare list of
+      ``{"index", "score"}``.
+    * ``jina`` — vLLM's Jina-compatible rerank (Qwen3-Reranker sidecar):
+      ``{"query", "documents", "instruction"?}`` →
+      ``{"results": [{"index", "relevance_score"}, ...]}``.
 
     Sends at most ``_MAX_TEXTS_PER_RERANK_REQUEST`` texts per request and merges
     the partial results. Returns one score per chunk, aligned to the input order.
     Raises on any HTTP / schema problem — the caller (``rerank``) degrades to the
     original order.
     """
+    from config.settings import RERANK_API_FORMAT, RERANK_INSTRUCT
+
+    jina = RERANK_API_FORMAT == "jina"
+    doc_field = "documents" if jina else "texts"
     client = await _get_http_client()
     scores = [0.0] * len(chunks)
     for start in range(0, len(chunks), _MAX_TEXTS_PER_RERANK_REQUEST):
         batch = chunks[start : start + _MAX_TEXTS_PER_RERANK_REQUEST]
-        resp = await client.post(
-            f"{base_url}/rerank", json={"query": query, "texts": batch}
-        )
+        payload: dict[str, Any] = {"query": query, doc_field: batch}
+        if jina and RERANK_INSTRUCT:
+            payload["instruction"] = RERANK_INSTRUCT
+        resp = await client.post(f"{base_url}/rerank", json=payload)
         resp.raise_for_status()
         data = resp.json()
-        if not isinstance(data, list):
-            raise ValueError(f"unexpected /rerank response type: {type(data).__name__}")
-        for item in data:
+        items: list[Any]
+        if jina:
+            # vLLM wraps results in an object; TEI returns a bare list.
+            if not isinstance(data, dict) or "results" not in data:
+                raise ValueError("jina /rerank response missing 'results'")
+            items = data["results"]
+        else:
+            if not isinstance(data, list):
+                raise ValueError(f"unexpected /rerank response type: {type(data).__name__}")
+            items = data
+        for item in items:
             idx = int(item["index"])
             if not 0 <= idx < len(batch):
                 raise ValueError(f"/rerank returned out-of-range index {idx}")
-            scores[start + idx] = float(item["score"])
+            scores[start + idx] = float(item["relevance_score" if jina else "score"])
     return scores
 
 
