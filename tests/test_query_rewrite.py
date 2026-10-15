@@ -413,5 +413,62 @@ class TestGlobalAISlot:
         assert order == ["first", "second", "third"]
 
 
+# ─────────── thinking-disable request params (2026-10-15 TQ failure) ───────────
+# On the Unsloth/llama.cpp backend (:8888) top-level reasoning_effort="none" is
+# actively HARMFUL: measured 38.6 s for a ~50-token expansion vs 1.2 s with
+# enable_thinking alone, and in the combo it overrode enable_thinking so the
+# model spent its whole 256-token budget reasoning ("full output budget on
+# reasoning" — empty expansions, TQ torture failure).
+
+class TestRewriterThinkingParams:
+    @staticmethod
+    def _make_response(content="quiver hidden attack\nranged stealth item\nmiss does not reveal position"):
+        message = MagicMock()
+        message.content = content
+        choice = MagicMock()
+        choice.message = message
+        resp = MagicMock()
+        resp.choices = [choice]
+        return resp
+
+    @pytest.mark.asyncio
+    async def test_sends_enable_thinking_only(self):
+        from kb.query_rewriter import QueryRewriter
+
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(return_value=self._make_response())
+        rw = QueryRewriter(client=client)
+
+        out = await rw.expand("test query")
+
+        assert len(client.chat.completions.create.call_args_list) == 1
+        kwargs = client.chat.completions.create.call_args.kwargs
+        assert kwargs["extra_body"] == {"enable_thinking": False}, (
+            "rewrite must disable thinking via enable_thinking ONLY — "
+            "reasoning_effort is a 30x slowdown on :8888"
+        )
+        assert "reasoning_effort" not in kwargs["extra_body"]
+        assert len(out) == 4  # original + 3 expansions
+
+    @pytest.mark.asyncio
+    async def test_param_rejection_falls_back_to_plain_call(self):
+        from kb.query_rewriter import QueryRewriter
+
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(
+            side_effect=[Exception("unknown parameter"), self._make_response()]
+        )
+        rw = QueryRewriter(client=client)
+
+        out = await rw.expand("test query")
+
+        assert len(client.chat.completions.create.call_args_list) == 2
+        first_kwargs = client.chat.completions.create.call_args_list[0].kwargs
+        second_kwargs = client.chat.completions.create.call_args_list[1].kwargs
+        assert first_kwargs["extra_body"] == {"enable_thinking": False}
+        assert "extra_body" not in second_kwargs  # plain retry
+        assert len(out) == 4
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

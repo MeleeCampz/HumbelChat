@@ -41,7 +41,11 @@ class QueryRewriter:
     """Dynamically expand queries using the configured LLM backend."""
 
     MAX_EXPANSIONS = 3
-    REWRITE_TIMEOUT_SEC = 10
+    # Per-call HTTP timeout. Must exceed RAG_REWRITE_BUDGET_SECONDS (default 30,
+    # the outer asyncio.wait_for and the true cap): a :8888 model swap during
+    # the call takes ~20 s before the first byte, so a 10 s read timeout killed
+    # otherwise-successful rewrites mid-swap (2026-10-15).
+    REWRITE_TIMEOUT_SEC = 60
     REWRITE_PROMPT_TEMPLATE = """\
 You are a search query expansion assistant. The knowledge base is written in ENGLISH (official D&D 5e SRD text plus campaign lore) about {kb_domain}. Your task is to generate additional search terms that capture related concepts, synonyms, and contextual meanings of the user's original query.
 
@@ -121,12 +125,14 @@ Expansions:
         # reasoning and return no content ("full token budget on reasoning"). This is
         # a short utility call — disable thinking. Measured: 0.5s with it off vs
         # 5.7s of pure thinking (see docs/internal/RAG_ANALYSIS_2026-09-27.md).
-        # Backend-specific params, sent together: llama.cpp/unsloth-studio honours
-        # reasoning_effort="none" (silently ignores enable_thinking); LM Studio
-        # honours enable_thinking. A backend that rejects the combo falls back to
-        # enable_thinking alone, then to a plain call.
-        # Kwargs are passed inline (not via a dict) so mypy can match each against
-        # the AsyncCompletions.create overload.
+        #
+        # Send ONLY enable_thinking=False. On the Unsloth/llama.cpp backend (:8888)
+        # top-level reasoning_effort="none" is actively HARMFUL: measured 38.6 s for
+        # a ~50-token expansion vs 1.2 s with enable_thinking alone (it defeats a
+        # fast generation path), and in the combo it overrode enable_thinking so the
+        # model thought its way through the whole 256-token budget — the exact
+        # failure of 2026-10-15 ("full output budget on reasoning", TQ case).
+        # A backend that rejects the param (older LM Studio) gets one plain retry.
         try:
             response = await self._client.chat.completions.create(
                 model=self.model_slug,
@@ -134,10 +140,10 @@ Expansions:
                 temperature=0.3,  # Low for consistent, focused expansions
                 max_tokens=256,
                 timeout=self.REWRITE_TIMEOUT_SEC,
-                extra_body={"reasoning_effort": "none", "enable_thinking": False},
+                extra_body={"enable_thinking": False},
             )
         except Exception:
-            # Backend rejected the combo — try the LM-Studio-only param, then plain.
+            # Backend rejected the param — retry plain.
             try:
                 response = await self._client.chat.completions.create(
                     model=self.model_slug,
@@ -145,20 +151,10 @@ Expansions:
                     temperature=0.3,
                     max_tokens=256,
                     timeout=self.REWRITE_TIMEOUT_SEC,
-                    extra_body={"enable_thinking": False},
                 )
-            except Exception:
-                try:
-                    response = await self._client.chat.completions.create(
-                        model=self.model_slug,
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=0.3,
-                        max_tokens=256,
-                        timeout=self.REWRITE_TIMEOUT_SEC,
-                    )
-                except Exception as exc:
-                    logger.warning("Query rewrite attempt failed (%s); returning no expansions", exc)
-                    return []
+            except Exception as exc:
+                logger.warning("Query rewrite attempt failed (%s); returning no expansions", exc)
+                return []
 
         # P1 #8: empty `choices` raises AIBackendError → caught below →
         # no expansions (instead of an IndexError from `choices[0]`).

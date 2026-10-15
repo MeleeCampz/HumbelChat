@@ -51,13 +51,46 @@ coding session on Q4_K_M — was resident. With working expansions, TQ is **hybr
 
 | Fix | Where | Effect |
 |---|---|---|
-| `RAG_REWRITE_BUDGET_SECONDS` 10 → 30 | `.env` (gitignored) | rewrite survives model swaps; runs concurrently with dense ranking, so no common-case latency cost |
+| `RAG_REWRITE_BUDGET_SECONDS` 10 → 45 | `.env` (gitignored) | rewrite survives model swaps; runs concurrently with dense ranking, so no common-case latency cost |
 | `RERANK_TOP_K` 100 → 150 | `.env` (gitignored) | wider cross-encoder rescue window; needs the ≤32-text request chunking already on this branch or TEI answers 422 |
 | `RERANK_USE_EXPANSION` (new, default on) | `kb/retrievers.py`, `config/settings.py` | rerank against original AND first expansion, keep max per chunk; failed passes return all-0.0 so the merge degrades to pre-rerank order |
 
 Considered and rejected: raising `RAG_MAX_CHUNKS_PER_FILE` 3 → 5 — with the expansion
 rerank TQ is rank 1, so the cap is non-binding for this failure; it would only grow
 context usage.
+
+## Second failure layer (same day): rewrite "thinking" bug
+
+After rebuilding with the fixes above, the TQ question **still failed** — and the
+logs showed the rewrite failing again, this time *not* with a timeout:
+```
+The model used its full output budget on reasoning and produced no answer.
+```
+
+The rewriter disables thinking by sending
+`extra_body={"reasoning_effort": "none", "enable_thinking": False}`. Measured
+directly against :8888 (IQ4_XS, the bot's model):
+
+| params sent | time | result |
+|---|---|---|
+| `reasoning_effort=none` **only** | **38.6 s** | content OK — 30× slower generation |
+| `enable_thinking=False` **only** | **1.2 s** | clean, fast |
+| neither (baseline) | 6.0 s | all 256 tokens spent reasoning → **empty content** |
+
+So on the Unsloth/llama.cpp backend top-level `reasoning_effort="none"` is
+*actively harmful*: it defeats a fast generation path, and in the combo it
+overrode `enable_thinking` so the model thought its way through the whole
+256-token budget → empty expansions → no English query ever reached the reranker
+→ the same TQ miss. The 18:16 attempt was the same bug as a timeout (thinking at
+~1.4 tok/s exceeded the budget); 18:21 completed but with empty content.
+
+**Fix:** `kb/query_rewriter.py` now sends **only** `enable_thinking=False` (one
+plain-call fallback for backends that reject it). Live end-to-end check through
+the real `QueryRewriter` class: clean English expansions, ~1 s warm. Also raised
+`REWRITE_TIMEOUT_SEC` 10 → 60 (the per-call httpx timeout must exceed the outer
+budget — a :8888 model swap mid-call takes ~20 s before the first byte) and
+`.env RAG_REWRITE_BUDGET_SECONDS` to 45 so a rewrite survives a swap instead of
+timing out. Tests: `tests/test_query_rewrite.py::TestRewriterThinkingParams`.
 
 ## Verification
 
