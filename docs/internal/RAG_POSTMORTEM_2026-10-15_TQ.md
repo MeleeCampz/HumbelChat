@@ -92,6 +92,34 @@ budget — a :8888 model swap mid-call takes ~20 s before the first byte) and
 `.env RAG_REWRITE_BUDGET_SECONDS` to 45 so a rewrite survives a swap instead of
 timing out. Tests: `tests/test_query_rewrite.py::TestRewriterThinkingParams`.
 
+## Third failure layer (same day): generic expansions + per-file cap
+
+After rebuild #2, attempt 1's rewrite failed (timeout — a model swap overlapped
+the query) but attempt 2 ran the FULL fixed pipeline: "Query rewrite triggered
+… added 3 expansion list(s) in 5.0s", "Reranked top 150 candidate(s) against 2
+queries" — and STILL no answer.
+
+Reproduced the exact pipeline against the production index with live IQ4_XS
+expansions. The rewriter's prompt asks for *generic* short phrases, and generic
+phrases score near-noise in the cross-encoder against the TQ chunk:
+
+| prompt | sample expansions | TQ rerank rank | TQ score | bucket pos in Saddlebag p2 | in context (cap 3) |
+|---|---|---|---|---|---|
+| v1 (current, 2 runs) | "equipment hiding attacker from enemies", … | 18 / 12 | 0.030 / 0.106 | **4th** of ~33 | **NO** |
+| v2 (mechanic-preserving, 2 runs) | "ranged attack does not reveal position", … | **1 / 1** | 0.900 / 0.710 | **1st** | YES |
+
+So the per-file cap (3) was the coin flip: v1 expansions put TQ 4th among its
+own file's chunks → dropped; v2 expansions — which keep the query's specific
+mechanics (action type, trigger condition, effect) — put it first with a
+decisive margin. **Fix:** `REWRITE_PROMPT_TEMPLATE` gained two rules ("preserve
+the SPECIFIC mechanics…", "each distinct mechanic/condition gets its own
+expansion line"); pinned by
+`tests/test_query_rewrite.py::TestRewriterPromptMechanics`. `.env
+RAG_MAX_CHUNKS_PER_FILE` 3 → 5 as a safety margin for other narrow-bucket cases.
+Also added chunk-level INFO logging ("attached chunk: …") in `kb/retrievers.py`
+so the next failure shows exactly which sections were attached — this
+visibility gap is what cost three debug rounds.
+
 ## Verification
 
 - Unit: `tests/test_rag_german_retrieval.py::TestRerankExpansionMaxFusion` (4 tests) —

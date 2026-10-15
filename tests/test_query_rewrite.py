@@ -470,5 +470,20 @@ class TestRewriterThinkingParams:
         assert len(out) == 4
 
 
+# ─────────── prompt: mechanic-preserving expansions (TQ, 2026-10-15) ──────────
+# Generic topic-word expansions ("equipment hiding attacker from enemies") score
+# ~0.03–0.11 against the right chunk in the cross-encoder; mechanic-preserving
+# ones ("ranged attack does not reveal position") score 0.71–0.90 and put the
+# chunk at rerank rank 1 (2/2 A/B runs, docs/internal/RAG_POSTMORTEM_2026-10-15_TQ.md).
+class TestRewriterPromptMechanics:
+    def test_template_requires_specific_mechanics(self):
+        from kb.query_rewriter import QueryRewriter
+
+        t = QueryRewriter.REWRITE_PROMPT_TEMPLATE
+        assert "preserve the SPECIFIC mechanics" in t
+        assert "trigger condition" in t
+        assert "its own expansion line" in t
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
