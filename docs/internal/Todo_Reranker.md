@@ -203,9 +203,11 @@ curl -s http://host.docker.internal:8000/rerank -H 'Content-Type: application/js
      -d '{"query": "test", "documents": ["a", "b"]}'
 ```
 
-(Loopback, not LAN: vLLM's OpenAI server has no auth. The same one-liner can
-be added to `embedder-qwen` — `"127.0.0.1:11435:11434"` — if embedding
-debugging from the sandbox is ever needed.)
+(Loopback, not LAN: vLLM's OpenAI server has no auth. `embedder-qwen`
+likewise publishes `127.0.0.1:11435:11434` — host port 11435 so a native
+host Ollama on 11434 is unaffected; reachable at
+`http://host.docker.internal:11435/v1/embeddings`. Both publishes are inert
+until the services are started.)
 Also: `kb.reranker` now logs the server's response body (truncated to 300
 chars) on HTTP errors, so a future 400 shows *why* immediately instead of
 just the status line.

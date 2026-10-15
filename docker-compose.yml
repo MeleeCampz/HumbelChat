@@ -147,6 +147,11 @@ services:
     container_name: humbelchat-embedder-qwen
     profiles: ["qwen-embed"]
     restart: unless-stopped
+    # Debug access for the dev sandbox (host.docker.internal:11435). Host port
+    # 11435 (not 11434) so a natively installed Ollama on the host is unaffected.
+    # Loopback-only, same rationale as reranker-qwen.
+    ports:
+      - "127.0.0.1:11435:11434"
     volumes:
       - ./ollama-models:/root/.ollama   # model store, outside the repo tree
     deploy:
