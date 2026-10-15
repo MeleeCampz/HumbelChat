@@ -25,6 +25,12 @@ import sys
 import urllib.error
 import urllib.request
 
+# ConnectionResetError / RemoteDisconnected / ConnectionRefusedError / URLError
+# are all OSError subclasses; TimeoutError covers read timeouts. Catching these
+# two (plus HTTPError separately, below) means no network failure can ever
+# escape as a raw traceback.
+_NET_ERRORS = (OSError, TimeoutError)
+
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
 
 # Mirrors RERANK_INSTRUCT in .env (kept short here; the exact string does not
@@ -74,8 +80,26 @@ def main() -> int:
     # 1. liveness
     try:
         http_json("/health", timeout=15)
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
-        print(f"FAIL: /health unreachable ({exc})")
+    except urllib.error.HTTPError as exc:
+        # Note: a 500 here can also be an intermediate proxy's "upstream
+        # unreachable" signature (e.g. the dev sandbox's egress proxy) — on the
+        # host itself, /health should be a plain 200 once vLLM is ready.
+        print(f"FAIL: /health answered HTTP {exc.code} (server not ready, or an intermediate proxy can't reach it)")
+        return 1
+    except _NET_ERRORS as exc:
+        # A TCP connect that is ACCEPTED then reset (RemoteDisconnected) means
+        # the Docker port proxy is bound but vLLM hasn't opened :8000 inside the
+        # container yet — i.e. the model is still downloading/loading, or the
+        # process crashed during load.
+        hint = ""
+        if "closed connection" in str(exc):
+            hint = (
+                "\n  → port is bound but the server isn't answering yet: vLLM only"
+                "\n    opens :8000 AFTER the model finishes loading (first start:"
+                "\n    image pull + ~2.6 GB checkpoint). Check:"
+                "\n    docker compose logs -f reranker-qwen"
+            )
+        print(f"FAIL: /health unreachable ({exc}){hint}")
         return 1
     print("  /health: OK")
 
@@ -95,7 +119,7 @@ def main() -> int:
             print(f"FAIL [{label}]: /rerank HTTP {exc.code}: {detail}")
             failures += 1
             continue
-        except (urllib.error.URLError, TimeoutError) as exc:
+        except _NET_ERRORS as exc:
             print(f"FAIL [{label}]: /rerank unreachable ({exc})")
             failures += 1
             continue
