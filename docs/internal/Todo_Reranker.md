@@ -136,13 +136,20 @@ native support (`--hf_overrides ... "is_original_qwen3_reranker": true`).
 **What changed:**
 
 - `docker-compose.yml`: new `reranker-qwen` service — `vllm/vllm-openai:v0.31.0`
-  (pinned), `Qwen/Qwen3-Reranker-4B` with `--quantization bitsandbytes` (NF4,
-  ~2.6 GB weights instead of ~8 GB fp16 — first-party weights, no third-party
-  checkpoint), `--gpu-memory-utilization 0.5`, `--max-model-len 2048`, GPU 1.
+  (pinned), `boboliu/Qwen3-Reranker-4B-W4A16-G128` with
+  `--quantization compressed-tensors` (pre-quantized INT4, W4A16 group-128,
+  ~2.6 GB — a third-party 4-bit of the official Qwen3-Reranker-4B),
+  `--gpu-memory-utilization 0.5`, `--max-model-len 2048`, GPU 1.
   The chat template is vendored at `deploy/qwen3_reranker.jinja` (vLLM's own
   example, Apache-2.0) and mounted in — without it the model scores with the
   wrong prompt format. The old TEI `reranker` service is profile-gated
   (`tei-rerank`) for rollback.
+  - **Why not bitsandbytes/NF4 on the official fp16 weights (the original plan)?**
+    In vLLM 0.31.0 BitsAndBytes is an **out-of-tree plugin** (`vllm-bnb-plugin`)
+    that is NOT bundled in `vllm/vllm-openai`, so `--quantization bitsandbytes`
+    fails with "unknown quantization" in the stock image. compressed-tensors is
+    in-tree, so the INT4 checkpoint loads with no custom build. To keep NF4 on
+    first-party weights you'd need a custom Dockerfile installing the plugin.
 - `kb/reranker.py`: `_rerank_http()` now speaks both wire formats via
   `RERANK_API_FORMAT` — `tei` (unchanged) and `jina` (vLLM's Jina-compatible
   `/rerank`: `documents` field, object response with `results`,
@@ -151,17 +158,23 @@ native support (`--hf_overrides ... "is_original_qwen3_reranker": true`).
   `RERANK_API_FORMAT=jina`, `RERANK_INSTRUCT=<D&D task instruction>` (folded
   into the template's `<Instruct>` slot per request).
 
-**VRAM budget GPU 1 (16 GB):** vLLM reserves 0.5×16 = 8 GB (NF4 weights + KV);
+**VRAM budget GPU 1 (16 GB):** vLLM reserves 0.5×16 = 8 GB (INT4 weights + KV);
 the Ollama `embedder-qwen` sidecar keeps ~2.5–3 GB outside that reservation.
 Headroom for a future Qwen3-Reranker-8B or fp16: limited — plan around it.
 
 **Rollback:** `docker compose --profile tei-rerank up -d reranker`, then set
 `RERANK_API_BASE=http://reranker:80` + `RERANK_API_FORMAT=tei` in `.env`.
 
-**Fallbacks if NF4 load fails on first start:** swap the model id to
-`boboliu/Qwen3-Reranker-4B-W4A16-G128` with `--quantization gptq`, or drop
-`--quantization` entirely (fp16, ~8 GB, still fits the 0.5 reservation).
+**Fallbacks if the INT4 checkpoint fails to load:** drop `--quantization`
+and point at `Qwen/Qwen3-Reranker-4B` (official fp16, ~8 GB — still fits the
+0.5 reservation), or build a custom image with `vllm-bnb-plugin` for NF4.
 
-**First start:** downloads the fp16 weights (~8 GB) into `hf-cache/`; bnb
-quantizes at load time (extra ~1–2 min). Watch `docker compose logs -f
-reranker-qwen` for the "Uvicorn running on" line before testing in Discord.
+**First start:** downloads the INT4 checkpoint (~2.6 GB) into `hf-cache/`.
+Watch `docker compose logs -f reranker-qwen` for the "Uvicorn running on"
+line before testing in Discord.
+
+**Gotcha hit 2026-10-15:** v0.31.0's `vllm-openai` image changed its ENTRYPOINT
+to `["vllm", "serve"]` (older images: `["vllm"]`). The compose `command` must
+therefore start with the model id, **not** `serve` — a leading `serve` makes the
+container crash-loop with `vllm: error: unrecognized arguments: <model id>`
+(the subparser eats `serve` as the model tag). Fixed in `docker-compose.yml`.

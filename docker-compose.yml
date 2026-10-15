@@ -72,14 +72,18 @@ services:
   # {"results": [{"index", "relevance_score"}]}; kb/reranker.py selects the wire
   # format via RERANK_API_FORMAT=jina and sends RERANK_INSTRUCT per request.
   #
-  # 4-bit: --quantization bitsandbytes (NF4) on the OFFICIAL fp16 weights — no
-  # third-party checkpoint needed, ~2.6 GB of weights instead of ~8 GB. If that
-  # path ever fails to load, alternatives in order:
-  #   boboliu/Qwen3-Reranker-4B-W4A16-G128 (GPTQ, --quantization gptq) or drop
-  #   --quantization entirely (fp16, ~8 GB — still fits: 0.5 util = 8 GB cap).
+  # 4-bit: pre-quantized compressed-tensors INT4 checkpoint (W4A16, group-128)
+  # of the official Qwen3-Reranker-4B — boboliu/Qwen3-Reranker-4B-W4A16-G128
+  # (~2.6 GB). vLLM supports compressed-tensors natively (in-tree), so it loads
+  # in the stock pinned image with no plugin. NOTE: the earlier plan used
+  # `--quantization bitsandbytes` (NF4 on the official fp16 weights), but in
+  # vLLM 0.31.0 BitsAndBytes is an OUT-OF-TREE plugin (vllm-bnb-plugin) that is
+  # NOT bundled in vllm/vllm-openai — that path would fail with "unknown
+  # quantization". A custom Dockerfile installing the plugin is the only way to
+  # keep NF4-on-official-weights; the INT4 checkpoint avoids that maintenance.
   #
   # GPU 1 budget: vLLM reserves --gpu-memory-utilization 0.5 of the 16 GB card
-  # (~8 GB: NF4 weights + KV); the Ollama embedder-qwen sidecar keeps ~2.5-3 GB
+  # (~8 GB: INT4 weights + KV); the Ollama embedder-qwen sidecar keeps ~2.5-3 GB
   # outside that reservation. max-model-len 2048 covers our truncated pairs
   # (RERANK_MAX_CHARS=1200 chars ≈ 350 tokens + query + template overhead).
   #
@@ -87,7 +91,7 @@ services:
   # --hf_overrides is_original_qwen3_reranker). The chat template is vendored in
   # deploy/qwen3_reranker.jinja (vLLM's own example, Apache-2.0) — without it the
   # model scores everything with the wrong prompt format.
-  # First start downloads the fp16 weights (~8 GB) into hf-cache/.
+  # First start downloads the INT4 checkpoint (~2.6 GB) into hf-cache/.
   reranker-qwen:
     image: vllm/vllm-openai:v0.31.0
     container_name: humbelchat-reranker-qwen
@@ -95,11 +99,14 @@ services:
     volumes:
       - ./hf-cache:/root/.cache/huggingface   # shared HF cache (bot uses /models/hf)
       - ./deploy/qwen3_reranker.jinja:/templates/qwen3_reranker.jinja:ro
+    # NOTE: v0.31.0's vllm-openai image ENTRYPOINT is ["vllm", "serve"] — the
+    # subcommand is baked in, so `command` must start with the model name.
+    # (Older images used ENTRYPOINT ["vllm"]; a leading `serve` here makes the
+    # container crash-loop with "unrecognized arguments: <model id>".)
     command:
-      - serve
-      - Qwen/Qwen3-Reranker-4B
+      - boboliu/Qwen3-Reranker-4B-W4A16-G128
       - --quantization
-      - bitsandbytes
+      - compressed-tensors
       - --hf_overrides
       - '{"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
       - --chat-template
