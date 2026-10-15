@@ -193,16 +193,19 @@ payload was already correct.
 **Debugging from the dev sandbox (2026-10-16):** the sandbox can reach
 *host-bound* ports via `http://host.docker.internal:<port>` (the Unsloth/LM
 Studio backend on :8888 works with `INFER_API_KEY`), but compose-internal
-services (`reranker-qwen:8000`, `embedder-qwen:11434`) are on a Docker
-network the sandbox can't see — DNS fails and nothing is published. To let
-the sandbox hit `/rerank` directly, temporarily add to the service:
+service names (`reranker-qwen:8000`, `embedder-qwen:11434`) don't resolve
+there. So `reranker-qwen` publishes its port **loopback-only**
+(`127.0.0.1:8000:8000` in docker-compose.yml) — from the sandbox:
 
-```yaml
-    ports:
-      - "127.0.0.1:8000:8000"   # host-loopback only; remove when done
+```bash
+curl -s http://host.docker.internal:8000/health
+curl -s http://host.docker.internal:8000/rerank -H 'Content-Type: application/json' \
+     -d '{"query": "test", "documents": ["a", "b"]}'
 ```
 
-then `curl http://host.docker.internal:8000/rerank` from the sandbox.
+(Loopback, not LAN: vLLM's OpenAI server has no auth. The same one-liner can
+be added to `embedder-qwen` — `"127.0.0.1:11435:11434"` — if embedding
+debugging from the sandbox is ever needed.)
 Also: `kb.reranker` now logs the server's response body (truncated to 300
 chars) on HTTP errors, so a future 400 shows *why* immediately instead of
 just the status line.
