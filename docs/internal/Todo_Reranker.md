@@ -201,6 +201,12 @@ there. So `reranker-qwen` publishes its port **loopback-only**
 curl -s http://host.docker.internal:8000/health
 curl -s http://host.docker.internal:8000/rerank -H 'Content-Type: application/json' \
      -d '{"query": "test", "documents": ["a", "b"]}'
+
+Better: `deploy/reranker_smoke.py` — zero-dependency end-to-end check
+(/health + Jina response shape + relevant-outranks-irrelevant for an EN and
+a DE query). On the host: `python3 deploy/reranker_smoke.py`; from the
+sandbox: `python3 deploy/reranker_smoke.py http://host.docker.internal:8000`.
+Exit 0 = healthy.
 ```
 
 (Loopback, not LAN: vLLM's OpenAI server has no auth. `embedder-qwen`
