@@ -178,3 +178,14 @@ to `["vllm", "serve"]` (older images: `["vllm"]`). The compose `command` must
 therefore start with the model id, **not** `serve` — a leading `serve` makes the
 container crash-loop with `vllm: error: unrecognized arguments: <model id>`
 (the subparser eats `serve` as the model tag). Fixed in `docker-compose.yml`.
+
+**Gotcha #2 (found via live 400s, 2026-10-16):** the container booted fine but
+every `/rerank` call returned `400 Bad Request` (bot correctly fell back to
+pre-rerank order). Root cause: `Qwen3ForSequenceClassification` exists only via
+`hf_overrides` — it is NOT in vLLM's model registry — so `--runner auto`
+couldn't match it and fell back to `generate`, serving the model as a
+generative LLM; the scoring endpoint then rejects requests with 400. Fix:
+explicit `--runner pooling` (vLLM's own `qwen3_reranker_online.py` example
+passes it). Verified against v0.31.0 sources: `RerankRequest` accepts
+`{query, documents, instruction}` (`model` is optional), so the bot's jina
+payload was already correct.
