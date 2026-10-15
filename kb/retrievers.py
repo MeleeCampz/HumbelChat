@@ -198,6 +198,7 @@ def select_ranked_chunks(
     max_chars_per_file: int = MAX_CHARS_PER_FILE,
     attach_min_score: float = 0.0,
     dense_scores: dict[str, float] | None = None,
+    selected_names: list[str] | None = None,
 ) -> list[tuple[str, str]]:
     """Collapse ranked index chunks into per-file document entries.
 
@@ -252,6 +253,8 @@ def select_ranked_chunks(
             continue
         seen_names.add(name)
         bucket.append(content)
+        if selected_names is not None:
+            selected_names.append(name)
         total_chunks += 1
 
     # Drop any file that ended up with no chunks (defensive: shouldn't happen
@@ -659,10 +662,12 @@ async def _retrieve_vector(
         )
 
     from config.settings import RAG_MAX_CHUNKS_PER_FILE, RAG_ATTACH_FLOOR
+    selected: list[str] = []
     docs = select_ranked_chunks(
         final_ranked, top_n=top_n,
         max_chunks_per_file=RAG_MAX_CHUNKS_PER_FILE,
         attach_min_score=RAG_ATTACH_FLOOR, dense_scores=dense_scores,
+        selected_names=selected,
     )
     if not docs and final_ranked:
         # Safety net: an over-aggressive floor must never yield an empty context.
@@ -680,6 +685,11 @@ async def _retrieve_vector(
         len(final_ranked), len(docs),
         sum(len(c) for _, c in docs) if docs else 0,
     )
+    # Chunk-level visibility: which sections actually got attached (the
+    # per-file cap can silently drop a right chunk that ranked just below
+    # its file's bucket — the TQ case, 2026-10-15).
+    for name in selected:
+        logger.info("  attached chunk: %s", name)
     return docs
 
 
