@@ -287,6 +287,7 @@ compaction/summarization is performed — the block always contains raw turns.
 | `RAG_REWRITE_MIN_SCORE` | Similarity threshold below which the rewriter triggers |
 | `RAG_QUERY_MAX_EXPANSIONS` | Max alternative phrasings generated per rewrite |
 | `RAG_REWRITE_BUDGET_SECONDS` | Wall-clock cap for the LLM rewrite call |
+| `RERANK_USE_EXPANSION` | When expansions exist, also rerank against the first expansion and keep the max score per chunk (`1`/`0`, default on). Fixes cross-lingual rerank blindness: bge-reranker-v2-m3 scores German-question/English-chunk pairs near-noise (right chunk rank 25 @0.003) but ranks it #1 @0.963 against the English expansion | `1` |
 | `EMBED_BACKEND` | `local` (in-process CPU query embeddings, recommended) or `remote` (legacy backend `/embeddings`) |
 | `LOCAL_EMBED_MODEL` | In-process query-embedding model (default `BAAI/bge-m3`) |
 | `EMBED_QUERY_INSTRUCT` | Optional task instruction for instruction-aware models (Qwen3-Embedding): when non-empty, every QUERY is wrapped as `Instruct: {text}\nQuery:{query}` before encoding — documents are never wrapped. Keep it in English even for German queries. Empty = off; toggling needs no reindex (queries only). Measured on the 33-query golden set with Qwen3-Embedding-4B: hit@10 26→31, found 30/33→32/33 | *(empty)* |

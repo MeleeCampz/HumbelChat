@@ -306,3 +306,135 @@ class TestParallelRewrite:
         assert calls == [], f"confident English query must not trigger a rewrite, got {calls}"
         # select_ranked_chunks collapses to per-file stems (no section suffix).
         assert [n for n, _ in docs] == ["a.md"]
+
+
+# ─────────────── Rerank against the LLM expansion (cross-lingual rescue) ───────────────
+# bge-reranker-v2-m3 scores a German question vs English KB chunks near-noise
+# (TQ case Oct 15: right chunk rank 25 @0.003 with the German original, but
+# rank 1 @0.963 against the rewriter's English expansion). _retrieve_vector
+# therefore scores candidates against BOTH and keeps the max per chunk.
+
+class TestRerankExpansionMaxFusion:
+    def _patch_pipeline(self, monkeypatch):
+        import kb.retrievers as R
+
+        monkeypatch.setattr("config.settings.RAG_REWRITE_ALL_QUERIES", True)
+        monkeypatch.setattr("config.settings.RAG_QUERY_REWRITER", True)
+        monkeypatch.setattr("config.settings.RAG_HYBRID_ENABLED", False)  # isolate
+        monkeypatch.setattr("config.settings.RERANK_TOP_K", 10)
+        monkeypatch.setattr("config.settings.RAG_MIN_ATTACH_SCORE", 0.0)
+        monkeypatch.setattr("config.settings.RAG_ATTACH_FLOOR", 0.0)
+
+        class FakeIdx:
+            def is_empty(self):
+                return False
+
+            async def query_with_embeddings(self, text, top_n=5):
+                # Dense (and thus the pre-rerank order) favours the DECOY —
+                # exactly like production, where stealth-item near-duplicates
+                # outscored Trickster's Quiver on the raw German question.
+                return [
+                    (("decoy.md [Hood]", "decoy content", 0.62)),
+                    (("tq.md [Quiver]", "tq content", 0.57)),
+                ], [0.1]
+
+            async def rank_texts(self, texts, top_n=5):
+                return []  # expansions add no new chunks — only the rerank query
+
+        class FakeStore:
+            def get_index(self):
+                return FakeIdx()
+
+        monkeypatch.setattr(R, "_index_store", FakeStore())
+
+        class FakeRewriter:
+            async def expand(self, q):
+                return [q, "quiver hidden attack no reveal"]
+
+        monkeypatch.setattr(
+            "kb.query_rewriter.create_query_rewriter",
+            lambda model_slug="": FakeRewriter(),
+        )
+        return R
+
+    def _fake_cross_encoder(self, calls: list[str]):
+        """Mimics the measured production behaviour per query language."""
+
+        async def fake_rerank(q, chunks, *, top_n=None):
+            calls.append(q)
+            if q == "quiver hidden attack no reveal":  # English expansion
+                table = {"tq content": 0.963, "decoy content": 0.126}
+            else:  # German original — near-noise scores, decoy on top
+                table = {"decoy content": 0.018, "tq content": 0.003}
+            return sorted(((c, table[c]) for c in chunks), key=lambda t: -t[1])
+
+        return fake_rerank
+
+    async def test_max_fusion_rescues_cross_lingual_chunk(self, monkeypatch):
+        import kb.reranker as KR
+
+        R = self._patch_pipeline(monkeypatch)
+        calls: list[str] = []
+        monkeypatch.setattr(KR, "is_available", lambda: True)
+        monkeypatch.setattr(KR, "rerank", self._fake_cross_encoder(calls))
+
+        docs = await R._retrieve_vector(
+            "Gibt es ein Item dass mich nicht aufdeckt?", "/nonexistent-kb", top_n=4
+        )
+        names = [n for n, _ in docs]
+        assert calls == [
+            "Gibt es ein Item dass mich nicht aufdeckt?",
+            "quiver hidden attack no reveal",
+        ], f"rerank must run against original AND first expansion, got {calls}"
+        # max(0.003, 0.963)=0.963 > max(0.018, 0.126)=0.126 → TQ file first.
+        assert names == ["tq.md", "decoy.md"], f"max-fusion must rescue TQ, got {names}"
+
+    async def test_disabled_flag_uses_original_only(self, monkeypatch):
+        import kb.reranker as KR
+
+        R = self._patch_pipeline(monkeypatch)
+        monkeypatch.setattr("config.settings.RERANK_USE_EXPANSION", False)
+        calls: list[str] = []
+        monkeypatch.setattr(KR, "is_available", lambda: True)
+        monkeypatch.setattr(KR, "rerank", self._fake_cross_encoder(calls))
+
+        docs = await R._retrieve_vector(
+            "Gibt es ein Item dass mich nicht aufdeckt?", "/nonexistent-kb", top_n=4
+        )
+        names = [n for n, _ in docs]
+        assert calls == ["Gibt es ein Item dass mich nicht aufdeckt?"], (
+            "RERANK_USE_EXPANSION=0 must rerank against the original only"
+        )
+        # German-only scores: decoy 0.018 > TQ 0.003 — reproduces the failure.
+        assert names == ["decoy.md", "tq.md"]
+
+    async def test_no_expansion_means_single_pass(self, monkeypatch):
+        import kb.reranker as KR
+
+        R = self._patch_pipeline(monkeypatch)
+        # Confident English query with all-queries rewrite OFF → no expansions.
+        monkeypatch.setattr("config.settings.RAG_REWRITE_ALL_QUERIES", False)
+        calls: list[str] = []
+        monkeypatch.setattr(KR, "is_available", lambda: True)
+        monkeypatch.setattr(KR, "rerank", self._fake_cross_encoder(calls))
+
+        docs = await R._retrieve_vector("fireball spell", "/nonexistent-kb", top_n=4)
+        assert calls == ["fireball spell"], f"single pass expected, got {calls}"
+        assert len(docs) > 0
+
+    async def test_both_passes_failing_keeps_candidate_order(self, monkeypatch):
+        import kb.reranker as KR
+
+        R = self._patch_pipeline(monkeypatch)
+
+        async def failing_rerank(q, chunks, *, top_n=None):
+            return [(c, 0.0) for c in chunks]  # the contract's failure fallback
+
+        monkeypatch.setattr(KR, "is_available", lambda: True)
+        monkeypatch.setattr(KR, "rerank", failing_rerank)
+
+        docs = await R._retrieve_vector(
+            "Gibt es ein Item dass mich nicht aufdeckt?", "/nonexistent-kb", top_n=4
+        )
+        # All scores 0.0 → stable sort keeps the pre-rerank (dense) order.
+        assert [n for n, _ in docs] == ["decoy.md", "tq.md"]

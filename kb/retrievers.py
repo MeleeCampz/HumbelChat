@@ -627,15 +627,36 @@ async def _retrieve_vector(
     from kb.reranker import rerank, is_available as _rerank_available
     final_ranked = hybrid_ranked
     if _rerank_available():
-        from config.settings import RERANK_TOP_K
+        from config.settings import RERANK_TOP_K, RERANK_USE_EXPANSION
         cands = hybrid_ranked[:RERANK_TOP_K]  # (name, content, score)
         contents = [c for _, c, _ in cands]
         name_map: dict[str, str] = {}
         for name, content, _ in cands:
             name_map.setdefault(content, name)
-        scored = await rerank(query, contents)  # [(content, score), ...]; original order on fallback
-        final_ranked = [(name_map.get(c, ""), c, s) for c, s in scored]
-        logger.info("Reranked top %d candidate(s)", len(final_ranked))
+        # Score against the original query AND — when expansions exist and
+        # RERANK_USE_EXPANSION is on — the first expansion, keeping the MAX per
+        # chunk. Cross-encoders score cross-lingual pairs (German question vs
+        # English KB text) near-noise, which DEMOTES the right chunk; the
+        # rewriter's English expansion rescues it (TQ case: rank 25 → 1).
+        # A failed pass returns all-0.0 scores, so max-fusion degrades safely:
+        # one good pass dominates, both failing keeps the original order.
+        rerank_queries = [query]
+        if RERANK_USE_EXPANSION and expansion_texts:
+            rerank_queries.append(expansion_texts[0])
+        merged_scores: dict[str, float] = {}
+        for rq in rerank_queries:
+            scored = await rerank(rq, contents)  # [(content, score), ...]; original order on fallback
+            for c, s in scored:
+                if s > merged_scores.get(c, 0.0):
+                    merged_scores[c] = s
+        final_ranked = sorted(
+            ((name_map.get(c, ""), c, merged_scores.get(c, 0.0)) for c in contents),
+            key=lambda t: t[2],
+            reverse=True,  # stable: all-0 (both passes failed) keeps candidate order
+        )
+        logger.info(
+            "Reranked top %d candidate(s) against %d quer%s", len(final_ranked), len(rerank_queries), "y" if len(rerank_queries) == 1 else "ies",
+        )
 
     from config.settings import RAG_MAX_CHUNKS_PER_FILE, RAG_ATTACH_FLOOR
     docs = select_ranked_chunks(
