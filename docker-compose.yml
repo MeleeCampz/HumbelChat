@@ -96,6 +96,11 @@ services:
     image: vllm/vllm-openai:v0.31.0
     container_name: humbelchat-reranker-qwen
     restart: unless-stopped
+    # Debug access for the dev sandbox (reaches it via host.docker.internal:8000).
+    # Loopback-only on purpose: vLLM's OpenAI server has NO auth, so this must
+    # never be bound to 0.0.0.0 / the LAN.
+    ports:
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./hf-cache:/root/.cache/huggingface   # shared HF cache (bot uses /models/hf)
       - ./deploy/qwen3_reranker.jinja:/templates/qwen3_reranker.jinja:ro
