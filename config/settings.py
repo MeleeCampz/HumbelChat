@@ -402,6 +402,15 @@ RERANK_TOP_K: int = _safe_int(
 # scoring cost — what makes a wide RERANK_TOP_K window affordable.
 RERANK_MAX_CHARS: int = _safe_int(os.getenv("RERANK_MAX_CHARS"), 1200)
 RERANK_TIMEOUT_SECONDS: int = _safe_int(os.getenv("RERANK_TIMEOUT_SECONDS"), 8)
+# When query expansions exist, ALSO score every candidate against the first
+# expansion and keep the MAX of both passes. Cross-encoders score cross-
+# linguistic pairs near-noise: the Trickster's-Quiver failure (Oct 15) ranked
+# the right chunk #25 against the raw German question (scores 0.002-0.018,
+# indistinguishable from wrong items) but #1 @ 0.963 against the English
+# expansion. Max-fusion keeps native-language queries on their original signal
+# while letting the translation rescue non-English ones. Costs one extra
+# rerank pass (GPU, ~1-2 s) only when expansions exist. Set 0 to disable.
+RERANK_USE_EXPANSION: bool = _safe_bool(os.getenv("RERANK_USE_EXPANSION"), True)
 # Enable the hybrid lexical (BM25) leg that is RRF-fused with dense vectors.
 # On by default (part of the high-quality pipeline); set to 0 to use dense-only.
 RAG_HYBRID_ENABLED: bool = _safe_bool(os.getenv("RAG_HYBRID_ENABLED"), True)
