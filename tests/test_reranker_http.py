@@ -5,7 +5,9 @@ order with 0.0 scores). Mirrors the fake-client pattern of test_p2_embedder_clie
 from __future__ import annotations
 
 import asyncio
+import logging
 
+import httpx
 import pytest
 import pytest_asyncio
 from unittest.mock import patch
@@ -118,6 +120,33 @@ class TestHttpRerank:
             out = await R.rerank("q", ["a", "b"])
         assert [c for c, _ in out] == ["a", "b"]
         assert all(s == 0.0 for _, s in out)
+
+    @pytest.mark.asyncio
+    async def test_http_error_logs_server_body(self, caplog):
+        """A 4xx/5xx must fall back AND log the server's response body — a bare
+        '400 Bad Request' status is useless for diagnosing e.g. vLLM serving the
+        model with the wrong runner/task (gotcha #2, Todo_Reranker.md)."""
+        request = httpx.Request("POST", "http://reranker.test:80/rerank")
+        response = httpx.Response(
+            400,
+            request=request,
+            text='{"object":"error","message":"The model does not support the rerank task"}',
+        )
+        _FakeTEIClient.raise_exc = httpx.HTTPStatusError(
+            "Client error \'400 Bad Request\' for url \'http://reranker.test:80/rerank\'",
+            request=request,
+            response=response,
+        )
+        with patch.object(R.httpx, "AsyncClient", _factory([])):
+            with caplog.at_level(logging.WARNING, logger="kb.reranker"):
+                out = await R.rerank("q", ["a", "b"])
+        # never-breaks contract still holds
+        assert [c for c, _ in out] == ["a", "b"]
+        assert all(s == 0.0 for _, s in out)
+        # and the diagnostic detail made it into the log
+        joined = "\n".join(r.getMessage() for r in caplog.records)
+        assert "Rerank failed" in joined
+        assert "does not support the rerank task" in joined
 
     @pytest.mark.asyncio
     async def test_out_of_range_index_falls_back(self):

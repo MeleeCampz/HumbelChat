@@ -101,6 +101,21 @@ async def _get_http_client() -> httpx.AsyncClient:
     return _http_client
 
 
+def _failure_detail(exc: Exception) -> str:
+    """Render an exception for logging. HTTP errors include a truncated response
+    body — a bare status line ("400 Bad Request") says nothing about *why* the
+    server rejected the request (e.g. vLLM serving the model with the wrong
+    runner/task). The body is whitespace-collapsed and capped at 300 chars so it
+    stays on one log line."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        try:
+            body = " ".join(exc.response.text.split())[:300]
+        except Exception:  # noqa: BLE001 — logging must never raise
+            body = "<unreadable body>"
+        return f"{exc} | server response: {body}"
+    return str(exc)
+
+
 async def close_client() -> None:
     """Close the shared HTTP client (wired into bot shutdown). Safe to call anytime."""
     global _http_client
@@ -247,7 +262,7 @@ async def rerank(
         logger.warning("Rerank timed out after %ss — using original order", RERANK_TIMEOUT_SECONDS)
         return [(c, 0.0) for c in chunks]
     except Exception as exc:  # noqa: BLE001 — any failure degrades to original order
-        logger.warning("Rerank failed (%s); using original order", exc)
+        logger.warning("Rerank failed (%s); using original order", _failure_detail(exc))
         return [(c, 0.0) for c in chunks]
 
     if len(scores) != len(chunks):  # defensive: malformed output → don't trust it
