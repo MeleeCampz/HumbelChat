@@ -390,6 +390,15 @@ RERANK_MODE: str = os.getenv("RERANK_MODE", "local").strip().lower()
 # Base URL for RERANK_MODE=http (no trailing slash), e.g. http://reranker:80
 # or http://host.docker.internal:8081. Ignored in local mode.
 RERANK_API_BASE: str = os.getenv("RERANK_API_BASE", "").rstrip("/")
+# Wire format of the /rerank endpoint (RERANK_MODE=http):
+#   "tei"  — Hugging Face TEI: {"query", "texts"} -> [ {"index", "score"}, ... ]
+#   "jina" — vLLM Jina-compatible: {"query", "documents", "instruction"?}
+#            -> {"results": [ {"index", "relevance_score"}, ... ]}
+# (Qwen3-Reranker via the `reranker-qwen` compose service, see docker-compose.yml.)
+RERANK_API_FORMAT: str = os.getenv("RERANK_API_FORMAT", "tei").strip().lower()
+# Task instruction sent with each jina-format rerank request (the Qwen3-Reranker
+# chat template folds it into <Instruct>). Empty = the server's generic default.
+RERANK_INSTRUCT: str = os.getenv("RERANK_INSTRUCT", "")
 # Number of candidate chunks handed to the reranker (was hardcoded 6*4=24).
 # The correctly-named env var RERANK_TOP_K wins; the historical (misnamed)
 # RAG_VECTOR_TOP_K stays supported as an alias for existing deployments.

@@ -1,0 +1,15 @@
+{# Vendored from vllm-project/vllm examples/pooling/score/template/qwen3_reranker.jinja
+   (Apache-2.0). Required to score Qwen3-Reranker via vLLM's /rerank endpoint:
+   it wraps query/document in the model's expected <Instruct>/<Query>/<Document>
+   format with an empty <think> block, and accepts a per-request `instruction`
+   field (see RERANK_INSTRUCT in config/settings.py). #}
+< |im_start|>system
+Judge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".< |im_end|>
+< |im_start|>user
+<Instruct>: {{ instruction | default(instruct | default(messages | selectattr("role", "eq", "system") | map(attribute="content") | first | default("Given a web search query, retrieve relevant passages that answer the query", true), true), true) }}
+<Query>: {{ messages | selectattr("role", "eq", "query") | map(attribute="content") | first }}
+<Document>: {{ messages | selectattr("role", "eq", "document") | map(attribute="content") | first }}< |im_end|>
+< |im_start|>assistant
+< think>
+
+< /think>

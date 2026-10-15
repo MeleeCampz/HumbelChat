@@ -26,8 +26,9 @@ services:
       - ./data:/app/data        # KB docs + .vector_index_cache + recordings + history.json
       - ./logs:/app/logs        # RotatingFileHandler output, readable from host
       - ./hf-cache:/models/hf   # bge-m3 + whisper models (downloaded once)
-    depends_on:
-      - reranker
+    # No depends_on for the rerankers: both are optional accelerators — the
+    # bot health-checks them at startup and fails open to pre-rerank order.
+
 
   # GPU cross-encoder reranker for RAG (see docs/internal/Todo_Reranker.md).
   # Hugging Face Text Embeddings Inference serving BAAI/bge-reranker-v2-m3 on
@@ -35,7 +36,14 @@ services:
   # main chat LLM. The bot reaches it over the compose network (http://reranker:80);
   # no host port is published. First start downloads the model (~1 GB) into the
   # shared hf-cache/ volume.
+  #
+  # ROLLED BACK to a profile on 2026-10-15 in favour of `reranker-qwen`
+  # (Qwen3-Reranker-4B via vLLM — TEI cannot serve Qwen3ForSequenceClassification,
+  # see huggingface/text-embeddings-inference#643). To run the old one again:
+  #   docker compose --profile tei-rerank up -d reranker
+  # and set RERANK_API_BASE=http://reranker:80, RERANK_API_FORMAT=tei in .env.
   reranker:
+    profiles: ["tei-rerank"]
     image: ghcr.io/huggingface/text-embeddings-inference:latest
     container_name: humbelchat-reranker
     restart: unless-stopped
@@ -49,6 +57,57 @@ services:
     # chunks requests to <=32 so the bot survives any future TEI default.
     # Pin this tag if it moves again.
     command: --model-id BAAI/bge-reranker-v2-m3 --max-client-batch-size 128
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
+
+  # Qwen3-Reranker-4B cross-encoder for RAG (replaces the TEI bge-reranker above,
+  # 2026-10-15). Served by vLLM — TEI does not support Qwen3ForSequenceClassification
+  # (huggingface/text-embeddings-inference#643, still open). The bot talks to its
+  # Jina-compatible /rerank endpoint: {"query", "documents", "instruction"} →
+  # {"results": [{"index", "relevance_score"}]}; kb/reranker.py selects the wire
+  # format via RERANK_API_FORMAT=jina and sends RERANK_INSTRUCT per request.
+  #
+  # 4-bit: --quantization bitsandbytes (NF4) on the OFFICIAL fp16 weights — no
+  # third-party checkpoint needed, ~2.6 GB of weights instead of ~8 GB. If that
+  # path ever fails to load, alternatives in order:
+  #   boboliu/Qwen3-Reranker-4B-W4A16-G128 (GPTQ, --quantization gptq) or drop
+  #   --quantization entirely (fp16, ~8 GB — still fits: 0.5 util = 8 GB cap).
+  #
+  # GPU 1 budget: vLLM reserves --gpu-memory-utilization 0.5 of the 16 GB card
+  # (~8 GB: NF4 weights + KV); the Ollama embedder-qwen sidecar keeps ~2.5-3 GB
+  # outside that reservation. max-model-len 2048 covers our truncated pairs
+  # (RERANK_MAX_CHARS=1200 chars ≈ 350 tokens + query + template overhead).
+  #
+  # Pinned to v0.31.0 (first release line with native Qwen3-Reranker support via
+  # --hf_overrides is_original_qwen3_reranker). The chat template is vendored in
+  # deploy/qwen3_reranker.jinja (vLLM's own example, Apache-2.0) — without it the
+  # model scores everything with the wrong prompt format.
+  # First start downloads the fp16 weights (~8 GB) into hf-cache/.
+  reranker-qwen:
+    image: vllm/vllm-openai:v0.31.0
+    container_name: humbelchat-reranker-qwen
+    restart: unless-stopped
+    volumes:
+      - ./hf-cache:/root/.cache/huggingface   # shared HF cache (bot uses /models/hf)
+      - ./deploy/qwen3_reranker.jinja:/templates/qwen3_reranker.jinja:ro
+    command:
+      - serve
+      - Qwen/Qwen3-Reranker-4B
+      - --quantization
+      - bitsandbytes
+      - --hf_overrides
+      - '{"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
+      - --chat-template
+      - /templates/qwen3_reranker.jinja
+      - --gpu-memory-utilization
+      - "0.5"
+      - --max-model-len
+      - "2048"
     deploy:
       resources:
         reservations:
