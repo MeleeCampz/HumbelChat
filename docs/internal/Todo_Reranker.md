@@ -190,6 +190,16 @@ passes it). Verified against v0.31.0 sources: `RerankRequest` accepts
 `{query, documents, instruction}` (`model` is optional), so the bot's jina
 payload was already correct.
 
+**Gotcha #3 (live crash 2026-10-15/16):** with `--gpu-memory-utilization 0.5`
+the engine init died with `ValueError: ... 0.28 GiB KV cache is needed, which
+is larger than the available KV cache memory (0.06 GiB)`. The INT4 weights +
+Marlin kernels loaded fine — the card is simply SHARED with the Ollama
+embedder, and vLLM subtracts other processes' VRAM from its 50% budget.
+Fix: `--gpu-memory-utilization 0.7` (plenty of KV headroom for 32-pair rerank
+batches, still leaves room for the embedder) +
+`CUDA_DEVICE_ORDER=PCI_BUS_ID` (host has two different GPUs; vLLM warns that
+device "1" is otherwise not guaranteed to be the PCI-bus second card).
+
 **Debugging from the dev sandbox (2026-10-16):** the sandbox can reach
 *host-bound* ports via `http://host.docker.internal:<port>` (the Unsloth/LM
 Studio backend on :8888 works with `INFER_API_KEY`), but compose-internal

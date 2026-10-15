@@ -96,6 +96,11 @@ services:
     image: vllm/vllm-openai:v0.31.0
     container_name: humbelchat-reranker-qwen
     restart: unless-stopped
+    environment:
+      # Deterministic device indexing: the host has two different GPUs (4070 Ti
+      # SUPER + 5070 Ti), and vLLM warns that without this, device "1" is not
+      # guaranteed to be the PCI-bus second card.
+      - CUDA_DEVICE_ORDER=PCI_BUS_ID
     # Debug access for the dev sandbox (reaches it via host.docker.internal:8000).
     # Loopback-only on purpose: vLLM's OpenAI server has NO auth, so this must
     # never be bound to 0.0.0.0 / the LAN.
@@ -122,8 +127,15 @@ services:
       - '{"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
       - --chat-template
       - /templates/qwen3_reranker.jinja
+      # 0.7 (not 0.5): this card is SHARED with the Ollama embedder, and vLLM
+      # subtracts other processes' VRAM from its budget. At 0.5 the INT4 weights
+      # (~3 GiB) + CUDA graphs (0.7 GiB) + the resident embedder left only
+      # 0.06 GiB for KV cache — below the 0.28 GiB minimum for max_model_len
+      # 2048, so engine init failed with a ValueError. 0.7 leaves ~7 GiB of KV
+      # headroom (a 32-pair rerank batch can hold several GiB of KV at once)
+      # while still leaving room for the embedder on the shared card.
       - --gpu-memory-utilization
-      - "0.5"
+      - "0.7"
       - --max-model-len
       - "2048"
     deploy:
