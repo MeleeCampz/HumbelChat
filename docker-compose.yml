@@ -103,8 +103,14 @@ services:
     # subcommand is baked in, so `command` must start with the model name.
     # (Older images used ENTRYPOINT ["vllm"]; a leading `serve` here makes the
     # container crash-loop with "unrecognized arguments: <model id>".)
+    # --runner pooling is REQUIRED: the seq-cls architecture only exists via
+    # hf_overrides (it's not in vLLM's registry), so `--runner auto` falls back
+    # to "generate" and the /rerank scoring endpoint 400s. Matches vLLM's own
+    # qwen3_reranker_online.py example.
     command:
       - boboliu/Qwen3-Reranker-4B-W4A16-G128
+      - --runner
+      - pooling
       - --quantization
       - compressed-tensors
       - --hf_overrides
