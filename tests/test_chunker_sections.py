@@ -67,3 +67,63 @@ class TestPerSectionChunking:
         chunks = Chunker._split_by_headers(body, "spells.md", "spells.md")
         # The preamble is attached to the first spell's chunk, not emitted as an orphan.
         assert "FirstSpell" in chunks[0].content and "Intro line" in chunks[0].content
+
+
+class TestParentHeaderInheritance:
+    """Nested sections carry their parent header chain in ``section_path``.
+
+    Regression: session notes split a trailing "## Notizen und offene Fäden"
+    section into tiny ### sub-chunks (Party / Quests / Lexikon …) that lost the
+    parent's context — the quest list became an unlabeled fragment that ranked
+    near zero on "offene Fäden" queries, so the newest session never got
+    attached and the bot answered campaign-state questions from stale sessions.
+    """
+
+    def test_nested_header_inherits_parent_path(self):
+        body = (
+            "## Notizen und offene Fäden\n\n"
+            + _spell("Quests", body_len=120).replace("####", "###")
+            + "\n\n" + _spell("Party", body_len=120).replace("####", "###")
+        )
+        chunks = Chunker._split_by_headers(body, "notes.md", "notes.md")
+        paths = [c.section_path for c in chunks]
+        assert "Notizen und offene Fäden -> Quests" in paths
+        assert "Notizen und offene Fäden -> Party" in paths
+
+    def test_top_level_header_keeps_plain_name(self):
+        body = "## Offene Planung\n\n" + "x" * 150
+        chunks = Chunker._split_by_headers(body, "notes.md", "notes.md")
+        assert chunks[0].section_path == "Offene Planung"
+
+    def test_siblings_do_not_share_parent(self):
+        body = (
+            "## Alpha\n\n" + _spell("A1", body_len=120).replace("####", "###")
+            + "\n\n## Beta\n\n" + _spell("B1", body_len=120).replace("####", "###")
+        )
+        chunks = Chunker._split_by_headers(body, "notes.md", "notes.md")
+        paths = [c.section_path for c in chunks]
+        assert "Alpha -> A1" in paths
+        assert "Beta -> B1" in paths
+        # The Beta sub-section must NOT inherit Alpha's chain.
+        assert not any(p.startswith("Alpha") and "B1" in p for p in paths)
+
+    def test_deeper_nesting_builds_full_chain(self):
+        body = (
+            "# Session: Ab zur Hexe\n\n" + "x" * 100
+            + "\n\n## Notizen und offene Fäden\n\n"
+            + _spell("Quests", body_len=120).replace("####", "###")
+        )
+        chunks = Chunker._split_by_headers(body, "notes.md", "notes.md")
+        assert any(c.section_path == "Session: Ab zur Hexe -> Notizen und offene Fäden -> Quests"
+                   for c in chunks)
+
+    def test_folded_fragment_takes_parent_section_path(self):
+        tiny = "### Tiny\n\nNote."  # below MIN — folded into the next section
+        body = (
+            "## Notizen und offene Fäden\n\n"
+            + tiny + "\n\n" + _spell("Quests", body_len=200).replace("####", "###")
+        )
+        chunks = Chunker._split_by_headers(body, "notes.md", "notes.md")
+        quest = [c for c in chunks if "Note." in c.content]
+        assert len(quest) == 1
+        assert quest[0].section_path.endswith("-> Quests")

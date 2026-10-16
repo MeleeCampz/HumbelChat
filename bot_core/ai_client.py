@@ -42,6 +42,7 @@ from config.settings import (
     DEFAULT_MODEL,
     DEFAULT_SYSTEM_PROMPT,
     STAT_BLOCK_FORMAT_RULES,
+    SESSION_LOG_CHRONOLOGY_RULES,
     AI_TIMEOUT_S,
     CONTEXT_WINDOW,
     KB_PATH,
@@ -574,7 +575,9 @@ def _compose_system_prompt(char_obj: Character | None) -> str:
     world = _load_world_context()
     if world:
         base = f"{base}\n\n[Campaign world]\n{world}"
-    return base + STAT_BLOCK_FORMAT_RULES
+    # Session-chronology rules before the format appendix: both are global rules
+    # appended to every persona, formatting last so it stays closest to the reply.
+    return base + SESSION_LOG_CHRONOLOGY_RULES + STAT_BLOCK_FORMAT_RULES
 
 
 def _session_field(session: object, key: str, default: Any = None) -> Any:

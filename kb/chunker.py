@@ -194,23 +194,37 @@ class Chunker:
         oversized section is hard-split to respect MAX_CHUNK_SIZE.
 
         Headers are split at every level (# through ######) so the finest meaningful
-        unit of structure is preserved.
+        unit of structure is preserved. Each chunk's ``section_path`` includes its
+        PARENT header chain ("Chapter -> Section") so nested sub-sections keep their
+        context in the display name used for retrieval and reranking.
         """
         # Step 1: Collect all header regions (each includes its header line + content until next header)
         headers = list(cls.HEADER_RE.finditer(content))
         if not headers:
             return []
 
-        raw_chunks: list[tuple[str, int]] = []  # (chunk text, size)
+        raw_chunks: list[tuple[str, int, str]] = []  # (chunk text, size, section path)
 
         preamble = content[: headers[0].start()].strip()
         if preamble:
-            raw_chunks.append((preamble, len(preamble)))
+            raw_chunks.append((preamble, len(preamble), "Preamble"))
+
+        # Heading stack for parent inheritance: a chunk under "### Quests" inside
+        # "## Notizen und offene Fäden" gets the path "Notizen und offene Fäden -> Quests"
+        # so sub-sections keep their parent's context in the display name (and thus in
+        # retrieval/rerank identity). Without this, small ### fragments are just an
+        # unlabeled bullet list and rank near zero on queries for the parent topic.
+        heading_stack: list[tuple[int, str]] = []
 
         for i, header_match in enumerate(headers):
             header_text = header_match.group(2).strip()
             level = len(header_match.group(1))
             prefix = "#" * level
+
+            while heading_stack and heading_stack[-1][0] >= level:
+                heading_stack.pop()
+            heading_stack.append((level, header_text))
+            section_path = " -> ".join(t for _, t in heading_stack)
 
             # Get content from this header to the next (or end of file)
             start = header_match.end()
@@ -222,7 +236,7 @@ class Chunker:
 
             # Full chunk including the header line itself
             full_chunk_text = f"{prefix} {header_text}\n{section_content}"
-            raw_chunks.append((full_chunk_text, len(full_chunk_text)))
+            raw_chunks.append((full_chunk_text, len(full_chunk_text), section_path))
 
         if not raw_chunks:
             return []
@@ -233,48 +247,48 @@ class Chunker:
         # previous one if they trail the document — so we never emit unusably small orphans.
         # A single section that is itself oversized is hard-split so no chunk exceeds
         # MAX_CHUNK_SIZE (the embedder context safety margin).
-        merged: list[str] = []
+        merged_texts: list[str] = []
+        merged_paths: list[str] = []
         pending_small: str = ""
+        pending_path: str = "Preamble"
 
-        for text, size in raw_chunks:
+        for text, size, path in raw_chunks:
             if size >= cls.MIN_CHUNK_SIZE:
                 pieces = cls._hard_split(text)
                 if pending_small:
+                    # Folded fragments take the REAL section's path — they are
+                    # subordinate to it, not the other way around.
                     pieces[0] = pending_small + "\n---\n" + pieces[0]
                     pending_small = ""
-                merged.extend(pieces)
+                merged_texts.extend(pieces)
+                merged_paths.extend([path] * len(pieces))
             else:
+                if not pending_small:
+                    pending_path = path
                 pending_small = (pending_small + "\n---\n" + text) if pending_small else text
 
         # Flush trailing tiny fragments: attach to the last real chunk, or emit alone.
         if pending_small:
-            if merged:
-                merged[-1] = merged[-1] + "\n---\n" + pending_small
+            if merged_texts:
+                merged_texts[-1] = merged_texts[-1] + "\n---\n" + pending_small
             else:
-                merged.append(pending_small)
+                merged_texts.append(pending_small)
+                merged_paths.append(pending_path)
 
-        if not merged:
+        if not merged_texts:
             return []
 
-        logger.debug("Header split produced %d chunk(s)", len(merged))
+        logger.debug("Header split produced %d chunk(s)", len(merged_texts))
 
-        # Step 3: Convert to ChunkInfo objects
+        # Step 3: Convert to ChunkInfo objects (section_path carried from step 1,
+        # so nested sections include their parent header chain).
         result: list[ChunkInfo] = []
-        for idx, section_text in enumerate(merged):
-            # Extract the primary header text for section_path
-            first_header = re.match(r"^(#{1,6})\s+(.+)$", section_text.strip(), re.MULTILINE)
-            if first_header:
-                section_path = first_header.group(2).strip()
-            elif not section_text.lstrip().startswith("#"):
-                section_path = "Preamble"
-            else:
-                section_path = f"Section {idx + 1}"
-
+        for idx, section_text in enumerate(merged_texts):
             result.append(
                 ChunkInfo(
                     display_name=display_name,
                     source_file=source_file,
-                    section_path=section_path,
+                    section_path=merged_paths[idx],
                     content=section_text.strip(),
                     header_hash=cls._hash(section_text),
                 )
