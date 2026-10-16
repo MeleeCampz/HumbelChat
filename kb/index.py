@@ -102,7 +102,7 @@ CREATE TABLE IF NOT EXISTS metadata (
 );
 """
 
-_SCHEMA_VERSION = "5"  # v4 file hash + v5 packed embeddings and model identity
+_SCHEMA_VERSION = "6"  # v4 file hash + v5 packed embeddings/model identity + v6 parent-header section paths
 
 
 class _CacheRow(TypedDict):

@@ -420,7 +420,9 @@ def test_compose_system_prompt_appends_stat_block_rules(monkeypatch, tmp_path):
     assert "```" in out  # stat blocks are narrow fenced (monospace) tables
     assert "one entry per line" in out.lower()  # comparisons stay fence-free
     assert "NO header row is needed" in out or "no header row is needed" in out
-    assert out == C().system_prompt + A.STAT_BLOCK_FORMAT_RULES  # byte-exact append
+    # Byte-exact append: persona → session-chronology rules → stat-block rules.
+    assert out == (C().system_prompt + A.SESSION_LOG_CHRONOLOGY_RULES
+                   + A.STAT_BLOCK_FORMAT_RULES)
 
     class Bare:  # no system_prompt attribute at all
         pass
@@ -463,7 +465,8 @@ class TestWorldContext:
             system_prompt = "You are Marvin."
 
         assert A._compose_system_prompt(C()) == \
-            C().system_prompt + A.STAT_BLOCK_FORMAT_RULES
+            (C().system_prompt + A.SESSION_LOG_CHRONOLOGY_RULES
+             + A.STAT_BLOCK_FORMAT_RULES)
 
     def test_blank_file_disables_block(self, monkeypatch, tmp_path):
         from bot_core import ai_client as A

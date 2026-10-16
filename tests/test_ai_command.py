@@ -283,11 +283,13 @@ class TestExplicitCharacterPersona:
         kwargs = client.chat.completions.create.await_args.kwargs
         assert kwargs["model"] == "assistant-model"
         # The persona is the base of the system prompt; the global
-        # <stat-block-format> appendix (settings.STAT_BLOCK_FORMAT_RULES) is
-        # added to EVERY character and must not break exact-match tests.
+        # <stat-block-format> appendix (settings.STAT_BLOCK_FORMAT_RULES) and
+        # the <campaign-session-logs> chronology rules are added to EVERY
+        # character and must not break exact-match tests.
         sys_prompt = kwargs["messages"][0]["content"]
         assert sys_prompt.startswith("ASSISTANT PROMPT")
         assert "<stat-block-format>" in sys_prompt
+        assert "<campaign-session-logs>" in sys_prompt
         assert kwargs["temperature"] == 0.9
         assert kwargs["max_tokens"] == 400
 
