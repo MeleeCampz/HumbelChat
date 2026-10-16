@@ -107,6 +107,43 @@ Expansions:
 
     # ── Rewrite Logic ──────────────────────────────────────────────────
 
+    # ── Load-state probe ────────────────────────────────────────────────
+
+    async def model_is_loaded(self) -> bool | None:
+        """Is the rewrite target model currently resident on the backend?
+
+        Backends that expose load state (LM Studio / Unsloth Studio: ``GET
+        /v1/models`` entries carry a ``loaded`` flag) let callers distinguish
+        "model cold — this call will pay the weight-load cost" from "model warm
+        — a slow call is a real stall".  Returns ``None`` when the state is
+        unknown (no client/slug, request failure, or a backend without the
+        field); callers must fall back to default behaviour in that case.
+        """
+        if not self._client:
+            return None
+        slug = self.model_slug
+        if not slug:
+            from config.settings import DEFAULT_MODEL
+            slug = DEFAULT_MODEL or ""
+        if not slug:
+            return None
+        try:
+            import httpx
+
+            base = str(self._client.base_url).rstrip("/")
+            async with httpx.AsyncClient(timeout=5) as hc:
+                r = await hc.get(
+                    f"{base}/models",
+                    headers={"Authorization": f"Bearer {self._client.api_key}"},
+                )
+                r.raise_for_status()
+            for entry in r.json().get("data", []):
+                if entry.get("id") == slug and isinstance(entry.get("loaded"), bool):
+                    return entry["loaded"]
+        except Exception:  # noqa: BLE001 — probe is best-effort by design
+            pass
+        return None
+
     async def _rewrite(self, original_query: str) -> list[str]:
         """Generate expansions via LLM call to the configured backend."""
         if not self._client:

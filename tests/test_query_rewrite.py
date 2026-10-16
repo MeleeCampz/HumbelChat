@@ -152,6 +152,8 @@ class TestLowConfidenceRewrite:
 
         rw = MagicMock()
         rw.expand = AsyncMock(side_effect=fake_expand)
+        # Load state unknown → tight warm budget (pre-2026-10-16 behaviour).
+        rw.model_is_loaded = AsyncMock(return_value=None)
         return patch("kb.query_rewriter.create_query_rewriter", return_value=rw), rw
 
     @pytest.mark.asyncio
@@ -483,6 +485,116 @@ class TestRewriterPromptMechanics:
         assert "preserve the SPECIFIC mechanics" in t
         assert "trigger condition" in t
         assert "its own expansion line" in t
+
+
+# ─────────── load-state-aware rewrite budget (2026-10-16) ───────────
+# A COLD chat model pays a ~30-50 s weight load on the first call — which the
+# main completion would pay anyway. The rewriter probes /v1/models (LM Studio
+# ``loaded`` flag) and _llm_expansions extends the budget only in that case,
+# so warm stalls still fail fast at RAG_REWRITE_BUDGET_SECONDS.
+
+def _fake_openai_client(base_url="http://fake/v1/"):
+    c = MagicMock()
+    c.base_url = base_url
+    c.api_key = "test-key"
+    return c
+
+
+def _fake_httpx_cls(payload=None, exc=None):
+    """httpx.AsyncClient replacement returning *payload* (or raising *exc*)."""
+    resp = MagicMock()
+    resp.json.return_value = payload if payload is not None else {"data": []}
+    resp.raise_for_status = MagicMock()
+    client = MagicMock()
+    client.get = AsyncMock(side_effect=exc) if exc else AsyncMock(return_value=resp)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+    return MagicMock(return_value=client)
+
+
+class TestModelIsLoaded:
+    async def test_parses_loaded_true(self):
+        from unittest.mock import patch
+
+        from kb.query_rewriter import QueryRewriter
+
+        rw = QueryRewriter(client=_fake_openai_client(), model_slug="m:q4")
+        payload = {"data": [{"id": "other", "loaded": True},
+                            {"id": "m:q4", "loaded": True}]}
+        with patch("httpx.AsyncClient", _fake_httpx_cls(payload)):
+            assert await rw.model_is_loaded() is True
+
+    async def test_parses_loaded_false(self):
+        from unittest.mock import patch
+
+        from kb.query_rewriter import QueryRewriter
+
+        rw = QueryRewriter(client=_fake_openai_client(), model_slug="m:q4")
+        with patch("httpx.AsyncClient", _fake_httpx_cls({"data": [{"id": "m:q4", "loaded": False}]})):
+            assert await rw.model_is_loaded() is False
+
+    async def test_unknown_when_entry_missing_or_field_absent(self):
+        from unittest.mock import patch
+
+        from kb.query_rewriter import QueryRewriter
+
+        rw = QueryRewriter(client=_fake_openai_client(), model_slug="m:q4")
+        with patch("httpx.AsyncClient", _fake_httpx_cls({"data": [{"id": "other"}]})):
+            assert await rw.model_is_loaded() is None
+        with patch("httpx.AsyncClient", _fake_httpx_cls({"data": [{"id": "m:q4"}]})):
+            assert await rw.model_is_loaded() is None  # no loaded field (older backend)
+
+    async def test_unknown_on_request_error_or_no_client(self):
+        from unittest.mock import patch
+
+        from kb.query_rewriter import QueryRewriter
+
+        rw = QueryRewriter(client=_fake_openai_client(), model_slug="m:q4")
+        with patch("httpx.AsyncClient", _fake_httpx_cls(exc=OSError("down"))):
+            assert await rw.model_is_loaded() is None
+        assert await QueryRewriter(client=None, model_slug="m").model_is_loaded() is None
+
+
+async def _llm_expansions_with_fake(loaded_state: bool | None, sleep_s: float) -> list[str]:
+    """Drive kb.retrievers._llm_expansions with a fake rewriter whose expand()
+    takes *sleep_s*; budgets pinned to warm=0.1 s / cold=0.5 s."""
+    import config.settings as settings
+    from kb import retrievers
+
+    class FakeRewriter:
+        def __init__(self):
+            self.probed = False
+
+        async def model_is_loaded(self):
+            self.probed = True
+            return loaded_state
+
+        async def expand(self, q):
+            await asyncio.sleep(sleep_s)
+            return [q, "expanded-term"]
+
+    fake = FakeRewriter()
+    with patch.object(settings, "RAG_QUERY_REWRITER", True), \
+         patch.object(settings, "RAG_REWRITE_BUDGET_SECONDS", 0.1), \
+         patch.object(settings, "RAG_REWRITE_LOAD_BUDGET_SECONDS", 0.5), \
+         patch("kb.query_rewriter.create_query_rewriter", return_value=fake):
+        return await retrievers._llm_expansions("original query")
+
+
+class TestLoadAwareBudget:
+    async def test_cold_model_gets_extended_budget(self):
+        # expand takes 0.3 s: exceeds the 0.1 s warm budget, fits the 0.5 s
+        # load budget — only a cold-model probe can let it succeed.
+        out = await _llm_expansions_with_fake(loaded_state=False, sleep_s=0.3)
+        assert out == ["expanded-term"]
+
+    async def test_warm_model_fails_fast(self):
+        out = await _llm_expansions_with_fake(loaded_state=True, sleep_s=0.3)
+        assert out == []  # killed at the tight warm budget
+
+    async def test_unknown_state_keeps_warm_budget(self):
+        out = await _llm_expansions_with_fake(loaded_state=None, sleep_s=0.3)
+        assert out == []  # no extension without a positive cold signal
 
 
 if __name__ == "__main__":

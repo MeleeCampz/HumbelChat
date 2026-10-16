@@ -361,9 +361,25 @@ async def _llm_expansions(query: str, rewrite_model: str = "") -> list[str]:
         # local backend a different slug would either fail or evict the loaded
         # weights.  Empty string = rewriter falls back to DEFAULT_MODEL.
         rewriter = create_query_rewriter(model_slug=rewrite_model)
-        expanded = await asyncio.wait_for(
-            rewriter.expand(query), timeout=RAG_REWRITE_BUDGET_SECONDS
-        )
+
+        # Load-state-aware budget (2026-10-16): when the backend reports the
+        # chat model as NOT resident, this call will pay the weight-load cost
+        # (~30-50 s on :8888) — which the main completion would pay anyway.
+        # Extend the budget so the load happens DURING this concurrent call and
+        # the expansions survive; when warm (or state unknown), keep the tight
+        # budget so a genuinely stalled call fails fast.
+        budget = RAG_REWRITE_BUDGET_SECONDS
+        try:
+            loaded = await rewriter.model_is_loaded()
+        except Exception:  # noqa: BLE001 — the probe is best-effort; never break the rewrite path
+            loaded = None
+        if loaded is False:
+            from config.settings import RAG_REWRITE_LOAD_BUDGET_SECONDS
+            budget = max(budget, RAG_REWRITE_LOAD_BUDGET_SECONDS)
+            logger.info(
+                "Chat model not loaded — extending rewrite budget to %ds so the "
+                "load happens during this call", budget)
+        expanded = await asyncio.wait_for(rewriter.expand(query), timeout=budget)
         # expand() returns [original, *expansions] — drop the original.
         return [e for e in expanded[1:] if e and e.strip()]
     except Exception as exc:  # noqa: BLE001 — rewrite is a pure enhancement
