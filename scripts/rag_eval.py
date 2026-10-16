@@ -36,6 +36,14 @@ from pathlib import Path
 # (query, acceptable file stems — a hit = ANY of them attached).
 # Mirrors scripts/rag_probe_after2.py QUERIES.
 QUERIES: list[tuple[str, list[str]]] = [
+    # ── Torture case 0 (DE): property-specific item lookup.
+    #    Canonical cross-lingual regression case — see
+    #    docs/internal/RAG_POSTMORTEM_2026-10-15_TQ.md. The stealth-miss
+    #    property only exists in the Trickster's Quiver entry; near-duplicate
+    #    stealth items (Cloak of Elvenkind etc.) must not crowd it out. ──
+    ("Gibt es ein Item dass mir hilft nicht aufgedeckt zu werden, wenn ich aus "
+     "Stealth heraus einen Fernkampfangriff mache?",
+     ["The Griffon's Saddlebag (part 2 of 3).md"]),
     # ── The real failing query + armor variants (DE) ──
     ("Gib mir die Stat block vons verschiedneen Rüstungen", ["equipment.md"]),
     ("Was ist die Rüstungsklasse einer Kettenrüstung?", ["equipment.md"]),
