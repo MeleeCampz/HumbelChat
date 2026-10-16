@@ -284,13 +284,23 @@ class Chunker:
         # so nested sections include their parent header chain).
         result: list[ChunkInfo] = []
         for idx, section_text in enumerate(merged_texts):
+            path = merged_paths[idx]
+            content = section_text.strip()
+            if " -> " in path:
+                # Nested section: prepend the parent chain to the CONTENT itself.
+                # Every scoring path (dense embedding, BM25, cross-encoder rerank)
+                # sees `content`, not the display name — without this a tiny
+                # "### Quests" fragment stays an unlabeled bullet list that ranks
+                # near zero on queries for the parent topic. The breadcrumb also
+                # tells the LLM which session/section an attached fragment came from.
+                content = f"{path}\n{content}"
             result.append(
                 ChunkInfo(
                     display_name=display_name,
                     source_file=source_file,
-                    section_path=merged_paths[idx],
-                    content=section_text.strip(),
-                    header_hash=cls._hash(section_text),
+                    section_path=path,
+                    content=content,
+                    header_hash=cls._hash(content),
                 )
             )
         return result

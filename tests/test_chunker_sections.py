@@ -127,3 +127,21 @@ class TestParentHeaderInheritance:
         quest = [c for c in chunks if "Note." in c.content]
         assert len(quest) == 1
         assert quest[0].section_path.endswith("-> Quests")
+
+    def test_nested_content_carries_breadcrumb(self):
+        # All scoring paths (embedding / BM25 / rerank) see `content`, not the
+        # display name — nested chunks must carry the parent chain INSIDE the
+        # content or the inheritance never affects retrieval.
+        body = (
+            "## Notizen und offene Fäden\n\n"
+            + _spell("Quests", body_len=120).replace("####", "###")
+        )
+        chunks = Chunker._split_by_headers(body, "notes.md", "notes.md")
+        quest = [c for c in chunks if "Quests" in c.section_path][0]
+        assert quest.content.startswith("Notizen und offene Fäden -> Quests\n### Quests")
+
+    def test_top_level_content_has_no_breadcrumb(self):
+        body = "## Offene Planung\n\n" + "x" * 150
+        chunks = Chunker._split_by_headers(body, "notes.md", "notes.md")
+        # No breadcrumb for flat sections — content is just header + body.
+        assert chunks[0].content == f"## Offene Planung\n{'x' * 150}"
