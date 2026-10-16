@@ -646,8 +646,18 @@ RAG_ATTACH_FLOOR: float = _safe_float(os.getenv("RAG_ATTACH_FLOOR"), 0.50)
 # reply paths that re-deliver as multi-message chunks) are simpler with the
 # proven non-streaming path, so it defaults to off.
 AI_STREAM: bool = _safe_bool(os.getenv("AI_STREAM"), True)
-# Wall-clock budget (seconds) for the LLM rewrite call itself.
+# Wall-clock budget (seconds) for the LLM rewrite call itself — applies when
+# the chat model is already resident on the backend (or its load state is
+# unknown). Keep this tight: a slow WARM call is a real stall (e.g. thinking-
+# mode leakage) and failing fast beats dragging every answer.
 RAG_REWRITE_BUDGET_SECONDS: int = _safe_int(os.getenv("RAG_REWRITE_BUDGET_SECONDS"), 10)
+# Extended rewrite budget used ONLY when the backend reports the chat model as
+# not loaded (LM Studio /v1/models ``loaded=false``): the first call pays the
+# weight-load cost (~30-50 s on :8888), which the main completion would pay
+# anyway — so let the concurrent rewrite call absorb the load and keep the
+# expansions instead of failing at the tight warm budget (2026-10-16).
+RAG_REWRITE_LOAD_BUDGET_SECONDS: int = _safe_int(
+    os.getenv("RAG_REWRITE_LOAD_BUDGET_SECONDS"), 90)
 
 # ════════════════════════════════════
 #  INPUT VALIDATION
