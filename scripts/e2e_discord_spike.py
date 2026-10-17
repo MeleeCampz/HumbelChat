@@ -25,7 +25,7 @@ Environment (tokens come from .env automatically):
                        (falls back to DISCORD_BOT_TOKEN — which the target
                        bot will ignore, so you'll get "no reply")
     E2E_CHANNEL_ID     target channel id (overrides name discovery)
-    E2E_CHANNEL_NAME   channel to discover by name (default: "bottesting")
+    E2E_CHANNEL_NAME   channel to discover by name (default: "private-bot")
     E2E_TIMEOUT        seconds to wait for the bot's reply (default 120)
 
 Exit codes: 0 = bot replied, 1 = no reply within timeout, 2 = setup/HTTP error.
@@ -82,7 +82,7 @@ def resolve_channel(cli: Client, guild_id: int) -> tuple[int, str]:
     env_id = os.environ.get("E2E_CHANNEL_ID")
     if env_id:
         return int(env_id), f"(id {env_id})"
-    want = os.environ.get("E2E_CHANNEL_NAME", "bottesting").lower()
+    want = os.environ.get("E2E_CHANNEL_NAME", "private-bot").lower()
     channels = cli.get(f"/guilds/{guild_id}/channels")
     matches = [c for c in channels if str(c["type"]) == "0" and c["name"].lower() == want]
     if not matches:
