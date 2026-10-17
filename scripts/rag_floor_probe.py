@@ -31,6 +31,12 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# The bot's main.py loads .env; standalone scripts must do it themselves or
+# INFER_URL/INFER_API_KEY (rewrite LLM) silently fall back to defaults.
+from dotenv import load_dotenv  # noqa: E402
+
+load_dotenv(REPO / ".env")
+
 from rag_eval import QUERIES, _default_kb_path, stem_of  # noqa: E402
 
 
