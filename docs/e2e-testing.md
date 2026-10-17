@@ -34,7 +34,7 @@ docker compose exec -T bot python scripts/e2e_emulate.py /character action=list
 ## 2. Real Discord driver (`scripts/e2e_discord_spike.py`)
 
 Sends REAL traffic to the live bot over the Discord REST API and polls for
-its reply in a channel (default `#bottesting`). Runs from anywhere that can
+its reply in a channel (default `#private-bot`). Runs from anywhere that can
 reach discord.com — including this dev sandbox (no Docker involved).
 
 ### Prefix mode (the working real-E2E path)
@@ -76,7 +76,7 @@ genuine client-side invocations (or prefix messages from a non-bot author) do.
 | Var | Meaning |
 | --- | --- |
 | `E2E_CHANNEL_ID` | target channel id (overrides name discovery) |
-| `E2E_CHANNEL_NAME` | channel to discover by name (default `bottesting`) |
+| `E2E_CHANNEL_NAME` | channel to discover by name (default `private-bot`) |
 | `E2E_TIMEOUT` | seconds to wait for the bot's reply / command run |
 | `E2E_DRIVER_TOKEN` | second bot account token for prefix mode |
 | `E2E_GUILD_ID`, `E2E_CHANNEL_ID` (harness) | fake ids for the mock interaction |
