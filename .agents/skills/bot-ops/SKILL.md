@@ -5,6 +5,19 @@ description: Operate the Discord bot — production via docker compose, local de
 
 # Bot operations
 
+## ⚠️ Sandbox limitation (read first)
+
+If you are running inside the dev sandbox: its Docker daemon is **NOT the
+host's Docker Desktop**. The live containers (`humbelchat-bot`, rerankers) are
+invisible here — `docker compose ps` / `docker cp` / starting or stopping the
+bot from the sandbox WILL fail or hit the wrong daemon. Do not try to manage
+the production container from the sandbox.
+
+What DOES work from the sandbox: reading `logs/` and `data/` (bind-mounted),
+and E2E-testing the live bot over the Discord REST API — see
+`docs/e2e-testing.md` (`scripts/e2e_discord_spike.py`). Anything requiring
+`docker compose …` must be run by the user on the host.
+
 Two ways the bot runs — **never both at once** (same Discord token, shared `data/`):
 
 - **Production:** a Docker container from this repo's checkout (`docker-compose.yml`).
