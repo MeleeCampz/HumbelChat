@@ -93,6 +93,14 @@ sandbox (`/ai` full turns worked, ~55 s each). Caveats:
   overwrite the production index — **back up the DB first** if you do this,
   or just run the harness inside the container (production env vars, no
   override needed).
+- **Standalone processes rebuild on EVERY start:** the vector store is loaded
+  once per process. A standalone script (harness/probe) that can't reach the
+  qwen embedder falls back to local bge-m3 for the QUERY vector → dim mismatch
+  vs the stored index → a full reindex attempt on every invocation (tens of
+  minutes each, or an endless wait). Production is unaffected (single store,
+  loaded at bot startup; if that load fails it degrades to keyword search).
+  For long standalone RAG experiments, copy `data/knowledge` elsewhere and run
+  with `--kb-path` / `KB_PATH` pointing at the copy so rebuilds hit the copy.
 - Retrieval then degrades to keyword fallback (observed: German proper-noun
   queries attach session notes instead of the matching rulebook chapters —
   fine for plumbing verification, not for retrieval-quality testing).
