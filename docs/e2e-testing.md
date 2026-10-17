@@ -77,15 +77,22 @@ The harness can also run against the bind-mounted repo from any machine that
 has the deps installed — no Docker needed. Verified 2026-10-17 from the dev
 sandbox (`/ai` full turns worked, ~55 s each). Caveats:
 
-- **Embeddings:** the qwen3 embedder is loopback-only on the host and NOT
-  reachable from the sandbox, so run with `EMBED_BACKEND=local RERANK_ENABLED=0`.
-  The stored vector index was built with `qwen3-embedding:4b`; with a local
-  bge-m3 query embedder the mismatch guard REJECTS it and attempts a rebuild
-  against the live `data/knowledge/.vector_index_cache/vector_index.db`. A
-  failed rebuild leaves the file untouched (verified), but a *successful* one
-  would overwrite the production index — **back up the DB first** if you do
-  this, or just run the harness inside the container (production env vars,
-  no override needed).
+- **Embeddings/reranker ARE reachable over IPv4** (verified 2026-10-17):
+  `EMBED_URL=http://host.docker.internal:11435/v1` serves
+  `qwen3-embedding:4b` and `RERANK_API_BASE=http://host.docker.internal:8000`
+  is the Qwen reranker — full production-equivalent runs work from the sandbox
+  (real vector index + rerank, no fallback). Plain `curl http://...` may fail
+  with `[::1] refused` because dialing tries IPv6 first; force IPv4
+  (`curl -4`) or let the HTTP client retry. Under heavy GPU load the embedder
+  can hang — set `EMBED_TIMEOUT=10` so batches fall back to local quickly.
+- **Local-fallback caveat:** if you DO run with `EMBED_BACKEND=local`, the
+  stored vector index was built with `qwen3-embedding:4b`; with a local bge-m3
+  query embedder the mismatch guard REJECTS it and attempts a rebuild against
+  the live `data/knowledge/.vector_index_cache/vector_index.db`. A failed
+  rebuild leaves the file untouched (verified), but a *successful* one would
+  overwrite the production index — **back up the DB first** if you do this,
+  or just run the harness inside the container (production env vars, no
+  override needed).
 - Retrieval then degrades to keyword fallback (observed: German proper-noun
   queries attach session notes instead of the matching rulebook chapters —
   fine for plumbing verification, not for retrieval-quality testing).
