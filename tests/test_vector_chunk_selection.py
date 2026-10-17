@@ -199,6 +199,46 @@ class TestAttachFloor:
         assert docs["a.md"] == "one"
 
 
+class TestRerankGateSource:
+    """#43: gate the attach floor on Qwen rerank scores (gate_scores)."""
+
+    def test_gate_scores_take_precedence_over_dense(self):
+        ranked = _ranked(
+            ("spells.md [Fireball]", "fireball text", 0.95),   # rerank 0.95 -> keep
+            ("filler.md [Intro]", "fluff", 0.10),              # rerank 0.10 -> drop
+        )
+        # Deliberately INVERTED dense scores: the rerank gate must win.
+        dense_scores = {"spells.md [Fireball]": 0.2, "filler.md [Intro]": 0.9}
+        gate_scores = {"spells.md [Fireball]": 0.95, "filler.md [Intro]": 0.10}
+        docs = dict(select_ranked_chunks(
+            ranked, top_n=5, attach_min_score=0.35,
+            dense_scores=dense_scores, gate_scores=gate_scores,
+        ))
+        assert "fireball text" in docs.get("spells.md", "")
+        assert "filler.md" not in docs
+
+    def test_gate_scores_absent_chunk_is_kept(self):
+        # Lexical-only hit (no rerank score) survives the floor, as with dense.
+        ranked = _ranked(("equipment.md [Weapons]", "longsword +1d4", 0.3))
+        docs = dict(select_ranked_chunks(
+            ranked, top_n=5, attach_min_score=0.35,
+            dense_scores=None, gate_scores={},
+        ))
+        assert "longsword +1d4" in docs["equipment.md"]
+
+    def test_gate_scores_none_falls_back_to_dense(self):
+        ranked = _ranked(
+            ("a.md [A]", "one", 0.9),   # dense 0.8 -> keep
+            ("a.md [B]", "two", 0.8),   # dense 0.2 -> drop
+        )
+        dense_scores = {"a.md [A]": 0.8, "a.md [B]": 0.2}
+        docs = dict(select_ranked_chunks(
+            ranked, top_n=5, attach_min_score=0.5,
+            dense_scores=dense_scores, gate_scores=None,
+        ))
+        assert docs["a.md"] == "one"
+
+
 class TestRetrievalName:
     def test_basename_label_uses_source_path(self):
         doc = _DocEntry(
