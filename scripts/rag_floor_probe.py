@@ -45,7 +45,7 @@ class Capture:
 CAP = Capture()
 
 
-async def run(kb_path: Path, top_n: int) -> list[dict]:
+async def run(kb_path: Path, top_n: int, out_path: Path | None = None) -> list[dict]:
     import kb.retrievers as R
 
     original_select = R.select_ranked_chunks
@@ -67,13 +67,16 @@ async def run(kb_path: Path, top_n: int) -> list[dict]:
             try:
                 docs = await asyncio.wait_for(
                     retrieve_kb_documents(query, kb_path, strategy="vector", top_n=top_n),
-                    timeout=240,
+                    timeout=900,  # local CPU embedding fallback makes queries slow
                 )
             except (asyncio.TimeoutError, Exception) as exc:  # noqa: BLE001 — one bad query must not kill the probe
-                results.append({"query": query, "error": f"{type(exc).__name__}: {exc}"})
+                msg = f"{type(exc).__name__}: {exc}"
+                print(f"    ERROR {msg}", flush=True)
+                results.append({"query": query, "error": msg})
                 continue
             attached = [stem_of(n) for n, _c in docs]
             hit_pos = next((i for i, s in enumerate(attached) if s in expected), None)
+            print(f"    ok: hit={hit_pos is not None} attached={attached[:3]}", flush=True)
             # Candidate table: (name, rerank_score, relevant?) — top 8 only.
             cands = [
                 {"name": stem_of(n), "score": round(s, 4),
@@ -85,6 +88,13 @@ async def run(kb_path: Path, top_n: int) -> list[dict]:
                 "hit": hit_pos is not None, "hit_position": hit_pos,
                 "candidates": cands, "elapsed_ms": round((time.monotonic() - t0) * 1000),
             })
+            if out_path and (i + 1) % 5 == 0:  # periodic save — a crash must not lose hours
+                try:
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(out_path, "w", encoding="utf-8") as f:
+                        json.dump({"queries": results}, f, indent=2, ensure_ascii=False)
+                except OSError:
+                    pass
     finally:
         R.select_ranked_chunks = original_select
     return results
@@ -98,7 +108,8 @@ def sweep(results: list[dict], top_n: int) -> list[dict]:
     rows = []
     for floor_bps in range(0, 96, 5):
         floor = floor_bps / 100.0
-        n_hit = recall = {1: 0, 2: 0, 4: 0}
+        n_hit = 0
+        recall = {1: 0, 2: 0, 4: 0}
         n_ok = 0
         for r in results:
             if "error" in r or not r.get("candidates"):
@@ -137,7 +148,14 @@ def main() -> None:
 
     kb_path = args.kb_path or _default_kb_path()
     print(f"Floor probe — KB: {kb_path}  top_n={args.top_n}  queries={len(QUERIES)}")
-    results = asyncio.run(run(kb_path, args.top_n))
+    results = asyncio.run(run(kb_path, args.top_n, out_path=args.out or None))
+    if args.out:  # incremental save BEFORE the (bug-prone) analysis stage
+        try:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            with open(args.out, "w", encoding="utf-8") as f:
+                json.dump({"queries": results}, f, indent=2, ensure_ascii=False)
+        except OSError:
+            pass
 
     ok = [r for r in results if "error" not in r]
     baseline_hit = sum(r["hit"] for r in ok) / max(len(ok), 1)
