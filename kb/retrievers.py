@@ -198,6 +198,7 @@ def select_ranked_chunks(
     max_chars_per_file: int = MAX_CHARS_PER_FILE,
     attach_min_score: float = 0.0,
     dense_scores: dict[str, float] | None = None,
+    gate_scores: dict[str, float] | None = None,
     selected_names: list[str] | None = None,
 ) -> list[tuple[str, str]]:
     """Collapse ranked index chunks into per-file document entries.
@@ -209,14 +210,15 @@ def select_ranked_chunks(
     joined in rank order into one entry per file so downstream per-file
     budgets (``RAG_MAX_DOCS``) still apply.
 
-    ``attach_min_score`` + ``dense_scores`` implement an optional per-chunk
-    relevance gate. When ``attach_min_score > 0`` and *dense_scores* maps a
-    chunk name to its original DENSE cosine similarity, any ranked chunk whose
-    dense score is below the floor is skipped before it claims a slot. The
-    check runs BEFORE a file's bucket is opened, so a weak chunk can neither
-    consume a distinct-file slot nor leave an empty one behind. Chunks with no
-    dense score (pure lexical/BM25 hits) are always kept — exact-term matches
-    are valuable even when the embedding was lukewarm.
+    ``attach_min_score`` + a per-chunk score map implement an optional
+    relevance gate. The score map is *gate_scores* when given (e.g. Qwen3
+    rerank scores, #43), else *dense_scores* (original DENSE cosine). When
+    ``attach_min_score > 0`` and the map contains a chunk's name, any ranked
+    chunk whose score is below the floor is skipped before it claims a slot.
+    The check runs BEFORE a file's bucket is opened, so a weak chunk can
+    neither consume a distinct-file slot nor leave an empty one behind.
+    Chunks with no entry in the map (pure lexical/BM25 hits) are always kept
+    — exact-term matches are valuable even when the embedding was lukewarm.
 
     Works for any chunk shape — header-split sections as well as unstructured
     "Full Document" chunks (e.g. player session logs) — because it consumes
@@ -232,13 +234,15 @@ def select_ranked_chunks(
         if total_chunks >= top_n * max_chunks_per_file:
             break
         stem = name.split(" [")[0] if " [" in name else name
-        # Per-chunk relevance floor (opt-in): skip weak dense matches BEFORE
-        # opening a file bucket, so they can't waste a distinct-file slot.
-        # Lexical-only chunks (absent from dense_scores) always pass.
-        if attach_min_score > 0 and dense_scores is not None:
-            ds = dense_scores.get(name)
-            if ds is not None and ds < attach_min_score:
-                continue
+        # Per-chunk relevance floor (opt-in): skip weak matches BEFORE opening
+        # a file bucket, so they can't waste a distinct-file slot. Chunks
+        # absent from the score map (lexical-only hits) always pass.
+        if attach_min_score > 0:
+            score_map = gate_scores if gate_scores is not None else dense_scores
+            if score_map is not None:
+                s = score_map.get(name)
+                if s is not None and s < attach_min_score:
+                    continue
         bucket = per_file.get(stem)
         if bucket is None:
             # New file — only open it while distinct-file budget remains.
@@ -645,6 +649,7 @@ async def _retrieve_vector(
     # ── Cross-encoder rerank of the top candidates (quality boost) ─────────
     from kb.reranker import rerank, is_available as _rerank_available
     final_ranked = hybrid_ranked
+    rerank_gate: dict[str, float] | None = None  # #43: set when rerank runs
     if _rerank_available():
         from config.settings import RERANK_TOP_K, RERANK_USE_EXPANSION
         cands = hybrid_ranked[:RERANK_TOP_K]  # (name, content, score)
@@ -676,14 +681,24 @@ async def _retrieve_vector(
         logger.info(
             "Reranked top %d candidate(s) against %d quer%s", len(final_ranked), len(rerank_queries), "y" if len(rerank_queries) == 1 else "ies",
         )
+        # #43: per-chunk rerank scores for the attach floor (used only when
+        # RAG_ATTACH_FLOOR_SOURCE=rerank). If BOTH rerank passes failed every
+        # score is 0.0 — treat that as "no gate" so the floor can't drop all.
+        rerank_gate = {
+            name_map[c]: s for c, s in merged_scores.items()
+            if name_map.get(c) and s > 0.0
+        } or None
 
-    from config.settings import RAG_MAX_CHUNKS_PER_FILE, RAG_ATTACH_FLOOR
+    from config.settings import RAG_MAX_CHUNKS_PER_FILE, RAG_ATTACH_FLOOR, RAG_ATTACH_FLOOR_SOURCE
+    # #43: gate the attach floor on Qwen rerank scores when opted in; the
+    # dense-source default keeps the historical behavior untouched.
+    gate = rerank_gate if RAG_ATTACH_FLOOR_SOURCE == "rerank" else None
     selected: list[str] = []
     docs = select_ranked_chunks(
         final_ranked, top_n=top_n,
         max_chunks_per_file=RAG_MAX_CHUNKS_PER_FILE,
         attach_min_score=RAG_ATTACH_FLOOR, dense_scores=dense_scores,
-        selected_names=selected,
+        gate_scores=gate, selected_names=selected,
     )
     if not docs and final_ranked:
         # Safety net: an over-aggressive floor must never yield an empty context.

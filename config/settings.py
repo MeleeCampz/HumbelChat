@@ -659,6 +659,17 @@ RAG_MAX_CHUNKS_PER_FILE: int = _safe_int(os.getenv("RAG_MAX_CHUNKS_PER_FILE"), 3
 # set to 0 to disable. A safety net in the retriever guarantees an over-aggressive
 # floor can never yield an empty context (it falls back to unfiltered selection).
 RAG_ATTACH_FLOOR: float = _safe_float(os.getenv("RAG_ATTACH_FLOOR"), 0.50)
+# RAG_ATTACH_FLOOR_SOURCE selects WHICH score the attach floor gates on (#43):
+#   "dense"  — original DENSE cosine similarity (historical default; safe for
+#              cross-lingual queries whose rerank scores are uncalibrated).
+#   "rerank" — the Qwen3-Reranker score of each candidate (only available when
+#              the reranker actually ran). Qwen's sigmoid scores carry real
+#              discriminative signal (measured DE relevant ≈0.95 vs irrelevant
+#              ≈0.10), so a floor on them stops junk padding far better than a
+#              floor on dense cosine — but the floor VALUE must be calibrated to
+#              Qwen's distribution (see scripts/rag_floor_probe.py).
+# Default "dense" = current production behavior until calibration is reviewed.
+RAG_ATTACH_FLOOR_SOURCE: str = os.getenv("RAG_ATTACH_FLOOR_SOURCE", "dense").strip().lower()
 
 # ── Streaming AI responses (P3 #24) ────────────────────────────────────────
 # When on, /ai streams the completion token-by-token and progressively edits a
