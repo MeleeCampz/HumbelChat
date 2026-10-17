@@ -28,6 +28,11 @@ Exit code: 0 = command completed and produced at least one output,
 NOTE: commands whose delivery path goes through ``bot_core.channel_delivery``
 REST fallbacks (e.g. /remind posting later) need a logged-in bot and will fail
 loudly here — this harness is for turn-based slash commands.
+
+WARNING: outside the container, if you override EMBED_BACKEND=local while the
+stored vector index was built with a different model, the mismatch guard may
+attempt to REBUILD the live index DB. Back up
+data/knowledge/.vector_index_cache/vector_index.db first (see docs/e2e-testing.md).
 """
 from __future__ import annotations
 
@@ -36,10 +41,17 @@ import asyncio
 import inspect
 import logging
 import os
+import pathlib
 import sys
 import time
 import types as _types
+import typing
 from typing import Any, Union, get_args, get_origin
+
+# Make the repo root importable regardless of cwd (script lives in scripts/).
+_REPO_ROOT = str(pathlib.Path(__file__).resolve().parent.parent)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 # Importing main builds the bot object and registers every tree command.
 # It does NOT connect to Discord (bot.run() only happens under __main__).
@@ -53,6 +65,27 @@ class _User:
         self.id = 999000001
         self.display_name = "e2e-harness"
         self.name = "e2e_harness"
+
+    def __str__(self) -> str:  # handlers log interaction.user directly
+        return f"e2e-harness#{self.id}"
+
+    __repr__ = __str__
+
+
+def _make_entry(kind: str, content: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a send() call into a recordable entry (embed= and embeds=)."""
+    entry: dict[str, Any] = {
+        "kind": kind,
+        # handlers often pass content=None with an embed — keep it falsy
+        "content": "" if content is None else str(content),
+        "ephemeral": kwargs.get("ephemeral", False),
+    }
+    embeds = list(kwargs.get("embeds") or [])
+    if kwargs.get("embed") is not None:  # singular embed= kwarg
+        embeds.insert(0, kwargs["embed"])
+    if embeds:
+        entry["embeds"] = [getattr(e, "to_dict", lambda: {"repr": repr(e)})() for e in embeds]
+    return entry
 
 
 class _Response:
@@ -69,18 +102,7 @@ class _Response:
 
     async def send_message(self, content: str = "", **kwargs: Any) -> None:
         self._done = True
-        self._record("response", content, kwargs)
-
-    def _record(self, kind: str, content: str, kwargs: dict[str, Any]) -> None:
-        entry: dict[str, Any] = {
-            "kind": kind,
-            "content": str(content),
-            "ephemeral": kwargs.get("ephemeral", False),
-        }
-        embeds = kwargs.get("embeds") or []
-        if embeds:
-            entry["embeds"] = [getattr(e, "to_dict", lambda: {"repr": repr(e)})() for e in embeds]
-        self._sink.append(entry)
+        self._sink.append(_make_entry("response", content, kwargs))
 
 
 class _Followup:
@@ -88,15 +110,7 @@ class _Followup:
         self._sink = sink
 
     async def send(self, content: str = "", **kwargs: Any) -> None:
-        entry: dict[str, Any] = {
-            "kind": "followup",
-            "content": str(content),
-            "ephemeral": kwargs.get("ephemeral", False),
-        }
-        embeds = kwargs.get("embeds") or []
-        if embeds:
-            entry["embeds"] = [getattr(e, "to_dict", lambda: {"repr": repr(e)})() for e in embeds]
-        self._sink.append(entry)
+        self._sink.append(_make_entry("followup", content, kwargs))
 
 
 class MockInteraction:
@@ -150,15 +164,22 @@ def _coerce(value: str, annotation: Any) -> Any:
 
 def _build_kwargs(callback: Any, opts: dict[str, str], ix: MockInteraction) -> dict[str, Any]:
     sig = inspect.signature(callback)
+    # main.py uses `from __future__ import annotations` — raw signatures carry
+    # STRING annotations; get_type_hints evaluates them against the module.
+    try:
+        hints = typing.get_type_hints(callback)
+    except Exception:  # pragma: no cover - exotic annotations fall back to str
+        hints = {}
     kwargs: dict[str, Any] = {"interaction": ix}
     for name, param in sig.parameters.items():
         if name == "interaction":
             continue
         if name in opts:
-            kwargs[name] = _coerce(opts[name], param.annotation)
+            kwargs[name] = _coerce(opts[name], hints.get(name, str))
         else:
             if param.default is inspect.Parameter.empty:
-                raise SystemExit(f"missing required option: {name}")
+                print(f"ERROR: missing required option: {name}", file=sys.stderr)
+                raise SystemExit(2)
     return kwargs
 
 
@@ -210,7 +231,7 @@ async def _run(command_name: str, opts: dict[str, str]) -> int:
     return 0
 
 
-def main() -> None:
+def cli() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("command", help='slash command name, e.g. "/ai" or "item_stats"')
     parser.add_argument(
@@ -232,4 +253,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # NB: named `cli`, not `main` — a top-level function called `main` would
+    # shadow the imported bot module (`import main`) inside this file.
+    cli()

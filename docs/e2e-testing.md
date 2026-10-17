@@ -71,6 +71,27 @@ activity; no log lines, no reply). Options cannot be carried this way either.
 Conclusion: REST-created command messages do not trigger interactions; only
 genuine client-side invocations (or prefix messages from a non-bot author) do.
 
+## Running the harness OUTSIDE the container (e.g. this dev sandbox)
+
+The harness can also run against the bind-mounted repo from any machine that
+has the deps installed — no Docker needed. Verified 2026-10-17 from the dev
+sandbox (`/ai` full turns worked, ~55 s each). Caveats:
+
+- **Embeddings:** the qwen3 embedder is loopback-only on the host and NOT
+  reachable from the sandbox, so run with `EMBED_BACKEND=local RERANK_ENABLED=0`.
+  The stored vector index was built with `qwen3-embedding:4b`; with a local
+  bge-m3 query embedder the mismatch guard REJECTS it and attempts a rebuild
+  against the live `data/knowledge/.vector_index_cache/vector_index.db`. A
+  failed rebuild leaves the file untouched (verified), but a *successful* one
+  would overwrite the production index — **back up the DB first** if you do
+  this, or just run the harness inside the container (production env vars,
+  no override needed).
+- Retrieval then degrades to keyword fallback (observed: German proper-noun
+  queries attach session notes instead of the matching rulebook chapters —
+  fine for plumbing verification, not for retrieval-quality testing).
+- History entries land under the fake channel id; clean up afterwards with
+  `/clear_history` through the harness.
+
 ## Environment variables (both tools)
 
 | Var | Meaning |
