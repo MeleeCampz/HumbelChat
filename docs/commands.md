@@ -6,7 +6,7 @@ The bot uses Discord slash commands by default, plus a legacy prefix command for
 
 All commands begin with `/`.
 
-**Visibility:** all commands post their output **publicly** in the channel, so every message is visible to everyone in the channel. The 13 non-recording commands were reviewed and set to public on 2026-08-29; the voice-recording commands (`/start_recording`, `/stop_recording`) and their background transcription follow-up were switched from ephemeral to public on 2026-09-04.
+**Visibility:** all commands post their output **publicly** in the channel, so every message is visible to everyone in the channel.
 
 ### `/ai`
 
@@ -182,7 +182,7 @@ Queue a reminder that is delivered when the **next** session starts (in the chan
 /session_notes [note: <text>] [file: <.txt/.md>]
 ```
 
-Append a timestamped note to the **current** session (requires an active session; notes are stored in the session file and re-indexed for RAG). Voice-channel transcripts from `/stop_recording` are added automatically this way when STT finishes.
+Append a timestamped note to the **current** session (requires an active session; notes are stored in the session file and re-indexed for RAG).
 
 **Adding a text document:** also accepts a **file** — a `.txt` or `.md` attachment — instead of (or in place of) the `note` text:
 
@@ -203,30 +203,12 @@ Show info about the **current** session — or the most recent ended session if 
 - session name and status (`current` / `last (ended)`), with start time, end time and duration for ended sessions;
 - the stored recap (truncated) when one exists;
 - all notes added to the session (the most recent 10 in full, long ones split across messages) plus the total count;
-- uploaded documents (`📎 Attachments`) and voice transcripts (`🎙️ Transcripts`), each listed with filename and size;
+- uploaded documents (`📎 Attachments`), plus any legacy voice transcripts (`🎙️ Transcripts` from sessions recorded before the voice feature was removed), each listed with filename and size;
 - the session folder name (`notes.md` is the single RAG document; raw files stay in the hidden folders).
-
-### Voice recording
-
-Full pipeline, output format, manifest schema, and troubleshooting: [Voice Recording](./voice-recording.md).
-
-### `/start_recording`
-
-Joins the voice channel you're currently in and starts capturing each participant's audio separately (per-speaker STT). You must be in a guild voice channel, and the bot needs **Connect** + **Speak** there. Each recording is written to its own `recordings/recording_YYYYMMDD-HHMMSS/` directory when you stop.
-
-### `/stop_recording`
-
-```
-/stop_recording [leave_channel: true] [transcribe: true]
-```
-
-Stops capturing, writes one WAV per speaker plus a `manifest.json`, and replies with a per-speaker summary and the attached manifest (visible to the whole channel). By default the bot leaves the voice channel afterwards.
-
-With `STT_ENABLED` on (default), each speaker's audio is then transcribed in the background via the backend's `/v1/audio/transcriptions` endpoint (`STT_MODEL`, e.g. `qwen3-asr-1.7b`) and a follow-up message with the transcript preview + attached `transcript.json` is posted when done. If a session is active, the finished transcript is also appended to its notes automatically — pinned to the session that was active when the recording stopped, even if it ends before STT finishes (`STT_ADD_TO_SESSION=0` in `.env` opts out). Set `transcribe: false` to skip STT for one recording, or `STT_ENABLED=0` in `.env` to disable it entirely.
 
 ### `/help`
 
-Shows a categorized overview of **all** available commands (AI & Chat, D&D Items, Knowledge Base, Sessions, Voice Recording, Utility, Maintenance). The listing is generated from the live command set, so it always matches what the bot actually has.
+Shows a categorized overview of **all** available commands (AI & Chat, D&D Items, Knowledge Base, Sessions, Utility, Maintenance). The listing is generated from the live command set, so it always matches what the bot actually has.
 
 With an argument — `/help <command>` — it shows a detail view for that one command: its description plus every option (type, required/default, and min–max where applicable).
 

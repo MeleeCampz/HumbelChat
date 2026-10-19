@@ -47,8 +47,6 @@ _CATEGORIES: dict[str, str] = {
     "remind_next_session": "Sessions",
     "session_notes": "Sessions",
     "session_info": "Sessions",
-    "start_recording": "Voice Recording",
-    "stop_recording": "Voice Recording",
     "remind": "Utility",
     "ocr": "Utility",
     "summarize": "Utility",

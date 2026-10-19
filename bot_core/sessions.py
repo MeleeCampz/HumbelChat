@@ -368,24 +368,6 @@ def _unique_path(directory: pathlib.Path, stem: str, ext: str) -> pathlib.Path:
     return directory / f"{stem}_{n}{ext}"
 
 
-def _next_transcript_name(directory: pathlib.Path) -> str:
-    """Next sequential transcript file name in *directory*.
-
-    Sequential (``transcript_01.md``, ``transcript_02.md", …) so the name is
-    stable, deterministic and reflects the transcript's position in the
-    session — not the (potentially misleading) completion timestamp.
-    """
-    best = 0
-    try:
-        for f in directory.iterdir():
-            m = re.match(r"^transcript_(\d+)\.md$", f.name)
-            if m:
-                best = max(best, int(m.group(1)))
-    except OSError:
-        pass
-    return f"transcript_{best + 1:02d}.md"
-
-
 def _session_docs(session: dict[str, Any], subdir: str) -> list[str]:
     """Names of standalone documents currently in one of the session's sub-folders."""
     d = _session_dir(session) / subdir
@@ -887,51 +869,6 @@ def _append_document_file(session: dict[str, Any], subdir: str, title: str,
     except OSError as e:
         log.warning("Failed to write session document %s: %s", path, e)
     return path
-
-
-def add_transcript(text: str, title: str = "",
-                   session: dict[str, Any] | None = None) -> tuple[dict[str, Any] | None, int]:
-    """Store a finished voice-channel transcript for a session.
-
-    Called from the STT background job after ``/stop_recording``.  The full
-    transcript is written as a raw ``.md`` file under the session's hidden
-    ``.transcripts/`` folder (out of RAG), and the combined ``notes.md`` is
-    re-rendered with the transcript's full text so it stays cleanly
-    searchable as part of the session's single RAG document.
-    The transcript shows up in ``/session_notes`` via its dot-dir listing.
-
-    *session* pins the target — normally the session that was active when the
-    recording stopped, which may have ended by the time transcription
-    finishes.  When omitted, the currently active session is used.
-
-    Returns ``(session, n_files)`` where ``n_files`` is 1 on success and 0
-    when the transcript is empty or no session is available.  Never raises —
-    STT delivery must not be blocked by note bookkeeping.
-    """
-    try:
-        if session is None:
-            session = get_current_session()
-        if session is None:
-            return None, 0
-        clean = str(text).strip()
-        if not clean:
-            return None, 0
-
-        header = (title.strip() or "Voice channel transcript")
-        directory = _session_dir(session) / _SUBDIR_TRANSCRIPTS
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / _next_transcript_name(directory)
-        path.write_text(f"# {header}\n\n{clean}\n", encoding="utf-8")
-
-        _write_session_file(session)
-        _index_session_paths(session)
-        _save()
-        log.info("Transcript saved for %s: %s (%d chars)",
-                 session.get("name"), path.name, len(clean))
-        return session, 1
-    except Exception as e:  # pragma: no cover - defensive
-        log.warning("Could not add transcript to session: %s", e)
-        return None, 0
 
 
 def add_document(text: str, title: str = "",

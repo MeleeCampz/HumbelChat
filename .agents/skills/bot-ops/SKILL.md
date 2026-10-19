@@ -29,9 +29,9 @@ The live bot runs as a single container from this repo's checkout
 (`C:\Repos\GitHub_Me\HumbelChat`), defined in `docker-compose.yml`. All runtime
 state is bind-mounted from the repo — nothing important lives inside the image:
 
-- `data/` — KB docs, `.vector_index_cache/vector_index.db`, recordings, sessions/reminders JSON
+- `data/` — KB docs, `.vector_index_cache/vector_index.db`, sessions/reminders JSON
 - `logs/` — `bot.log` (INFO) + `dev.log` (DEBUG), rotated 10 MB × 5
-- `hf-cache/` — HuggingFace model cache (bge-m3 ~2.2 GB, faster-whisper ~1.6 GB)
+- `hf-cache/` — HuggingFace model cache (bge-m3 ~2.2 GB)
 - `.env`, `characters.json` — config
 
 Full docs: `docs/docker.md`.
@@ -89,12 +89,12 @@ docker compose exec -T bot sh -c 'curl -sS -m 30 -o /dev/null -w "%{http_code}\n
 
 ### Docker gotchas
 
-- `.env` in Docker: don't set `KB_PATH` / `RECORDINGS_DIR` / `CHARACTERS_FILE`
+- `.env` in Docker: don't set `KB_PATH` / `CHARACTERS_FILE`
   to Windows paths — compose pins them to the bind mounts (`/app/...`).
 - `INFER_URL` uses `host.docker.internal` (Docker Desktop resolves it to the
   Windows host) or a LAN IP for remote backends.
-- First-ever start downloads models into `hf-cache/` (~4 GB) — slow boot once,
-  fast afterwards. Same for the first voice→STT transcription (whisper model).
+- First-ever start downloads models into `hf-cache/` (~2 GB) — slow boot once,
+  fast afterwards.
 - Bind mounts from the Windows filesystem are slower than native storage;
   reindexing may take longer than on a Linux host.
 

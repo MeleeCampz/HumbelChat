@@ -325,64 +325,6 @@ class TestAddDocument:
         assert first == second
 
 
-class TestAddTranscript:
-    """sessions.add_transcript() — a finished transcript → raw file in the
-    session's hidden .transcripts/ folder (out of RAG) + full text combined
-    into notes.md, the session's single RAG document."""
-
-    def test_no_active_session_returns_none(self):
-        session, n = S.add_transcript("hello")
-        assert session is None and n == 0
-
-    def test_empty_text_is_noop(self):
-        S.start_session(name="T")
-        session, n = S.add_transcript("   ")
-        assert n == 0
-        assert S.get_notes(session) == []
-
-    def test_transcript_written_as_own_file(self):
-        S.start_session(name="T")
-        session, n = S.add_transcript("hello there\nsecond line",
-                                      title="Voice channel transcript — #vc (2026-08-31 22:00, 10s)")
-        assert n == 1
-        tdir = pathlib.Path(session["dir"]) / ".transcripts"
-        files = [f for f in tdir.iterdir() if f.is_file()]
-        assert len(files) == 1
-        body = files[0].read_text(encoding="utf-8")
-        assert "hello there" in body and "second line" in body
-        assert "Voice channel transcript" in body
-        # notes state unchanged; notes.md combines the full transcript text
-        assert S.get_notes(session) == []
-        content = pathlib.Path(session["file"]).read_text(encoding="utf-8")
-        assert "## Documents" in content and files[0].name in content
-        assert "hello there" in content and "second line" in content
-
-    def test_long_transcript_not_chunked(self):
-        S.start_session(name="T")
-        long_text = ("word " * 2000).strip()  # ~10k chars — stays in ONE file
-        session, n = S.add_transcript(long_text, title="Voice channel transcript")
-        assert n == 1
-        tdir = pathlib.Path(session["dir"]) / ".transcripts"
-        files = [f for f in tdir.iterdir() if f.is_file()]
-        assert len(files) == 1
-        assert long_text in files[0].read_text(encoding="utf-8")
-        assert long_text in pathlib.Path(session["file"]).read_text(encoding="utf-8")
-
-    def test_pins_to_ended_session_when_pinned(self):
-        S.start_session(name="Old")
-        old = S.get_current_session()
-        S.end_session(overview="done")
-        S._state["last_start_at"] -= 2 * 3600
-        S.start_session(name="New")
-
-        session, n = S.add_transcript("pinned words", title="Voice channel transcript",
-                                      session=old)
-        assert n == 1 and session is old
-        tdir = pathlib.Path(old["dir"]) / ".transcripts"
-        assert any("pinned words" in f.read_text(encoding="utf-8") for f in tdir.iterdir())
-        assert "pinned words" in pathlib.Path(old["file"]).read_text(encoding="utf-8")
-
-
 class TestLegacyMigration:
     """migrate_legacy_session_dirs() — visible attachments/ + transcripts/
     (indexed file-by-file) → hidden dot-dirs + combined notes.md."""

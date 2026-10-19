@@ -71,7 +71,7 @@ async def handle_upload_kb(
 
     # --- step 2 & 3: validate + write to KB_PATH ---
     # P0 #4: the write + SHA-256 hash run in a worker thread so a large
-    # upload can't freeze the event loop (gateway/typing/voice).
+    # upload can't freeze the event loop (gateway/typing).
     try:
         dest, summary = await validate_upload_async(data, filename=fname, kb_path=None, subfolder=subfolder)
     except ValueError as exc:

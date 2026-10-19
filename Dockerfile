@@ -3,8 +3,8 @@
 # HumbelChat Discord bot — production image (see docs/docker.md)
 #
 # Build:  docker compose up -d --build     (from the repo root)
-# The image contains only code + deps. All runtime state (KB, recordings,
-# history, logs, model cache) lives in bind-mounted host directories.
+# The image contains only code + deps. All runtime state (KB, history,
+# logs, model cache) lives in bind-mounted host directories.
 #
 # Build speed: pip downloads (notably the ~900MB CPU torch wheel) are cached
 # on the daemon via BuildKit cache mounts, so changing requirements.txt never
@@ -18,11 +18,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     HF_HOME=/models/hf
 
-# libopus0 — discord.py voice loads it via ctypes at runtime (DAVE E2EE).
 # curl — reachability probes for INFER_URL during setup.
 # git — Obsidian vault sync (clone/pull/commit/push of KB vaults, #19).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libopus0 \
         curl \
         git \
     && rm -rf /var/lib/apt/lists/*

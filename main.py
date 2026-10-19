@@ -60,7 +60,7 @@ def _configure_discord_logger(dev_handler: logging.Handler | None = None) -> Non
     — previously the level (and the whole config) lived inside the file-logging
     branch, so ``BOT_DISCORD_LOG_LEVEL`` was silently ignored when
     ``BOT_NO_LOG_FILES=1``. A ``dev_handler`` (dev.log) is attached only when a
-    file logger is present, so voice-gateway/DAVE debug lines reach dev.log.
+    file logger is present.
     """
     _discord_logger = logging.getLogger("discord")
     _discord_logger.handlers.clear()
@@ -129,16 +129,13 @@ else:
 # P3 #33: the bot only serves *guild* prefix commands and slash commands — it
 # never handles DM (non-guild) messages — so the deprecated ``messages`` intent
 # is not set. ``guild_messages`` + ``message_content`` are enough for the
-# prefix path; ``guilds`` for command/voice state. (Discord has deprecated the
+# prefix path; ``guilds`` for command state. (Discord has deprecated the
 # legacy non-guild ``messages`` intent, and it only matters if you add DM
 # support later.)
 INTENTS = discord.Intents.default()
 INTENTS.guilds = True
 INTENTS.guild_messages = True
 INTENTS.message_content = True
-# Voice recording: we need voice-state updates (to see who is in a channel and
-# to resolve speaker display names) for /start_recording & /stop_recording.
-INTENTS.voice_states = True
 
 # ── Character loading ───────────────────────────────────────────────────
 load_characters(CHARACTERS_FILE)
@@ -554,32 +551,6 @@ async def session_info_command(interaction: discord.Interaction) -> None:
     await handle_session_info(interaction)
 
 
-@bot.tree.command(
-    name="start_recording",
-    description="Join your voice channel and record each participant's audio separately (for STT).",
-)
-async def start_recording_command(interaction: discord.Interaction) -> None:
-    """Start voice recording — delegated to commands/recording_commands.py."""
-    from commands.recording_commands import handle_start_recording
-    await handle_start_recording(interaction)
-
-
-@bot.tree.command(
-    name="stop_recording",
-    description="Stop the active voice recording and save per-speaker WAV files + a timestamped manifest.",
-)
-@app_commands.describe(leave_channel="Whether the bot should leave the voice channel afterwards (default true)")
-@app_commands.describe(transcribe="Transcribe each speaker's audio with STT after stopping (default true; requires STT_ENABLED)")
-async def stop_recording_command(
-    interaction: discord.Interaction,
-    leave_channel: bool = True,
-    transcribe: bool = True,
-) -> None:
-    """Stop voice recording — delegated to commands/recording_commands.py."""
-    from commands.recording_commands import handle_stop_recording
-    await handle_stop_recording(interaction, leave_channel=leave_channel, transcribe=transcribe)
-
-
 # ════════════════════════════════════════════════════════════════════════
 #  Event handlers
 # ════════════════════════════════════════════════════════════════════════
@@ -639,13 +610,6 @@ async def on_ready() -> None:
     # restart (persistent views; no-op when there are no recorded rolls).
     from bot_core import roll_buttons
     spawn_tracked_task(roll_buttons.rehydrate(bot), name="roll-button-rehydrate")
-
-    # Crash durability: attach the voice recorder and recover any recording
-    # left open by an unclean shutdown.
-    try:
-        _recover_crashed_recordings(bot)
-    except Exception:  # pragma: no cover - never block startup on recovery
-        log.exception("Crashed-recording recovery failed (continuing)")
 
     # Session crash recovery (#28): load_sessions() already resumed any session
     # that was active before the shutdown (at import time) — now that an event
@@ -910,23 +874,6 @@ def _enforce_single_instance() -> None:
 
 
 # ── Startup ────────────────────────────────────────────────────────────
-
-def _recover_crashed_recordings(bot_obj: commands.Bot) -> None:
-    """Attach the voice recorder and recover orphaned recordings at startup.
-
-    :func:`recover_orphans` rebuilds any recording whose process died
-    mid-capture (OOM, segfault, power loss, or a stop while recording) — but
-    only if its session marker is at least ~5 minutes old, so a still-live
-    recording (bot restarted while a meeting was going) is left untouched.
-    """
-    from config.settings import RECORDINGS_DIR
-    from bot_core.voice_recorder import attach_to_bot, recover_orphans
-
-    attach_to_bot(bot_obj, RECORDINGS_DIR)
-    recovered = recover_orphans(RECORDINGS_DIR)
-    if recovered:
-        log.info("Recovered %d crashed recording(s) at startup", len(recovered))
-
 
 def run_bot() -> None:
     """Entry point for ``python main.py`` / ``python -m main``.
