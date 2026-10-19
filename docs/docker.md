@@ -12,9 +12,9 @@ runtime state lives in bind-mounted host directories.
 ├── Dockerfile                 # python:3.12-slim + CPU torch + requirements.txt
 ├── .env                       # all bot config (env_file), incl. INFER_URL
 ├── characters.json            # personas (bind-mounted read path)
-├── data/                      # KB docs, .vector_index_cache/, recordings, history.json
+├── data/                      # KB docs, .vector_index_cache/, history.json
 ├── logs/                      # bot.log (INFO) + dev.log (DEBUG), rotated 10 MB × 5
-└── hf-cache/                  # HuggingFace model cache (bge-m3, faster-whisper) — ~4 GB
+└── hf-cache/                  # HuggingFace model cache (bge-m3)
 ```
 
 ## Operations
@@ -33,7 +33,7 @@ docker compose down            # stop (data is untouched — it's all on the hos
   before judging; bge-m3 loads from `hf-cache/` in seconds and the first
   backend-health probe can log a transient `DOWN (timeout)` that recovers.
 - The container needs no published ports: the Discord gateway is an outbound
-  WebSocket and voice uses outbound UDP.
+  WebSocket.
 
 ## Config / `.env`
 
@@ -42,7 +42,7 @@ The host `.env` is passed through as-is (`env_file`). Container-specific notes:
 - `INFER_URL` — the unsloth studio API. From Docker Desktop,
   `host.docker.internal` resolves to the Windows host (predefined; no
   `extra_hosts` needed). If the API runs on another machine, use its LAN IP.
-- `KB_PATH`, `RECORDINGS_DIR`, `CHARACTERS_FILE` are pinned to the bind mounts
+- `KB_PATH`, `CHARACTERS_FILE` are pinned to the bind mounts
   in `docker-compose.yml` — don't set them to Windows paths in `.env`.
 - Model cache: `HF_HOME=/models/hf` is set in the image, backed by `./hf-cache`.
   First start downloads the models (~4 GB); later starts load from cache.

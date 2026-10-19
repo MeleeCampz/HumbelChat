@@ -7,7 +7,7 @@
 #   docker compose down             # stop
 #
 # All runtime state lives in the bind-mounted host directories next to this
-# file: data/ (KB + vector index + recordings + history), logs/, hf-cache/
+# file: data/ (KB + vector index + history), logs/, hf-cache/
 # (HuggingFace model cache). Nothing important is inside the image.
 # ──────────────────────────────────────────────────────────────
 services:
@@ -20,12 +20,11 @@ services:
       # Pin runtime data paths to the bind mounts (defaults in config/settings.py
       # resolve relative to /app, which is equivalent — explicit for clarity).
       KB_PATH: /app/data/knowledge
-      RECORDINGS_DIR: /app/data/recordings
       CHARACTERS_FILE: /app/characters.json
     volumes:
-      - ./data:/app/data        # KB docs + .vector_index_cache + recordings + history.json
+      - ./data:/app/data        # KB docs + .vector_index_cache + history.json
       - ./logs:/app/logs        # RotatingFileHandler output, readable from host
-      - ./hf-cache:/models/hf   # bge-m3 + whisper models (downloaded once)
+      - ./hf-cache:/models/hf   # bge-m3 embedding model (downloaded once)
     # No depends_on for the rerankers: both are optional accelerators — the
     # bot health-checks them at startup and fails open to pre-rerank order.
 

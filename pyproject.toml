@@ -14,17 +14,16 @@
 #
 # Install matrix (each line is a full, working install):
 #   * Base only:          pip install -e .
-#   * + local STT:        pip install -e .[stt]
 #   * + vector RAG:       pip install -e .[rag-vector]
 #   * Everything:         pip install -e .[all]
 #   * Dev / test tooling: pip install -e .[dev]
 #
-# The heavy STT (faster-whisper) and vector (fastembed / sentence-transformers)
-# deps are OPTIONAL extras, not base dependencies. They are imported lazily by
-# the code (bot_core/transcriber.py, kb/vector_db.py, kb/embedder.py), so a
-# base-only install imports and runs cleanly; an extra is only required when its
-# feature is enabled. `requirements.txt` is retained alongside for pin
-# compatibility / plain `pip install -r`.
+# The heavy vector (fastembed / sentence-transformers) deps are OPTIONAL
+# extras, not base dependencies. They are imported lazily by the code
+# (kb/vector_db.py, kb/embedder.py), so a base-only install imports and runs
+# cleanly; an extra is only required when its feature is enabled.
+# `requirements.txt` is retained alongside for pin compatibility / plain
+# `pip install -r`.
 # ─────────────────────────────────────────────────────────────────────────────
 
 [build-system]
@@ -34,7 +33,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "discord-ai-bot"
 version = "0.1.0"
-description = "Discord bot with AI chat, knowledge-base RAG, and voice recording"
+description = "Discord bot with AI chat and knowledge-base RAG"
 readme = "README.md"
 requires-python = ">=3.10"          # code uses `str | None` (PEP 604); dev env is 3.12
 authors = [{ name = "discord-ai-bot" }]
@@ -42,21 +41,12 @@ authors = [{ name = "discord-ai-bot" }]
 dependencies = [
     # Core runtime (see requirements.txt for the matching pins).
     "python-dotenv==1.2.2",
-    # [voice] pulls PyNaCl + davey (DAVE E2EE, mandatory for Discord voice
-    # since 2026-03-01). libopus is a *system* package (e.g. `apt-get install
-    # libopus0`) and is loaded by discord.py via ctypes at runtime.
-    "discord.py[voice]==2.7.1",
-    "cryptography==49.0.0",   # AES-256-GCM voice transport decryption
+    "discord.py==2.7.1",
     "openai==2.44.0",
     "httpx==0.28.1",
 ]
 
 [project.optional-dependencies]
-# Local STT backend (STT_BACKEND=local): segment timestamps -> transcript.
-stt = [
-    "faster-whisper==1.2.1",
-    "numpy==1.26.4",
-]
 # Vector retrieval (RAG_RETRIEVAL_METHOD=vector).
 rag-vector = [
     "fastembed==0.8.0",
@@ -69,7 +59,6 @@ rag-cpu = [
     "numpy==1.26.4",
 ]
 all = [
-    "faster-whisper==1.2.1",
     "fastembed==0.8.0",
     "sentence-transformers>=3.0,<5",
     "numpy==1.26.4",
@@ -77,8 +66,8 @@ all = [
 dev = [
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
-    # The test suite imports numpy directly (tests/test_transcriber.py), so it
-    # is a dev/test dependency in its own right.
+    # The test suite imports numpy directly, so it is a dev/test dependency
+    # in its own right.
     "numpy==1.26.4",
     # P3 #28: CI tooling (lint + type-check + coverage).
     "ruff==0.16.8",

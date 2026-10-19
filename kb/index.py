@@ -20,7 +20,7 @@ Blocking IO (P0 #4)
 -------------------
 Filesystem walks, SQLite writes and embedding serialization are offloaded to a
 worker thread (``asyncio.to_thread``) at every async boundary so a large KB
-scan never freezes the event loop (gateway, typing indicators, voice).
+scan never freezes the event loop (gateway, typing indicators).
 
 Design
 ------

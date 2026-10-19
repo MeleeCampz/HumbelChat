@@ -32,12 +32,11 @@ cp .env.example .env   # then set DISCORD_BOT_TOKEN, INFER_URL, INFER_API_KEY
 <details>
 <summary>Optional extras & running directly</summary>
 
-The heavy STT and vector dependencies are optional extras (a base install runs
-the core bot):
+The heavy vector dependencies are optional extras (a base install runs the
+core bot):
 
 ```bash
 pip install -e .                # base (AI chat + RAG text retrieval)
-pip install -e '.[stt]'         # + local STT (faster-whisper)
 pip install -e '.[rag-vector]'  # + vector retrieval (fastembed)
 pip install -e '.[all]'         # everything
 ```
@@ -54,7 +53,6 @@ foreground without tmux: `./.venv/bin/python main.py` (Windows:
 - [Embeds](./docs/embeds.md) — structured Discord-embed rendering for /ai replies
 - [Characters](./docs/characters.md) — `characters.json` format and per-character settings
 - [RAG / Knowledge Base](./docs/rag.md) — retrieval methods, smart chunking, supported file types
-- [Voice Recording](./docs/voice-recording.md) — per-speaker voice capture for STT (pipeline, manifest format, troubleshooting)
 - [Commands](./docs/commands.md) — slash command and prefix command reference
 - [Item Rolls](./docs/item-rolls.md) — `/roll_items` table formats, rolling mechanics, and pool management
 - [Permissions](./docs/permissions.md) — Discord permissions the bot needs, where to set them, and per-channel override traps
@@ -81,7 +79,6 @@ foreground without tmux: `./.venv/bin/python main.py` (Windows:
 - `/end_session` — end the session and generate a brief AI recap (what happened + next steps)
 - `/remind_next_session` — queue a reminder for the next session start
 - `/session_notes` — add/view notes for the current or last session
-- `/start_recording` / `/stop_recording` — capture voice channel audio per speaker (WAV + timestamped manifest) for STT
 
 Prefix command: `<BOT_PREFIX><message>` (example: `!ai hello`)
 
@@ -93,14 +90,14 @@ Full reference: [Commands](./docs/commands.md)
 discord-ai-bot/
 ├── main.py            # entry point (wires bot, commands, startup)
 ├── config/            # settings.py (env), characters.py
-├── bot_core/          # ai_client, history, voice/ (recorder), transcriber, sessions, ...
+├── bot_core/          # ai_client, history, sessions, ...
 ├── commands/          # slash + prefix command handlers
 ├── kb/                # storage, chunker, embedder, retrievers, vector_db, ...
 ├── utils/             # embed_formatter, response_splitter, url_fetch, typing_loop, ...
-├── data/              # runtime data (knowledge base, recordings, session notes)
+├── data/              # runtime data (knowledge base, session notes)
 ├── botctl.sh          # local-dev control (tmux): setup / start / stop / restart / status / logs
 ├── requirements.txt   # pinned deps (see pyproject.toml for optional extras)
-├── pyproject.toml     # packaging: base + [stt] [rag-vector] [dev] extras
+├── pyproject.toml     # packaging: base + [rag-vector] [dev] extras
 └── docs/              # in-depth docs (index: docs/README.md)
 ```
 

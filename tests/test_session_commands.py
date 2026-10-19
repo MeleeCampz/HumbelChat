@@ -493,78 +493,6 @@ class TestSessionNotesDocumentUpload:
         assert ("word " * 2000).strip() in files[0].read_text(encoding="utf-8")
 
 
-class TestAddTranscript:
-    """sessions.add_transcript() — automatic transcript -> its own file in the
-    session's transcripts/ folder (see bot_core/sessions.py for the core tests)."""
-
-    def test_appends_own_file_with_header(self):
-        S.start_session(name="T")
-        session, n = S.add_transcript("hello there", title="Voice channel transcript — #vc (2026-08-31 22:00, 10s)")
-        assert n == 1
-        # A standalone transcript file is created in the session's folder.
-        tdir = pathlib.Path(session["dir"]) / ".transcripts"
-        files = [f for f in tdir.iterdir() if f.is_file()]
-        assert len(files) == 1
-        body = files[0].read_text(encoding="utf-8")
-        assert "Voice channel transcript — #vc" in body
-        assert "hello there" in body
-        # Notes are NOT pre-chunked — the notes state stays clean.
-        assert S.get_notes(session) == []
-
-    def test_long_transcript_not_chunked(self):
-        S.start_session(name="T")
-        long_text = ("word " * 2000).strip()  # ~10k chars — stays in ONE file
-        session, n = S.add_transcript(long_text, title="Voice channel transcript")
-        assert n == 1
-        tdir = pathlib.Path(session["dir"]) / ".transcripts"
-        files = [f for f in tdir.iterdir() if f.is_file()]
-        assert len(files) == 1
-        assert long_text in files[0].read_text(encoding="utf-8")
-
-    def test_no_active_session_returns_none(self):
-        session, n = S.add_transcript("hello")
-        assert session is None and n == 0
-
-    def test_empty_text_is_noop(self):
-        S.start_session(name="T")
-        session, n = S.add_transcript("   ")
-        assert n == 0
-        assert S.get_notes(session) == []
-
-    def test_pins_to_ended_session_when_pinned(self):
-        # STT completes after the recording's session ended — the transcript
-        # must still land in THAT session's folder, not the new active one.
-        S.start_session(name="Old")
-        old = S.get_current_session()
-        S.end_session(overview="done")
-        S._state["last_start_at"] -= 2 * 3600
-        S.start_session(name="New")
-
-        session, n = S.add_transcript("pinned words", title="Voice channel transcript",
-                                      session=old)
-        assert n == 1 and session is old
-        tdir = pathlib.Path(old["dir"]) / ".transcripts"
-        assert any("pinned words" in f.read_text(encoding="utf-8") for f in tdir.iterdir())
-
-    @pytest.mark.asyncio
-    async def test_file_lands_in_folder_and_view(self, ix):
-        from commands.session_commands import handle_session_notes
-        S.start_session(name="T")
-        S.add_transcript("the key is under the bridge", title="Voice channel transcript — #vc")
-        session = S.get_current_session()
-        tdir = pathlib.Path(session["dir"]) / ".transcripts"
-        files = [f for f in tdir.iterdir() if f.is_file()]
-        assert files and "under the bridge" in files[0].read_text(encoding="utf-8")
-        # notes.md lists the transcript pointer …
-        on_disk = pathlib.Path(session["file"]).read_text(encoding="utf-8")
-        assert "## Documents" in on_disk and files[0].name in on_disk
-        # … and /session_info lists it under Transcripts
-        from commands.session_commands import handle_session_info
-        await handle_session_info(ix)
-        info_msgs = [m for m in ix._sent if "Session info" in m]
-        assert any("Transcripts" in m and files[0].name in m for m in info_msgs)
-
-
 class TestOverviewSourceAssembly:
     """The session's own documents (attachments/transcripts) must feed the AI
     overview — the previous bug was that only notes + a tiny recent-chat slice
@@ -575,9 +503,13 @@ class TestOverviewSourceAssembly:
         S.start_session(name="Src")
         S.add_document("Wir reisen über die Brücke nach Alderheart und treffen die Hexe.",
                        title="session3.md")
-        S.add_transcript("Colum erzählt von der Taverne und dem Elch am Weg.",
-                         title="Voice transcript")
+        # legacy voice transcript (pre-STT-removal): a raw file in the hidden folder
         session = S.get_current_session()
+        tdir = pathlib.Path(session["dir"]) / ".transcripts"
+        tdir.mkdir(parents=True, exist_ok=True)
+        (tdir / "transcript_01.md").write_text(
+            "# Voice transcript\n\nColum erzählt von der Taverne und dem Elch am Weg.\n",
+            encoding="utf-8")
         text, refs = _session_documents_text(session)
         assert "Source: .attachments/session3.md" in text
         assert "Source: .transcripts/" in text

@@ -6,8 +6,6 @@ Each test locks in one fixed bug so it can never silently return:
       counter → same-day collision overwrote the previous notes.md.
   H2  history: a persisted "None" guild key (DM turns) aborted the ENTIRE
       load, dropping later channels and all active-character selections.
-  M1  voice recovery: real frame logs are ``Name_123.wav.log``; the old
-      regex never matched → every speaker became user 0 (one shared WAV).
   M2  kb storage: the UUID-prefix stripper ate any leading all-hex word
       ("cafe_notes.md" → "notes.md", "add_this.md" → "this.md").
   M3  errors: every HTTP 400 was reported as "model not found".
@@ -124,47 +122,6 @@ class TestHistoryLoadWithNoneKeys:
         H.load_persisted()
         assert H.get_history(None, 500) == [{"role": "user", "content": "dm"}]
         assert H._active_characters.get((None, 500)) == "Dana"
-
-
-# ──────────────────────── M1: voice recovery ─────────────────────────────
-
-class TestRecoveryLogNameParsing:
-    def test_real_runtime_log_name(self):
-        from bot_core.voice.recover import _user_id_from_log_name
-        # Name produced by VoiceRecorder._log_path_for: <safe>_<uid>.wav.log
-        assert _user_id_from_log_name("Alice_1234567890.wav.log") == 1234567890
-
-    def test_legacy_shape_still_parses(self):
-        from bot_core.voice.recover import _user_id_from_log_name
-        assert _user_id_from_log_name("Bob_777.log") == 777
-
-    def test_multi_speaker_recovery_writes_one_wav_per_user(self, tmp_path):
-        """Two speakers with REAL log names must not collapse into user-0."""
-        from bot_core.voice.capture import FRAME_SAMPLES, _SpeakerLog
-        from bot_core.voice.recover import recover_orphans
-
-        rec_dir = tmp_path / "recording_20260101-000000"
-        rec_dir.mkdir()
-        started = time.time() - 3600
-        (rec_dir / ".recording").write_text(json.dumps(
-            {"started_at": started, "guild_id": 1, "channel_id": 2,
-             "channel_name": "room", "pid": 1}))
-        for name, uid in (("Alice_111.wav.log", 111), ("Bob_222.wav.log", 222)):
-            lg = _SpeakerLog(rec_dir / name)
-            t = started + 1.0
-            for _ in range(5):
-                lg.write_frame(t, b"\x07\x08" * (FRAME_SAMPLES // 2))
-                t += 0.02
-            lg.close()
-
-        recovered = recover_orphans(tmp_path)
-        assert len(recovered) == 1
-        speakers = recovered[0]["speakers"]
-        assert {s["user_id"] for s in speakers} == {111, 222}
-        wavs = sorted(s["wav_file"] for s in speakers)
-        assert wavs == ["user-111_111.wav", "user-222_222.wav"]  # _wav_filename("", uid)
-        for s in speakers:
-            assert (rec_dir / s["wav_file"]).exists()
 
 
 # ─────────────────────── M2: filename sanitizer ──────────────────────────
