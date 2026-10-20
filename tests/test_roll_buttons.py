@@ -247,11 +247,41 @@ class TestRehydrate:
         bot.get_channel = MagicMock(side_effect={100: live, 101: gone}.get)
         await rb.rehydrate(bot)
 
-        # Live message: view added. Gone message: record dropped.
+        # Live message: view added (per-message). Gone message: record dropped.
         assert bot.add_view.call_count == 1
+        _, kwargs = bot.add_view.call_args
+        assert kwargs["message_id"] == 200
         rb.reset_records_for_tests()
         assert rb._message_pairs(200) is not None
         assert rb._message_pairs(201) is None
+
+    async def test_skips_and_logs_unavailable_channel(self):
+        """Uncached/invisible channel: view skipped with a warning, record kept."""
+        rb.record_roll_message(100, 200, [("weapons", "Sword")])
+
+        bot = MagicMock()
+        bot.get_channel = MagicMock(return_value=None)
+        await rb.rehydrate(bot)
+
+        bot.add_view.assert_not_called()
+        # Record is kept — the message may be reachable at a later restart.
+        assert rb._message_pairs(200) is not None
+
+    async def test_registers_views_per_message(self):
+        """Views are registered for their specific message, not globally."""
+        rb.record_roll_message(100, 200, [("weapons", "Sword")])
+
+        live = MagicMock()
+        live.fetch_message = AsyncMock(return_value=MagicMock())
+        bot = MagicMock()
+        bot.get_channel = MagicMock(return_value=live)
+        await rb.rehydrate(bot)
+
+        import discord as _d
+
+        args, kwargs = bot.add_view.call_args
+        assert isinstance(args[0], _d.ui.View)
+        assert kwargs["message_id"] == 200
 
     async def test_rehydrated_view_labels_follow_state(self):
         item_state.consume([item_state.Item(name="Sword", table="weapons")])

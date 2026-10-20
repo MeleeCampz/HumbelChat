@@ -124,6 +124,16 @@ else:
     _kb_logger.addHandler(dev_log)
     _kb_logger.setLevel(logging.INFO)
 
+    # bot_core modules log under their own top-level "bot_core" namespace
+    # (e.g. bot_core.roll_buttons) — same treatment as "kb". Without this,
+    # roll-button rehydrate failures were invisible in every log.
+    _bot_core_logger = logging.getLogger("bot_core")
+    _bot_core_logger.handlers.clear()
+    _bot_core_logger.addHandler(console_handler)
+    _bot_core_logger.addHandler(bot_log)
+    _bot_core_logger.addHandler(dev_log)
+    _bot_core_logger.setLevel(logging.INFO)
+
 
 # ── Intents ─────────────────────────────────────────────────────────────
 # P3 #33: the bot only serves *guild* prefix commands and slash commands — it
