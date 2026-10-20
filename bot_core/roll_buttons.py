@@ -272,21 +272,39 @@ async def rehydrate(bot: discord.Client) -> None:
     with _records_lock:
         records = list(_load_cache_locked().items())
     alive = 0
+    skipped = 0
     for message_id, rec in records:
         try:
             channel = bot.get_channel(rec["channel"])
             if channel is None or not hasattr(channel, "fetch_message"):
+                # Channel not cached (or not visible) — the buttons on this
+                # message stay dead until the next restart. Log it: this path
+                # used to fail completely silently.
+                log.warning(
+                    "roll_buttons: channel %s for message %s unavailable; view not re-attached",
+                    rec["channel"], message_id,
+                )
+                skipped += 1
                 continue
             await channel.fetch_message(message_id)
             # Rebuild from the live state file so labels are current.
-            bot.add_view(build_view([tuple(x) for x in rec["items"]]))
+            view = build_view([tuple(x) for x in rec["items"]])
+            # Register per-message (like send/edit do) instead of in the global
+            # bucket: avoids cross-message custom_id collisions when two roll
+            # messages share an item name, and keeps the view synced via
+            # MESSAGE_UPDATE tracking.
+            bot.add_view(view, message_id=message_id)
             alive += 1
         except discord.HTTPException:
             forget_record(message_id)  # deleted / inaccessible
         except Exception as e:  # noqa: BLE001 - one bad record must not kill the rest
             log.warning("roll_buttons: rehydrate failed for message %s: %s", message_id, e)
-    if records:
-        log.info("roll_buttons: rehydrated %d/%d roll messages", alive, len(records))
+    # Always logged (even with zero records) so a missing line means
+    # rehydrate never ran at all.
+    log.info(
+        "roll_buttons: rehydrated %d/%d roll messages (%d skipped)",
+        alive, len(records), skipped,
+    )
 
 
 # ---------------------------------------------------------------------------
