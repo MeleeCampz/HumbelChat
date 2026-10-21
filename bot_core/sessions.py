@@ -91,12 +91,26 @@ _state: dict[str, Any] = {
 
 # ── Path resolution ──────────────────────────────────────────────────────
 
+_persist_disabled_warned = False
+
+
 def _resolve_path() -> pathlib.Path | None:
-    global _store_path
+    global _store_path, _persist_disabled_warned
     if _store_path is not None:
         return _store_path if _store_path else None
     env = os.environ.get("SESSIONS_PERSIST_FILE")
     if env is not None:
+        if not env and not _persist_disabled_warned:
+            # An EMPTY value (as opposed to an unset variable) explicitly disables
+            # persistence — that silently lost the active session across the
+            # 2026-10-20 restarts. Make it impossible to miss in the logs.
+            log.warning(
+                "SESSIONS_PERSIST_FILE is set to an EMPTY value — session persistence is "
+                "DISABLED: the active session and queued next-session reminders are "
+                "memory-only and will be LOST on every bot restart (crash recovery #28 "
+                "is off too). Comment out the line in .env to use the default (%s).",
+                _DEFAULT_PATH)
+            _persist_disabled_warned = True
         _store_path = pathlib.Path(env) if env else None
         return _store_path if _store_path else None
     return _DEFAULT_PATH
