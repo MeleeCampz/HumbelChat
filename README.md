@@ -71,6 +71,7 @@ foreground without tmux: `./.venv/bin/python main.py` (Windows:
 - `/ocr` — extract text from an image
 - `/summarize` — summarize chat history or a URL
 - `/translate` — translate text into a target language
+- `/speak` — read text aloud and send it as an audio message (TTS; config-gated via `TTS_MODEL`, works with Unsloth Studio's `/v1/audio/speech`)
 - `/roll_items` — roll random items from a CSV item table (descriptions + page links, optional CR scaling, opt-in no-repeat tracking)
 - `/item_search` — fuzzy-search the item tables for a specific item
 - `/item_stats` — per-rarity counts and remaining pool size
