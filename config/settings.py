@@ -76,6 +76,23 @@ EMBED_URL: str = os.getenv("EMBED_URL", "") or INFER_URL
 EMBED_API_KEY: str = os.getenv("EMBED_API_KEY", "") or INFER_API_KEY
 
 # ════════════════════════════════════
+#  TTS (/speak, #34 — any OpenAI-compatible /v1/audio/speech endpoint;
+#  Unsloth Studio serves it at the same base URL as its chat API)
+# ════════════════════════════════════
+# Empty = feature off: /speak replies with a "not configured" hint.
+TTS_MODEL: str = os.getenv("TTS_MODEL", "")
+# Voice name sent with each request (the OpenAI-compatible API requires the
+# parameter). Set it to the voice your TTS model expects, e.g. a Kokoro voice
+# like "af_heart"; "default" works for servers that ignore the value.
+TTS_VOICE: str = os.getenv("TTS_VOICE", "") or "default"
+TTS_URL: str = os.getenv("TTS_URL", "") or INFER_URL
+TTS_API_KEY: str = os.getenv("TTS_API_KEY", "") or INFER_API_KEY
+TTS_TIMEOUT_S: float = _safe_float(os.getenv("TTS_TIMEOUT_S"), 120.0)
+# Hard cap on text length per /speak request (model input limits + Discord's
+# 10 MB attachment limit at typical mp3 bitrates).
+TTS_MAX_CHARS: int = _safe_int(os.getenv("TTS_MAX_CHARS"), 5000)
+
+# ════════════════════════════════════
 #  CHARACTER defaults (per-char in characters.json)
 # ════════════════════════════════════
 DEFAULT_MODEL: str | None = os.getenv("MODEL_NAME")

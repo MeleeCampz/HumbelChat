@@ -83,6 +83,19 @@ Translate text into the target language. Put the text to translate after a colon
 
 Schedule a one-time reminder (minimum 10 seconds ahead); the bot posts a `⏰ Reminder` message in this channel when it fires. Accepted units: seconds, minutes, hours. Reminders persist across restarts (see `REMINDERS_PERSIST_FILE`).
 
+### `/speak`
+
+```
+/speak <text>
+```
+
+Read the text aloud and send it as a playable audio message (mp3 attachment —
+Discord shows a native audio bar). Uses any OpenAI-compatible
+`/v1/audio/speech` endpoint; Unsloth Studio serves one at the same base URL as
+its chat API. Config-gated: with `TTS_MODEL` empty the command replies with a
+"not configured" hint instead of failing. See the TTS section in `.env.example`
+(`TTS_MODEL`, `TTS_VOICE`, `TTS_URL`, `TTS_API_KEY`, `TTS_TIMEOUT_S`, `TTS_MAX_CHARS`).
+
 ### `/roll_items`
 
 ```

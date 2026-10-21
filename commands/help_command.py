@@ -51,6 +51,7 @@ _CATEGORIES: dict[str, str] = {
     "ocr": "Utility",
     "summarize": "Utility",
     "translate": "Utility",
+    "speak": "Utility",
     "sync": "Maintenance",
 }
 
