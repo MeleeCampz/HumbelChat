@@ -74,12 +74,24 @@ _deliver_locks: dict[str, asyncio.Lock] = {}
 
 # ── Path resolution ──────────────────────────────────────────────────────
 
+_persist_disabled_warned = False
+
+
 def _resolve_path() -> pathlib.Path | None:
-    global _store_path
+    global _store_path, _persist_disabled_warned
     if _store_path is not None:
         return _store_path if _store_path else None
     env = os.environ.get("REMINDERS_PERSIST_FILE")
     if env is not None:
+        if not env and not _persist_disabled_warned:
+            # An EMPTY value (as opposed to an unset variable) explicitly disables
+            # persistence — queued reminders would be wiped on every restart.
+            log.warning(
+                "REMINDERS_PERSIST_FILE is set to an EMPTY value — reminder persistence is "
+                "DISABLED: queued reminders are memory-only and will be LOST on every bot "
+                "restart. Comment out the line in .env to use the default (%s).",
+                _DEFAULT_PATH)
+            _persist_disabled_warned = True
         _store_path = pathlib.Path(env) if env else None
         return _store_path if _store_path else None
     return _DEFAULT_PATH
