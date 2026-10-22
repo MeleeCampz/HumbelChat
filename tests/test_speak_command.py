@@ -184,6 +184,73 @@ class TestTtsClient:
             await tts.synthesize("hello")
 
     @pytest.mark.asyncio
+    async def test_not_loaded_triggers_reload_and_single_retry(self, monkeypatch):
+        """Studio idle-unloaded the model: load it next to chat, retry once."""
+        import bot_core.tts as tts
+        from openai import APIStatusError
+        monkeypatch.setattr(tts, "TTS_MODEL", "kokoro")
+
+        resp = MagicMock()
+        resp.read.return_value = b"audio"
+        client = MagicMock()
+        client.audio.speech.create = AsyncMock(
+            side_effect=[APIStatusError("No model loaded.", response=MagicMock(), body=None), resp]
+        )
+        monkeypatch.setattr(tts, "_tts_client", client)
+        ensure = AsyncMock(return_value=True)
+        monkeypatch.setattr(tts, "_ensure_model_loaded", ensure)
+
+        assert await tts.synthesize("hello") == b"audio"
+        ensure.assert_awaited_once()
+        assert client.audio.speech.create.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_not_loaded_without_studio_layout_propagates(self, monkeypatch):
+        """A plain OpenAI-compatible TTS server has no load endpoint — surface the error."""
+        import bot_core.tts as tts
+        from openai import APIStatusError
+        monkeypatch.setattr(tts, "TTS_MODEL", "kokoro")
+        monkeypatch.setattr(tts, "TTS_URL", "http://kokoro-server:8000")  # no /v1
+
+        client = MagicMock()
+        client.audio.speech.create = AsyncMock(
+            side_effect=APIStatusError("No model loaded.", response=MagicMock(), body=None)
+        )
+        monkeypatch.setattr(tts, "_tts_client", client)
+        ensure = AsyncMock(return_value=False)
+        monkeypatch.setattr(tts, "_ensure_model_loaded", ensure)
+
+        with pytest.raises(tts.TTSError, match="No model loaded"):
+            await tts.synthesize("hello")
+        ensure.assert_awaited_once()
+        assert client.audio.speech.create.await_count == 1  # no retry
+
+    @pytest.mark.asyncio
+    async def test_other_errors_do_not_trigger_reload(self, monkeypatch):
+        import bot_core.tts as tts
+        from openai import APIConnectionError
+        monkeypatch.setattr(tts, "TTS_MODEL", "kokoro")
+
+        client = MagicMock()
+        client.audio.speech.create = AsyncMock(
+            side_effect=APIConnectionError(request=MagicMock())
+        )
+        monkeypatch.setattr(tts, "_tts_client", client)
+        ensure = AsyncMock(return_value=True)
+        monkeypatch.setattr(tts, "_ensure_model_loaded", ensure)
+
+        with pytest.raises(tts.TTSError):
+            await tts.synthesize("hello")
+        ensure.assert_not_awaited()
+
+    def test_unsloth_api_base_detection(self, monkeypatch):
+        import bot_core.tts as tts
+        monkeypatch.setattr(tts, "TTS_URL", "http://host.docker.internal:8888/v1")
+        assert tts._unsloth_api_base() == "http://host.docker.internal:8888"
+        monkeypatch.setattr(tts, "TTS_URL", "http://kokoro-server:8000")
+        assert tts._unsloth_api_base() is None
+
+    @pytest.mark.asyncio
     async def test_timeout_wrapped_as_ttserro(self, monkeypatch):
         import bot_core.tts as tts
         monkeypatch.setattr(tts, "TTS_MODEL", "kokoro")
@@ -207,11 +274,14 @@ class TestTtsSettingsFallbacks:
         import importlib
         import config.settings as S
         monkeypatch.setenv("INFER_URL", "http://tts-host:8888/v1")
-        monkeypatch.delenv("TTS_URL", raising=False)
-        monkeypatch.delenv("TTS_API_KEY", raising=False)
+        # The host .env (loaded by main.py's load_dotenv in other tests) may set
+        # these — pin them so the fallback under test is unambiguous.
+        for var in ("TTS_MODEL", "TTS_VOICE", "TTS_URL", "TTS_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
         importlib.reload(S)
         assert S.TTS_URL == "http://tts-host:8888/v1"
         assert S.TTS_MODEL == ""
+        assert S.TTS_VOICE == "default"
 
     def test_tts_api_key_defaults_to_infer_api_key(self, monkeypatch):
         import importlib
