@@ -15,6 +15,7 @@ import httpx
 from openai import AsyncOpenAI
 
 from config.settings import (
+    DEFAULT_MODEL,
     TTS_API_KEY,
     TTS_MODEL,
     TTS_TIMEOUT_S,
@@ -66,20 +67,23 @@ def _unsloth_api_base() -> str | None:
     return base[: -len("/v1")]
 
 
-async def _ensure_model_loaded() -> bool:
-    """Load the TTS model via Studio's /api/inference/load and wait until resident.
+async def _ensure_slug_loaded(model_path: str, wait_s: float) -> bool:
+    """Load *model_path* via Studio's /api/inference/load and wait until resident.
 
     Returns False when the endpoint is not an Unsloth Studio layout or the
-    load does not finish within ``TTS_TIMEOUT_S``.
+    load does not finish within *wait_s*. Co-loading works: an explicit load
+    brings the new model up NEXT TO the currently resident one (both stay
+    loaded at once), so loading the chat model back after a TTS use does not
+    kick the TTS model out again.
     """
     api_base = _unsloth_api_base()
-    if api_base is None:
+    if api_base is None or not model_path:
         return False
     headers = {"Authorization": f"Bearer {TTS_API_KEY}"} if TTS_API_KEY else {}
     # NOTE: this Studio version silently ignores gpu_ids for audio.cpp GGUF
     # models — a GPU TTS load evicts the resident chat model and the pair
     # swaps back per use (accepted trade-off; kept for future Studio builds).
-    payload: dict[str, object] = {"model_path": TTS_MODEL}
+    payload: dict[str, object] = {"model_path": model_path}
     if TTS_GPU_IDS:
         payload["gpu_ids"] = TTS_GPU_IDS
     try:
@@ -90,21 +94,61 @@ async def _ensure_model_loaded() -> bool:
                 headers=headers,
             )
             loop = asyncio.get_running_loop()
-            deadline = loop.time() + TTS_TIMEOUT_S
+            deadline = loop.time() + wait_s
             while loop.time() < deadline:
                 resp = await http.get(
                     f"{api_base}/api/inference/loaded-models", headers=headers
                 )
                 data = resp.json().get("data", [])
-                if any(
-                    m.get("id") == TTS_MODEL and m.get("loaded") for m in data
-                ):
-                    log.info("TTS model re-loaded: %s", TTS_MODEL)
+                if any(m.get("id") == model_path and m.get("loaded") for m in data):
+                    log.info("Model re-loaded: %s", model_path)
                     return True
                 await asyncio.sleep(5)
     except Exception as e:  # noqa: BLE001 - load is best-effort; report below
-        log.warning("TTS auto-load failed: %s: %s", e.__class__.__name__, e)
+        log.warning(
+            "Model auto-load failed (%s): %s: %s",
+            model_path, e.__class__.__name__, e,
+        )
     return False
+
+
+async def _ensure_model_loaded() -> bool:
+    """Load the TTS model via Studio's /api/inference/load and wait until resident."""
+    return await _ensure_slug_loaded(TTS_MODEL, TTS_TIMEOUT_S)
+
+
+# ── Chat-model swap-back after /speak ─────────────────────────────────
+# A GPU TTS load evicts the resident chat model (see NOTE above), so the next
+# question after a /speak would pay the 30–90 s cold load. The chat model is
+# needed for the whole session anyway, so bring it back in the BACKGROUND
+# right after synthesis — while the user is listening to the audio — and the
+# next question finds it warm. Fire-and-forget: never delays the reply.
+_chat_reload_task: asyncio.Task[None] | None = None
+_CHAT_RELOAD_WAIT_S = 120  # cold chat-model loads can take upwards of a minute
+
+
+async def _swap_chat_model_back() -> None:
+    """Best-effort background reload of the chat model after a TTS evicted it."""
+    global _chat_reload_task
+    if not DEFAULT_MODEL or _unsloth_api_base() is None:
+        return
+    await _ensure_slug_loaded(DEFAULT_MODEL, _CHAT_RELOAD_WAIT_S)
+    _chat_reload_task = None
+
+
+def _schedule_chat_swap_back() -> None:
+    """Schedule :func:`_swap_chat_model_back` without awaiting it (deduped)."""
+    global _chat_reload_task
+    if not DEFAULT_MODEL or _unsloth_api_base() is None:
+        return  # nothing to reload / no Studio API to reload it with
+    if _chat_reload_task is not None and not _chat_reload_task.done():
+        return  # a reload is already in flight
+    try:
+        _chat_reload_task = asyncio.get_running_loop().create_task(
+            _swap_chat_model_back()
+        )
+    except RuntimeError:  # no running loop — nothing to schedule against
+        pass
 
 
 def _is_not_loaded_error(e: Exception) -> bool:
@@ -121,7 +165,7 @@ async def synthesize(text: str) -> bytes:
         raise ValueError("TTS_MODEL is not set — /speak is disabled.")
     client = _make_tts_client()
     try:
-        return await _speech_once(client, text)
+        audio = await _speech_once(client, text)
     except TTSError as e:
         # One bounded recovery: the model was idle-unloaded (or never
         # co-loaded) — load it next to the chat model and retry exactly once.
@@ -129,7 +173,11 @@ async def synthesize(text: str) -> bytes:
             raise
         if not await _ensure_model_loaded():
             raise
-        return await _speech_once(client, text)
+        audio = await _speech_once(client, text)
+    # The TTS load just evicted the resident chat model — bring it back in
+    # the background so the next question doesn't pay the cold load.
+    _schedule_chat_swap_back()
+    return audio
 
 
 async def _speech_once(client: AsyncOpenAI, text: str) -> bytes:
