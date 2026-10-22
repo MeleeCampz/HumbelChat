@@ -96,6 +96,16 @@ TTS_MAX_CHARS: int = _safe_int(os.getenv("TTS_MAX_CHARS"), 5000)
 # speaker embedding (x-vector) for cloning avoids that; non-Studio backends
 # ignore the option.
 TTS_X_VECTOR_ONLY_MODE: bool = _safe_bool(os.getenv("TTS_X_VECTOR_ONLY_MODE"), True)
+# Unsloth Studio only: GPU id(s) the TTS model is pinned to on (re-)load
+# Unsloth Studio only: GPU id(s) the TTS model is pinned to on (re-)load
+# (e.g. "1" for the second GPU). NOTE: this Studio version silently ignores
+# gpu_ids for audio.cpp GGUF models — a GPU TTS load then evicts the resident
+# chat model and the pair swaps back and forth per use (accepted trade-off).
+TTS_GPU_IDS: list[int] = [
+    int(part)
+    for part in os.getenv("TTS_GPU_IDS", "").replace(",", " ").split()
+    if part.lstrip("-").isdigit()
+]
 
 # ════════════════════════════════════
 #  CHARACTER defaults (per-char in characters.json)

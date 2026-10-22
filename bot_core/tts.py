@@ -21,6 +21,7 @@ from config.settings import (
     TTS_VOICE,
     TTS_URL,
     TTS_X_VECTOR_ONLY_MODE,
+    TTS_GPU_IDS,
 )
 
 log = logging.getLogger("bot.bot_core.tts")
@@ -75,11 +76,17 @@ async def _ensure_model_loaded() -> bool:
     if api_base is None:
         return False
     headers = {"Authorization": f"Bearer {TTS_API_KEY}"} if TTS_API_KEY else {}
+    # NOTE: this Studio version silently ignores gpu_ids for audio.cpp GGUF
+    # models — a GPU TTS load evicts the resident chat model and the pair
+    # swaps back per use (accepted trade-off; kept for future Studio builds).
+    payload: dict[str, object] = {"model_path": TTS_MODEL}
+    if TTS_GPU_IDS:
+        payload["gpu_ids"] = TTS_GPU_IDS
     try:
         async with httpx.AsyncClient(timeout=30.0) as http:
             await http.post(
                 f"{api_base}/api/inference/load",
-                json={"model_path": TTS_MODEL},
+                json=payload,
                 headers=headers,
             )
             loop = asyncio.get_running_loop()
