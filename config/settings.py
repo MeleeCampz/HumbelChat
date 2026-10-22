@@ -579,6 +579,31 @@ RAG_EMBED_BATCH_SIZE: int = _safe_int(os.getenv("RAG_EMBED_BATCH_SIZE"), 8)
 LAST_SESSION_CONTEXT_ENABLED: bool = _safe_bool(os.getenv("LAST_SESSION_CONTEXT_ENABLED"), True)
 LAST_SESSION_MAX_CHARS: int = _safe_int(os.getenv("LAST_SESSION_MAX_CHARS"), 4000)
 
+# ── Answer-honesty + citations for RAG turns (Tier 0 item 2, #39 plan) ────
+# Appended to the user message ONLY when KB context is actually attached
+# (bot_core/ai_client._append_user_message). Fixes FM5 (confident answers from
+# junk on negative queries) and makes FM3 (reaching beyond context) visible:
+# the model must name the section each claim comes from, and must say "not in
+# the KB" instead of guessing when nothing attached is relevant. Set
+# RAG_HONESTY_RULES="" to disable.
+RAG_HONESTY_RULES: str = os.getenv(
+    "RAG_HONESTY_RULES",
+    (
+        "<kb-answering-rules>\n"
+        "Rules for answering with the attached knowledge-base context:\n"
+        "- Ground every key claim in the attached sections and mention which one it "
+        "comes from, in passing and in the language of the reply (e.g. \"according to "
+        "equipment.md\" / \"laut equipment.md\") — just the section name, no citation "
+        "formatting.\n"
+        "- If NONE of the attached sections actually answers the question, do NOT fill "
+        "the gap with guesses or general D&D knowledge presented as fact: say plainly "
+        "that it isn't covered in the rulebook/campaign material (e.g. \"That's not in "
+        "the rules or campaign notes I have on hand\") and, if useful, offer what IS "
+        "nearby instead.\n"
+        "</kb-answering-rules>"
+    ),
+)
+
 # ── Low-confidence query rewriting (vector path only) ─────────────────────
 # When the top vector similarity score for a query is below RAG_REWRITE_MIN_SCORE,
 # the rewriter asks the LLM for up to RAG_QUERY_MAX_EXPANSIONS alternative phrasings,

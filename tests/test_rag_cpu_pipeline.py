@@ -514,6 +514,28 @@ def test_append_user_message_rag_only_unchanged():
     assert "[Relevant knowledge-base context]\nRAG" in out
 
 
+def test_append_user_message_rag_includes_honesty_rules():
+    # Tier 0 item 2 (#39 plan): honesty + citation rules attached with the KB
+    # context, after it (closest to the question).
+    from bot_core import ai_client as A
+    out = A._append_user_message("Bob", "hi", rag_context="RAG")
+    assert "<kb-answering-rules>" in out
+    assert out.index("[Relevant knowledge-base context]") < out.index("<kb-answering-rules>")
+
+
+def test_append_user_message_no_rag_no_honesty_rules():
+    from bot_core import ai_client as A
+    out = A._append_user_message("Bob", "hi", rag_context="")
+    assert "<kb-answering-rules>" not in out
+
+
+def test_append_user_message_honesty_rules_disabled(monkeypatch):
+    from bot_core import ai_client as A
+    monkeypatch.setattr(A, "RAG_HONESTY_RULES", "")
+    out = A._append_user_message("Bob", "hi", rag_context="RAG")
+    assert "<kb-answering-rules>" not in out
+
+
 # ── #8: min-attachment relevance floor ───────────────────────────────────────
 
 def _fake_store_with_ranked(ranked):

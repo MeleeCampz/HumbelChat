@@ -48,6 +48,7 @@ from config.settings import (
     KB_PATH,
     RAG_MAX_DOCS,
     RAG_MAX_CHARS,
+    RAG_HONESTY_RULES,
     RAG_WINDOW_LINES,
     LAST_SESSION_CONTEXT_ENABLED,
     LAST_SESSION_MAX_CHARS,
@@ -705,6 +706,11 @@ def _append_user_message(username: str, user_message: str, rag_context: str,
         blocks.append(f"[Previous session context]\n{session_context}")
     if rag_context:
         blocks.append(f"[Relevant knowledge-base context]\n{rag_context}")
+        # Tier 0 item 2 (#39 plan): honesty + citation rules travel with the
+        # context they constrain — appended AFTER it so they sit closest to
+        # the question. Skipped entirely (and for free) on non-RAG turns.
+        if RAG_HONESTY_RULES:
+            blocks.append(RAG_HONESTY_RULES)
     if blocks:
         base = "---\n\n".join(blocks) + "\n\n---\n\n" + base
     return base

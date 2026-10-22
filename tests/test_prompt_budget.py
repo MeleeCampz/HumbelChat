@@ -14,6 +14,14 @@ from bot_core import ai_client as ac
 
 
 class TestApplyPromptBudget:
+    @pytest.fixture(autouse=True)
+    def _no_honesty_rules(self, monkeypatch):
+        # These tests exercise trimming mechanics with TINY budgets (200–300
+        # chars); the RAG honesty-rules block (~750 chars, attached whenever
+        # rag_context is non-empty) would dwarf them. Pin it off so the
+        # estimates are deterministic.
+        monkeypatch.setattr(ac, "RAG_HONESTY_RULES", "")
+
     def test_no_trim_when_under_budget(self, monkeypatch):
         monkeypatch.setattr(ac, "PROMPT_BUDGET_CHARS", 10_000)
         hist = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
