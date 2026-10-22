@@ -278,6 +278,59 @@ class TestTtsClient:
         monkeypatch.setattr(tts, "TTS_URL", "http://kokoro-server:8000")
         assert tts._unsloth_api_base() is None
 
+    @staticmethod
+    def _fake_httpx(monkeypatch, model: str) -> dict[str, object]:
+        """Patch tts.httpx.AsyncClient; returns the recorded load payload."""
+        import bot_core.tts as tts
+
+        sent: dict[str, object] = {}
+
+        class _Resp:
+            def json(self):
+                return {"data": [{"id": model, "loaded": True}]}
+
+        class _Client:
+            def __init__(self, *a, **k):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def post(self, url, json=None, headers=None):
+                sent["payload"] = json
+
+            async def get(self, url, headers=None):
+                return _Resp()
+
+        monkeypatch.setattr(tts.httpx, "AsyncClient", _Client)
+        return sent
+
+    @pytest.mark.asyncio
+    async def test_load_pins_configured_gpus(self, monkeypatch):
+        import bot_core.tts as tts
+        monkeypatch.setattr(tts, "TTS_MODEL", "qwen3-tts")
+        monkeypatch.setattr(tts, "TTS_URL", "http://studio:8888/v1")
+        monkeypatch.setattr(tts, "TTS_GPU_IDS", [1])
+        sent = self._fake_httpx(monkeypatch, "qwen3-tts")
+
+        assert await tts._ensure_model_loaded() is True
+        # pinned to its own GPU — default placement would evict the chat model
+        assert sent["payload"] == {"model_path": "qwen3-tts", "gpu_ids": [1]}
+
+    @pytest.mark.asyncio
+    async def test_load_omits_placement_when_unconfigured(self, monkeypatch):
+        import bot_core.tts as tts
+        monkeypatch.setattr(tts, "TTS_MODEL", "qwen3-tts")
+        monkeypatch.setattr(tts, "TTS_URL", "http://studio:8888/v1")
+        monkeypatch.setattr(tts, "TTS_GPU_IDS", [])
+        sent = self._fake_httpx(monkeypatch, "qwen3-tts")
+
+        assert await tts._ensure_model_loaded() is True
+        assert sent["payload"] == {"model_path": "qwen3-tts"}
+
     @pytest.mark.asyncio
     async def test_timeout_wrapped_as_ttserro(self, monkeypatch):
         import bot_core.tts as tts
