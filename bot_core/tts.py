@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 
 import httpx
 from openai import AsyncOpenAI
@@ -19,6 +20,7 @@ from config.settings import (
     TTS_TIMEOUT_S,
     TTS_VOICE,
     TTS_URL,
+    TTS_X_VECTOR_ONLY_MODE,
 )
 
 log = logging.getLogger("bot.bot_core.tts")
@@ -124,10 +126,22 @@ async def synthesize(text: str) -> bytes:
 
 
 async def _speech_once(client: AsyncOpenAI, text: str) -> bytes:
+    # Qwen3-TTS (Unsloth Studio): clone via speaker embedding only — the base
+    # model's ICL reference prompting otherwise leaks the saved voice's
+    # transcript tail into the output. Ignored by other backends.
+    extra_body: dict[str, Any] | None = (
+        {"audio_options": {"x_vector_only_mode": True}}
+        if TTS_X_VECTOR_ONLY_MODE
+        else None
+    )
     try:
         resp = await asyncio.wait_for(
             client.audio.speech.create(
-                model=TTS_MODEL, voice=TTS_VOICE, input=text, response_format="mp3"
+                model=TTS_MODEL,
+                voice=TTS_VOICE,
+                input=text,
+                response_format="mp3",
+                extra_body=extra_body,
             ),
             timeout=TTS_TIMEOUT_S,
         )
