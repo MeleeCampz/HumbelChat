@@ -41,11 +41,15 @@ class QueryRewriter:
     """Dynamically expand queries using the configured LLM backend."""
 
     MAX_EXPANSIONS = 3
-    # Per-call HTTP timeout. Must exceed RAG_REWRITE_BUDGET_SECONDS (default 30,
-    # the outer asyncio.wait_for and the true cap): a :8888 model swap during
-    # the call takes ~20 s before the first byte, so a 10 s read timeout killed
-    # otherwise-successful rewrites mid-swap (2026-10-15).
-    REWRITE_TIMEOUT_SEC = 60
+    # Per-call HTTP timeout. Must exceed BOTH RAG_REWRITE_BUDGET_SECONDS and
+    # RAG_REWRITE_LOAD_BUDGET_SECONDS (90, the outer asyncio.wait_for budgets
+    # and the true caps): a cold :8888 chat-model load can take upwards of a
+    # minute before the first byte, so a 60 s read timeout killed the once-per-
+    # session cold-load rewrite at the HTTP layer before the extended budget
+    # could help (the "first call after unload always fails" symptom).
+    # History: 10 s killed mid-swap rewrites (2026-10-15) → 60 s covered warm
+    # swaps (~20 s to first byte) but not cold loads → 120 s (2026-10-20).
+    REWRITE_TIMEOUT_SEC = 120
     REWRITE_PROMPT_TEMPLATE = """\
 You are a search query expansion assistant. The knowledge base is written in ENGLISH (official D&D 5e SRD text plus campaign lore) about {kb_domain}. Your task is to generate additional search terms that capture related concepts, synonyms, and contextual meanings of the user's original query.
 

@@ -66,7 +66,7 @@ iteration, no verification) and about *corpus structure* (enumeration, near-dupl
 | **FM3** | **Single turn, no iteration, no answer-side verification.** If the first retrieval is even slightly off, there is no second chance to search differently, and nothing checks the answer is grounded in what was attached. This is the core of **#39**. | Architectural — `_retrieve_vector` → one `ask_ai`. No loop, no critic. | Yes — architectural |
 | **FM4** | **Cross-lingual German query / English KB residual.** Mostly bridged by English expansion + expansion-aware rerank; a fuzzy match (animals/Vulpin) still scores only ~0.50. | Benchmark case 16/26. | Largely fixed, small residual |
 | **FM5** | **Negative / unanswerable queries drag junk.** "Capital of France?" attaches **9.4 K chars**, "Steuererklärung in Deutschland?" attaches **13.7 K chars** of on-topic-but-wrong D&D content (rerank tops only 0.26–0.35). The model then either answers from junk or says "not in context" — but it *wasted* the budget and risks a confident wrong answer. | Benchmark Finding 4 (backlog #43). | Yes — no relevance gate before attach/answer |
-| **FM6** | **Rewrite latency stalls.** In the production run, **17/42 (40%) of rewrites exhausted the 45 s budget** and were dropped → those queries paid ~50–57 s end-to-end *and* lost their expansions. Root cause: the rewrite uses the **big chat model**, which intermittently leaks into thinking mode or stalls on LM Studio. | Benchmark Finding 2 (top action item). | Yes — operational, but it also *removes the safety net* that fixes FM2. |
+| **FM6** | **Rewrite latency stalls.** In the production run, **17/42 (40%) of rewrites exhausted the rewrite budget** and were dropped → those queries paid ~50–57 s end-to-end *and* lost their expansions. Root cause (refined 2026-10-20): the rewrite uses the **big chat model**, which is often **not resident** — Unsloth Studio loads/swaps it on demand and a cold load takes upwards of a minute, so the *first call after an unload* always failed or paid the full load. Secondary: thinking-mode leaks on a warm model. | Benchmark Finding 2 (top action item). | **Resolved 2026-10-20** (see Tier 0 item 1) — keep the chat model resident; cold load happens once per session and now survives to completion. |
 
 **Key insight.** FM1 and FM5 are *retrieval-structure* problems fixable without an agent.
 FM3 is the *architectural* problem that tool calling (#39) addresses. FM6 is an operational bug
@@ -287,15 +287,24 @@ env knob controls it; `auto` is the intended default.
 
 ### Tier 0 — trivial, config/prompt only (do first; low risk)
 
-1. **Stop the rewrite stalls (FM6).** Two independent levers:
-   - Drop `RAG_REWRITE_BUDGET_SECONDS` from 45 → **8–10 s** so a stalled rewrite fails fast
-     (a 45 s hang is *worse* than no expansion — Benchmark Finding 2).
-   - Structurally, stop using the big chat model for the utility call: run expansions with a
-     **small dedicated local model** (or the embedding-instruct path) so it can't leak into
-     thinking mode or stall on LM Studio. This also *protects the FM2 fix*, which currently
-     depends on an expansion landing in time.
-   - *Measure:* re-run `rag_benchmark.py`; stalled-rewrite count should drop from 17/42 → ~0;
-     median latency down; hit rate unchanged (it was already unaffected).
+1. **Stop the rewrite stalls (FM6).** — **DONE 2026-10-20** (user decision: keep the big chat
+   model, ensure it stays resident; no small sidecar). Three pieces:
+   - *Already in place:* load-state-aware rewrite budget (`kb/retrievers.py` probes Studio's
+     `/v1/models` `loaded` flag and extends to `RAG_REWRITE_LOAD_BUDGET_SECONDS=90` so a cold
+     load happens during the call; commit 70947e3).
+   - *Fixed:* the per-call HTTP timeout (`REWRITE_TIMEOUT_SEC`) was 60 s — **below** the 90 s
+     extended budget — so a cold load taking >60 s to first byte died at the HTTP layer before
+     the budget could help (the "first call after unload always failed" symptom). Now 120 s
+     (`kb/query_rewriter.py`), above both budgets.
+   - *Fixed:* `/speak` TTS co-loads evict the resident chat model (Studio ignores `gpu_ids`
+     for GGUF audio), so the question after any `/speak` paid a cold load. `bot_core/tts.py`
+     now schedules a **background swap-back** (`_schedule_chat_swap_back`) right after each
+     synthesis — the chat model reloads while the user listens; next question finds it warm.
+   - Net effect: one load per session (~30–90 s, absorbed by the load-budget logic on whatever
+     query is first), zero stalls after that. Remaining hygiene (host-side): keep Studio from
+     idle-unloading the chat model over multi-hour sessions.
+   - *Measure:* re-run `rag_benchmark.py`; stalled-rewrite count → ~0; median latency down;
+     hit rate unchanged.
 2. **Answer-honesty + citations prompt (FM3/FM5).** Add to the answer system prompt: cite the
    attached section for each claim; if nothing attached is clearly relevant, say "I couldn't find
    that in the rules/campaign" instead of guessing. *Measure:* negative set attaches junk but the
