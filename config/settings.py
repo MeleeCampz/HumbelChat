@@ -91,6 +91,11 @@ TTS_TIMEOUT_S: float = _safe_float(os.getenv("TTS_TIMEOUT_S"), 120.0)
 # Hard cap on text length per /speak request (model input limits + Discord's
 # 10 MB attachment limit at typical mp3 bitrates).
 TTS_MAX_CHARS: int = _safe_int(os.getenv("TTS_MAX_CHARS"), 5000)
+# Qwen3-TTS quirk (Unsloth Studio): the base model's ICL reference prompting can
+# leak the tail of the saved voice's transcript into the output. Using only the
+# speaker embedding (x-vector) for cloning avoids that; non-Studio backends
+# ignore the option.
+TTS_X_VECTOR_ONLY_MODE: bool = _safe_bool(os.getenv("TTS_X_VECTOR_ONLY_MODE"), True)
 
 # ════════════════════════════════════
 #  CHARACTER defaults (per-char in characters.json)

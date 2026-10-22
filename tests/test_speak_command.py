@@ -160,6 +160,34 @@ class TestTtsClient:
         assert kwargs["response_format"] == "mp3"
 
     @pytest.mark.asyncio
+    async def test_x_vector_only_mode_sent_when_enabled(self, monkeypatch):
+        import bot_core.tts as tts
+        monkeypatch.setattr(tts, "TTS_MODEL", "kokoro")
+        monkeypatch.setattr(tts, "TTS_X_VECTOR_ONLY_MODE", True)
+        client = self._fake_client(b"audio-bytes")
+        monkeypatch.setattr(tts, "_tts_client", client)
+
+        await tts.synthesize("hello")
+
+        _, kwargs = client.audio.speech.create.call_args
+        assert kwargs["extra_body"] == {
+            "audio_options": {"x_vector_only_mode": True}
+        }
+
+    @pytest.mark.asyncio
+    async def test_x_vector_only_mode_omitted_when_disabled(self, monkeypatch):
+        import bot_core.tts as tts
+        monkeypatch.setattr(tts, "TTS_MODEL", "kokoro")
+        monkeypatch.setattr(tts, "TTS_X_VECTOR_ONLY_MODE", False)
+        client = self._fake_client(b"audio-bytes")
+        monkeypatch.setattr(tts, "_tts_client", client)
+
+        await tts.synthesize("hello")
+
+        _, kwargs = client.audio.speech.create.call_args
+        assert kwargs.get("extra_body") is None
+
+    @pytest.mark.asyncio
     async def test_empty_response_raises(self, monkeypatch):
         import bot_core.tts as tts
         monkeypatch.setattr(tts, "TTS_MODEL", "kokoro")
