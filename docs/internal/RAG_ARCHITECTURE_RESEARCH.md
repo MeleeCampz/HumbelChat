@@ -305,10 +305,16 @@ env knob controls it; `auto` is the intended default.
      idle-unloading the chat model over multi-hour sessions.
    - *Measure:* re-run `rag_benchmark.py`; stalled-rewrite count → ~0; median latency down;
      hit rate unchanged.
-2. **Answer-honesty + citations prompt (FM3/FM5).** Add to the answer system prompt: cite the
-   attached section for each claim; if nothing attached is clearly relevant, say "I couldn't find
-   that in the rules/campaign" instead of guessing. *Measure:* negative set attaches junk but the
-   *answer* now says "not found"; hit set shows no regressions and gains visible citations.
+2. **Answer-honesty + citations prompt (FM3/FM5).** — **DONE 2026-10-23.** Implemented as
+   `RAG_HONESTY_RULES` (`config/settings.py`, env-overridable, `""` disables): appended to the
+   user message ONLY when KB context is attached (`bot_core/ai_client._append_user_message`),
+   after the context block so it sits closest to the question — non-RAG turns pay nothing.
+   Rules: cite the attached section per key claim (in passing, in the reply's language); if
+   nothing attached is relevant, say plainly "not in the rules/campaign notes" instead of
+   guessing (offer what IS nearby). Tests: `tests/test_rag_cpu_pipeline.py` (attached /
+   not-attached / disabled) + prompt-budget tests pin the rules off for tiny budgets.
+   *Measure (pending):* golden-set re-run — negative set should flip to "not found" answers,
+   hit set no regressions; citations visible in production logs.
 
 ### Tier 1 — quick wins, minimal infra (retrieval-structure fixes)
 
