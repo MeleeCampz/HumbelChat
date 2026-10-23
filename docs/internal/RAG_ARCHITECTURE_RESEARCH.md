@@ -333,10 +333,19 @@ env knob controls it; `auto` is the intended default.
 6. **Enumeration handling (FM1) — the persistent miss.** PARTIAL — **(a) KB-side index file**
    ✅ DONE on disk: `data/knowledge/humblewood/HumbleWood/HumbleWood/Humblewood_Special_Spells.md`
    + `Humblewood_Backgrounds.md` (bilingual listings of all 7 special spells / 3 backgrounds).
-   **NOT yet indexed** — needs `/sync_kb` via the bot (sole-writer on `vector_index.db`; do it
-   while the user is present). **(b) Directory-aware retrieval** deferred to agent mode (§3.2,
-   `list_sections`). *Measure:* after indexing, the two Humblewood enumeration golden cases
-   (#27/#28) should flip MISS → HIT.
+   **NOW INDEXED + RETRIEVED** (verified in the clean benchmark run below — both summary files
+   attach at rank 0; strict per-file expected matching still counts them MISS, so the golden set
+   itself needs updating to expect the summary files). **(b) Directory-aware retrieval** is the
+   agent-mode `list_sections` path (§3.2).
+
+**Tier 1 validation — clean benchmark 2026-10-24** (all backends healthy: embedder OK, reranker
+OK with 67 passes / **0 errors** under the new chunked config, LLM OK): **37/40 expected-file
+hits** (DE 28/31 · EN 9/9; 2 negatives, 0 errors), recall@1 70% / @2 88% / @4 92%, retrieval
+latency median 9.5 s · p95 15.9 s, rewrite fired 25/42 (zero stalls), hit top-rerank median
+0.915. The attach floor ran on real rerank scores every pass; dedup notes fired live (Y rows);
+the two enumeration cases now retrieve their summary files at rank 0. Remaining misses: one
+near-miss (Saddlebag part 3 attached vs expected part 2) + the two strict-match enumeration
+cases above.
 
 ### Tier 2 — moderate effort, higher value (index-time + gated generation)
 
