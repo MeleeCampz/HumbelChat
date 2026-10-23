@@ -546,6 +546,9 @@ def _fake_store_with_ranked(ranked):
         async def query_with_embeddings(self, q, top_n=5):
             return ranked, [0.0] * 8
 
+        def embedding_map(self):
+            return {}  # no embeddings → near-duplicate dedup is a no-op
+
     class FakeStore:
         def get_index(self):
             return FakeIdx()
@@ -557,6 +560,7 @@ def _fake_store_with_ranked(ranked):
 async def test_min_attach_score_drops_low_chunks(monkeypatch):
     import kb.retrievers as R
     monkeypatch.setattr("config.settings.RAG_MIN_ATTACH_SCORE", 0.5)
+    monkeypatch.setattr("config.settings.RAG_ATTACH_FLOOR_SOURCE", "dense")
     monkeypatch.setattr("config.settings.RAG_HYBRID_ENABLED", False)
     monkeypatch.setattr("config.settings.RAG_REWRITE_MIN_SCORE", 0.0)  # no rewrite
     monkeypatch.setattr("kb.reranker.is_available", lambda: False)
@@ -579,6 +583,7 @@ async def test_min_attach_score_off_keeps_all(monkeypatch):
     import kb.retrievers as R
     monkeypatch.setattr("config.settings.RAG_MIN_ATTACH_SCORE", 0.0)  # pre-fusion floor off
     monkeypatch.setattr("config.settings.RAG_ATTACH_FLOOR", 0.0)     # attach floor off (isolate pre-fusion knob)
+    monkeypatch.setattr("config.settings.RAG_ATTACH_FLOOR_SOURCE", "dense")
     monkeypatch.setattr("config.settings.RAG_HYBRID_ENABLED", False)
     monkeypatch.setattr("config.settings.RAG_REWRITE_MIN_SCORE", 0.0)
     monkeypatch.setattr("kb.reranker.is_available", lambda: False)
@@ -600,6 +605,7 @@ async def test_attach_floor_drops_weak_keeps_strong(monkeypatch):
     import kb.retrievers as R
     monkeypatch.setattr("config.settings.RAG_MIN_ATTACH_SCORE", 0.0)  # pre-fusion off
     monkeypatch.setattr("config.settings.RAG_ATTACH_FLOOR", 0.5)
+    monkeypatch.setattr("config.settings.RAG_ATTACH_FLOOR_SOURCE", "dense")
     monkeypatch.setattr("config.settings.RAG_HYBRID_ENABLED", False)
     monkeypatch.setattr("config.settings.RAG_REWRITE_MIN_SCORE", 0.0)
     monkeypatch.setattr("kb.reranker.is_available", lambda: False)
