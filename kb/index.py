@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import array
@@ -255,6 +256,10 @@ class KBIndexStore:
         # via the atomic temp-file swap in _persist_index_to_db.
         self._ignore_cache = False
         self._index: KBVectorIndex | None = None
+        # Tier 2 (#39 item 7): Contextual Retrieval sidecar — content_hash →
+        # one-line chunk context. Empty when the file is absent, which keeps
+        # every code path at its legacy behaviour.
+        self._context_lines = self._load_context_lines()
         # Index WRITES (build / update / sync) use a dedicated embedder that can run
         # on the GPU backend for speed while QUERIES stay on local CPU. Both must be
         # the same model (bge-m3) so their vectors are interchangeable.
@@ -266,6 +271,31 @@ class KBIndexStore:
         # (Do NOT recreate it per call — two distinct Lock objects never
         # exclude each other.  Python ≥3.10 locks carry no loop binding.)
         self._mut_lock: asyncio.Lock | None = None
+
+    def _load_context_lines(self) -> dict[str, str]:
+        """Read the Contextual Retrieval sidecar (``context_lines.json``).
+
+        Maps a chunk's ORIGINAL content hash to its one-line context. Lives
+        next to the vector DB in *persist_dir*; absent or unreadable → empty
+        map = legacy behaviour (no framing, no re-embedding needed).
+        """
+        path = self.persist_dir / "context_lines.json"
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return {}
+            return {k: v for k, v in data.items()
+                    if isinstance(k, str) and isinstance(v, str) and v}
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Could not read contextual sidecar '%s': %s", path, exc)
+            return {}
+
+    def reload_context_lines(self) -> dict[str, str]:
+        """Re-read the sidecar from disk (after an offline generation run)."""
+        self._context_lines = self._load_context_lines()
+        return self._context_lines
 
     def _make_index_embedder(self) -> Embedder:
         """Embedder used for index WRITES (build / update / sync).
@@ -424,6 +454,7 @@ class KBIndexStore:
             self._index = KBVectorIndex.from_entries(
                 self._entries_from_docs(merged),
                 [d.embedding for d in merged],
+                context_lines=self._context_lines,
             )
 
             await self._save_to_disk(changed={key})  # P2 #20: incremental
@@ -568,6 +599,7 @@ class KBIndexStore:
                     self._entries_from_docs(merged),
                     [d.embedding for d in merged],
                     [d.file_hash for d in merged],  # P2 #19
+                    context_lines=self._context_lines,
                 )
                 # Only persist a non-empty index — never wipe a good on-disk cache
                 # with an empty one when the embedding backend is down.
@@ -675,7 +707,8 @@ class KBIndexStore:
             return KBVectorIndex()
 
         aligned_hashes = [file_hash_by_key.get(e[2]) for e in entries]  # P2 #19
-        idx = KBVectorIndex.from_entries(entries, embeddings, aligned_hashes)
+        idx = KBVectorIndex.from_entries(entries, embeddings, aligned_hashes,
+                                         context_lines=self._context_lines)
         await self._save_to_disk_from(idx)
         logger.info("Index ready: %d chunk(s) from %d file(s), persisted to %s",
                     idx.count(), len(files), self._db_path)
@@ -732,7 +765,9 @@ class KBIndexStore:
             logger.info("Cache HIT: %d chunk(s) loaded from disk, 0 API calls", reused)
 
         aligned_hashes = [file_hash_by_key.get(e[2]) for e in entries] if embeddings else None  # P2 #19
-        idx = KBVectorIndex.from_entries(entries, embeddings, aligned_hashes) if embeddings else KBVectorIndex()
+        idx = (KBVectorIndex.from_entries(entries, embeddings, aligned_hashes,
+                                          context_lines=self._context_lines)
+               if embeddings else KBVectorIndex())
         # P2 #20: incremental persist — only the refreshed files changed; rows
         # for files deleted since the cache was written are pruned by the upsert path.
         if idx is not None:
@@ -779,7 +814,15 @@ class KBIndexStore:
         if not flat:
             return [], [], file_hashes
 
-        embeddings = await self._embedder.encode([c for _, c, _ in flat])
+        # Tier 2: embed the CONTEXTUAL passage (context line + original text)
+        # when a sidecar entry exists, so vectors carry chunk-specific framing.
+        passages = [
+            f"{ctx}\n\n{content}"
+            if (ctx := self._context_lines.get(_content_hash(content)))
+            else content
+            for _display, content, _key in flat
+        ]
+        embeddings = await self._embedder.encode(passages)
         return flat, embeddings, file_hashes
 
     async def _embed_one_file(self, path: pathlib.Path) -> tuple[list[tuple[str, str, str]], list[list[float]], dict[str, str]]:

@@ -10,6 +10,7 @@ Uses ``kb.embedder.Embedder`` powered by the configured INFER_URL
 """
 from __future__ import annotations
 
+import hashlib
 import math
 import pathlib
 from dataclasses import dataclass, field
@@ -46,6 +47,11 @@ def _wrap_query_instruct(text: str) -> str:
 
 # ──────────────────────────── Data structures ─────────────────────────
 
+def _content_hash(content: str) -> str:
+    """SHA-256 of a chunk's ORIGINAL text — the key into the contextual sidecar."""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
 @dataclass
 class _DocEntry:
     """Internal representation of an indexed document chunk."""
@@ -56,6 +62,10 @@ class _DocEntry:
     # P2 #19: SHA-256 of the SOURCE file on disk. Lets the cache skip
     # re-chunking a file whose content is unchanged (chunker is deterministic).
     file_hash: str | None = field(default=None, repr=False)
+    # Tier 2 (#39 item 7): one-line chunk-specific context (Contextual
+    # Retrieval). Empty when no contextual sidecar exists — every consumer
+    # then sees exactly the legacy behaviour.
+    context_line: str = field(default="", repr=False)
 
     def source(self) -> str:
         """Best-effort original filename for this chunk (for cache bookkeeping)."""
@@ -83,6 +93,18 @@ class _DocEntry:
         if file_part.replace("\\", "/") == source:
             return name
         return f"{source}{section}"
+
+    def passage_text(self) -> str:
+        """The text a consumer (embedding, attachment, BM25) sees for this chunk.
+
+        Contextual Retrieval: the context line is prepended so BOTH the vector
+        and the attached passage carry chunk-specific framing (e.g. which
+        session a log excerpt belongs to). Without a context line this is
+        exactly ``content`` — legacy behaviour unchanged.
+        """
+        if self.context_line:
+            return f"{self.context_line}\n\n{self.content}"
+        return self.content
 
 
 # ──────────────────────────── Helpers ─────────────────────────────────
@@ -177,8 +199,14 @@ class KBVectorIndex:
         entries: Sequence[tuple[str, str, str]],  # (display_name, content, source_file)
         embeddings: Sequence[list[float] | None],
         file_hashes: Sequence[str | None] | None = None,  # P2 #19
+        context_lines: dict[str, str] | None = None,  # Tier 2: content_hash → line
     ) -> KBVectorIndex:
-        """Build an index from pre-embedded entries (no API calls)."""
+        """Build an index from pre-embedded entries (no API calls).
+
+        *context_lines* maps a chunk's ORIGINAL content hash to its one-line
+        context (Contextual Retrieval sidecar); matching chunks carry the line
+        so ``passage_text()`` can prepend it.
+        """
         index = cls.__new__(cls)
         from config.settings import effective_embedding_model
         index._embedder = Embedder(model_name=effective_embedding_model())
@@ -186,19 +214,22 @@ class KBVectorIndex:
         docs: list[_DocEntry] = []
         for (n, c, s), e in zip(entries, embeddings):
             fh = file_hashes[len(docs)] if file_hashes else None
+            ctx = context_lines.get(_content_hash(c), "") if context_lines else ""
             docs.append(_DocEntry(display_name=n, content=c, embedding=e,
-                                  source_file=s, file_hash=fh))
+                                  source_file=s, file_hash=fh, context_line=ctx))
         index._docs = docs
         return index
 
     def iter_chunks(self) -> Iterator[tuple[str, str]]:
-        """Yield ``(display_name, content)`` for every indexed chunk.
+        """Yield ``(display_name, passage_text)`` for every indexed chunk.
 
         Used by the agent-mode tools (kb/tools.py) for name-based lookups
         (read_section / list_sections). Display names look like
         ``"humblewood/DnDRules/…/equipment.md [Equipment -> Armor]"``.
+        The passage carries the contextual line when one exists, so
+        read_section output matches what the main retrieval path attaches.
         """
-        return ((d.display_name, d.content) for d in self._docs)
+        return ((d.display_name, d.passage_text()) for d in self._docs)
 
     def embedding_map(self) -> dict[str, list[float]]:
         """display_name → embedding for every chunk that has one.
@@ -354,7 +385,7 @@ class KBVectorIndex:
         # P2 #17: numpy matmul ranking (falls back to pure Python internally).
         ranked = self._rank(q_emb, top_n)
         scored = [
-            (self._docs[i].retrieval_name(), self._docs[i].content, sim)
+            (self._docs[i].retrieval_name(), self._docs[i].passage_text(), sim)
             for sim, i in ranked
         ]
         return scored, q_emb
@@ -384,7 +415,7 @@ class KBVectorIndex:
                 # P2 #17: numpy matmul ranking (falls back to pure Python internally).
                 ranked = self._rank(emb, top_n)
                 scored = [
-                    (self._docs[i].retrieval_name(), self._docs[i].content, sim)
+                    (self._docs[i].retrieval_name(), self._docs[i].passage_text(), sim)
                     for sim, i in ranked
                 ]
             else:
