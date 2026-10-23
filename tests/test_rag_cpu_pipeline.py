@@ -174,6 +174,9 @@ def test_lexical_ranking_returns_relevant_first(monkeypatch):
         def retrieval_name(self):
             return self.name
 
+        def passage_text(self):
+            return self.content
+
     class FakeIdx:
         _docs = [FakeDoc("a.md", "dragon hoards gold"),
                  FakeDoc("b.md", "calendar moons")]
@@ -190,6 +193,9 @@ def test_get_bm25_caches_by_docs_identity(monkeypatch):
     class FakeDoc:
         def __init__(self, content):
             self.content = content
+
+        def passage_text(self):
+            return self.content
 
     docs = [FakeDoc("hello world")]
     idx = type("I", (), {"_docs": docs})()

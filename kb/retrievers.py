@@ -537,7 +537,9 @@ def _get_bm25(idx: "KBVectorIndex") -> "BM25":
     if _bm25_cache is not None and _bm25_cache[1] is docs and _bm25_cache[2] == len(docs):
         return _bm25_cache[0]
     from kb.lexical import BM25
-    bm25 = BM25([d.content for d in docs])
+    # Contextual passages: the lexical leg sees the same framed text as the
+    # dense leg, so a context line (e.g. "Session 7 of …") is matchable here too.
+    bm25 = BM25([d.passage_text() for d in docs])
     _bm25_cache = (bm25, docs, len(docs))
     return bm25
 
@@ -551,7 +553,7 @@ def _lexical_ranking(idx: "KBVectorIndex", query: str, limit: int) -> list[tuple
     scores = bm25.scores(query)
     docs = idx._docs
     ranked = [
-        (docs[i].retrieval_name(), docs[i].content, float(s))
+        (docs[i].retrieval_name(), docs[i].passage_text(), float(s))
         for i, s in enumerate(scores) if s > 0
     ]
     ranked.sort(key=lambda t: -t[2])
