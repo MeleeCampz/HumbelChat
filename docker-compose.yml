@@ -126,17 +126,22 @@ services:
       - '{"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
       - --chat-template
       - /templates/qwen3_reranker.jinja
-      # 0.7 (not 0.5): this card is SHARED with the Ollama embedder, and vLLM
-      # subtracts other processes' VRAM from its budget. At 0.5 the INT4 weights
-      # (~3 GiB) + CUDA graphs (0.7 GiB) + the resident embedder left only
-      # 0.06 GiB for KV cache — below the 0.28 GiB minimum for max_model_len
-      # 2048, so engine init failed with a ValueError. 0.7 leaves ~7 GiB of KV
-      # headroom (a 32-pair rerank batch can hold several GiB of KV at once)
-      # while still leaving room for the embedder on the shared card.
+      # 0.5 (shrunk from 0.7, 2026-10-24 — host VRAM pressure): the old 0.7
+      # reservation (~11 GB of the shared 16 GB card) carried ~7 GiB of KV
+      # headroom our workload never uses. It now fits at 0.5 because BOTH of
+      # the original blockers are removed: --enforce-eager drops the ~0.7 GiB
+      # CUDA-graph reservation (latency cost is irrelevant for a reranker), and
+      # max-model-len 1024 halves the per-sequence KV minimum (our pairs are
+      # RERANK_MAX_CHARS=600 chars ≈ 180 tokens + query + template — well under
+      # 1024). --max-num-seqs 32 caps concurrent KV; the bot sends ≤48 pairs
+      # per request (RERANK_TOP_K=48) so vLLM chunks the overflow.
       - --gpu-memory-utilization
-      - "0.7"
+      - "0.5"
       - --max-model-len
-      - "2048"
+      - "1024"
+      - --max-num-seqs
+      - "32"
+      - --enforce-eager
     deploy:
       resources:
         reservations:
