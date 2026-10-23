@@ -128,17 +128,21 @@ services:
       - /templates/qwen3_reranker.jinja
       # 0.5 (shrunk from 0.7, 2026-10-24 — host VRAM pressure): the old 0.7
       # reservation (~11 GB of the shared 16 GB card) carried ~7 GiB of KV
-      # headroom our workload never uses. It now fits at 0.5 because BOTH of
-      # the original blockers are removed: --enforce-eager drops the ~0.7 GiB
-      # CUDA-graph reservation (latency cost is irrelevant for a reranker), and
-      # max-model-len 1024 halves the per-sequence KV minimum (our pairs are
-      # RERANK_MAX_CHARS=600 chars ≈ 180 tokens + query + template — well under
-      # 1024). --max-num-seqs 32 caps concurrent KV; the bot sends ≤48 pairs
-      # per request (RERANK_TOP_K=48) so vLLM chunks the overflow.
+      # headroom our workload never uses. It now fits at 0.5 because the
+      # original init blocker is gone: --enforce-eager drops the ~0.7 GiB
+      # CUDA-graph reservation (latency cost is irrelevant for a reranker),
+      # which alone lifts KV headroom from 0.06 to ~0.8 GiB at max-model-len
+      # 2048 — above the 0.28 GiB minimum that failed init before. Scoring
+      # inputs are UNCHANGED (max-model-len 2048 keeps covering our full
+      # RERANK_MAX_CHARS=1200 pairs ≈ 350-500 tokens + query + template; no
+      # truncation, floor calibration stays valid). --max-num-seqs 32 caps
+      # concurrent KV: a 150-pair request (RERANK_TOP_K=150) runs as ~5
+      # waves of 32 — memory bounded by the cap, not the request size; the
+      # bot's RERANK_TIMEOUT_SECONDS=60 gives chunked batches time to finish.
       - --gpu-memory-utilization
       - "0.5"
       - --max-model-len
-      - "1024"
+      - "2048"
       - --max-num-seqs
       - "32"
       - --enforce-eager
