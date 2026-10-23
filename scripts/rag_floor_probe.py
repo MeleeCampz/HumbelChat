@@ -1,4 +1,4 @@
-"""Rerank-score floor calibration probe (backlog #43 — 'measure first').
+"""Rerank-score floor calibration probe (#39 Tier 1 item 3 — 'measure first').
 
 Runs the 33-query golden set through the REAL production retrieval path with
 the Qwen3-Reranker active, captures every candidate's rerank score, and:
@@ -74,7 +74,7 @@ async def run(kb_path: Path, top_n: int, out_path: Path | None = None) -> list[d
                     retrieve_kb_documents(query, kb_path, strategy="vector", top_n=top_n),
                     timeout=900,  # local CPU embedding fallback makes queries slow
                 )
-            except (asyncio.TimeoutError, Exception) as exc:  # noqa: BLE001 — one bad query must not kill the probe
+            except Exception as exc:  # noqa: BLE001 — one bad query must not kill the probe
                 msg = f"{type(exc).__name__}: {exc}"
                 print(f"    ERROR {msg}", flush=True)
                 results.append({"query": query, "error": msg})
