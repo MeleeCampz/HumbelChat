@@ -224,7 +224,10 @@ class TestParallelRewrite:
             async def query_with_embeddings(self, text, top_n=5):
                 await asyncio.sleep(0.2)  # simulate the embed+rank window
                 events["expand_seen_during_rank"] = events["expand_called"]
-                return [(("a.md [Sec]", "alpha content", 0.6))], [0.1]
+                return [("a.md [Sec]", "alpha content", 0.6)], [0.1]
+
+            def embedding_map(self):
+                return {}  # no embeddings → near-duplicate dedup is a no-op
 
             async def rank_texts(self, texts, top_n=5):
                 assert texts == ["armor table english"]
