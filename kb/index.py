@@ -1080,6 +1080,11 @@ class KBIndexStore:
                 tmp_path.unlink()
 
             conn = sqlite3.connect(str(tmp_path))
+            # Some filesystems (e.g. the sandbox's Windows mount) cannot create
+            # SQLite journal files — "attempt to write a readonly database".
+            # An in-memory journal needs no extra file; harmless elsewhere since
+            # this tmp DB is written by exactly one connection.
+            conn.execute("PRAGMA journal_mode=MEMORY")
             conn.execute(_SCHEMA_CREATE_DOC_INDEX)
             conn.execute(_SCHEMA_CREATE_METADATA)
 

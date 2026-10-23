@@ -94,7 +94,7 @@ def _save_sidecar(persist_dir: pathlib.Path, lines: dict[str, str]) -> None:
     tmp.replace(path)  # atomic: readers never see a partial file
 
 
-async def _chat(client, base_url: str, model: str, prompt: str, max_tokens: int = 2048) -> str:
+async def _chat(client, base_url: str, model: str, prompt: str, max_tokens: int = 900) -> str:
     """One non-streaming completion (thinking off where the backend allows it)."""
     url = f"{base_url}/chat/completions"
     body = {
@@ -113,17 +113,24 @@ async def _chat(client, base_url: str, model: str, prompt: str, max_tokens: int 
     return resp.json()["choices"][0]["message"]["content"] or ""
 
 
-def _parse_json_array(text: str) -> list[str] | None:
-    """Extract the JSON array from a model reply (tolerates prose fences)."""
+def _parse_json_array(text: str, expected: int) -> list[str] | None:
+    """Extract the JSON array from a model reply (tolerates prose fences).
+
+    Single-chunk batches often get a BARE string back (no brackets) — accept
+    that shape when exactly one line is expected.
+    """
     m = re.search(r"\[.*\]", text, re.DOTALL)
-    if not m:
-        return None
-    try:
-        data = json.loads(m.group(0))
-        if isinstance(data, list) and all(isinstance(x, str) for x in data):
-            return [x.strip() for x in data]
-    except json.JSONDecodeError:
-        pass
+    if m:
+        try:
+            data = json.loads(m.group(0))
+            if isinstance(data, list) and all(isinstance(x, str) for x in data):
+                return [x.strip() for x in data]
+        except json.JSONDecodeError:
+            pass
+    if expected == 1:
+        line = text.strip().strip('"').strip()
+        if 0 < len(line) <= 300 and "[" not in line and not line.lower().startswith(("here", "sure", "ok")):
+            return [line]
     return None
 
 
@@ -138,10 +145,20 @@ async def _generate(
     max_chars: int,
     limit: int | None,
     dry_run: bool,
+    priority_substring: str = "",
+    path_substring: str = "",
+    reference_block: str = "",
 ) -> int:
     import httpx
 
     todo = [c for c in chunks if c["hash"] not in sidecar]
+    # Scope filter: only files whose path contains the substring.
+    if path_substring:
+        todo = [c for c in todo if path_substring in c["source"]]
+    # Priority: files whose path contain the substring first (stable within
+    # each group) — e.g. "SessionLogs" so campaign-log context lands first.
+    if priority_substring:
+        todo.sort(key=lambda c: 0 if priority_substring in c["source"] else 1)
     if limit is not None:
         todo = todo[:limit]
     print(f"chunks total={len(chunks)}  already contextualized={len(chunks) - len([c for c in chunks if c['hash'] not in sidecar])}  to do={len(todo)}")
@@ -179,12 +196,16 @@ async def _generate(
                 f"{c['content'][:max_chars]}"
                 for i, c in enumerate(batch, 1)
             )
-            prompt = _BATCH_PROMPT.format(file_path=file_path, chunks_block=chunks_block, n=len(batch))
+            prompt = (
+                (reference_block + "\n")
+                if reference_block
+                else ""
+            ) + _BATCH_PROMPT.format(file_path=file_path, chunks_block=chunks_block, n=len(batch))
             ok = False
             for attempt in range(3):
                 try:
                     reply = await _chat(client, base_url, model, prompt)
-                    lines = _parse_json_array(reply)
+                    lines = _parse_json_array(reply, expected=len(batch))
                     if lines is not None and len(lines) == len(batch):
                         for c, line in zip(batch, lines):
                             if line:
@@ -214,7 +235,7 @@ async def _rebuild(persist_dir: pathlib.Path) -> None:
     manager = KBIndexStore(DEFAULT_KB_PATH, persist_dir=persist_dir)
     n_ctx = manager.reload_context_lines()
     print(f"sidecar loaded: {len(n_ctx)} context line(s); forcing full re-embed ...")
-    idx = await manager.rebuild(force_rebuild=True)
+    idx = await manager.rebuild()
     print(f"index rebuilt: {idx.count()} chunk(s) → {manager.db_path}")
     await manager.shutdown()
 
@@ -233,7 +254,14 @@ def main() -> None:
     ap.add_argument("--model", default=DEFAULT_MODEL or "")
     ap.add_argument("--base-url", default=INFER_URL, help="OpenAI-compatible base URL")
     ap.add_argument("--batch-size", type=int, default=12)
-    ap.add_argument("--max-chars", type=int, default=400, help="chunk preview length per prompt")
+    ap.add_argument("--max-chars", type=int, default=250, help="chunk preview length per prompt")
+    ap.add_argument("--priority", default="",
+                    help="process files whose path contains this substring first")
+    ap.add_argument("--path-substring", default="",
+                    help="only process chunks from files whose path contains this substring")
+    ap.add_argument("--reference-file", default="",
+                    help="text file with reference material appended to every prompt "
+                        "(e.g. the campaign session-order table)")
     ap.add_argument("--limit", type=int, default=None, help="only process this many chunks (testing)")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--rebuild", action="store_true",
@@ -246,6 +274,9 @@ def main() -> None:
     failed = asyncio.run(_generate(
         chunks, sidecar, persist_dir, args.model, args.base_url.rstrip("/"),
         INFER_API_KEY, args.batch_size, args.max_chars, args.limit, args.dry_run,
+        args.priority,
+        args.path_substring,
+        open(args.reference_file, encoding="utf-8").read() if args.reference_file else "",
     ))
     if args.rebuild and not args.dry_run:
         asyncio.run(_rebuild(persist_dir))
