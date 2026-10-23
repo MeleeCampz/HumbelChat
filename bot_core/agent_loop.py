@@ -44,6 +44,40 @@ from kb.tools import (
 
 log = logging.getLogger(__name__)
 
+
+def _is_tool_call(text: str) -> bool:
+    """True when the text IS a valid tool call (not merely mentions one)."""
+    try:
+        parse_tool_call(text)
+        return True
+    except ToolCallParseError:
+        return False
+
+
+def _strip_tool_json(text: str) -> str:
+    """Remove JSON objects carrying a 'tool' key (fenced or bare)."""
+    decoder = json.JSONDecoder()
+    out: list[str] = []
+    i = 0
+    while True:
+        j = text.find("{", i)
+        if j == -1:
+            out.append(text[i:])
+            break
+        try:
+            obj, end = decoder.raw_decode(text[j:])
+        except json.JSONDecodeError:
+            out.append(text[i:j + 1])
+            i = j + 1
+            continue
+        if isinstance(obj, dict) and "tool" in obj:
+            out.append(text[i:j])
+            i = j + (end - j)
+        else:
+            out.append(text[i:j + 1])
+            i = j + 1
+    return " ".join("".join(out).split())
+
 # A decision turn with NO tool call is treated as the final answer only when
 # it looks like one (not a bare JSON fragment and at least this many chars).
 _MIN_ANSWER_CHARS = 40
@@ -151,10 +185,42 @@ async def run_agent_loop(
                         "is not in the rules/campaign notes."),
         }]
         try:
-            return (await complete(fb_messages, model, thinking=True)), meta
+            text = await complete(fb_messages, model, thinking=True)
         except Exception as exc:  # noqa: BLE001 — even the fallback died
             raise RuntimeError(
                 f"agent fallback completion failed: {exc}") from exc
+        return await _plain_final(text, fb_messages, complete, model), meta
+
+    async def _plain_final(
+        text: str,
+        messages: list[dict[str, Any]],
+        complete: CompletionFn,
+        model: str,
+    ) -> str:
+        """A forced/final answer must be PROSE. If the model emits a tool
+        call instead (there is no budget left to execute it), nudge once for
+        plain text; if that still yields a call, strip the JSON and return
+        whatever prose remains."""
+        text = text.strip()
+        if not _is_tool_call(text):
+            return text
+        log.warning("final answer was a tool call; nudging once for plain text")
+        nudged = list(messages) + [
+            {"role": "assistant", "content": text},
+            {"role": "user",
+             "content": ("No more tool calls — the budget is spent. Answer in "
+                         "PLAIN TEXT now, using the information above.")},
+        ]
+        try:
+            retry = (await complete(nudged, model, thinking=True)).strip()
+            if not _is_tool_call(retry):
+                return retry
+            text = retry
+        except Exception:  # noqa: BLE001 — keep the stripped original
+            pass
+        prose = _strip_tool_json(text)
+        return prose or ("I couldn't finish that lookup within the tool "
+                         "budget; please try asking again.")
 
     try:
         for iteration in range(1, RAG_AGENT_MAX_ITERATIONS + 1):
@@ -225,7 +291,8 @@ async def run_agent_loop(
             "content": ("Iteration limit reached — give your final answer "
                         "now in plain text with the information gathered."),
         })
-        return (await complete(messages, model, thinking=True)), meta
+        forced = await complete(messages, model, thinking=True)
+        return await _plain_final(forced, messages, complete, model), meta
     except Exception as exc:  # noqa: BLE001 — last-resort safety net
         log.warning("agent loop failed (%s); falling back", exc)
         try:

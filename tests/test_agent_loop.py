@@ -183,6 +183,43 @@ async def test_tool_error_is_data_not_fatal(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_forced_answer_that_is_a_tool_call_gets_nudged(monkeypatch):
+    """Observed live: the final-answer turn can emit a tool call instead of
+    prose (no budget left to run it). The loop must nudge for plain text."""
+    import config.settings as S
+    monkeypatch.setattr(S, "RAG_AGENT_MAX_ITERATIONS", 1)
+
+    comp = _ScriptedComplete([
+        '{"tool": "search_kb", "args": {"query": "a"}}',
+        # Forced-answer turn emits a tool call instead of prose:
+        'Let me read it. {"tool": "read_section", "args": {"file": "x.md"}}',
+        # Nudge → plain text:
+        "Final prose answer after the nudge.",
+    ])
+    text, meta = await agent_loop.run_agent_loop(
+        complete=comp, model="m", system_prompt="P", user_message="Q")
+    assert "Final prose answer" in text
+    assert "read_section" not in text
+
+
+@pytest.mark.asyncio
+async def test_final_tool_call_surviving_nudge_is_stripped(monkeypatch):
+    import config.settings as S
+    monkeypatch.setattr(S, "RAG_AGENT_MAX_ITERATIONS", 1)
+
+    comp = _ScriptedComplete([
+        '{"tool": "search_kb", "args": {"query": "a"}}',
+        'Prose lead-in. {"tool": "read_section", "args": {"file": "x.md"}}',
+        # Nudge still yields a tool call → the JSON is stripped:
+        'Still calling. {"tool": "search_kb", "args": {"query": "b"}}',
+    ])
+    text, meta = await agent_loop.run_agent_loop(
+        complete=comp, model="m", system_prompt="P", user_message="Q")
+    assert '"tool"' not in text
+    assert "Still calling" in text
+
+
+@pytest.mark.asyncio
 async def test_initial_messages_get_protocol_addendum():
     # ≥40 chars so the turn counts as an answer, not a malformed call.
     comp = _ScriptedComplete(["Built-on-prompt answer: plate armor is AC 18."])
