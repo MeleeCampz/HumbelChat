@@ -25,6 +25,15 @@ from typing import Any
 
 sys.path.insert(0, ".")
 
+try:
+    import openai  # noqa: F401 — must come from the project venv
+except ModuleNotFoundError:  # pragma: no cover — environment guard
+    sys.exit(
+        "openai not found — you are using the system Python.\n"
+        "Run with the project venv instead, from the repo root:\n"
+        "  Windows:  .\\.venv\\Scripts\\python.exe scripts/rag_agent_probe.py\n"
+        "  Linux/macOS:  .venv/bin/python scripts/rag_agent_probe.py")
+
 from bot_core.agent_loop import run_agent_loop  # noqa: E402
 from config.settings import INFER_URL, MODEL_NAME  # noqa: E402
 from openai import AsyncOpenAI  # noqa: E402
