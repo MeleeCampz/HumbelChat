@@ -116,3 +116,4 @@ whisper-api.env
 
 # Remote-pi relay broker deployment (local infra for the agent mesh, not repo content)
 remote-pi-relay/
+scripts/rag_answer_eval_last.json
