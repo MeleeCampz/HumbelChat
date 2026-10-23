@@ -76,11 +76,18 @@ QUERIES: list[tuple[str, list[str]]] = [
     ("Wie ist der Kalender in Humblewood aufgebaut?", ["Humblewood_Calendar.md"]),
     ("Wer ist Hath und was ist sein Reich?", ["Hath.md"]),
     ("Was kann die Spezies Vulpin?", ["Vulpin.md", "species.md"]),
+    # Enumeration: the per-entry files OR the bilingual summary listing file
+    # (item 6(a)) are both valid answers — either attached = HIT.
     ("Welche besonderen Zaubersprüche gibt es in Humblewood?",
      ["Ambush_Prey.md", "Elevated_Sight.md", "Feathered_Reach.md", "Globe_of_Twilight.md",
-      "Gust_Barrier.md", "Invoke_the_Amaranthine.md", "Mend_Plants.md"]),
+      "Gust_Barrier.md", "Invoke_the_Amaranthine.md", "Mend_Plants.md",
+      "Humblewood_Special_Spells.md"]),
     ("Welche Hintergründe gibt es in Humblewood?",
-     ["Bandit_Defector.md", "Grounded.md", "Wind-touched.md"]),
+     ["Bandit_Defector.md", "Grounded.md", "Wind-touched.md", "Humblewood_Backgrounds.md"]),
+    # ── Multi-hop (§5.1 — answer needs info from ≥2 files) ──
+    ("Can a fighter cast Fireball?", ["classes.md", "spells.md"]),
+    ("Welcher Hintergrund verleiht die Sprache Auran und welche Spezies sprechen sie?",
+     ["Humblewood_Backgrounds.md", "Wind-touched.md", "Corvum.md", "Gallus.md", "Luma.md"]),
     # ── Session notes (DE) ──
     ("Was ist in der letzten Session bei Alderheart passiert?", ["notes.md"]),
     # ── English baselines ──
