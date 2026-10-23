@@ -68,7 +68,9 @@ DEFAULT_QUESTIONS = [
 async def main(questions: list[str]) -> None:
     if not DEFAULT_MODEL:
         sys.exit("MODEL_NAME is not set (.env) — the probe needs the chat model slug.")
-    client = AsyncOpenAI(base_url=INFER_URL, api_key="unused")
+    from config.settings import INFER_API_KEY
+
+    client = AsyncOpenAI(base_url=INFER_URL, api_key=INFER_API_KEY or "unused")
 
     async def complete(messages: list[dict[str, Any]], model: str, *,
                        thinking: bool) -> str:

@@ -371,11 +371,15 @@ async def _create_with_reasoning_fallback(
     try:
         return await client.chat.completions.create(**kwargs)
     except APIStatusError as e:
-        if body is None or e.status_code is None or e.status_code >= 500:
+        sc = e.status_code
+        # Only a 4xx that could plausibly be a param rejection justifies the
+        # retry — 401/403 are auth errors, which dropping the param cannot
+        # fix (observed live: Studio 'Invalid token payload' 401).
+        if body is None or sc is None or sc >= 500 or sc in (401, 403):
             raise
         log.warning(
             "Backend rejected reasoning control %s (HTTP %d); retrying once without it.",
-            body, e.status_code,
+            body, sc,
         )
         kwargs.pop("extra_body", None)
         return await client.chat.completions.create(**kwargs)
