@@ -36,6 +36,7 @@ from openai.types.chat import ChatCompletionMessageParam
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from config.characters import Character
 
+from bot_core.agent_loop import AgentTurnMeta
 from bot_core.history import ensure_history, get_history, set_history
 from config.settings import (
     INFER_URL,
@@ -895,6 +896,23 @@ def _looks_like_enumeration(text: str) -> bool:
     return bool(_ENUMERATION_RE.search(text or ""))
 
 
+# Multi-clause questions ('… and which …?') structurally need ≥2 pieces of
+# information, so ONE retrieval pass is often incomplete even when its top
+# chunk scores high — the confidence gate cannot see incompleteness (observed
+# live: the DE Auran background→species chain scores 0.86 on Wind-touched.md
+# yet misses every bird-species file). Compound shape is the trigger.
+_COMPOUND_QUESTION_RE = re.compile(
+    r"\b(?:und|and)\s+(?:welche|welcher|welches|wer|was|weitere|"
+    r"which|what|who|where|when|how)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_compound_question(text: str) -> bool:
+    """'… and which/what/who …?' in EN or DE — see _COMPOUND_QUESTION_RE."""
+    return bool(_COMPOUND_QUESTION_RE.search(text or ""))
+
+
 def agent_trigger_reason(user_message: str, rerank_top: float | None) -> str | None:
     """Why agent mode should run for this turn (None = fast path).
 
@@ -913,12 +931,16 @@ def agent_trigger_reason(user_message: str, rerank_top: float | None) -> str | N
         return None
     if _looks_like_enumeration(user_message):
         return "enumeration-shape"
+    if _looks_like_compound_question(user_message):
+        return "compound-question"
     if rerank_top is not None and rerank_top < RAG_AGENT_SCORE_GATE:
         return f"low-rerank {rerank_top:.2f} < {RAG_AGENT_SCORE_GATE:.2f}"
     return None
 
 
-async def _run_agent_turn(ctx: _AIRequestContext, reason: str) -> str:
+async def _run_agent_turn(
+    ctx: _AIRequestContext, reason: str,
+) -> tuple[str, "AgentTurnMeta"]:
     """One agent-mode turn over the fast path's already-built prompt.
 
     The completion adapter reuses the ctx's client/model/timeout/max_tokens;
@@ -955,7 +977,7 @@ async def _run_agent_turn(ctx: _AIRequestContext, reason: str) -> str:
         reason, meta.iterations, ",".join(meta.tool_calls) or "-",
         meta.fallback, f" ({meta.fallback_reason})" if meta.fallback else "",
     )
-    return text
+    return text, meta
 
 
 def _persist_turn(guild_id: int, channel_id: int | None, user_message: str,
@@ -1137,9 +1159,10 @@ async def ask_ai(
 
         # ── Agent mode (#39 §3.4): trigger, don't default ───────────────
         agent_reason = agent_trigger_reason(user_message, ctx.rerank_top)
+        agent_meta: AgentTurnMeta | None = None
         if agent_reason is not None:
             try:
-                reply_text = await _run_agent_turn(ctx, agent_reason)
+                reply_text, agent_meta = await _run_agent_turn(ctx, agent_reason)
             except Exception as e:  # noqa: BLE001 — classified below
                 log.warning("agent turn failed (%s); surfacing", e)
                 _friendly_ai_error(e, model=ctx.effective_model,
@@ -1197,7 +1220,17 @@ async def ask_ai(
         _persist_turn(guild_id, channel_id, user_message, reply_text, username=username)
 
         approx_tokens = max(1, len(reply_text) // 4)  # §4.3: char-based estimate, not word count
-        return reply_text, {"model_used": ctx.effective_model, "tokens_approx": approx_tokens}
+        extra: dict[str, Any] = {
+            "model_used": ctx.effective_model, "tokens_approx": approx_tokens,
+        }
+        if agent_meta is not None:  # §5.3: per-query agentic telemetry
+            extra.update(
+                agent_mode=True,
+                agent_iterations=agent_meta.iterations,
+                agent_tool_calls=list(agent_meta.tool_calls),
+                agent_fallback=agent_meta.fallback,
+            )
+        return reply_text, extra
 
 
 async def ask_ai_stream(
@@ -1260,7 +1293,7 @@ async def ask_ai_stream(
         agent_reason = agent_trigger_reason(user_message, ctx.rerank_top)
         if agent_reason is not None:
             try:
-                reply_text = await _run_agent_turn(ctx, agent_reason)
+                reply_text, _agent_meta = await _run_agent_turn(ctx, agent_reason)
             except Exception as e:  # noqa: BLE001 — classified below
                 _friendly_ai_error(e, model=ctx.effective_model,
                                    backend_url=INFER_URL)

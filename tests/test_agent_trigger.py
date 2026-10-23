@@ -1,7 +1,11 @@
 """Tests for the agent-mode trigger (#39 §3.4) in bot_core.ai_client."""
 import pytest
 
-from bot_core.ai_client import _looks_like_enumeration, agent_trigger_reason
+from bot_core.ai_client import (
+    _looks_like_compound_question,
+    _looks_like_enumeration,
+    agent_trigger_reason,
+)
 
 
 @pytest.mark.parametrize("mode", ["off", ""])
@@ -33,6 +37,42 @@ def test_unknown_mode_is_off(monkeypatch):
 ])
 def test_enumeration_heuristic(text, expected):
     assert _looks_like_enumeration(text) is expected
+
+
+@pytest.mark.parametrize("text,expected", [
+    # The live-missed case (0.86 top-rerank, single pass structurally
+    # incomplete) + its EN twin:
+    ("Welcher Hintergrund verleiht die Sprache Auran und welche Spezies sprechen sie?",
+     True),
+    ("What does the Wind-touched background grant and which species speaks Auran?",
+     True),
+    # Ordinary single-clause questions must NOT trigger:
+    ("Was ist die Rüstungsklasse einer Plattenrüstung?", False),
+    ("Wie funktioniert Initiative im Kampf?", False),
+    ("What is the AC of plate armor?", False),
+    # 'und' inside a word / non-question conjunctions:
+    ("Sandune und Fels", False),
+    ("", False),
+])
+def test_compound_question_heuristic(text, expected):
+    assert _looks_like_compound_question(text) is expected
+
+
+def test_auto_compound_triggers_even_when_confident(monkeypatch):
+    """The confidence gate cannot see incompleteness — compound shape can."""
+    monkeypatch.setattr("config.settings.RAG_AGENT_MODE", "auto")
+    monkeypatch.setattr("config.settings.RAG_AGENT_SCORE_GATE", 0.55)
+    reason = agent_trigger_reason(
+        "Welcher Hintergrund verleiht die Sprache Auran und welche Spezies sprechen sie?",
+        0.86,  # confidently above the gate — shape must still win
+    )
+    assert reason == "compound-question"
+
+
+def test_mode_off_never_compound(monkeypatch):
+    monkeypatch.setattr("config.settings.RAG_AGENT_MODE", "off")
+    assert agent_trigger_reason(
+        "What is X and why does it happen?", 0.9) is None
 
 
 def test_auto_triggers_on_low_rerank(monkeypatch):
