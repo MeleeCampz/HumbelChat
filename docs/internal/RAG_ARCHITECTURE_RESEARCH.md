@@ -439,6 +439,18 @@ actually scored:
 | Answer | **faithfulness** | RAGAS — fraction of answer claims supported by the *attached* context (0–1) | hallucination / reaching-beyond-context (FM3) |
 | Answer | **"not found" correctness** | % of negative queries answered with an honest "not in the KB" vs a confident guess | honesty (FM5) |
 
+**✅ IMPLEMENTED 2026-10-24 — `scripts/rag_answer_eval.py`** (harness + first scored run).
+Drives the real production path (`ask_ai`, synthetic guild, history persistence no-op'd,
+attached context captured) and LLM-judges with the local model, thinking off. First run
+(9 cases: 2 controls + hard tail + 2 multi-hop + 2 negatives): **faithfulness mean 0.99**
+(min 0.95 — one near-miss claim on the TQ torture case) and **negative honesty 2/2
+admits-not-found, 2/2 fully clean** (no invented specifics) — Tier 0 item 2's honesty
+rules verified live on both languages. Known trade-off observed: the attach-floor safety
+net ("never yield an empty context", `kb/retrievers.py`) re-attaches top chunks when every
+score is below the floor, so negatives still carry ~9–13k chars of junk context; the
+honesty rules absorb this empirically. Context precision/recall (RAGAS) not yet added —
+the LLM-judge harness is in place to extend it.
+
 RAGAS metrics are LLM-judged; run them with our local model (thinking off, batched) as an offline
 eval pass — not on the hot path.
 
