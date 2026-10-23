@@ -345,7 +345,11 @@ latency median 9.5 s · p95 15.9 s, rewrite fired 25/42 (zero stalls), hit top-r
 0.915. The attach floor ran on real rerank scores every pass; dedup notes fired live (Y rows);
 the two enumeration cases now retrieve their summary files at rank 0. Remaining misses: one
 near-miss (Saddlebag part 3 attached vs expected part 2) + the two strict-match enumeration
-cases above.
+cases above. **Golden-set v2** (enumeration expecteds updated to accept the summary files;
+2 §5.1 multi-hop cases added — `088d65d`): **39/42 hits, recall@4 93%**, rerank 83 ok / 5
+transient (graceful degrade; full-size 150-pair batch verified at 10.8 s under the chunked
+config). The EN fighter/Fireball multi-hop hits @2; the DE Auran background→species chain
+misses (bird species files don't reach top-4) — kept as a standing failure-loop case (§5.1).
 
 ### Tier 2 — moderate effort, higher value (index-time + gated generation)
 
