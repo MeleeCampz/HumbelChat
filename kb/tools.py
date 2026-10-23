@@ -261,6 +261,21 @@ def _kb_path() -> pathlib.Path:
     return KB_PATH
 
 
+def _file_matches(file_part: str, file: str) -> bool:
+    """Match a chunk's file part against the model's file argument.
+
+    Display names are BARE filenames (no directory prefix), but the model
+    may pass a path it inferred from content or search context — so also
+    accept a basename match (case-insensitive).
+    """
+    f = (file or "").strip()
+    if not f:
+        return False
+    if file_part == f or file_part.endswith(f"/{f}"):
+        return True
+    return pathlib.Path(file_part).name.lower() == pathlib.Path(f).name.lower()
+
+
 async def _tool_read_section(file: str, section: str | None = None) -> str:
     """Full chunk text for (file[, section fragment])."""
     from kb.retrievers import _ensure_index_store
@@ -273,7 +288,7 @@ async def _tool_read_section(file: str, section: str | None = None) -> str:
     matches: list[tuple[str, str]] = []
     for name, content in idx.iter_chunks():
         file_part = name.split(" [")[0] if " [" in name else name
-        if file_part != file and not file_part.endswith(f"/{file}"):
+        if not _file_matches(file_part, file):
             continue
         if section:
             sec = name[len(file_part):].strip(" []") if " [" in name else ""
@@ -306,7 +321,7 @@ async def _tool_list_sections(file: str | None = None, dir: str | None = None) -
     by_file: dict[str, list[str]] = {}
     for name, _content in idx.iter_chunks():
         file_part = name.split(" [")[0] if " [" in name else name
-        if file and not (file_part == file or file_part.endswith(f"/{file}")):
+        if file and not _file_matches(file_part, file):
             continue
         if dir and dir not in file_part:
             continue

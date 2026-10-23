@@ -180,6 +180,23 @@ async def test_read_section_full_text(fake_store):
 
 
 @pytest.mark.asyncio
+async def test_read_section_path_style_arg_matches_bare_name(fake_store, monkeypatch):
+    """Display names are bare filenames; the model may pass a path it inferred
+    from content/search context — basename fallback must still match."""
+    async def _bare_ensure(kb_path):
+        return _FakeStore(_FakeIdx([
+            ("Humblewood_Backgrounds.md [Full Document]", "Bare-name body text here."),
+        ]))
+
+    import kb.retrievers as R
+    monkeypatch.setattr(R, "_ensure_index_store", _bare_ensure)
+    for arg in ("humblewood/HumbleWood/HumbleWood/Humblewood_Backgrounds.md",
+                "HUMBLEWOOD_BACKGROUNDS.MD"):
+        out = await tools.execute_tool("read_section", {"file": arg})
+        assert "Bare-name body text here." in out, arg
+
+
+@pytest.mark.asyncio
 async def test_read_section_missing(fake_store):
     out = await tools.execute_tool("read_section", {"file": "nope.md"})
     assert out.startswith("No chunk found")
