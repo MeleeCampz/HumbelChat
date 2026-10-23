@@ -20,6 +20,7 @@ P5 additions:
 from __future__ import annotations
 
 import logging
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -525,6 +526,7 @@ class _AIRequestContext:
         max_tokens: int | None,
         temperature: float,
         timeout_sec: float,
+        rerank_top: float | None = None,
     ) -> None:
         self.effective_model = effective_model
         self.client = client
@@ -541,6 +543,10 @@ class _AIRequestContext:
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.timeout_sec = timeout_sec
+        # #39 agent-mode trigger (CRAG gate): top Qwen rerank score for this
+        # query, or None when the reranker never scored (backend down → the
+        # fast path always wins; a missing signal must not activate agents).
+        self.rerank_top = rerank_top
 
 
 def _load_world_context() -> str:
@@ -772,6 +778,7 @@ async def _build_ai_request(
     rag_context = ""
     included_names: list[str] = []
     from kb.retrievers import retrieve_kb_documents
+    _retr_meta: dict[str, Any] = {}
     kb_docs = await retrieve_kb_documents(
         query=user_message,
         kb_path=KB_PATH,
@@ -779,6 +786,7 @@ async def _build_ai_request(
         top_n=RAG_MAX_DOCS,
         window_lines=RAG_WINDOW_LINES,
         rewrite_model=effective_model,  # same model as the completion call
+        meta=_retr_meta,
     )
     if kb_docs:
         rag_context, included_names = _build_rag_context(kb_docs)
@@ -858,7 +866,92 @@ async def _build_ai_request(
         max_tokens=_request_max_tokens,
         temperature=_request_temp,
         timeout_sec=timeout_sec,
+        rerank_top=_retr_meta.get("rerank_top"),
     )
+
+
+# ── Agent mode (#39, research doc §3.4): trigger, don't default ─────────
+
+_ENUMERATION_RE = re.compile(
+    r"\b(list|enumerate)\s+(all|every)\b|"
+    r"\bwhich\s+\w+(\s+\w+)?\s+(are|exist)\b|"
+    r"\bwhat\s+\w+(\s+\w+)?\s+(are|exist)\s+there\b|"
+    r"\bnenne\s+(alle|mich)\b|\bwelche\s+\w+(\s+\w+)?\s+gibt\s+es\b|"
+    r"\bliste\s+.{1,60}?\bauf\b|\bz\u00e4hle\s+.{1,60}?\bauf\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _looks_like_enumeration(text: str) -> bool:
+    """Cheap query-shape heuristic (§3.4): 'which X exist / list all Y'.
+
+    Deliberately conservative — a false positive only costs one agent turn;
+    the CRAG score gate is the primary trigger.
+    """
+    return bool(_ENUMERATION_RE.search(text or ""))
+
+
+def agent_trigger_reason(user_message: str, rerank_top: float | None) -> str | None:
+    """Why agent mode should run for this turn (None = fast path).
+
+    ``RAG_AGENT_MODE``: off → never; always → every turn; auto → low top
+    rerank score (retrieval itself is unsure) or enumeration shape.
+    """
+    from config.settings import RAG_AGENT_MODE, RAG_AGENT_SCORE_GATE
+
+    mode = (RAG_AGENT_MODE or "off").strip().lower()
+    if mode == "off":
+        return None
+    if mode == "always":
+        return "always"
+    if mode != "auto":
+        log.warning("unknown RAG_AGENT_MODE %r — treating as off", RAG_AGENT_MODE)
+        return None
+    if _looks_like_enumeration(user_message):
+        return "enumeration-shape"
+    if rerank_top is not None and rerank_top < RAG_AGENT_SCORE_GATE:
+        return f"low-rerank {rerank_top:.2f} < {RAG_AGENT_SCORE_GATE:.2f}"
+    return None
+
+
+async def _run_agent_turn(ctx: _AIRequestContext, reason: str) -> str:
+    """One agent-mode turn over the fast path's already-built prompt.
+
+    The completion adapter reuses the ctx's client/model/timeout/max_tokens;
+    decision turns run with reasoning OFF (fast, no FM6 leak), the final
+    answer with the normal AI_REASONING_EFFORT. The loop NEVER raises —
+    every failure degrades to a single-turn answer over the tool transcript.
+    """
+    from bot_core.agent_loop import run_agent_loop
+    from bot_core.errors import extract_reply_text
+
+    async def _agent_complete(
+        messages: list[dict[str, Any]],
+        model: str,
+        *,
+        thinking: bool,
+    ) -> str:
+        effort = AI_REASONING_EFFORT if thinking else "off"
+        kwargs: dict[str, Any] = dict(
+            model=model, messages=list(messages), stream=False,
+            timeout=ctx.timeout_sec,
+        )
+        if ctx.max_tokens is not None:
+            kwargs["max_tokens"] = ctx.max_tokens
+        resp = await _create_with_reasoning_fallback(ctx.client, effort, **kwargs)
+        return extract_reply_text(resp)
+
+    text, meta = await run_agent_loop(
+        complete=_agent_complete,
+        model=ctx.effective_model,
+        initial_messages=cast("list[dict[str, Any]]", list(ctx.messages)),
+    )
+    log.info(
+        "agent mode (%s): %d iteration(s), tools=%s fallback=%s%s",
+        reason, meta.iterations, ",".join(meta.tool_calls) or "-",
+        meta.fallback, f" ({meta.fallback_reason})" if meta.fallback else "",
+    )
+    return text
 
 
 def _persist_turn(guild_id: int, channel_id: int | None, user_message: str,
@@ -1038,51 +1131,61 @@ async def ask_ai(
 
         from bot_core.errors import extract_reply_text
 
-        # Omit max_tokens when unset so the backend (LM Studio) lets the model
-        # use its maximum output length.
-        create_kwargs: dict[str, Any] = dict(
-            model=ctx.effective_model,
-            messages=ctx.messages,
-            temperature=ctx.temperature,
-            stream=False,
-            timeout=ctx.timeout_sec,
-        )
-        if ctx.max_tokens is not None:
-            create_kwargs["max_tokens"] = ctx.max_tokens
-
-        # #20: per-task reasoning control for the /ai chat path.
-        reasoning_body = _reasoning_extra_body(AI_REASONING_EFFORT)
-        if reasoning_body is not None:
-            create_kwargs["extra_body"] = reasoning_body
-
-        try:
+        # ── Agent mode (#39 §3.4): trigger, don't default ───────────────
+        agent_reason = agent_trigger_reason(user_message, ctx.rerank_top)
+        if agent_reason is not None:
             try:
-                # P1 #7: one bounded retry on transient 5xx/timeout/connection
-                # failures before we give up on the turn.
-                resp = await _call_completion_with_retry(ctx.client, **create_kwargs)
-            except APIStatusError as e:
-                # #20: only a 4xx rejection of the reasoning param justifies a
-                # plain retry without it (older backends don't know it).
-                if (reasoning_body is not None and e.status_code is not None
-                        and e.status_code < 500):
-                    log.warning(
-                        "Backend rejected reasoning control %s (HTTP %d); "
-                        "retrying once without it.",
-                        reasoning_body, e.status_code,
-                    )
-                    create_kwargs.pop("extra_body", None)
+                reply_text = await _run_agent_turn(ctx, agent_reason)
+            except Exception as e:  # noqa: BLE001 — classified below
+                log.warning("agent turn failed (%s); surfacing", e)
+                _friendly_ai_error(e, model=ctx.effective_model,
+                                   backend_url=INFER_URL)
+        else:
+            # Omit max_tokens when unset so the backend (LM Studio) lets the
+            # model use its maximum output length.
+            create_kwargs: dict[str, Any] = dict(
+                model=ctx.effective_model,
+                messages=ctx.messages,
+                temperature=ctx.temperature,
+                stream=False,
+                timeout=ctx.timeout_sec,
+            )
+            if ctx.max_tokens is not None:
+                create_kwargs["max_tokens"] = ctx.max_tokens
+
+            # #20: per-task reasoning control for the /ai chat path.
+            reasoning_body = _reasoning_extra_body(AI_REASONING_EFFORT)
+            if reasoning_body is not None:
+                create_kwargs["extra_body"] = reasoning_body
+
+            try:
+                try:
+                    # P1 #7: one bounded retry on transient 5xx/timeout/connection
+                    # failures before we give up on the turn.
                     resp = await _call_completion_with_retry(ctx.client, **create_kwargs)
-                else:
-                    raise
-            # P1 #8: extract the reply safely — an empty `choices` array is a
-            # malformed backend response (AIBackendError), and a response cut
-            # off at the model's output limit with no visible answer raises
-            # AIResponseTruncatedError. Both fall through to _friendly_ai_error
-            # below as real errors — there is no bigger budget to retry with
-            # when max_tokens is omitted (model max).
-            reply_text = extract_reply_text(resp)
-        except Exception as e:  # noqa: BLE001 — classified below
-            _friendly_ai_error(e, model=ctx.effective_model, backend_url=INFER_URL)
+                except APIStatusError as e:
+                    # #20: only a 4xx rejection of the reasoning param justifies a
+                    # plain retry without it (older backends don't know it).
+                    if (reasoning_body is not None and e.status_code is not None
+                            and e.status_code < 500):
+                        log.warning(
+                            "Backend rejected reasoning control %s (HTTP %d); "
+                            "retrying once without it.",
+                            reasoning_body, e.status_code,
+                        )
+                        create_kwargs.pop("extra_body", None)
+                        resp = await _call_completion_with_retry(ctx.client, **create_kwargs)
+                    else:
+                        raise
+                # P1 #8: extract the reply safely — an empty `choices` array is a
+                # malformed backend response (AIBackendError), and a response cut
+                # off at the model's output limit with no visible answer raises
+                # AIResponseTruncatedError. Both fall through to _friendly_ai_error
+                # below as real errors — there is no bigger budget to retry with
+                # when max_tokens is omitted (model max).
+                reply_text = extract_reply_text(resp)
+            except Exception as e:  # noqa: BLE001 — classified below
+                _friendly_ai_error(e, model=ctx.effective_model, backend_url=INFER_URL)
 
         log.debug("RAW_AI_RESPONSE_START\n%s\nRAW_AI_RESPONSE_END", reply_text)
 
@@ -1145,6 +1248,24 @@ async def ask_ai_stream(
         # _friendly_ai_error always raises, and that must stay a coincidence
         # of the classifier, not of control flow.
         stream: Any = None
+
+        # ── Agent mode (#39 §3.4): v1 runs the bounded loop NON-streaming
+        # and yields the final answer as one chunk (stream interleaving is a
+        # documented follow-up). Same trigger + same graceful degradation as
+        # ask_ai — the loop never raises.
+        agent_reason = agent_trigger_reason(user_message, ctx.rerank_top)
+        if agent_reason is not None:
+            try:
+                reply_text = await _run_agent_turn(ctx, agent_reason)
+            except Exception as e:  # noqa: BLE001 — classified below
+                _friendly_ai_error(e, model=ctx.effective_model,
+                                   backend_url=INFER_URL)
+            collected.append(reply_text)
+            yield reply_text
+            _persist_turn(guild_id, channel_id, user_message, reply_text,
+                         username=username)
+            return
+
         try:
             # The streaming call is NOT retried: a mid-stream transient
             # failure is ambiguous (we may have already emitted tokens), so

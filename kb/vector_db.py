@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 import pathlib
 from dataclasses import dataclass, field
-from typing import Any, Sequence
+from typing import Any, Iterator, Sequence
 
 
 # ──────────────────────────── Chunking provider ──────────────────────
@@ -190,6 +190,15 @@ class KBVectorIndex:
                                   source_file=s, file_hash=fh))
         index._docs = docs
         return index
+
+    def iter_chunks(self) -> Iterator[tuple[str, str]]:
+        """Yield ``(display_name, content)`` for every indexed chunk.
+
+        Used by the agent-mode tools (kb/tools.py) for name-based lookups
+        (read_section / list_sections). Display names look like
+        ``"humblewood/DnDRules/…/equipment.md [Equipment -> Armor]"``.
+        """
+        return ((d.display_name, d.content) for d in self._docs)
 
     def embedding_map(self) -> dict[str, list[float]]:
         """display_name → embedding for every chunk that has one.
