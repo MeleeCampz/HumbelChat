@@ -358,6 +358,34 @@ misses (bird species files don't reach top-4) — kept as a standing failure-loo
    (−67% with rerank) in Anthropic's study; our decontextualized table rows are the ideal target.
    Run once with the chat model unloaded on GPU (or a small local model). *Measure:* full golden
    set before/after reindex — expect broad recall gains, especially FM1/FM2 and German lookups.
+
+   **🔨 IN PROGRESS 2026-10-23 (`feat/tool-calling`, `2c5df6d`).** Motivation found in the wild:
+   production question "Was ist mit Session 7?" retrieved the right session log but buried it
+   under S1/S3 chunks — ordinal references ("session 7") cannot match date-named folders
+   (`2026-10-20_02_…`) lexically or densely. A context line ("Session 7 of the HumbleWood
+   campaign, 2026-10-20 …") makes such chunks directly findable.
+   - Plumbing (merged behaviour-safe): `_DocEntry.context_line` + `passage_text()` — consumers
+     (query results, rank_texts, BM25 corpus/lexical leg, `iter_chunks` for agent tools) see the
+     framed passage; absent sidecar = byte-identical legacy. Lines live in
+     `<persist_dir>/context_lines.json` keyed by ORIGINAL content hash, so chunk validity is
+     untouched (adding a sidecar is a cache hit, not a re-chunk storm). 11 tests.
+   - Generator: `scripts/contextual_reindex.py` — batches ≤16 chunks per file per call, resumable
+     sidecar, `--priority SessionLogs` puts campaign logs first, `--rebuild` forces the full
+     re-embed through the normal atomic-swap path (an interrupted run never loses the old cache).
+   - **DONE 2026-10-23 (same day).** 5,749/5,764 chunks contextualized (99.6%; 15 stubborn
+     chunks stay legacy), full re-embed via the atomic-swap path. A/B benchmark (44 cases):
+     **38/42 → 40/42 hits (best ever), recall@1 67% → 79%, recall@4 90% → 95%**; two former
+     standing failures now HIT@0 ("Welche Monster leben in der Wüste?", DE healing-spell
+     enumeration). Latency unchanged (median ~4.6–4.7 s). One follow-up found live: the LLM
+     numbered session logs by folder suffix, not campaign order — fixed with a
+     `--reference-file` session-order table + scoped regeneration (`--path-substring`); the
+     production "Was ist mit Session 7?" case now ranks the correct log #1 in DE and EN.
+   - Sandbox quirk fixed en route: SQLite cannot create journal files on the Windows mount
+     ("readonly database") — `PRAGMA journal_mode=MEMORY` on the tmp-build connection
+     (`_persist_index_to_db`), harmless elsewhere (single-connection tmp DB).
+   - **Host action:** none needed for retrieval (index file picked up on next bot restart /
+     cache load); the running bot container keeps its old in-memory index until restarted —
+     `docker compose restart bot` to activate.
 8. **Query decomposition + step-back for hard queries (§2.1).** Extend the rewrite slot to emit
    sub-questions / a step-back abstraction for enumeration & multi-part shapes; feed sub-queries
    through retrieval and RRF-merge. *Measure:* multi-part + enumeration golden queries.
