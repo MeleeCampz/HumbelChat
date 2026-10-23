@@ -401,6 +401,14 @@ misses (bird species files don't reach top-4) — kept as a standing failure-loo
       the docker network the embedder/reranker are only reachable via published host ports
       (`host.docker.internal:11435/8000`) — sandbox runs need EMBED_URL/RERANK_API_BASE
       overrides; the bot container uses the .env docker-internal names as-is.
+    - **FLIPPED TO `auto` 2026-10-24** (`.env`, effective on next bot restart): both gates green
+      + answer-side eval green (faithfulness 0.99, negative honesty 2/2 — §5.2 harness in
+      `scripts/rag_answer_eval.py`). Same day: third auto trigger added — compound multi-clause
+      questions (`… and which/what/who …?`, EN+DE), because the confidence gate cannot see
+      *incompleteness* (the Auran chain scores 0.86 yet one pass structurally can't answer it);
+      verified live through `ask_ai` (agent solved it in 3 iterations; single-fact control stays
+      on the fast path). `ask_ai` now returns per-query agent telemetry (`agent_mode`,
+      `agent_iterations`, `agent_tool_calls`, `agent_fallback`) — §5.3.
 11. **Collection routing (rules / lore / session) (§2.2).** Lightweight path-prefix filter +
     per-collection RRF weighting; also fixes German-note crowding of rulebook answers. *Measure:*
     enumeration + German rule queries.
