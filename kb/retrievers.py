@@ -564,6 +564,7 @@ async def _retrieve_vector(
     top_n: int,
     window_lines: int = 80,
     rewrite_model: str = "",
+    meta: dict[str, Any] | None = None,
 ) -> list[tuple[str, str]]:
     """Vector-based retrieval using the persist-backed index.
 
@@ -794,6 +795,12 @@ async def _retrieve_vector(
     # its file's bucket — the TQ case, 2026-10-15).
     for name in selected:
         logger.info("  attached chunk: %s", name)
+    # Agent-mode trigger data (#39 §3.4): the CRAG gate needs the top rerank
+    # score (None when the reranker never scored — e.g. backend down).
+    if meta is not None:
+        meta["rerank_top"] = max(rerank_gate.values()) if rerank_gate else None
+        meta["dense_top"] = dense_scores.get(
+            final_ranked[0][0]) if final_ranked else None
     return docs
 
 
@@ -807,6 +814,7 @@ async def retrieve_kb_documents(
     top_n: int = 5,
     window_lines: int = 80,
     rewrite_model: str = "",
+    meta: dict[str, Any] | None = None,
 ) -> list[tuple[str, str]]:
     """Retrieve relevant KB documents for *query* using the selected strategy.
 
@@ -835,7 +843,7 @@ async def retrieve_kb_documents(
     if method == "vector":
         return await _retrieve_vector(
             query, kb_path, top_n,
-            window_lines=window_lines, rewrite_model=rewrite_model,
+            window_lines=window_lines, rewrite_model=rewrite_model, meta=meta,
         )
 
     # Unknown strategy — fall back to keyword with a warning

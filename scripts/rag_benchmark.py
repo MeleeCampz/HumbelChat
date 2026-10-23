@@ -342,7 +342,7 @@ def _report(results: list[dict], warm: dict) -> None:
                       f"        expected: {', '.join(r['expected'])}\n"
                       f"        attached: {', '.join(r['attached_files']) or '(none)'}")
     if negatives:
-        print(f"\nNEGATIVE CASES (informational — what got attached to unanswerable queries)")
+        print("\nNEGATIVE CASES (informational — what got attached to unanswerable queries)")
         for r in negatives:
             print(f"  {r['query'][:60]!r} → {', '.join(r['attached_files']) or '(none)'} "
                   f"[{r.get('stages', {}).get('attach_chars', '?')} chars]")

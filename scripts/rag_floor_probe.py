@@ -22,7 +22,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import statistics
 import sys
 import time
 from pathlib import Path
@@ -178,7 +177,7 @@ def main() -> None:
         xs = sorted(xs)
         q = lambda p: xs[min(len(xs) - 1, int(p * len(xs)))]
         return f"min={xs[0]:.3f} med={q(0.5):.3f} p90={q(0.9):.3f} max={xs[-1]:.3f} (n={len(xs)})"
-    print(f"\nRerank score distribution:")
+    print("\nRerank score distribution:")
     print(f"  relevant:     {pct(rel)}")
     print(f"  irrelevant:   {pct(irr)}")
 

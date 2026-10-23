@@ -667,6 +667,25 @@ RAG_ATTACH_FLOOR_SOURCE: str = os.getenv("RAG_ATTACH_FLOOR_SOURCE", "dense").str
 RAG_DEDUP_ENABLED: bool = _safe_bool(os.getenv("RAG_DEDUP_ENABLED"), True)
 RAG_DEDUP_COSINE_TAU: float = _safe_float(os.getenv("RAG_DEDUP_COSINE_TAU"), 0.92)
 
+# ── Agent mode: bounded tool-calling loop (#39, research doc §3) ──────────
+# When triggered, the model gets three in-process tools (search_kb /
+# read_section / list_sections — kb/tools.py) and may call them for up to
+# RAG_AGENT_MAX_ITERATIONS decision turns / RAG_AGENT_MAX_TOOL_CALLS total
+# calls within RAG_AGENT_BUDGET_SECONDS of wall clock; any cap, parse error,
+# or timeout falls back to a single-turn answer with the best context gathered.
+# RAG_AGENT_MODE: off (default — fast path only) | auto (trigger on low top
+# rerank score or enumeration-shaped queries) | always (every /ai turn).
+RAG_AGENT_MODE: str = os.getenv("RAG_AGENT_MODE", "off").strip().lower()
+# CRAG gate: agent mode triggers in "auto" when the top Qwen rerank score is
+# BELOW this — i.e. retrieval itself is unsure (benchmark: hits ≥ 0.65,
+# negatives ≤ 0.36). No rerank score available → no trigger (fast path).
+RAG_AGENT_SCORE_GATE: float = _safe_float(os.getenv("RAG_AGENT_SCORE_GATE"), 0.55)
+RAG_AGENT_BUDGET_SECONDS: int = _safe_int(os.getenv("RAG_AGENT_BUDGET_SECONDS"), 45)
+RAG_AGENT_MAX_ITERATIONS: int = _safe_int(os.getenv("RAG_AGENT_MAX_ITERATIONS"), 2)
+RAG_AGENT_MAX_TOOL_CALLS: int = _safe_int(os.getenv("RAG_AGENT_MAX_TOOL_CALLS"), 4)
+# Hits returned per search_kb tool call (snippet ≈300 chars each).
+RAG_AGENT_SEARCH_TOP_K: int = _safe_int(os.getenv("RAG_AGENT_SEARCH_TOP_K"), 8)
+
 # ── Streaming AI responses (P3 #24) ────────────────────────────────────────
 # When on, /ai streams the completion token-by-token and progressively edits a
 # single Discord message as the text grows (instead of the user staring at a

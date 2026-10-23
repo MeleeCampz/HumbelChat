@@ -360,6 +360,27 @@ env knob controls it; `auto` is the intended default.
     tool-calling reliability probe (§3.5). This is where FM3 is truly closed. *Measure:* new
     agentic metrics — success rate on the hard-tail subset, median iterations, fallback rate,
     latency p50/p95, faithfulness.
+
+    **✅ IMPLEMENTED 2026-10-20 (commit on `feat/tool-calling`), `RAG_AGENT_MODE=off` by default.**
+    - `kb/tools.py`: the three tools (§3.2) — `search_kb` (dense top-k → rerank → compact
+      snippets), `read_section` (full chunk text, no truncation), `list_sections` (file/dir
+      outline). JSON protocol `{"tool": …, "args": …}` with schema validation; scope routing
+      rules/lore/all; tool errors are DATA fed back to the model, never fatal.
+    - `bot_core/agent_loop.py`: the bounded loop (§3.3) — ≤ N=2 decision turns (non-thinking),
+      ≤ C=4 total tool calls, wall-clock budget 45 s; forced final answer (thinking on) when a
+      cap hits or the model stalls; any failure degrades to a single-turn fallback over the
+      gathered transcript. `kb/vector_db.py` gains `iter_chunks()` for read/list.
+    - Trigger (§3.4) in `bot_core/ai_client.py`: `agent_trigger_reason()` — off (default,
+      zero overhead), always (probe), auto = top-rerank < 0.55 gate **or** enumeration-shaped
+      question (DE+EN heuristic). Wired into both `ask_ai` and `ask_ai_stream` (v1: the loop
+      runs non-streaming, yields the final answer as one chunk).
+    - Settings: `RAG_AGENT_MODE`, `RAG_AGENT_SCORE_GATE`, `RAG_AGENT_BUDGET_SECONDS`,
+      `RAG_AGENT_MAX_ITERATIONS`, `RAG_AGENT_MAX_TOOL_CALLS`, `RAG_AGENT_SEARCH_TOP_K`
+      (documented in `.env.example`). Tests: `tests/test_kb_tools.py` (17),
+      `tests/test_agent_loop.py` (9), `tests/test_agent_trigger.py` (10).
+    - **Still gated** as designed: live probe (`scripts/rag_agent_probe.py`, §3.5) not yet run
+      against the real backend; golden-set multi-hop/enumeration growth (§5) pending; flip
+      `RAG_AGENT_MODE=auto` only after both are green.
 11. **Collection routing (rules / lore / session) (§2.2).** Lightweight path-prefix filter +
     per-collection RRF weighting; also fixes German-note crowding of rulebook answers. *Measure:*
     enumeration + German rule queries.
