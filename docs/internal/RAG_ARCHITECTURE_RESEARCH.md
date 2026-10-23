@@ -318,24 +318,25 @@ env knob controls it; `auto` is the intended default.
 
 ### Tier 1 — quick wins, minimal infra (retrieval-structure fixes)
 
-3. **Enable the rerank-score attach floor (#43) for negatives (FM5).** Set
-   `RAG_ATTACH_FLOOR_SOURCE=rerank` with a Qwen3-calibrated floor ~0.50 (Benchmark Finding 4 shows
-   this attaches *nothing* to both negatives and changes nothing on the 38 hits). *Measure:*
-   negative set → ~0 junk chars attached; hit set unchanged.
-4. **Selection-time dedup of near-duplicates (FM2).** In `select_ranked_chunks`, cluster the
-   rerank window by embedding cosine (>τ) and attach one representative per cluster (+ optional
-   "×N similar items" note). No reindex. *Measure:* TQ + stealth-item queries; sibling saturation
-   drops; hit rate up or steady.
-5. **Small-to-big: return the parent section for precise hits (FM2 / completeness).** When a
-   stat-block row / item line is the top hit, attach its full section (heading-path parents are
-   already stored). *Measure:* property queries return complete entries; TQ stable at rank 1.
-6. **Enumeration handling (FM1) — the persistent miss.** Two complementary options:
-   - **(a) KB-side index file:** generate a small "Humblewood special spells / backgrounds" listing
-     file that ranks first for such queries (cheapest, most reliable).
-   - **(b) Directory-aware retrieval:** when the query is an enumeration ("which X in Y?"), list
-     the matching directory's files and attach their headers (this is what `list_sections` will do
-     in agent mode — §3.2). *Measure:* add both Humblewood enumeration queries to the golden set;
-     they should flip from MISS → HIT.
+3. **Enable the rerank-score attach floor (#43) for negatives (FM5).** ✅ DONE —
+   `RAG_ATTACH_FLOOR_SOURCE=rerank` + `RAG_ATTACH_FLOOR=0.50` (`.env` switched from the old
+   dense-cosine 0.35; `.env.example` documents both knobs). If the reranker is down the gate
+   simply doesn't apply instead of dropping everything.
+4. **Selection-time dedup of near-duplicates (FM2).** ✅ DONE (`505606e`) —
+   `select_ranked_chunks` skips a candidate within cosine `RAG_DEDUP_COSINE_TAU` (0.92) of an
+   already-selected chunk and appends a "(near-duplicates omitted: …)" note to the
+   representative's file entry. Lexical-only hits never deduped; `RAG_DEDUP_ENABLED=0` disables.
+5. **Small-to-big: return the parent section for precise hits (FM2 / completeness).** ✅ ALREADY
+   COVERED — nested chunks carry their parent header chain in content *and* display name
+   (`chunker.py`, commits 3155898 / 4c016e5), so a top-ranked line attaches with its section
+   context. No new code needed.
+6. **Enumeration handling (FM1) — the persistent miss.** PARTIAL — **(a) KB-side index file**
+   ✅ DONE on disk: `data/knowledge/humblewood/HumbleWood/HumbleWood/Humblewood_Special_Spells.md`
+   + `Humblewood_Backgrounds.md` (bilingual listings of all 7 special spells / 3 backgrounds).
+   **NOT yet indexed** — needs `/sync_kb` via the bot (sole-writer on `vector_index.db`; do it
+   while the user is present). **(b) Directory-aware retrieval** deferred to agent mode (§3.2,
+   `list_sections`). *Measure:* after indexing, the two Humblewood enumeration golden cases
+   (#27/#28) should flip MISS → HIT.
 
 ### Tier 2 — moderate effort, higher value (index-time + gated generation)
 
