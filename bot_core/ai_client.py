@@ -532,6 +532,7 @@ class _AIRequestContext:
         temperature: float,
         timeout_sec: float,
         rerank_top: float | None = None,
+        turn_record: dict[str, Any] | None = None,
     ) -> None:
         self.effective_model = effective_model
         self.client = client
@@ -552,6 +553,8 @@ class _AIRequestContext:
         # query, or None when the reranker never scored (backend down → the
         # fast path always wins; a missing signal must not activate agents).
         self.rerank_top = rerank_top
+        # Per-turn debugging record (bot_core/turn_logger); None when disabled.
+        self.turn_record = turn_record
 
 
 def _load_world_context() -> str:
@@ -855,6 +858,26 @@ async def _build_ai_request(
     # SILENT (single knob — see config/settings.py). No total wall-clock cap.
     timeout_sec = AI_TIMEOUT_S
 
+    # ── Per-turn debugging record (bot_core/turn_logger) ─────────────
+    # Capture the COMPLETE final prompt here — the single place both delivery
+    # paths converge — so a turn file shows exactly what the model saw.
+    from bot_core import turn_logger
+
+    _turn_record = turn_logger.new_turn(
+        channel_id=channel_id, username=username, char_key=char_key,
+        model=effective_model, user_message=user_message,
+    )
+    if _turn_record is not None:
+        turn_logger.set_retrieval(
+            _turn_record,
+            attached_files=included_names,
+            rag_chars=len(rag_context) if rag_context else 0,
+            retrieval_meta=_retr_meta,
+        )
+        turn_logger.set_prompt(
+            _turn_record, messages=messages, total_chars=_total_chars,
+        )
+
     return _AIRequestContext(
         effective_model=effective_model,
         client=client,
@@ -872,6 +895,7 @@ async def _build_ai_request(
         temperature=_request_temp,
         timeout_sec=timeout_sec,
         rerank_top=_retr_meta.get("rerank_top"),
+        turn_record=_turn_record,
     )
 
 
@@ -1155,82 +1179,108 @@ async def ask_ai(
             username=username, user_id=user_id, char_key=char_key,
         )
 
-        from bot_core.errors import extract_reply_text
+        # ── Per-turn record (bot_core/turn_logger): the `finally` below
+        # guarantees EVERY exit — success, agent fallback, classified error —
+        # lands on disk; a logging failure can never affect the turn.
+        from bot_core import turn_logger
 
-        # ── Agent mode (#39 §3.4): trigger, don't default ───────────────
-        agent_reason = agent_trigger_reason(user_message, ctx.rerank_top)
+        rec = ctx.turn_record
+        turn_started = time.monotonic()
+        _turn_out: dict[str, Any] = {"status": "ok", "error": "", "text": ""}
+        agent_reason: str | None = None
         agent_meta: AgentTurnMeta | None = None
-        if agent_reason is not None:
-            try:
-                reply_text, agent_meta = await _run_agent_turn(ctx, agent_reason)
-            except Exception as e:  # noqa: BLE001 — classified below
-                log.warning("agent turn failed (%s); surfacing", e)
-                _friendly_ai_error(e, model=ctx.effective_model,
-                                   backend_url=INFER_URL)
-        else:
-            # Omit max_tokens when unset so the backend (LM Studio) lets the
-            # model use its maximum output length.
-            create_kwargs: dict[str, Any] = dict(
-                model=ctx.effective_model,
-                messages=ctx.messages,
-                temperature=ctx.temperature,
-                stream=False,
-                timeout=ctx.timeout_sec,
-            )
-            if ctx.max_tokens is not None:
-                create_kwargs["max_tokens"] = ctx.max_tokens
+        try:
+            from bot_core.errors import extract_reply_text
 
-            # #20: per-task reasoning control for the /ai chat path.
-            reasoning_body = _reasoning_extra_body(AI_REASONING_EFFORT)
-            if reasoning_body is not None:
-                create_kwargs["extra_body"] = reasoning_body
-
-            try:
+            # ── Agent mode (#39 §3.4): trigger, don't default ───────────────
+            agent_reason = agent_trigger_reason(user_message, ctx.rerank_top)
+            if agent_reason is not None:
                 try:
-                    # P1 #7: one bounded retry on transient 5xx/timeout/connection
-                    # failures before we give up on the turn.
-                    resp = await _call_completion_with_retry(ctx.client, **create_kwargs)
-                except APIStatusError as e:
-                    # #20: only a 4xx rejection of the reasoning param justifies a
-                    # plain retry without it (older backends don't know it).
-                    if (reasoning_body is not None and e.status_code is not None
-                            and e.status_code < 500):
-                        log.warning(
-                            "Backend rejected reasoning control %s (HTTP %d); "
-                            "retrying once without it.",
-                            reasoning_body, e.status_code,
-                        )
-                        create_kwargs.pop("extra_body", None)
+                    reply_text, agent_meta = await _run_agent_turn(ctx, agent_reason)
+                except Exception as e:  # noqa: BLE001 — classified below
+                    log.warning("agent turn failed (%s); surfacing", e)
+                    _friendly_ai_error(e, model=ctx.effective_model,
+                                       backend_url=INFER_URL)
+            else:
+                # Omit max_tokens when unset so the backend (LM Studio) lets the
+                # model use its maximum output length.
+                create_kwargs: dict[str, Any] = dict(
+                    model=ctx.effective_model,
+                    messages=ctx.messages,
+                    temperature=ctx.temperature,
+                    stream=False,
+                    timeout=ctx.timeout_sec,
+                )
+                if ctx.max_tokens is not None:
+                    create_kwargs["max_tokens"] = ctx.max_tokens
+
+                # #20: per-task reasoning control for the /ai chat path.
+                reasoning_body = _reasoning_extra_body(AI_REASONING_EFFORT)
+                if reasoning_body is not None:
+                    create_kwargs["extra_body"] = reasoning_body
+
+                try:
+                    try:
+                        # P1 #7: one bounded retry on transient 5xx/timeout/connection
+                        # failures before we give up on the turn.
                         resp = await _call_completion_with_retry(ctx.client, **create_kwargs)
-                    else:
-                        raise
-                # P1 #8: extract the reply safely — an empty `choices` array is a
-                # malformed backend response (AIBackendError), and a response cut
-                # off at the model's output limit with no visible answer raises
-                # AIResponseTruncatedError. Both fall through to _friendly_ai_error
-                # below as real errors — there is no bigger budget to retry with
-                # when max_tokens is omitted (model max).
-                reply_text = extract_reply_text(resp)
-            except Exception as e:  # noqa: BLE001 — classified below
-                _friendly_ai_error(e, model=ctx.effective_model, backend_url=INFER_URL)
+                    except APIStatusError as e:
+                        # #20: only a 4xx rejection of the reasoning param justifies a
+                        # plain retry without it (older backends don't know it).
+                        if (reasoning_body is not None and e.status_code is not None
+                                and e.status_code < 500):
+                            log.warning(
+                                "Backend rejected reasoning control %s (HTTP %d); "
+                                "retrying once without it.",
+                                reasoning_body, e.status_code,
+                            )
+                            create_kwargs.pop("extra_body", None)
+                            resp = await _call_completion_with_retry(ctx.client, **create_kwargs)
+                        else:
+                            raise
+                    # P1 #8: extract the reply safely — an empty `choices` array is a
+                    # malformed backend response (AIBackendError), and a response cut
+                    # off at the model's output limit with no visible answer raises
+                    # AIResponseTruncatedError. Both fall through to _friendly_ai_error
+                    # below as real errors — there is no bigger budget to retry with
+                    # when max_tokens is omitted (model max).
+                    reply_text = extract_reply_text(resp)
+                except Exception as e:  # noqa: BLE001 — classified below
+                    _friendly_ai_error(e, model=ctx.effective_model, backend_url=INFER_URL)
 
-        log.debug("RAW_AI_RESPONSE_START\n%s\nRAW_AI_RESPONSE_END", reply_text)
+            log.debug("RAW_AI_RESPONSE_START\n%s\nRAW_AI_RESPONSE_END", reply_text)
 
-        # ── Update history (P0 #2) ──────────────────────────────────────
-        _persist_turn(guild_id, channel_id, user_message, reply_text, username=username)
+            # ── Update history (P0 #2) ──────────────────────────────────────
+            _persist_turn(guild_id, channel_id, user_message, reply_text, username=username)
 
-        approx_tokens = max(1, len(reply_text) // 4)  # §4.3: char-based estimate, not word count
-        extra: dict[str, Any] = {
-            "model_used": ctx.effective_model, "tokens_approx": approx_tokens,
-        }
-        if agent_meta is not None:  # §5.3: per-query agentic telemetry
-            extra.update(
-                agent_mode=True,
-                agent_iterations=agent_meta.iterations,
-                agent_tool_calls=list(agent_meta.tool_calls),
-                agent_fallback=agent_meta.fallback,
-            )
-        return reply_text, extra
+            approx_tokens = max(1, len(reply_text) // 4)  # §4.3: char-based estimate, not word count
+            extra: dict[str, Any] = {
+                "model_used": ctx.effective_model, "tokens_approx": approx_tokens,
+            }
+            if agent_meta is not None:  # §5.3: per-query agentic telemetry
+                extra.update(
+                    agent_mode=True,
+                    agent_iterations=agent_meta.iterations,
+                    agent_tool_calls=list(agent_meta.tool_calls),
+                    agent_fallback=agent_meta.fallback,
+                )
+
+            _turn_out["text"] = reply_text
+            return reply_text, extra
+        except Exception as e:  # noqa: BLE001 — record the failed turn, then re-raise
+            _turn_out["status"] = "error"
+            _turn_out["error"] = repr(e)
+            raise
+        finally:
+            if rec is not None:
+                turn_logger.set_agent(rec, trigger=agent_reason, meta=agent_meta)
+                turn_logger.finish_turn(
+                    rec,
+                    response_text=_turn_out["text"],
+                    status=_turn_out["status"],
+                    error=_turn_out["error"],
+                    started_monotonic=turn_started,
+                )
 
 
 async def ask_ai_stream(
@@ -1279,129 +1329,162 @@ async def ask_ai_stream(
             username=username, user_id=user_id, char_key=char_key,
         )
 
-        collected: list[str] = []
-        # Initialized up front (audit L5): the empty-stream diagnostics below
-        # getattr() this name; unreachable today only because
-        # _friendly_ai_error always raises, and that must stay a coincidence
-        # of the classifier, not of control flow.
-        stream: Any = None
+        # ── Per-turn record (bot_core/turn_logger): same guarantee as ask_ai;
+        # a cancelled stream (/ai stop) is recorded with status "cancelled".
+        from bot_core import turn_logger
 
-        # ── Agent mode (#39 §3.4): v1 runs the bounded loop NON-streaming
-        # and yields the final answer as one chunk (stream interleaving is a
-        # documented follow-up). Same trigger + same graceful degradation as
-        # ask_ai — the loop never raises.
-        agent_reason = agent_trigger_reason(user_message, ctx.rerank_top)
-        if agent_reason is not None:
-            try:
-                reply_text, _agent_meta = await _run_agent_turn(ctx, agent_reason)
-            except Exception as e:  # noqa: BLE001 — classified below
-                _friendly_ai_error(e, model=ctx.effective_model,
-                                   backend_url=INFER_URL)
-            collected.append(reply_text)
-            yield reply_text
-            _persist_turn(guild_id, channel_id, user_message, reply_text,
-                         username=username)
-            return
-
+        rec = ctx.turn_record
+        turn_started = time.monotonic()
+        _turn_out: dict[str, Any] = {"status": "ok", "error": "", "text": ""}
+        agent_reason: str | None = None
+        agent_meta: AgentTurnMeta | None = None
         try:
-            # The streaming call is NOT retried: a mid-stream transient
-            # failure is ambiguous (we may have already emitted tokens), so
-            # we surface it immediately rather than risk a duplicated partial
-            # reply. The non-streaming path keeps its one bounded retry.
-            #
-            # Timeout: AI_TIMEOUT_S is an idle watchdog — httpx applies the
-            # SDK timeout per read, so a stalled stream (no chunk within
-            # AI_TIMEOUT_S) raises ReadTimeout while an active generation may
-            # run indefinitely. No total wall-clock cap; /ai stop is the
-            # escape hatch.
-            from openai import AsyncStream
-            from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
+            collected: list[str] = []
+            # Initialized up front (audit L5): the empty-stream diagnostics below
+            # getattr() this name; unreachable today only because
+            # _friendly_ai_error always raises, and that must stay a coincidence
+            # of the classifier, not of control flow.
+            stream: Any = None
 
-            create_kwargs: dict[str, Any] = dict(
-                model=ctx.effective_model,
-                messages=ctx.messages,
-                temperature=ctx.temperature,
-                stream=True,
-                timeout=AI_TIMEOUT_S,
-            )
-            if ctx.max_tokens is not None:
-                create_kwargs["max_tokens"] = ctx.max_tokens
-
-            # #20: per-task reasoning control for the /ai chat path (the 4xx
-            # retry-without-param fallback lives in the helper; mid-stream
-            # failures below it still are NOT retried).
-            stream = cast("AsyncStream[ChatCompletionChunk]",
-                         await _create_with_reasoning_fallback(
-                             ctx.client, AI_REASONING_EFFORT, **create_kwargs,
-                         ))
-            try:
-                while True:
-                    try:
-                        chunk = await stream.__anext__()
-                    except StopAsyncIteration:
-                        break
-
-                    # Track the server-side finish reason (set on the final
-                    # chunk) so a truncated-but-silent stream can be told
-                    # apart from an ordinary empty answer (P4).
-                    if getattr(chunk, "choices", None):
-                        fr = getattr(chunk.choices[0], "finish_reason", None)
-                        if fr:
-                            setattr(stream, "_final_finish_reason", fr)
-                    try:
-                        delta = chunk.choices[0].delta.content
-                    except (IndexError, AttributeError, KeyError, TypeError):
-                        continue
-                    if delta:
-                        collected.append(delta)
-                        yield "".join(collected)
-            finally:
-                # Release the HTTP connection when the loop ends for any
-                # reason (success, timeout, cancellation); idempotent in the
-                # openai SDK.
+            # ── Agent mode (#39 §3.4): v1 runs the bounded loop NON-streaming
+            # and yields the final answer as one chunk (stream interleaving is a
+            # documented follow-up). Same trigger + same graceful degradation as
+            # ask_ai — the loop never raises.
+            agent_reason = agent_trigger_reason(user_message, ctx.rerank_top)
+            if agent_reason is not None:
                 try:
-                    # openai's AsyncStream.close() is async — awaiting it is
-                    # what actually releases the HTTP connection (P3 #3 fix).
-                    await stream.close()
-                except Exception:
-                    pass
-        except asyncio.CancelledError:
-            # Abandoned (e.g. /ai stop, P3 #25). Do not persist a partial turn.
-            log.info(
-                "ask_ai_stream: cancelled — %d chars accumulated, not persisted",
-                len("".join(collected)),
-            )
-            raise
-        except Exception as e:  # noqa: BLE001 — classified below
-            _friendly_ai_error(e, model=ctx.effective_model, backend_url=INFER_URL)
+                    reply_text, agent_meta = await _run_agent_turn(ctx, agent_reason)
+                except Exception as e:  # noqa: BLE001 — classified below
+                    _friendly_ai_error(e, model=ctx.effective_model,
+                                       backend_url=INFER_URL)
+                collected.append(reply_text)
+                yield reply_text
+                _persist_turn(guild_id, channel_id, user_message, reply_text,
+                             username=username)
+                _turn_out["text"] = reply_text
+                return
 
-        reply_text = "".join(collected).strip()
-        if not reply_text:
-            # P4: an empty stream whose final chunk reported
-            # finish_reason "length" means the thinking model spent its whole
-            # max_tokens budget with nothing left for the answer — report that
-            # honestly instead of the generic empty-response message.
-            from bot_core.errors import AIBackendError, AIResponseTruncatedError
-            if getattr(stream, "_final_finish_reason", None) == "length":
-                limit_desc = (
-                    f"max_tokens={ctx.max_tokens}"
-                    if ctx.max_tokens is not None
-                    else "the model's maximum output length"
+            try:
+                # The streaming call is NOT retried: a mid-stream transient
+                # failure is ambiguous (we may have already emitted tokens), so
+                # we surface it immediately rather than risk a duplicated partial
+                # reply. The non-streaming path keeps its one bounded retry.
+                #
+                # Timeout: AI_TIMEOUT_S is an idle watchdog — httpx applies the
+                # SDK timeout per read, so a stalled stream (no chunk within
+                # AI_TIMEOUT_S) raises ReadTimeout while an active generation may
+                # run indefinitely. No total wall-clock cap; /ai stop is the
+                # escape hatch.
+                from openai import AsyncStream
+                from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
+
+                create_kwargs: dict[str, Any] = dict(
+                    model=ctx.effective_model,
+                    messages=ctx.messages,
+                    temperature=ctx.temperature,
+                    stream=True,
+                    timeout=AI_TIMEOUT_S,
                 )
+                if ctx.max_tokens is not None:
+                    create_kwargs["max_tokens"] = ctx.max_tokens
+
+                # #20: per-task reasoning control for the /ai chat path (the 4xx
+                # retry-without-param fallback lives in the helper; mid-stream
+                # failures below it still are NOT retried).
+                stream = cast("AsyncStream[ChatCompletionChunk]",
+                             await _create_with_reasoning_fallback(
+                                 ctx.client, AI_REASONING_EFFORT, **create_kwargs,
+                             ))
+                try:
+                    while True:
+                        try:
+                            chunk = await stream.__anext__()
+                        except StopAsyncIteration:
+                            break
+
+                        # Track the server-side finish reason (set on the final
+                        # chunk) so a truncated-but-silent stream can be told
+                        # apart from an ordinary empty answer (P4).
+                        if getattr(chunk, "choices", None):
+                            fr = getattr(chunk.choices[0], "finish_reason", None)
+                            if fr:
+                                setattr(stream, "_final_finish_reason", fr)
+                        try:
+                            delta = chunk.choices[0].delta.content
+                        except (IndexError, AttributeError, KeyError, TypeError):
+                            continue
+                        if delta:
+                            collected.append(delta)
+                            yield "".join(collected)
+                finally:
+                    # Release the HTTP connection when the loop ends for any
+                    # reason (success, timeout, cancellation); idempotent in the
+                    # openai SDK.
+                    try:
+                        # openai's AsyncStream.close() is async — awaiting it is
+                        # what actually releases the HTTP connection (P3 #3 fix).
+                        await stream.close()
+                    except Exception:
+                        pass
+            except asyncio.CancelledError:
+                # Abandoned (e.g. /ai stop, P3 #25). Do not persist a partial turn.
+                log.info(
+                    "ask_ai_stream: cancelled — %d chars accumulated, not persisted",
+                    len("".join(collected)),
+                )
+                raise
+            except Exception as e:  # noqa: BLE001 — classified below
+                _friendly_ai_error(e, model=ctx.effective_model, backend_url=INFER_URL)
+
+            reply_text = "".join(collected).strip()
+            if not reply_text:
+                # P4: an empty stream whose final chunk reported
+                # finish_reason "length" means the thinking model spent its whole
+                # max_tokens budget with nothing left for the answer — report that
+                # honestly instead of the generic empty-response message.
+                from bot_core.errors import AIBackendError, AIResponseTruncatedError
+                if getattr(stream, "_final_finish_reason", None) == "length":
+                    limit_desc = (
+                        f"max_tokens={ctx.max_tokens}"
+                        if ctx.max_tokens is not None
+                        else "the model's maximum output length"
+                    )
+                    _friendly_ai_error(
+                        AIResponseTruncatedError(
+                            f"Streamed response truncated at {limit_desc} "
+                            f"with no visible answer.",
+                            max_tokens=ctx.max_tokens,
+                        ),
+                        model=ctx.effective_model, backend_url=INFER_URL,
+                    )
                 _friendly_ai_error(
-                    AIResponseTruncatedError(
-                        f"Streamed response truncated at {limit_desc} "
-                        f"with no visible answer.",
-                        max_tokens=ctx.max_tokens,
-                    ),
+                    AIBackendError("The AI backend returned an empty response."),
                     model=ctx.effective_model, backend_url=INFER_URL,
                 )
-            _friendly_ai_error(
-                AIBackendError("The AI backend returned an empty response."),
-                model=ctx.effective_model, backend_url=INFER_URL,
-            )
 
-        log.debug("RAW_AI_RESPONSE_START\n%s\nRAW_AI_RESPONSE_END", reply_text)
-        _persist_turn(guild_id, channel_id, user_message, reply_text, username=username)
+            log.debug("RAW_AI_RESPONSE_START\n%s\nRAW_AI_RESPONSE_END", reply_text)
+            _persist_turn(guild_id, channel_id, user_message, reply_text, username=username)
+
+            _turn_out["text"] = reply_text
+        except asyncio.CancelledError:
+            # /ai stop mid-stream: record the partial turn, then propagate.
+            _turn_out["status"] = "cancelled"
+            _turn_out["text"] = "".join(collected)
+            raise
+        except Exception as e:  # noqa: BLE001 — record the failed turn, then re-raise
+            _turn_out["status"] = "error"
+            _turn_out["error"] = repr(e)
+            raise
+        finally:
+            if rec is not None:
+                turn_logger.set_agent(rec, trigger=agent_reason, meta=agent_meta)
+                turn_logger.finish_turn(
+                    rec,
+                    response_text=_turn_out["text"],
+                    status=_turn_out["status"],
+                    error=_turn_out["error"],
+                    started_monotonic=turn_started,
+                )
+
         # Final value: the complete reply (also the last delta).
         yield reply_text

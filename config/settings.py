@@ -579,6 +579,18 @@ RAG_EMBED_BATCH_SIZE: int = _safe_int(os.getenv("RAG_EMBED_BATCH_SIZE"), 8)
 LAST_SESSION_CONTEXT_ENABLED: bool = _safe_bool(os.getenv("LAST_SESSION_CONTEXT_ENABLED"), True)
 LAST_SESSION_MAX_CHARS: int = _safe_int(os.getenv("LAST_SESSION_MAX_CHARS"), 4000)
 
+# ── Per-turn AI records for offline debugging (bot_core/turn_logger) ───────
+# Every ask_ai / ask_ai_stream turn writes ONE self-contained JSON file to
+# AI_TURN_LOG_DIR (default: logs/ai_turns): the complete final prompt, retrieval
+# details (attached files + rerank/dense top scores), agent-mode telemetry
+# (trigger, iterations, tool calls with results, fallback reason), the full
+# response text, and timings. Written atomically, rotated down to
+# AI_TURN_LOG_KEEP most-recent files after each write; a logging failure never
+# affects the turn. Set AI_TURN_LOG_ENABLED=0 for zero overhead.
+AI_TURN_LOG_ENABLED: bool = _safe_bool(os.getenv("AI_TURN_LOG_ENABLED"), True)
+AI_TURN_LOG_DIR: str = os.getenv("AI_TURN_LOG_DIR", "logs/ai_turns")
+AI_TURN_LOG_KEEP: int = _safe_int(os.getenv("AI_TURN_LOG_KEEP"), 300)
+
 # ── Answer-honesty + citations for RAG turns (Tier 0 item 2, #39 plan) ────
 # Appended to the user message ONLY when KB context is actually attached
 # (bot_core/ai_client._append_user_message). Fixes FM5 (confident answers from
