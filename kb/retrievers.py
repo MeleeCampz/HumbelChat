@@ -200,6 +200,7 @@ def select_ranked_chunks(
     dense_scores: dict[str, float] | None = None,
     gate_scores: dict[str, float] | None = None,
     selected_names: list[str] | None = None,
+    embeddings_by_name: dict[str, list[float]] | None = None,
 ) -> list[tuple[str, str]]:
     """Collapse ranked index chunks into per-file document entries.
 
@@ -223,9 +224,24 @@ def select_ranked_chunks(
     Works for any chunk shape — header-split sections as well as unstructured
     "Full Document" chunks (e.g. player session logs) — because it consumes
     the index content directly instead of re-deriving windows from disk.
+
+    ``embeddings_by_name`` enables near-duplicate dedup (Tier 1 item 4): a
+    candidate whose embedding is within cosine ``RAG_DEDUP_COSINE_TAU`` of an
+    already-SELECTED chunk is skipped and reported in the representative's
+    file entry as "(near-duplicates omitted: …)". Chunks without an embedding
+    (lexical-only hits) are never deduped.
     """
     if not ranked:
         return []
+
+    from config.settings import RAG_DEDUP_COSINE_TAU, RAG_DEDUP_ENABLED
+    dedup = RAG_DEDUP_ENABLED and bool(embeddings_by_name)
+    import numpy as np  # lazy: only paid when dedup is active
+
+    sel_mat: np.ndarray | None = None     # (k, dim) matrix of selected embeddings
+    sel_norms: np.ndarray | None = None   # (k,) L2 norms, parallel to sel_mat
+    sel_names: list[str] = []             # parallel to sel_mat rows
+    skipped_by_rep: dict[str, list[str]] = {}
 
     per_file: dict[str, list[str]] = {}
     seen_names: set[str] = set()
@@ -255,15 +271,63 @@ def select_ranked_chunks(
             continue  # file budget exhausted — try the next ranked chunk
         if name in seen_names:
             continue
+        # Near-duplicate dedup: skip if this chunk is ~the same text as one
+        # already selected (sibling entries crowding out distinct content).
+        emb = (
+            embeddings_by_name.get(name)
+            if dedup and embeddings_by_name is not None else None
+        )
+        v: np.ndarray | None = None
+        n = 0.0
+        if emb is not None:
+            v = np.asarray(emb, dtype=np.float32)
+            n = float(np.linalg.norm(v))
+            if n > 1e-9 and sel_mat is not None and sel_norms is not None:
+                sims = (sel_mat @ v) / (sel_norms * n)
+                best_i = int(np.argmax(sims))
+                if float(sims[best_i]) > RAG_DEDUP_COSINE_TAU:
+                    skipped_by_rep.setdefault(sel_names[best_i], []).append(name)
+                    continue
         seen_names.add(name)
         bucket.append(content)
         if selected_names is not None:
             selected_names.append(name)
         total_chunks += 1
+        if v is not None and n > 1e-9:
+            sel_mat = v if sel_mat is None else np.vstack([sel_mat, v[None, :]])
+            sel_norms = (np.array([n]) if sel_norms is None
+                         else np.append(sel_norms, n))
+            sel_names.append(name)
 
     # Drop any file that ended up with no chunks (defensive: shouldn't happen
     # given the floor-first ordering, but never attach an empty entry).
-    return [(stem, "\n\n".join(chunks)) for stem, chunks in per_file.items() if chunks]
+    docs = [(stem, "\n\n".join(chunks)) for stem, chunks in per_file.items() if chunks]
+
+    # Dedup notes: tell the model which near-duplicate entries were trimmed so
+    # it doesn't present a partial list as complete. Max 3 names per note.
+    if skipped_by_rep:
+        def _short(nm: str) -> str:
+            return nm.rsplit(" [", 1)[-1] if " [" in nm else nm.split("/")[-1]
+
+        notes_by_stem: dict[str, list[str]] = {}
+        for rep, skipped in skipped_by_rep.items():
+            stem = rep.split(" [", 1)[0] if " [" in rep else rep
+            notes_by_stem.setdefault(stem, []).extend(_short(s) for s in skipped)
+        out: list[tuple[str, str]] = []
+        for stem, text in docs:
+            names = notes_by_stem.get(stem)
+            if names:
+                shown = ", ".join(names[:3]) + ("…" if len(names) > 3 else "")
+                word = "entry" if len(names) == 1 else "entries"
+                text += f"\n\n(Near-duplicate {word} omitted from attachment: {shown})"
+            out.append((stem, text))
+        n_skipped = sum(len(v) for v in skipped_by_rep.values())
+        logger.info(
+            "Dedup (cosine > %.2f): %d near-duplicate chunk(s) omitted from attachment",
+            RAG_DEDUP_COSINE_TAU, n_skipped,
+        )
+        return out
+    return docs
 
 
 # ─────────── Low-confidence query rewriting (option A) ───────────
@@ -689,16 +753,25 @@ async def _retrieve_vector(
             if name_map.get(c) and s > 0.0
         } or None
 
-    from config.settings import RAG_MAX_CHUNKS_PER_FILE, RAG_ATTACH_FLOOR, RAG_ATTACH_FLOOR_SOURCE
+    from config.settings import (
+        RAG_MAX_CHUNKS_PER_FILE,
+        RAG_ATTACH_FLOOR,
+        RAG_ATTACH_FLOOR_SOURCE,
+        RAG_DEDUP_ENABLED,
+    )
     # #43: gate the attach floor on Qwen rerank scores when opted in; the
     # dense-source default keeps the historical behavior untouched.
     gate = rerank_gate if RAG_ATTACH_FLOOR_SOURCE == "rerank" else None
+    # Tier 1 item 4: near-duplicate dedup over the selection (see
+    # select_ranked_chunks). The map is built per call (~ms for 5K chunks).
+    emb_map = idx.embedding_map() if RAG_DEDUP_ENABLED else None
     selected: list[str] = []
     docs = select_ranked_chunks(
         final_ranked, top_n=top_n,
         max_chunks_per_file=RAG_MAX_CHUNKS_PER_FILE,
         attach_min_score=RAG_ATTACH_FLOOR, dense_scores=dense_scores,
         gate_scores=gate, selected_names=selected,
+        embeddings_by_name=emb_map,
     )
     if not docs and final_ranked:
         # Safety net: an over-aggressive floor must never yield an empty context.

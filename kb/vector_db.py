@@ -191,6 +191,15 @@ class KBVectorIndex:
         index._docs = docs
         return index
 
+    def embedding_map(self) -> dict[str, list[float]]:
+        """display_name → embedding for every chunk that has one.
+
+        Built per call (a few ms for ~5K chunks) so callers never hold a
+        stale view across index reloads. Used by the selection-time near-
+        duplicate dedup (Tier 1 item 4).
+        """
+        return {d.display_name: d.embedding for d in self._docs if d.embedding}
+
     def is_empty(self) -> bool:
         return len(self._docs) == 0
 

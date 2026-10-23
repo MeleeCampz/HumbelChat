@@ -280,7 +280,10 @@ class TestParallelRewrite:
 
             async def query_with_embeddings(self, text, top_n=5):
                 await asyncio.sleep(0.01)
-                return [(("a.md [Sec]", "alpha content", 0.9))], [0.1]  # confident
+                return [("a.md [Sec]", "alpha content", 0.9)], [0.1]  # confident
+
+            def embedding_map(self):
+                return {}  # no embeddings → near-duplicate dedup is a no-op
 
             async def rank_texts(self, texts, top_n=5):
                 calls.append("rank_texts")
@@ -335,8 +338,11 @@ class TestRerankExpansionMaxFusion:
                 # outscored Trickster's Quiver on the raw German question.
                 return [
                     (("decoy.md [Hood]", "decoy content", 0.62)),
-                    (("tq.md [Quiver]", "tq content", 0.57)),
+                    ("tq.md [Quiver]", "tq content", 0.57),
                 ], [0.1]
+
+            def embedding_map(self):
+                return {}  # no embeddings → near-duplicate dedup is a no-op
 
             async def rank_texts(self, texts, top_n=5):
                 return []  # expansions add no new chunks — only the rerank query

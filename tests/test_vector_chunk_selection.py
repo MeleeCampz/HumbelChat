@@ -257,6 +257,74 @@ class TestRetrievalName:
         assert doc.retrieval_name() == "classes.md [Rogue]"
 
 
+class TestNearDuplicateDedup:
+    """Tier 1 item 4: sibling entries within cosine τ of an already-selected
+    chunk are skipped; the representative's file entry gets a note."""
+
+    @staticmethod
+    def _vec(x, y):
+        n = (x * x + y * y) ** 0.5
+        return [x / n, y / n]
+
+    def test_near_duplicate_skipped_with_note(self, monkeypatch):
+        import config.settings as S
+        monkeypatch.setattr(S, "RAG_DEDUP_COSINE_TAU", 0.9)
+        a = self._vec(1, 0)
+        ranked = _ranked(
+            ("items.md [Cloak of Elvenkind]", "cloak text", 0.9),
+            ("items.md [Boots of Elvenkind]", "boots text (near-identical)", 0.88),
+            ("other.md [Full Document]", "unrelated", 0.5),
+        )
+        emb = {
+            "items.md [Cloak of Elvenkind]": a,
+            # cos ≈ 0.995 with the cloak — must be deduped
+            "items.md [Boots of Elvenkind]": self._vec(1, 0.1),
+            "other.md [Full Document]": self._vec(0, 1),
+        }
+        docs = dict(select_ranked_chunks(ranked, top_n=5, embeddings_by_name=emb))
+        assert "boots text" not in docs["items.md"]
+        assert "Near-duplicate entry omitted" in docs["items.md"]
+        assert "Boots of Elvenkind" in docs["items.md"]
+        assert "omitted" not in docs["other.md"]
+
+    def test_distinct_chunks_all_kept(self, monkeypatch):
+        import config.settings as S
+        monkeypatch.setattr(S, "RAG_DEDUP_COSINE_TAU", 0.9)
+        ranked = _ranked(
+            ("a.md [X]", "x", 0.9),
+            ("b.md [Y]", "y", 0.8),
+        )
+        emb = {"a.md [X]": self._vec(1, 0), "b.md [Y]": self._vec(0, 1)}
+        docs = select_ranked_chunks(ranked, top_n=5, embeddings_by_name=emb)
+        assert len(docs) == 2
+        assert all("omitted" not in text for _, text in docs)
+
+    def test_disabled_keeps_duplicates(self, monkeypatch):
+        import config.settings as S
+        monkeypatch.setattr(S, "RAG_DEDUP_ENABLED", False)
+        a = self._vec(1, 0)
+        ranked = _ranked(
+            ("items.md [Cloak]", "cloak", 0.9),
+            ("items.md [Boots]", "boots", 0.8),
+        )
+        emb = {"items.md [Cloak]": a, "items.md [Boots]": self._vec(1, 0.05)}
+        docs = dict(select_ranked_chunks(ranked, top_n=5, embeddings_by_name=emb))
+        assert "boots" in docs["items.md"]
+
+    def test_chunk_without_embedding_never_deduped(self, monkeypatch):
+        import config.settings as S
+        monkeypatch.setattr(S, "RAG_DEDUP_COSINE_TAU", 0.9)
+        a = self._vec(1, 0)
+        ranked = _ranked(
+            ("items.md [Cloak]", "cloak", 0.9),
+            ("lexi.md [Exact Term Hit]", "same-ish text, lexical only", 0.85),
+        )
+        # lexi.md has NO embedding — must survive even if text is similar.
+        emb = {"items.md [Cloak]": a}
+        docs = dict(select_ranked_chunks(ranked, top_n=5, embeddings_by_name=emb))
+        assert "same-ish text" in docs["lexi.md"]
+
+
 class TestChunkerPreamble:
     def test_text_before_first_header_is_kept(self):
         intro = "INTRO UNIQUE PREAMBLE"

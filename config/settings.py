@@ -656,6 +656,17 @@ RAG_ATTACH_FLOOR: float = _safe_float(os.getenv("RAG_ATTACH_FLOOR"), 0.50)
 # Default "dense" = current production behavior until calibration is reviewed.
 RAG_ATTACH_FLOOR_SOURCE: str = os.getenv("RAG_ATTACH_FLOOR_SOURCE", "dense").strip().lower()
 
+# ── Selection-time near-duplicate dedup (Tier 1 item 4, #39 plan / FM2) ────
+# A ranked chunk whose embedding sits within cosine RAG_DEDUP_COSINE_TAU of an
+# ALREADY-ATTACHED chunk is skipped — one representative per sibling cluster,
+# so near-identical entries (Cloak/Boots of Elvenkind ×N, Saddlebag items)
+# can't saturate the attach budget. The representative's file entry gets a
+# "(near-duplicates omitted: …)" note so the model knows the list is trimmed.
+# Chunks without an embedding (lexical-only hits) are never deduped. Set
+# RAG_DEDUP_ENABLED=0 to disable.
+RAG_DEDUP_ENABLED: bool = _safe_bool(os.getenv("RAG_DEDUP_ENABLED"), True)
+RAG_DEDUP_COSINE_TAU: float = _safe_float(os.getenv("RAG_DEDUP_COSINE_TAU"), 0.92)
+
 # ── Streaming AI responses (P3 #24) ────────────────────────────────────────
 # When on, /ai streams the completion token-by-token and progressively edits a
 # single Discord message as the text grows (instead of the user staring at a
