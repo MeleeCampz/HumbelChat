@@ -378,9 +378,16 @@ env knob controls it; `auto` is the intended default.
       `RAG_AGENT_MAX_ITERATIONS`, `RAG_AGENT_MAX_TOOL_CALLS`, `RAG_AGENT_SEARCH_TOP_K`
       (documented in `.env.example`). Tests: `tests/test_kb_tools.py` (17),
       `tests/test_agent_loop.py` (9), `tests/test_agent_trigger.py` (10).
-    - **Still gated** as designed: live probe (`scripts/rag_agent_probe.py`, §3.5) not yet run
-      against the real backend; golden-set multi-hop/enumeration growth (§5) pending; flip
-      `RAG_AGENT_MODE=auto` only after both are green.
+    - **Live probe GREEN 2026-10-24** (`scripts/rag_agent_probe.py`, §3.5, run against the real
+      backend + index with embedder/reranker healthy): all 3 questions completed with zero
+      fallbacks; enumeration Q answered fully (all 3 Humblewood backgrounds, cited) in ~12 s at
+      `RAG_AGENT_MAX_ITERATIONS=3`; control fact cited `equipment.md → Armor` in ~14 s. Probe
+      runs surfaced + fixed two live bugs: probe auth (`INFER_API_KEY`) and the read_section
+      path-style matcher (basename fallback). Remaining gate before flipping
+      `RAG_AGENT_MODE=auto`: golden-set multi-hop/enumeration growth (§5). Note: from outside
+      the docker network the embedder/reranker are only reachable via published host ports
+      (`host.docker.internal:11435/8000`) — sandbox runs need EMBED_URL/RERANK_API_BASE
+      overrides; the bot container uses the .env docker-internal names as-is.
 11. **Collection routing (rules / lore / session) (§2.2).** Lightweight path-prefix filter +
     per-collection RRF weighting; also fixes German-note crowding of rulebook answers. *Measure:*
     enumeration + German rule queries.
