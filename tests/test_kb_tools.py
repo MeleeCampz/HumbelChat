@@ -223,3 +223,151 @@ async def test_list_sections_dir(fake_store):
 async def test_list_sections_needs_arg(fake_store):
     with pytest.raises(ToolCallParseError, match="give 'file' or 'dir'"):
         await tools.execute_tool("list_sections", {})
+
+
+# ── list_sessions + session-folder reads (date-named folders) ─────────────
+
+def _make_session_kb(tmp_path):
+    logs = tmp_path / "humblewood" / "HumbleWood" / "SessionLogs"
+    for folder, first_line in [
+        ("2026-09-09_01_DerAnfang", "# Session 1\nThe party leaves the farm at dawn."),
+        ("2026-10-07_02", "They arrive at the witch's hut late evening."),
+        ("2026-10-20_02_Back_to_Alderheart", "Bandits attack the city gates."),
+    ]:
+        d = logs / folder
+        d.mkdir(parents=True)
+        (d / "notes.md").write_text(first_line + "\nmore notes\n", encoding="utf-8")
+    return tmp_path
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_chronological_roster(fake_store, tmp_path, monkeypatch):
+    kb_root = _make_session_kb(tmp_path)
+    monkeypatch.setattr("config.settings.KB_PATH", str(kb_root))
+    out = await tools.execute_tool("list_sessions", {})
+    assert "3 campaign session(s)" in out
+    # Ordinals follow CHRONOLOGICAL order, not folder names.
+    i1 = out.index("Session 1")
+    i2 = out.index("Session 2")
+    i3 = out.index("Session 3")
+    assert i1 < i2 < i3
+    assert "2026-09-09" in out[i1:i2] and "DerAnfang" in out[i1:i2]
+    # Title-less folder still listed (date + ordinal), teaser included.
+    assert "2026-10-07" in out[i2:i3]
+    assert "witch's hut" in out  # teaser line surfaced
+    assert 'read_section(file=' in out  # follow-up hint
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_none_found(fake_store, tmp_path, monkeypatch):
+    monkeypatch.setattr("config.settings.KB_PATH", str(tmp_path))
+    out = await tools.execute_tool("list_sessions", {})
+    assert "No session logs" in out
+
+
+def test_parse_list_sessions_no_args():
+    name, args = parse_tool_call('{"tool": "list_sessions", "args": {}}')
+    assert name == "list_sessions" and args == {}
+
+
+@pytest.mark.asyncio
+async def test_read_section_session_folder_fallback(tmp_path, monkeypatch):
+    """Bare 'notes.md' is ambiguous across sessions; a FOLDER name is not —
+    it reads that session's notes.md straight from disk."""
+    kb_root = _make_session_kb(tmp_path)
+    monkeypatch.setattr("config.settings.KB_PATH", str(kb_root))
+    # Index chunks all share the bare name (as the real KB does).
+    chunks = [
+        ("notes.md [Full Document]", "indexed chunk one"),
+        ("notes.md [Full Document -> Part 2]", "indexed chunk two"),
+    ]
+
+    async def _ensure(kb_path):
+        return _FakeStore(_FakeIdx(chunks))
+
+    import kb.retrievers as R
+    monkeypatch.setattr(R, "_ensure_index_store", _ensure)
+    out = await tools.execute_tool(
+        "read_section", {"file": "2026-10-07_02"})
+    assert "witch's hut" in out and "indexed chunk" not in out
+
+
+@pytest.mark.asyncio
+async def test_read_section_unknown_folder_falls_back_to_chunks(fake_store, tmp_path, monkeypatch):
+    """No matching session folder → the old chunk-matching behavior."""
+    monkeypatch.setattr("config.settings.KB_PATH", str(tmp_path))
+    out = await tools.execute_tool("read_section", {"file": "no_such_folder"})
+    assert "No chunk found" in out
+
+
+# ── search_kb lexical leg ───────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_search_kb_lexical_leg_surfaces_exact_term(fake_store, monkeypatch):
+    """A chunk dense ranks last but BM25 ranks first must surface on top
+    after RRF fusion (the proper-noun case)."""
+    import kb.retrievers as R
+
+    def _fake_lexical(idx, query, limit):
+        assert query == "fireball"
+        return [("humblewood/DnDRules/spells.md [Spells -> Fireball]",
+                 "Fireball deals 8d6 fire damage to each creature in a 20 ft radius.",
+                 5.0)]
+
+    monkeypatch.setattr(R, "_lexical_ranking", _fake_lexical)
+    monkeypatch.setattr("config.settings.RAG_DENSE_TOP_K", 10)
+
+    # The Fireball chunk must rank LAST in the dense leg (its name does not
+    # contain the query head) so only the lexical leg can surface it.
+    async def _dense_first(text, top_n=5):
+        return ([("humblewood/DnDRules/DnD5_5/equipment.md [Equipment -> Armor]",
+                  "Plate Armor: AC 18, 15 lb., 75 gp. Full entry text here.", 0.9),
+                 ("humblewood/DnDRules/spells.md [Spells -> Fireball]",
+                  "Fireball deals 8d6 fire damage to each creature in a 20 ft radius.",
+                  0.1)], [0.1])
+
+    # Re-point the store at an index whose dense ranking is fixed as above.
+    async def _fixed_ensure(kb_path):
+        class _FixedIdx(_FakeIdx):
+            async def query_with_embeddings(self, text, top_n=5):
+                return await _dense_first(text, top_n)
+        return _FakeStore(_FixedIdx(fake_store._idx._chunks))
+
+    monkeypatch.setattr(R, "_ensure_index_store", _fixed_ensure)
+    out = await tools.execute_tool("search_kb", {"query": "fireball"})
+    hits = json.loads(out.split("\n", 1)[1])
+    assert "Fireball deals 8d6" in hits[0]["snippet"]
+
+
+@pytest.mark.asyncio
+async def test_search_kb_lexical_failure_degrades_to_dense(fake_store, monkeypatch):
+    """A broken lexical leg must never break the search — dense-only result."""
+    import kb.retrievers as R
+
+    def _broken(idx, query, limit):
+        raise RuntimeError("no BM25 in this fake")
+
+    monkeypatch.setattr(R, "_lexical_ranking", _broken)
+    monkeypatch.setattr("config.settings.RAG_DENSE_TOP_K", 10)
+    out = await tools.execute_tool(
+        "search_kb", {"query": "plate armor AC", "scope": "rules"})
+    assert "hit(s)" in out
+
+
+@pytest.mark.asyncio
+async def test_search_kb_never_emits_truncated_json(fake_store, monkeypatch):
+    """When hits exceed the tool-output cap, drop tail hits — never break
+    the JSON array the model has to parse."""
+    import kb.retrievers as R
+
+    def _no_lex(idx, query, limit):
+        return []
+
+    monkeypatch.setattr(R, "_lexical_ranking", _no_lex)
+    monkeypatch.setattr("config.settings.RAG_DENSE_TOP_K", 10)
+    monkeypatch.setattr(tools, "_TOOL_RESULT_CAP", 400)
+    out = await tools.execute_tool(
+        "search_kb", {"query": "plate armor AC", "scope": "rules"})
+    assert "hit(s):" in out and "[truncated]" not in out
+    hits = json.loads(out[out.index("["):out.rindex("]") + 1])
+    assert hits, "at least one complete hit must survive the cap"
