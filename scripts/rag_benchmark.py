@@ -87,7 +87,15 @@ def _load_dotenv(path: Path) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, val = line.partition("=")
-        key, val = key.strip(), val.strip().strip('"').strip("'")
+        key, val = key.strip(), val.strip()
+        # Inline comments: real dotenv strips `  # ...` from UNQUOTED values.
+        # Without this, `RERANK_TOP_K=150  # unchanged...` loads as the whole
+        # string, _safe_int falls back to the default (15), and every sandbox
+        # benchmark silently ran with a 15-chunk rerank window instead of 150.
+        if val.startswith('"') or val.startswith("'"):
+            val = val.strip('"').strip("'")
+        else:
+            val = re.split(r"\s+#", val, maxsplit=1)[0].strip()
         if key and key not in os.environ:
             os.environ[key] = val
 
