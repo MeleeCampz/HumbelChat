@@ -1,6 +1,6 @@
 # Discord AI Bot
 
-A self-hosted Discord bot with AI chat, configurable AI personas, and optional RAG/knowledge-base lookup from local files.
+A self-hosted Discord bot with AI chat, configurable AI personas, and RAG/knowledge-base retrieval from local files — hybrid dense+BM25 search with optional cross-encoder reranking, plus an optional **agent mode** in which the AI calls knowledge-base tools (`search_kb`, `read_section`, `list_sections`, `find_in_kb`, `list_sessions`) to follow up on its own retrieval.
 
 ## Quick start
 
@@ -52,7 +52,7 @@ foreground without tmux: `./.venv/bin/python main.py` (Windows:
 - [Configuration](./docs/configuration.md) — env vars, response-length/token defaults, and fallback behavior
 - [Embeds](./docs/embeds.md) — structured Discord-embed rendering for /ai replies
 - [Characters](./docs/characters.md) — `characters.json` format and per-character settings
-- [RAG / Knowledge Base](./docs/rag.md) — retrieval methods, smart chunking, supported file types
+- [RAG / Knowledge Base](./docs/rag.md) — retrieval pipeline (hybrid + rerank), contextual chunks, query rewriting, agent-mode tool calling, session notes, supported file types
 - [Commands](./docs/commands.md) — slash command and prefix command reference
 - [Item Rolls](./docs/item-rolls.md) — `/roll_items` table formats, rolling mechanics, and pool management
 - [Permissions](./docs/permissions.md) — Discord permissions the bot needs, where to set them, and per-channel override traps

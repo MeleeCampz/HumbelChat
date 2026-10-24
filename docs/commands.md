@@ -14,7 +14,7 @@ All commands begin with `/`.
 /ai <message> [character: <name>]
 ```
 
-Send a message to the active AI character. Uses per-channel conversation history and, if enabled, RAG context.
+Send a message to the active AI character. Uses per-channel conversation history and, if enabled, RAG context. With agent mode enabled (`RAG_AGENT_MODE`, see [rag.md](./rag.md#agent-mode--tool-calling-over-the-kb)) the AI may additionally call knowledge-base tools to follow up on its retrieval.
 
 The optional `character` option takes a **one-off** persona for that single reply — it does not change the channel's active character (use `/character set` for that).
 

@@ -5,9 +5,14 @@ The bot can attach relevant local knowledge-base content to AI prompts. This is 
 ## How it works
 
 1. Documents are stored in `KB_PATH`.
-2. Files are chunked using the smart chunker.
+2. Files are chunked using the smart chunker (each chunk may carry a one-line
+   generated **contextual sidecar** — see below).
 3. A retrieval strategy (hybrid dense + BM25 by default) selects the most relevant chunks for a query.
-4. Selected context is included in the AI request, up to `RAG_MAX_CHARS`.
+4. An optional **cross-encoder reranker** re-scores and reorders the fused candidates.
+5. Selected context is included in the AI request, up to `RAG_MAX_CHARS` —
+   optionally after an attach-time relevance floor.
+6. Optionally, **agent mode** lets the model call KB tools for follow-up
+   retrieval instead of answering from the attached context alone.
 
 ## Embedding strategy — no per-request model swap
 
@@ -109,6 +114,19 @@ Two knobs control how much of each matched file actually reaches the prompt:
   no dense score) are always kept. A safety net guarantees an over-aggressive floor
   can never produce an empty context: if it would drop everything, selection falls
   back to the unfiltered ranking.
+
+## Contextual retrieval sidecar
+
+Each chunk's embedding input is optionally prefixed with one generated line —
+"{file title} / {header chain}: {chunk content}" — so chunks that are
+indistinguishable on their own (session notes, per-entry book sections) embed
+with their location baked in. The sidecar lives in a `chunk_contexts` table
+keyed by the chunk's ORIGINAL content hash: adding one is a cache hit (no
+re-embedding), and removing it yields byte-identical legacy behavior. Chunks
+without a sidecar fall back to raw content. Generated once per chunk by
+`scripts/contextual_reindex.py` (cached in `chunk_contexts.generated`,
+resumable); the A/B benchmark showed +2 hits with zero regressions on the
+golden set.
 
 ## Low-confidence query rewriting (vector path)
 
@@ -266,6 +284,48 @@ before this change render without a `name` attribute. All text is XML-escaped;
 malformed entries degrade to escaped text nodes and never raise. History is
 still trimmed oldest-first by the prompt budget *before* rendering, and no
 compaction/summarization is performed — the block always contains raw turns.
+
+## Agent mode — tool calling over the KB
+
+Optional bounded agent loop (`RAG_AGENT_MODE`, off by default): when active,
+the model may call KB tools instead of answering only from attached context.
+The full RAG prompt (system + history + attached chunks) is carried into the
+loop verbatim — nothing is discarded; tools are additive. Any failure
+degrades to a single-turn answer over the gathered transcript, so agent mode
+cannot make a turn worse than the fast path.
+
+**Modes.** `off` = fast path only (zero overhead). `auto` = trigger fires on
+any of: top rerank score below `RAG_AGENT_SCORE_GATE` (CRAG-style — retrieval
+itself is unsure; calibrated on the benchmark: true hits ≥ 0.65, negatives ≤
+0.36), enumeration phrasing ("which sessions…", "list all…"), or an explicit
+"search the knowledge base" request. `always` = every turn (measured: zero
+regressions vs off, +7% latency — see `docs/internal/MODE_COMPARE_ALWAYS_VS_AUTO.md`).
+
+**The five tools** (all in-process over the existing index — no new services,
+no new VRAM):
+
+| Tool | Answers | Notes |
+|---|---|---|
+| `search_kb(query, scope?)` | "tell me about X" — ranked relevance snippets | hybrid dense+BM25 (legs run concurrently), reranked when the cross-encoder is up; lexical failure degrades to dense-only |
+| `read_section(file, section?)` | full text of one chunk or a whole session folder | basename matching tolerates path-style args; bare names resolve across files/folders |
+| `list_sections(file? \| dir?)` | outline of a file's sections / a folder's documents | for navigation before reading |
+| `find_in_kb(term)` | "which/all X" — COMPLETE exact-presence list with per-location counts | pure CPU scan (~0.7 s cold over the full index); top-k ranking structurally cannot answer enumeration, so this tool exists |
+| `list_sessions()` | chronological roster: ordinal, date, title, content teaser | fixes ordinal-reference questions ("session 3") without reading anything |
+
+**Loop shape.** ≤ `RAG_AGENT_MAX_ITERATIONS` decision turns, ≤
+`RAG_AGENT_MAX_TOOL_CALLS` total calls, `RAG_AGENT_BUDGET_SECONDS`
+wall-clock — the budget is the primary governor (tuned to Discord patience),
+caps are safety nets. A decision turn may emit an ARRAY of independent calls;
+the loop executes the batch in parallel (`asyncio.gather` — wall clock ≈
+slowest call, not the sum); every call still gets its own `role:"tool"`
+result and counts against the cap. Tool errors are fed back as data, never
+fatal. The forced/final answer must be prose: a tool-call-shaped final is
+nudged once, then stripped.
+
+**Observability.** Each `/ai` turn writes one self-contained JSON record
+(`AI_TURN_LOG_*`, default `logs/ai_turns/`) including full agent telemetry —
+trigger, per-iteration calls and timings, fallback events. Design research
+and industry comparison: `docs/internal/AGENT_TOOLS_DESIGN_RESEARCH.md`.
 
 ## Commands
 
