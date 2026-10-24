@@ -88,3 +88,34 @@ confirm the trigger set grows only by the intended class.
   +7% mean should not be read as a precise cost.
 - The auto counterfactual uses pass A's rerank score; a live `auto` run could
   see slightly different scores (retrieval is deterministic in practice).
+
+
+## Follow-up: #49 prompt guidance re-run (2026-10-24, post `b0c64a3` + `81509a4`)
+
+After adding the "When NOT to call tools" + batching guidance to the agent
+system addendum and shipping `find_in_kb` + parallel batches, the same 36-prompt
+eval was re-run (`data/evals/mode_compare_20261024T0147UTC.jsonl`):
+
+| Metric | Before | After |
+|---|---|---|
+| Tool-invoked turns | 31/36 (86%) | **20/36 (56%)** |
+| simple-rules invocations | 8/8 | **0/8** |
+| negative invocations | — | 4/6 (all genuinely cross-context checks) |
+| enumeration invocations | — | 5/6 (the class tools exist for) |
+| Fallbacks / errors | 0 | 0 |
+| Median latency delta | +7% | +10% (fast median also rose — shared-backend variance) |
+
+**Batch adoption is real:** multi-call turns are now the norm where tools fire
+(e.g. `i02` → 6 calls incl. 3 parallel `list_sections`; `e01`/`c04` → mixed
+3-call batches), so the parallel-execution path is exercised in production
+shape, not just in tests.
+
+**Quality:** every newly tool-free turn was read pair-by-pair — answers are
+factually equivalent to the fast path (r01–r08 rule questions answered directly
+from attached context with correct citations; n01/n02 negatives still honest and
+specific). One cosmetic variance: r06 (German question) got an English answer
+in the always pass vs German in fast — sampling noise, not a regression.
+
+Conclusion: #49's acceptance criterion is met — invocations dropped exactly on
+the target classes with answers unchanged; the remaining 20/36 are turns where
+tools are the right instrument (enumeration, compound, cross-session).
