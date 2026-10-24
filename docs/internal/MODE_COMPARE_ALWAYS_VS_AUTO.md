@@ -45,10 +45,20 @@ the script).
   indirect Potion of Vitality (HP, not HD); `always` found the exact-match
   Rejuvenating Draft. `auto` silent — subtle miss.
 
-**Marginal `always` improvements:** s01/s05 (richer session summaries via
-list_sections), m02 (Dust Mephit as the desert answer vs a bare "none
-listed"), n03/n06 (search-confirmed absences). **Honesty held in both modes on
-all 6 negatives** — no hallucinated lore.
+**Full-pair reading (all 36 pairs read end-to-end, not just telemetry):**
+6 clear `always` wins — e04 and c04 (above), i03 (above), **e03** (DE Int-feats:
+fast path deflected to "not in attached sections" + ASI rule; `always` actually
+read feats.md and answered concretely, incl. flagging the file's truncation),
+**c02** (same deflection pattern — `always` checked feats.md directly), **c03**
+(DE Cha-spellcasting races: fast path found only Tiefling; `always` also found
+Elf/Elven Lineage and added the Warlock/Sorcerer/Bard class layer). 4 of the 6
+are inside auto's trigger set (e03 enumeration, c02/c03/c04 compound); e04 and
+i03 are the misses. Marginal `always` improvements: s01/s05 (richer session
+summaries via list_sections), m02 (Dust Mephit as the desert answer vs a bare
+"none listed"), n03/n06/i04 (search-confirmed absences, explicit "nothing else
+listed"), r01/r08 (more structure). The other ~24 pairs are quality-equivalent;
+zero regressions. **Honesty held in both modes on all 6 negatives** — no
+hallucinated lore.
 
 **Trigger false positives observed: none harmful.** r02 ("…und was darf man
 dabei?") and r06 ("Welche … gibt es?") triggered auto; the extra search call
