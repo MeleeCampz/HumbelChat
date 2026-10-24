@@ -90,6 +90,8 @@ One thing to know:
 
 ## Knowledge base and RAG
 
+Mechanics live in [RAG / Knowledge Base](./rag.md); this is the variable reference.
+
 | Variable | Description | Default |
 |---|---|---|
 | `KB_PATH` | Path to knowledge base files | `<repo_root>/data/knowledge` |
@@ -98,7 +100,80 @@ One thing to know:
 | `RAG_MAX_CHARS` | Hard cap on RAG context characters sent to the LLM | `24000` |
 | `RAG_WINDOW_LINES` | Lines above/below each match anchor | `80` |
 | `RAG_RETRIEVAL_METHOD` | Retrieval strategy: `vector` or `keyword` | `vector` |
-| `EMBEDDING_MODEL` | Embedding model name for vector search (OpenAI-compatible /embeddings endpoint) | `nomic-embed-text:latest` |
+
+### Embeddings (split query/index path — no model swapping)
+
+Query embeddings run **in-process on CPU**; index builds run on the GPU backend.
+Same model both sides, so vectors are interchangeable — see rag.md for the
+empirical verification and the fast reindex flow.
+
+| Variable | Description | Default |
+|---|---|---|
+| `EMBED_BACKEND` | `local` (in-process CPU query embeddings) or `remote` (legacy backend `/embeddings`) | `local` |
+| `LOCAL_EMBED_MODEL` | In-process query-embedding model | `BAAI/bge-m3` |
+| `EMBED_QUERY_INSTRUCT` | Optional English task instruction wrapping every QUERY for instruction-aware models (e.g. Qwen3-Embedding); documents are never wrapped; toggling needs no reindex | *(empty)* |
+| `INDEX_EMBED_BACKEND` | Where index builds run: `backend` (GPU) or `local` (CPU) | `backend` |
+| `INDEX_EMBED_MODEL` | Exact name the backend serves for `/embeddings` during builds (same model as `LOCAL_EMBED_MODEL`) | *(empty)* |
+| `RAG_EMBED_BATCH_SIZE` | Docs per `/embeddings` call during index builds | `8` |
+
+### Hybrid retrieval, query rewriting, attach floors
+
+| Variable | Description | Default |
+|---|---|---|
+| `RAG_HYBRID_ENABLED` | Fuse dense + BM25 legs via reciprocal rank fusion | `1` |
+| `RAG_DENSE_TOP_K` / `RAG_LEXICAL_TOP_K` | Candidate pool per leg before RRF fusion | `48` |
+| `RAG_QUERY_REWRITER` | Low-confidence query rewriting (LLM rephrasings when the top score is weak) | `1` |
+| `RAG_REWRITE_MIN_SCORE` | Similarity below which the rewriter triggers | `0.35` |
+| `RAG_QUERY_MAX_EXPANSIONS` / `RAG_REWRITE_BUDGET_SECONDS` | Rewriter shape / wall-clock cap | `2` / `45` |
+| `RAG_MIN_ATTACH_SCORE` | Opt-in dense-similarity floor before fusion (`0` = off) | `0` |
+| `RAG_MAX_CHUNKS_PER_FILE` | Max chunks attached per file | `3` |
+| `RAG_ATTACH_FLOOR` | Per-chunk dense-score gate at attach time; lexical-only chunks always kept; safety net never yields empty context (`0` = off) | `0.50` |
+
+### Cross-encoder reranking (opt-in sidecar)
+
+A cross-encoder (vLLM Qwen3-Reranker, jina wire format) re-scores the fused
+candidates and reorders them before attach; any failure degrades to the RRF
+order. The 0.50 attach floor is calibrated against these scores — do not
+shrink `RERANK_TOP_K` / `RERANK_MAX_CHARS` or the model's `--max-model-len`
+without re-running `scripts/rag_floor_probe.py`.
+
+| Variable | Description | Default |
+|---|---|---|
+| `RERANK_ENABLED` | Enable the reranker sidecar | `0` |
+| `RERANK_MODEL` | Model name for logs/display | *(empty)* |
+| `RERANK_API_BASE` / `RERANK_API_FORMAT` | Sidecar URL + wire format (`jina` or `tei`) | — |
+| `RERANK_INSTRUCT` | Task instruction sent per request (jina format only) | *(empty)* |
+| `RERANK_TOP_K` / `RERANK_MAX_CHARS` | Candidates re-scored / chars fed per candidate (keep at calibration values) | `48` / `1200` |
+| `RERANK_TIMEOUT_SECONDS` | Per-request timeout; raise to ~60 for large batches (wave-quantized inference) | `8` |
+| `RERANK_USE_EXPANSION` | Also rerank against the first query expansion, keep max per chunk (fixes cross-lingual blindness) | `1` |
+
+### Agent mode — tool calling over the KB
+
+Optional bounded agent loop: the model may call KB tools (`search_kb`,
+`read_section`, `list_sections`, `find_in_kb`, `list_sessions`) instead of
+answering from attached context alone; independent calls in one turn execute
+in parallel. Off by default — zero overhead when off.
+
+| Variable | Description | Default |
+|---|---|---|
+| `RAG_AGENT_MODE` | `off` (fast path only) / `auto` (trigger: top rerank score below gate, enumeration phrasing, or "search the knowledge base") / `always` (every turn) | `off` |
+| `RAG_AGENT_SCORE_GATE` | `auto` trigger threshold on the top rerank score (CRAG-style; calibrated: true hits ≥ 0.65, negatives ≤ 0.36) | `0.55` |
+| `RAG_AGENT_BUDGET_SECONDS` | Wall-clock cap per agent turn (primary governor) | `45` |
+| `RAG_AGENT_MAX_ITERATIONS` | Decision-turn cap (hard safety net) | `2` |
+| `RAG_AGENT_MAX_TOOL_CALLS` | Total tool-call cap across the turn (hard safety net; cheap CPU tools + parallel batches make the budget the binding constraint) | `6` |
+| `RAG_AGENT_SEARCH_TOP_K` | Snippet count for the agent's `search_kb` | `8` |
+
+### Per-turn AI record logging
+
+One self-contained JSON per `/ai` turn (prompt, retrieval, agent telemetry,
+response, timings) for offline debugging; total — a logger failure never
+breaks a turn.
+
+| Variable | Description | Default |
+|---|---|---|
+| `AI_TURN_LOG_ENABLED` | Enable per-turn records (`0` = zero overhead) | `1` |
+| `AI_TURN_LOG_DIR` | Folder for the JSON records | `logs/ai_turns` |
+| `AI_TURN_LOG_KEEP` | Max files kept (oldest deleted) | `300` |
 
 ### Obsidian vault sync (#19)
 

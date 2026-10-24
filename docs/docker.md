@@ -13,7 +13,7 @@ runtime state lives in bind-mounted host directories.
 ├── .env                       # all bot config (env_file), incl. INFER_URL
 ├── characters.json            # personas (bind-mounted read path)
 ├── data/                      # KB docs, .vector_index_cache/, history.json
-├── logs/                      # bot.log (INFO) + dev.log (DEBUG), rotated 10 MB × 5
+├── logs/                      # bot.log (INFO) + dev.log (DEBUG, rotated 10 MB × 5); ai_turns/ holds one JSON record per /ai turn
 └── hf-cache/                  # HuggingFace model cache (bge-m3)
 ```
 
