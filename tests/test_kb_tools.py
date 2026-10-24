@@ -43,8 +43,51 @@ class TestParseToolCall:
             parse_tool_call('{"tool": "search_kb", "args": {"query": 42}}')
 
     def test_no_json_at_all(self):
-        with pytest.raises(ToolCallParseError, match="no JSON object found"):
+        with pytest.raises(ToolCallParseError, match="no valid tool call"):
             parse_tool_call("I think the answer is forty-two.")
+
+
+class TestParseToolCalls:
+    """The multi-call (batch) protocol — arrays run in parallel."""
+
+    def test_single_object_returns_one_call(self):
+        calls = tools.parse_tool_calls(
+            '{"tool": "list_sessions", "args": {}}')
+        assert calls == [("list_sessions", {})]
+
+    def test_array_of_two_validates_both(self):
+        text = ('[{"tool": "find_in_kb", "args": {"term": "Alderheart"}},'
+                '{"tool": "list_sessions", "args": {}}]')
+        calls = tools.parse_tool_calls(text)
+        assert calls == [("find_in_kb", {"term": "Alderheart"}),
+                        ("list_sessions", {})]
+
+    def test_fenced_array(self):
+        text = ('```json\n'
+                '[{"tool": "read_section", "args": {"file": "a.md"}},'
+                '{"tool": "read_section", "args": {"file": "b.md"}}]'
+                '\n```')
+        assert len(tools.parse_tool_calls(text)) == 2
+
+    def test_array_second_call_invalid_raises_positioned(self):
+        with pytest.raises(ToolCallParseError, match="call 2"):
+            tools.parse_tool_calls(
+                '[{"tool": "list_sessions", "args": {}},'
+                '{"tool": "nope", "args": {}}]')
+
+    def test_array_element_missing_required_arg(self):
+        with pytest.raises(
+            ToolCallParseError, match="missing required arg 'query'"):
+            tools.parse_tool_calls(
+                '[{"tool": "search_kb", "args": {"scope": "rules"}}]')
+
+    def test_unrelated_json_in_prose_falls_through_to_real_call(self):
+        text = ('The format is {"foo": 1} — my actual call: '
+                '{"tool": "list_sessions", "args": {}}')
+        assert tools.parse_tool_calls(text) == [("list_sessions", {})]
+
+    def test_no_json_returns_empty_list(self):
+        assert tools.parse_tool_calls("plain answer only") == []
 
     def test_list_sections_needs_file_or_dir_at_execution(self):
         name, args = parse_tool_call('{"tool": "list_sections", "args": {}}')
@@ -371,3 +414,64 @@ async def test_search_kb_never_emits_truncated_json(fake_store, monkeypatch):
     assert "hit(s):" in out and "[truncated]" not in out
     hits = json.loads(out[out.index("["):out.rindex("]") + 1])
     assert hits, "at least one complete hit must survive the cap"
+
+
+# ── find_in_kb (exact presence, complete list) ────────────────────────────
+
+@pytest.mark.asyncio
+async def test_find_in_kb_complete_presence_list(fake_store, monkeypatch):
+    """Every chunk containing the term is listed — case-insensitive, with
+    per-location occurrence counts; no ranking, no cutoff by relevance."""
+    import kb.retrievers as R
+
+    async def _ensure(kb_path):
+        return _FakeStore(_FakeIdx([
+            ("humblewood/HumbleWood/SessionLogs/a.md [Full Document]",
+             "They reached ALDERHEART at dawn. Alderheart's gates opened."),
+            ("humblewood/HumbleWood/SessionLogs/b.md [Full Document]",
+             "No mention here, just the forest."),
+            ("humblewood/DnDRules/city.md [City -> Alderheart]",
+             "Alderheart is a walled city of 4,000 souls."),
+        ]))
+
+    monkeypatch.setattr(R, "_ensure_index_store", _ensure)
+    out = await tools.execute_tool("find_in_kb", {"term": "alderheart"})
+    assert "2 location(s)" in out
+    assert "×2" in out  # per-location occurrence count
+    assert "city.md" in out and "a.md" in out
+    assert "b.md" not in out
+
+
+@pytest.mark.asyncio
+async def test_find_in_kb_no_match(fake_store, monkeypatch):
+    import kb.retrievers as R
+
+    async def _ensure(kb_path):
+        return _FakeStore(_FakeIdx(
+            [("humblewood/x.md [Full Document]", "nothing relevant")]))
+
+    monkeypatch.setattr(R, "_ensure_index_store", _ensure)
+    out = await tools.execute_tool("find_in_kb", {"term": "Alderheart"})
+    assert "No chunk contains" in out
+
+
+@pytest.mark.asyncio
+async def test_find_in_kb_caps_locations(fake_store, monkeypatch):
+    import kb.retrievers as R
+
+    async def _ensure(kb_path):
+        return _FakeStore(_FakeIdx(
+            [(f"humblewood/s{i}.md [Full Document]", "Alderheart once.")
+             for i in range(5)]))
+
+    monkeypatch.setattr(R, "_ensure_index_store", _ensure)
+    monkeypatch.setattr(tools, "_FIND_MAX_LOCATIONS", 3)
+    out = await tools.execute_tool("find_in_kb", {"term": "Alderheart"})
+    assert "5 location(s)" in out          # the TRUE total is reported…
+    assert "2 more location(s)" in out     # …beyond the shown cap
+
+
+@pytest.mark.asyncio
+async def test_find_in_kb_requires_term():
+    with pytest.raises(ToolCallParseError, match="term"):
+        await tools.execute_tool("find_in_kb", {})

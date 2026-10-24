@@ -236,3 +236,76 @@ async def test_initial_messages_get_protocol_addendum():
     assert sys_msg["content"].startswith("PERSONA-ONLY")
     assert '"tool"' in sys_msg["content"]       # protocol appended
     assert "Hard limits" in sys_msg["content"]
+
+
+# ── Parallel batch execution (array protocol) ─────────────────────────────
+
+@pytest.mark.asyncio
+async def test_batch_of_two_runs_both_and_records_each():
+    """An array of independent calls executes in ONE decision turn; every
+    call gets its own role:"tool" result and is counted against the cap."""
+    batch = ('[{"tool": "find_in_kb", "args": {"term": "Alderheart"}},'
+             '{"tool": "list_sessions", "args": {}}]')
+    coro, comp = _start([
+        batch,
+        "Alderheart appears in sessions 3, 4 and 7.",
+    ])
+    text, meta = await coro
+    assert "sessions 3, 4 and 7" in text
+    assert meta.tool_calls == ["find_in_kb", "list_sessions"]
+    # Both results were fed back before the answering turn.
+    tool_msgs = [m for m in comp.calls[1][0] if m.get("role") == "tool"]
+    assert len(tool_msgs) == 2
+    assert any("RESULT[find_in_kb" in m["content"] for m in tool_msgs)
+    assert any("RESULT[list_sessions" in m["content"] for m in tool_msgs)
+
+
+@pytest.mark.asyncio
+async def test_batch_truncated_to_remaining_cap_reports_skipped(monkeypatch):
+    """A batch bigger than the remaining call budget executes what fits and
+    tells the model the rest was skipped — the cap still holds globally."""
+    import config.settings as S
+
+    executed: list[str] = []
+
+    async def _fake_execute(name, args):
+        executed.append(name)
+        return f"RESULT[{name} {args}]"
+
+    monkeypatch.setattr(agent_loop, "execute_tool", _fake_execute)
+    monkeypatch.setattr(S, "RAG_AGENT_MAX_TOOL_CALLS", 1)
+    batch = ('[{"tool": "read_section", "args": {"file": "a.md"}},'
+             '{"tool": "read_section", "args": {"file": "b.md"}},'
+             '{"tool": "read_section", "args": {"file": "c.md"}}]')
+    coro, comp = _start([batch, "Only a.md was read."])
+    text, meta = await coro
+    assert executed == ["read_section"]          # only what fit the cap
+    assert len(meta.tool_calls) == 1
+    # The model was told the rest did not run.
+    last_user = [m for m in comp.calls[1][0]
+                 if m.get("role") == "user"][-1]["content"]
+    assert "not executed" in last_user
+
+
+@pytest.mark.asyncio
+async def test_batch_runs_calls_concurrently(monkeypatch):
+    """Independent calls in one batch overlap in time (gather, not sum)."""
+
+    started: list[str] = []
+
+    async def _fake_execute(name, args):
+        started.append(args["file"])
+        await asyncio.sleep(0.05)
+        return f"RESULT[{name} {args}]"
+
+    monkeypatch.setattr(agent_loop, "execute_tool", _fake_execute)
+    t0 = asyncio.get_event_loop().time()
+    batch = ('[{"tool": "read_section", "args": {"file": "a.md"}},'
+             '{"tool": "read_section", "args": {"file": "b.md"}},'
+             '{"tool": "read_section", "args": {"file": "c.md"}}]')
+    coro, _comp = _start([batch, "done."])
+    await coro
+    elapsed = asyncio.get_event_loop().time() - t0
+    # Three 50 ms calls in parallel ≈ one call's time (allow scheduler slack).
+    assert elapsed < 0.12, f"batch took {elapsed:.3f}s — not parallel?"
+    assert sorted(started) == ["a.md", "b.md", "c.md"]

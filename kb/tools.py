@@ -73,6 +73,18 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "dir": ("str", False, "A directory prefix to list files of."),
         },
     },
+    "find_in_kb": {
+        "description": "Find EVERY file/section containing an exact string "
+                       "(case-insensitive) — a complete presence list, not a "
+                       "relevance ranking. Use for enumeration: 'which "
+                       "sessions mention X?', 'where does Y appear?' (search_kb "
+                       "only returns its top-k and can silently omit matches; "
+                       "this one cannot). Then read_section the hits.",
+        "args": {
+            "term": ("str", True, "Exact string to find, e.g. a place or "
+                               "monster name."),
+        },
+    },
     "list_sessions": {
         "description": "List all campaign sessions in chronological order with "
                        "their ordinal number ('session 1' = oldest), date, "
@@ -106,38 +118,65 @@ def parse_tool_call(text: str) -> tuple[str, dict[str, Any]]:
     short, model-readable reason when the turn contains no valid call — the
     agent loop feeds that back as a correction hint (single retry).
     """
+    calls = parse_tool_calls(text)
+    if not calls:
+        raise ToolCallParseError("no valid tool call found")
+    return calls[0]
+
+
+def parse_tool_calls(text: str) -> list[tuple[str, dict[str, Any]]]:
+    """Extract and validate the tool call(s) of a model turn.
+
+    Accepts either ONE object ``{"tool": …, "args": …}`` or an ARRAY of
+    them (a batch of independent lookups — the agent loop executes a batch
+    in parallel). Returns the validated ``[(name, args), …]`` list; EMPTY
+    when the turn contains no JSON at all (a plain-text answer). Raises
+    :class:`ToolCallParseError` with a model-readable reason as soon as a
+    candidate LOOKS like a tool call (carries a 'tool' key, or is an array)
+    but does not validate — unrelated JSON in prose (no 'tool' key) is
+    skipped so a later real call in the same turn can still be found.
+    """
     candidates: list[str] = []
     m = _FENCED_JSON_RE.search(text)
     if m:
         candidates.append(m.group(1))
-    # Bare object(s): try every '{' start, keep the first that parses AND
-    # validates (models sometimes wrap the call in prose).
+    # Bare value(s): try every '{' start (objects) and '[' start (arrays).
     for i, ch in enumerate(text):
-        if ch == "{":
+        if ch in "{[":
             candidates.append(text[i:])
 
-    last_err = "no JSON object found"
+    decoder = json.JSONDecoder()
     for cand in candidates:
         try:
-            obj, _end = json.JSONDecoder().raw_decode(cand.lstrip())
+            obj, _end = decoder.raw_decode(cand.lstrip())
         except (json.JSONDecodeError, ValueError):
+            continue  # not JSON here — try the next start position
+        items = obj if isinstance(obj, list) else [obj]
+        # A single object WITHOUT a 'tool' key is unrelated JSON in prose —
+        # skip it and try the next start position. Anything that LOOKS like
+        # a tool call (has 'tool', or is an array) is validated strictly.
+        if len(items) == 1 and isinstance(items[0], dict) \
+                and "tool" not in items[0]:
             continue
-        if not isinstance(obj, dict):
-            last_err = "JSON is not an object"
-            continue
-        name = obj.get("tool")
-        if not isinstance(name, str) or name not in TOOL_SCHEMAS:
-            known = ", ".join(TOOL_SCHEMAS)
-            last_err = (f"unknown or missing tool {name!r} — expected one "
-                        f"of: {known}")
-            continue
-        args_raw = obj.get("args", {})
-        if not isinstance(args_raw, dict):
-            last_err = "'args' must be a JSON object"
-            continue
-        name, args = _validate_args(name, args_raw)
-        return name, args
-    raise ToolCallParseError(last_err)
+        calls: list[tuple[str, dict[str, Any]]] = []
+        for pos, it in enumerate(items):
+            if not isinstance(it, dict):
+                raise ToolCallParseError("JSON is not an object (or array "
+                                         "of objects)")
+            name = it.get("tool")
+            if not isinstance(name, str) or name not in TOOL_SCHEMAS:
+                known = ", ".join(TOOL_SCHEMAS)
+                raise ToolCallParseError(
+                    f"call {pos + 1}: unknown or missing tool {name!r} — "
+                    f"expected one of: {known}")
+            args_raw = it.get("args", {})
+            if not isinstance(args_raw, dict):
+                raise ToolCallParseError(
+                    f"call {pos + 1}: 'args' must be a JSON object")
+            calls.append(_validate_args(name, args_raw))
+        if calls:
+            return calls
+    return []
 
 
 def _validate_args(
@@ -171,9 +210,12 @@ def tool_prompt_block() -> str:
 
     lines = [
         "You have tools to look things up in the knowledge base. On a turn "
-        "where you need more information, reply with EXACTLY ONE JSON object "
-        "(no prose around it):",
+        "where you need more information, reply with a JSON tool call (no prose "
+        "around it) — either ONE object:",
         '  {"tool": "<name>", "args": {<arguments>}}',
+        "or an ARRAY of independent lookups to run in parallel (faster for "
+        "enumeration — e.g. reading several sections at once):",
+        '  [{"tool": "read_section", "args": {...}}, {"tool": ...}]',
         "",
     ]
     for name, schema in TOOL_SCHEMAS.items():
@@ -220,6 +262,8 @@ async def execute_tool(name: str, args: dict[str, Any]) -> str:
         return await _tool_list_sections(args.get("file"), args.get("dir"))
     if name == "list_sessions":
         return await _tool_list_sessions()
+    if name == "find_in_kb":
+        return await _tool_find_in_kb(args.get("term", ""))
     raise ToolCallParseError(f"unknown tool {name!r}")  # defensive
 
 
@@ -243,24 +287,32 @@ async def _tool_search_kb(query: str, scope: str | None = None) -> str:
     keep = _scope_filter(scope)
     top_k = RAG_AGENT_SEARCH_TOP_K
     from config.settings import RAG_DENSE_TOP_K
-    ranked, _q_emb = await idx.query_with_embeddings(query, top_n=RAG_DENSE_TOP_K)
-    if keep is not None:
-        ranked = [t for t in ranked if keep(t[0])]
-
-    # Lexical leg (BM25): exact proper nouns and rare terms that dense
-    # embeddings miss — RRF-merged with the dense list, exactly like the main
-    # retrieval pipeline. Any failure degrades to dense-only.
     from kb.retrievers import _lexical_ranking, reciprocal_rank_fusion
+
+    # Dense and lexical legs are independent — run them CONCURRENTLY (the
+    # embedding call and the CPU BM25 pass overlap; saves one full leg of
+    # latency per search). A lexical failure degrades to dense-only.
+    async def _dense_leg() -> list[tuple[str, str, float]]:
+        ranked, _q_emb = await idx.query_with_embeddings(
+            query, top_n=RAG_DENSE_TOP_K)
+        return [t for t in ranked if keep(t[0])] if keep else list(ranked)
+
+    def _lex_leg() -> list[tuple[str, str, float]]:
+        lex = _lexical_ranking(idx, query, max(top_k * 3, 24))
+        return [t for t in lex if keep(t[0])] if keep else list(lex)
+
+    dense_res, lex_res = await asyncio.gather(
+        _dense_leg(),
+        asyncio.to_thread(_lex_leg),
+        return_exceptions=True,
+    )
+    ranked = (list(dense_res) if isinstance(dense_res, list) else [])
     base_lists: list[list[tuple[str, str, float]]] = [ranked] if ranked else []
-    try:
-        lex = await asyncio.to_thread(
-            _lexical_ranking, idx, query, max(top_k * 3, 24))
-        if keep is not None:
-            lex = [t for t in lex if keep(t[0])]
-        if lex:
-            base_lists.append(lex)
-    except Exception as exc:  # noqa: BLE001 — pure enhancement
-        log.warning("search_kb lexical leg failed (%s); dense order only", exc)
+    if isinstance(lex_res, list):
+        if lex_res:
+            base_lists.append(lex_res)
+    elif lex_res is not None:  # noqa: BLE001 — pure enhancement
+        log.warning("search_kb lexical leg failed (%s); dense order only", lex_res)
     merged = (reciprocal_rank_fusion(base_lists) if len(base_lists) > 1
               else (base_lists[0] if base_lists else []))
 
@@ -382,6 +434,52 @@ def _session_folder_text(folder_name: str) -> str | None:
             text = notes.read_text(encoding="utf-8", errors="replace")
             return f"### {target}/notes.md\n{text}"
     return None
+
+
+_FIND_MAX_LOCATIONS = 40           # presence-list cap (§3.2 output budget)
+
+
+async def _tool_find_in_kb(term: str) -> str:
+    """Complete case-insensitive presence list for *term* across all chunks.
+
+    Pure CPU substring scan (no embedding, no rerank — milliseconds even on
+    the full 5.7k-chunk index), so it is safe to batch with other calls. A
+    term can hit many chunks of one section; locations are deduped to
+    file+section with a match count, capped at _FIND_MAX_LOCATIONS.
+    """
+    if not term:
+        raise ToolCallParseError("missing required arg 'term'")
+    from kb.retrievers import _ensure_index_store
+
+    store = await _ensure_index_store(_kb_path())
+    idx = store.get_index() if store is not None else None
+    if idx is None or idx.is_empty():
+        return "The knowledge base index is unavailable right now."
+    needle = term.lower()
+
+    def _scan() -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for name, content in idx.iter_chunks():
+            n = content.lower().count(needle)
+            if n:
+                counts[name] = counts.get(name, 0) + n
+        return counts
+
+    counts = await asyncio.to_thread(_scan)
+    if not counts:
+        return f"No chunk contains {term!r}."
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    lines = [f"{len(counts)} location(s) contain {term!r} "
+             f"({sum(counts.values())} occurrence(s)):"]
+    shown = 0
+    for name, n in ranked:
+        if shown >= _FIND_MAX_LOCATIONS:
+            lines.append(f"…and {len(counts) - shown} more location(s) "
+                         f"(narrow the term).")
+            break
+        lines.append(f"- {name}  ×{n}" if n > 1 else f"- {name}")
+        shown += 1
+    return _cap("\n".join(lines))
 
 
 async def _tool_list_sessions() -> str:
