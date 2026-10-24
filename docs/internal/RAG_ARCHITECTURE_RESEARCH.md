@@ -503,6 +503,13 @@ Add per-query agentic telemetry to the benchmark:
 A standalone **tool-calling reliability probe** (§3.5) — ~30 scripted scenarios measuring valid-call
 %, termination %, median iterations — is a **prerequisite gate** before agent mode ships.
 
+**Done 2026-10-23 — `always` vs `auto` mode compare** (`scripts/rag_mode_compare.py`, full report
+in `MODE_COMPARE_ALWAYS_VS_AUTO.md`): 36 prompts × 2 real end-to-end passes; `always` invoked
+tools on 31/36 with zero fallbacks, `auto` would trigger 14/36 with zero wasted triggers and no
+quality regressions — `auto` stays the default. One structural gap found: cross-log/cross-file
+enumeration ("which monsters have appeared so far") is the highest-value tool class that the
+shape rules miss → backlog #48.
+
 ### 5.4 Guardrails for every change
 
 - Any retrieval change: re-run the full golden set; require **no regression on the 38 hits** (the
