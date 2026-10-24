@@ -1,11 +1,16 @@
 """In-process KB tools for agent mode (#39, research doc §3.2).
 
-Three tools over the EXISTING vector index + reranker — no new services,
+Four tools over the EXISTING vector index + reranker — no new services,
 no new VRAM:
 
   search_kb(query, scope)     → top-k hits as {file, section, snippet, score}
-  read_section(file, section) → the FULL chunk text (small-to-big)
+                                (hybrid: dense + BM25 lexical leg, RRF-merged)
+  read_section(file, section) → the FULL chunk text (small-to-big); a session
+                                FOLDER name also works (reads its notes.md —
+                                bare names like 'notes.md' are ambiguous)
   list_sections(file | dir)   → heading-path outline (enumeration support)
+  list_sessions()             → chronological campaign session roster with
+                                ordinals (folders are date-named, not "session N")
 
 Protocol (backend-agnostic — works with any OpenAI-compatible endpoint):
 the model emits ONE JSON object per decision turn, either bare or inside a
@@ -20,6 +25,7 @@ look up it answers in plain text instead, which terminates the loop.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import pathlib
 import logging
@@ -32,11 +38,12 @@ log = logging.getLogger(__name__)
 
 TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "search_kb": {
-        "description": "Search the D&D rules + campaign knowledge base. "
-                       "Returns up to %d hits with file, section path, a short "
-                       "snippet and a relevance score (0..1). Use scope "
-                       "'rules' for 5e rulebook content, 'lore' for "
-                       "campaign/session notes, or 'all'.",
+        "description": "Search the D&D rules + campaign knowledge base "
+                       "(hybrid: semantic + exact keyword). Returns up to %d "
+                       "hits with file, section path, a short snippet and a "
+                       "relevance score (0..1). Use scope 'rules' for 5e "
+                       "rulebook content, 'lore' for campaign/session notes, "
+                       "or 'all'.",
         "args": {
             "query": ("str", True, "What to search for — write it as a "
                                    "specific English phrase (names, stats)."),
@@ -47,9 +54,12 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "description": "Read the FULL text of one KB chunk (a complete "
                        "section, stat block or item entry) instead of a "
                        "snippet. Give the file from a search_kb hit and "
-                       "optionally a section path fragment to disambiguate.",
+                       "optionally a section path fragment to disambiguate. "
+                       "A session FOLDER name from list_sessions also works "
+                       "as 'file' (reads that session's full notes).",
         "args": {
-            "file": ("str", True, "File (path) from a search_kb hit."),
+            "file": ("str", True, "File (path) from a search_kb hit, or a "
+                                 "session folder name from list_sessions."),
             "section": ("str", False, "Section path fragment, e.g. 'Armor'."),
         },
     },
@@ -62,6 +72,15 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "file": ("str", False, "One file to outline."),
             "dir": ("str", False, "A directory prefix to list files of."),
         },
+    },
+    "list_sessions": {
+        "description": "List all campaign sessions in chronological order with "
+                       "their ordinal number ('session 1' = oldest), date, "
+                       "title and a teaser line. Session folders are DATE-named, "
+                       "so for 'session N' / 'the last session' questions call "
+                       "this FIRST to map the ordinal to a folder, then read the "
+                       "full notes with read_section(file=\"<folder name>\").",
+        "args": {},
     },
 }
 
@@ -199,6 +218,8 @@ async def execute_tool(name: str, args: dict[str, Any]) -> str:
         return await _tool_read_section(args["file"], args.get("section"))
     if name == "list_sections":
         return await _tool_list_sections(args.get("file"), args.get("dir"))
+    if name == "list_sessions":
+        return await _tool_list_sessions()
     raise ToolCallParseError(f"unknown tool {name!r}")  # defensive
 
 
@@ -220,16 +241,33 @@ async def _tool_search_kb(query: str, scope: str | None = None) -> str:
         return "The knowledge base index is unavailable right now."
 
     keep = _scope_filter(scope)
+    top_k = RAG_AGENT_SEARCH_TOP_K
     from config.settings import RAG_DENSE_TOP_K
     ranked, _q_emb = await idx.query_with_embeddings(query, top_n=RAG_DENSE_TOP_K)
     if keep is not None:
         ranked = [t for t in ranked if keep(t[0])]
 
+    # Lexical leg (BM25): exact proper nouns and rare terms that dense
+    # embeddings miss — RRF-merged with the dense list, exactly like the main
+    # retrieval pipeline. Any failure degrades to dense-only.
+    from kb.retrievers import _lexical_ranking, reciprocal_rank_fusion
+    base_lists: list[list[tuple[str, str, float]]] = [ranked] if ranked else []
+    try:
+        lex = await asyncio.to_thread(
+            _lexical_ranking, idx, query, max(top_k * 3, 24))
+        if keep is not None:
+            lex = [t for t in lex if keep(t[0])]
+        if lex:
+            base_lists.append(lex)
+    except Exception as exc:  # noqa: BLE001 — pure enhancement
+        log.warning("search_kb lexical leg failed (%s); dense order only", exc)
+    merged = (reciprocal_rank_fusion(base_lists) if len(base_lists) > 1
+              else (base_lists[0] if base_lists else []))
+
     # Rerank the head of the list when the cross-encoder is up; on any
-    # failure keep the dense order (degrades exactly like the fast path).
-    top_k = RAG_AGENT_SEARCH_TOP_K
-    if _rerank_ok() and ranked:
-        cands = ranked[: max(top_k * 3, 24)]
+    # failure keep the merged order (degrades exactly like the fast path).
+    if _rerank_ok() and merged:
+        cands = merged[: max(top_k * 3, 24)]
         try:
             scored = await rerank(query, [c for _, c, _ in cands])
             by_content = {c: s for c, s in scored}
@@ -239,7 +277,7 @@ async def _tool_search_kb(query: str, scope: str | None = None) -> str:
             log.warning("search_kb rerank failed (%s); dense order", exc)
             ranked_sorted = cands
     else:
-        ranked_sorted = ranked
+        ranked_sorted = merged
 
     hits = []
     for name, content, _score in ranked_sorted[:top_k]:
@@ -250,15 +288,24 @@ async def _tool_search_kb(query: str, scope: str | None = None) -> str:
 
     if not hits:
         return f"No hits for {query!r}" + (f" in scope '{scope}'" if scope else "")
-    # Scores only exist on the rerank path; omit the field otherwise so the
-    # model doesn't read dense cosine as a calibrated relevance number.
-    out = json.dumps(hits, ensure_ascii=False)
-    return _cap(f"{len(hits)} hit(s):\n{out}")
+
+    # Never emit a truncated JSON array — the model must always get valid
+    # JSON. If the full hit list exceeds the tool-output cap, drop hits from
+    # the TAIL (least relevant) until it fits.
+    def _render(hit_list: list[dict[str, Any]]) -> str:
+        return f"{len(hit_list)} hit(s):\n" + json.dumps(hit_list, ensure_ascii=False)
+
+    while hits and len(_render(hits)) > _TOOL_RESULT_CAP:
+        hits.pop()
+    if not hits:
+        return (f"No usable hits for {query!r} — results exceeded the tool "
+                f"output limit; try a narrower query or scope.")
+    return _render(hits)
 
 
 def _kb_path() -> pathlib.Path:
     from config.settings import KB_PATH
-    return KB_PATH
+    return pathlib.Path(KB_PATH)
 
 
 def _file_matches(file_part: str, file: str) -> bool:
@@ -298,6 +345,15 @@ async def _tool_read_section(file: str, section: str | None = None) -> str:
         if len(matches) >= 3:
             break
 
+    # Every session folder's notes is indexed under the SAME bare name
+    # ('notes.md'), so a bare-name hit set is ambiguous across sessions —
+    # but a session FOLDER name is unique. If the argument names one, read
+    # its notes.md straight from disk (unambiguous, complete).
+    if len(matches) != 1:
+        folder_text = _session_folder_text(file)
+        if folder_text is not None:
+            return _cap(folder_text)
+
     if not matches:
         return f"No chunk found for file={file!r}" + (f" section~{section!r}"
                                                       if section else "")
@@ -305,6 +361,105 @@ async def _tool_read_section(file: str, section: str | None = None) -> str:
     for name, content in matches:
         parts.append(f"### {name}\n{content}")
     return _cap("\n\n".join(parts))
+
+
+def _session_folder_text(folder_name: str) -> str | None:
+    """Full notes.md of a session folder, matched by exact folder name.
+
+    Returns None when no ``SessionLogs/<folder_name>/notes.md`` exists under
+    the KB root — callers fall back to chunk matching then.
+    """
+    target = pathlib.Path(folder_name.strip()).name.lower()
+    if not target:
+        return None
+    root = _kb_path()
+    for log_dir in root.rglob("SessionLogs"):
+        if not log_dir.is_dir():
+            continue
+        candidate = log_dir / target
+        notes = candidate / "notes.md"
+        if candidate.is_dir() and notes.is_file():
+            text = notes.read_text(encoding="utf-8", errors="replace")
+            return f"### {target}/notes.md\n{text}"
+    return None
+
+
+async def _tool_list_sessions() -> str:
+    """Chronological campaign session roster with 1-based ordinals.
+
+    Session folders are date-named (``2026-10-20_02_Title``), so 'session N'
+    questions need the ordinal mapping this provides: sort by date, number
+    from 1 (oldest), and hand the model both the ordinal and the exact
+    folder name for a follow-up read_section.
+    """
+    root = _kb_path()
+    folders: list[pathlib.Path] = []
+    for log_dir in root.rglob("SessionLogs"):
+        if not log_dir.is_dir():
+            continue
+        folders.extend(d for d in sorted(log_dir.iterdir())
+                       if d.is_dir() and (d / "notes.md").is_file())
+    if not folders:
+        return "No session logs found under the knowledge base."
+
+    entries = []
+    for d in folders:
+        # Folder names: 'YYYY-MM-DD_NN' or 'YYYY-MM-DD_NN_Title_With_Gaps'
+        # (the ordinal is the first underscore group; everything after it —
+        # underscores included — is the title).
+        m = re.match(r"^(\d{4}-\d{2}-\d{2})_(\d+)(?:[_](.*))?$",
+                     d.name)
+        date = m.group(1) if m else ""
+        title = (m.group(3) or "").strip() if m else ""
+        teaser = _first_line_teaser(d / "notes.md")
+        entries.append(((date, int(m.group(2)) if m and m.group(2).isdigit() else 0),
+                        date, title, d.name, teaser))
+    entries.sort(key=lambda e: e[0])
+
+    lines = [f"{len(entries)} campaign session(s), oldest → newest:"]
+    for ordinal, (_sort_key, date, title, folder, teaser) in enumerate(entries, 1):
+        head = f"Session {ordinal}"
+        if date:
+            head += f" · {date}"
+        if title:
+            head += f" · {title}"
+        lines.append(f"{head} — folder `{folder}`")
+        if teaser:
+            lines.append(f"    {teaser}")
+    lines.append("")
+    lines.append('To read a session\'s full notes: '
+                 'read_section(file="<folder name>").')
+    return _cap("\n".join(lines))
+
+
+_TEASER_SKIP = re.compile(
+    r"^(session:|started:|ended:|what happened:)|^\(no notes?\)$",
+    re.IGNORECASE)
+
+
+def _first_line_teaser(notes: pathlib.Path, limit: int = 160) -> str:
+    """First MEANINGFUL line of a session notes file (teaser for the roster).
+
+    Skips structural lines by their ORIGINAL form — markdown headers
+    ('# Session: …', '## Notes', '## Overview'), the '- Started/Ended:'
+    metadata, '(no notes)' placeholders and the 'What happened:' lead-in —
+    so the teaser is actual content (or the overview's first bullet).
+    """
+    try:
+        text = notes.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("---"):
+            continue
+        if stripped.startswith("#"):
+            continue  # structural header, not content
+        line = re.sub(r"^\s*(\*+|-+)?\s*", "", stripped).strip()
+        if not line or _TEASER_SKIP.search(line):
+            continue
+        return re.sub(r"\s+", " ", line)[:limit]
+    return "(no notes)"
 
 
 async def _tool_list_sections(file: str | None = None, dir: str | None = None) -> str:
