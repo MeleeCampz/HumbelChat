@@ -21,6 +21,8 @@ import discord.app_commands as app_commands
 
 from config.settings import (
     BOT_PREFIX,
+    CONTEXTUAL_BACKGROUND_FILL,
+    CONTEXTUAL_FILL_INITIAL_DELAY_S,
     KB_PATH,
     CHARACTERS_FILE,
     INFER_URL,
@@ -586,6 +588,64 @@ async def session_file_command(
 
 
 # ════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════
+#  #52: contextual-sidecar coverage watch + optional background fill
+# ════════════════════════════════════════════════════════════════════
+
+async def _contextual_sidecar_worker(bot: discord.Client) -> None:
+    """Warn when the Contextual Retrieval sidecar doesn't cover all chunks.
+
+    Always-on part (cheap, one index read): after a startup delay, check
+    coverage and log a warning pointing at the fill options — this is what
+    tells the user that newly ingested data is running uncontextualized.
+
+    Optional part (``CONTEXTUAL_BACKGROUND_FILL=1``): generate the missing
+    lines in the background — batch-paused so live /ai traffic keeps working,
+    resumable, sidecar reloaded per batch. One retry 15 min after a failure;
+    generation errors are logged, never fatal.
+    """
+    # discord.py's stubs declare is_closed as a method while it is a property
+    # at runtime — read defensively so both type-check and run.
+    def _closed() -> bool:
+        return bool(getattr(bot, "is_closed", False))
+
+    await asyncio.sleep(CONTEXTUAL_FILL_INITIAL_DELAY_S)
+    try:
+        from kb.retrievers import _ensure_index_store
+        store = await _ensure_index_store(KB_PATH)
+        if store is None:
+            return
+        covered, total = store.contextual_coverage()
+        if total and covered < total:
+            log.warning(
+                "Contextual sidecar covers %d/%d indexed chunks — new data is "
+                "retrieving uncontextualized. Fill it with scripts/contextual_reindex.py "
+                "or set CONTEXTUAL_BACKGROUND_FILL=1 for an automatic background pass.",
+                covered, total,
+            )
+        if not CONTEXTUAL_BACKGROUND_FILL:
+            return
+        from kb.contextual_gen import generate_missing_context_lines
+        for attempt in (1, 2):
+            if _closed():
+                return
+            try:
+                n = await generate_missing_context_lines(
+                    store, should_stop=_closed)
+                covered, total = store.contextual_coverage()
+                log.info("Contextual fill finished: %d new line(s); coverage now %d/%d.",
+                         n, covered, total)
+                return
+            except Exception as exc:  # noqa: BLE001 — data, never fatal
+                log.warning("Contextual fill attempt %d failed: %r%s",
+                            attempt, exc,
+                            " — retrying in 15 min" if attempt == 1 else "")
+                if attempt == 1 and not _closed():
+                    await asyncio.sleep(900)
+    except Exception as exc:  # noqa: BLE001 — the watch must never take the bot down
+        log.warning("Contextual sidecar worker failed: %r", exc)
+
+
 #  Event handlers
 # ════════════════════════════════════════════════════════════════════════
 
@@ -629,6 +689,9 @@ async def on_ready() -> None:
         await asyncio.to_thread(preload_reranker)
 
     spawn_tracked_task(_warmup_local_models(), name="model-warmup")
+
+    # #52: contextual-sidecar coverage watch + optional background fill.
+    spawn_tracked_task(_contextual_sidecar_worker(bot), name="contextual-fill")
 
     char_names = [c.name for c in _CHAR_CHOICES]
     log.info("Characters loaded: %s", ", ".join(char_names) or "(none)")

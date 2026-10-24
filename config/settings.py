@@ -579,6 +579,16 @@ RAG_EMBED_BATCH_SIZE: int = _safe_int(os.getenv("RAG_EMBED_BATCH_SIZE"), 8)
 LAST_SESSION_CONTEXT_ENABLED: bool = _safe_bool(os.getenv("LAST_SESSION_CONTEXT_ENABLED"), True)
 LAST_SESSION_MAX_CHARS: int = _safe_int(os.getenv("LAST_SESSION_MAX_CHARS"), 4000)
 
+# ── Contextual Retrieval background fill (#52) ─────────────────────────────
+# When the sidecar (context_lines.json) doesn't cover every indexed chunk —
+# e.g. after new data was ingested — optionally generate the missing lines in
+# the background at startup: idle-delayed, batch-paused so live /ai traffic
+# keeps working, resumable, and live-reloaded per batch. Off by default.
+CONTEXTUAL_BACKGROUND_FILL: bool = os.getenv(
+    "CONTEXTUAL_BACKGROUND_FILL", "0").strip().lower() in ("1", "true", "yes")
+# Seconds after startup before the fill begins (let the bot settle first).
+CONTEXTUAL_FILL_INITIAL_DELAY_S: int = int(os.getenv("CONTEXTUAL_FILL_INITIAL_DELAY_S", "300"))
+
 # ── Per-turn AI records for offline debugging (bot_core/turn_logger) ───────
 # Every ask_ai / ask_ai_stream turn writes ONE self-contained JSON file to
 # AI_TURN_LOG_DIR (default: logs/ai_turns): the complete final prompt, retrieval

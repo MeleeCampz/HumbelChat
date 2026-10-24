@@ -197,3 +197,16 @@ Replies are requested non-streaming and delivered as embeds (title +
 description + inline fields); long structured replies become multiple embed
 messages, and tiny/unstructured replies fall back to plain text. See
 [Embeds](./embeds.md) for details.
+
+## Contextual sidecar background fill (#52)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CONTEXTUAL_BACKGROUND_FILL` | `0` | After startup, generate missing contextual-retrieval lines for newly ingested chunks in the background (idle-delayed, batch-paused so live `/ai` keeps working, resumable, reloaded per batch). |
+| `CONTEXTUAL_FILL_INITIAL_DELAY_S` | `300` | Seconds after startup before the fill begins. |
+
+The coverage **warning** is always on: if the sidecar doesn't cover every
+indexed chunk (e.g. after new data was ingested), startup logs a warning with
+the coverage and both fill options. Offline alternative:
+`scripts/contextual_reindex.py`.
+

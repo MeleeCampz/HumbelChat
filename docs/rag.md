@@ -128,6 +128,14 @@ without a sidecar fall back to raw content. Generated once per chunk by
 resumable); the A/B benchmark showed +2 hits with zero regressions on the
 golden set.
 
+**Coverage watch + background fill (#52):** new chunks are indexed *without*
+a context line (safe legacy fallback), so after ingesting new data the
+sidecar no longer covers the index. At startup the bot checks coverage and
+logs a warning when it's partial; with `CONTEXTUAL_BACKGROUND_FILL=1` it also
+generates the missing lines in the background (shared core:
+`kb/contextual_gen.py`; offline alternative: `scripts/contextual_reindex.py`).
+
+
 ## Low-confidence query rewriting (vector path)
 
 Vector search alone can miss the right chunk when a player's phrasing differs

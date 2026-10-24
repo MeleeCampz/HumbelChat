@@ -297,6 +297,28 @@ class KBIndexStore:
         self._context_lines = self._load_context_lines()
         return self._context_lines
 
+    def save_context_lines(self, lines: dict[str, str]) -> None:
+        """Persist the sidecar atomically (write tmp + rename) — #52.
+
+        Used by the generation paths (background fill / offline script) after
+        every batch so an interrupted run never loses finished work and never
+        leaves readers a partial file.
+        """
+        self.persist_dir.mkdir(parents=True, exist_ok=True)
+        path = self.persist_dir / "context_lines.json"
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(lines, ensure_ascii=False, indent=0), encoding="utf-8")
+        tmp.replace(path)  # atomic: readers never see a partial file
+
+    def contextual_coverage(self) -> tuple[int, int]:
+        """(chunks with a context line, total chunks) — for the #52 warning."""
+        inner = self._index
+        if inner is None:
+            return 0, 0
+        docs = list(inner._docs)
+        covered = sum(1 for d in docs if d.context_line)
+        return covered, len(docs)
+
     def _make_index_embedder(self) -> Embedder:
         """Embedder used for index WRITES (build / update / sync).
 

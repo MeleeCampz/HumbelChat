@@ -33,7 +33,6 @@ import argparse
 import asyncio
 import json
 import pathlib
-import re
 import sqlite3
 import sys
 import time
@@ -44,13 +43,10 @@ sys.path.insert(0, str(REPO_ROOT))
 DEFAULT_KB_PATH = REPO_ROOT / "data" / "knowledge"
 DEFAULT_PERSIST_DIR = DEFAULT_KB_PATH / ".vector_index_cache"
 
-# Prompt for one batch of chunks from the same file.
-_BATCH_PROMPT = """You are building a search index for a D&D knowledge base. For each chunk below, write ONE line of context (max ~140 characters) that a retrieval system can match against user questions. The line must state what the chunk is about INDEPENDENTLY of its own text: include the file/section it comes from, and any key proper names, numbers, or dates it contains. For campaign session-log chunks, say which session it is (ordinal + date + title when visible in the path or headings) and what happens in this excerpt. Do not quote the chunk verbatim; do not add commentary about your task.
-
-File: {file_path}
-{chunks_block}
-
-Respond with a JSON array of exactly {n} strings, in the same order as the chunks."""
+# Prompt + reply parsing live in kb.contextual_gen (shared with the #52
+# background fill) — single source of truth for both generation paths.
+from kb.contextual_gen import BATCH_PROMPT as _BATCH_PROMPT  # noqa: E402
+from kb.contextual_gen import parse_json_array as _parse_json_array  # noqa: E402
 
 
 def _load_chunks(db_path: pathlib.Path) -> list[dict]:
@@ -111,27 +107,6 @@ async def _chat(client, base_url: str, model: str, prompt: str, max_tokens: int 
         resp = await client.post(url, json=body, timeout=180)
     resp.raise_for_status()
     return resp.json()["choices"][0]["message"]["content"] or ""
-
-
-def _parse_json_array(text: str, expected: int) -> list[str] | None:
-    """Extract the JSON array from a model reply (tolerates prose fences).
-
-    Single-chunk batches often get a BARE string back (no brackets) — accept
-    that shape when exactly one line is expected.
-    """
-    m = re.search(r"\[.*\]", text, re.DOTALL)
-    if m:
-        try:
-            data = json.loads(m.group(0))
-            if isinstance(data, list) and all(isinstance(x, str) for x in data):
-                return [x.strip() for x in data]
-        except json.JSONDecodeError:
-            pass
-    if expected == 1:
-        line = text.strip().strip('"').strip()
-        if 0 < len(line) <= 300 and "[" not in line and not line.lower().startswith(("here", "sure", "ok")):
-            return [line]
-    return None
 
 
 async def _generate(
