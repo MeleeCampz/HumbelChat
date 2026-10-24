@@ -111,8 +111,9 @@ observed failures (`list_commands` with #49; command-execution tools are
 
 1. **#48** — cross-log enumeration trigger rule (the `find_in_kb`-shaped
    questions the gate currently misses); re-run `scripts/rag_mode_compare.py`.
-2. **#49** — "when NOT to call tools" prompt guidance; measure invocation-rate
-   drop with unchanged answers.
+2. ~~**#49**~~ — DONE 2026-10-24 (`81509a4`): invocations 31/36 → 20/36,
+   simple-rules 8/8 → 0/8, answers unchanged; batch adoption confirmed
+   (see `MODE_COMPARE_ALWAYS_VS_AUTO.md` follow-up section).
 3. **Batch-adoption telemetry** — now that arrays are supported, watch
    `logs/ai_turns/` for how often the model actually batches (it may prefer
    single calls; if so, the parallelism win only lands when we nudge it in
