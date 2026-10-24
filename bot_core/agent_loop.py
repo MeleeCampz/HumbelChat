@@ -39,6 +39,7 @@ from kb.tools import (
     ToolCallParseError,
     execute_tool,
     parse_tool_call,
+    parse_tool_calls,
     tool_prompt_block,
 )
 
@@ -240,50 +241,72 @@ async def run_agent_loop(
                 log.warning("agent decision turn failed (%s)", exc)
                 return await _finish_with_fallback(f"decision turn error: {exc}")
 
-            # ── Parse: tool call, or a plain-text answer ─────────────────
+            # ── Parse: tool call(s), or a plain-text answer ─────────────
             try:
-                name, args = parse_tool_call(turn_text)
+                calls = parse_tool_calls(turn_text)
             except ToolCallParseError:
+                calls = None  # invalid JSON present — same handling as none
+            if not calls:
                 if len(turn_text.strip()) >= _MIN_ANSWER_CHARS:
                     return turn_text.strip(), meta  # plain-text answer
-                # Too short to be an answer — malformed call; one nudge.
+                # Too short to be an answer — malformed/missing call; nudge.
                 messages.append({"role": "assistant", "content": turn_text})
                 messages.append({
                     "role": "user",
                     "content": ("That was neither a valid tool call nor an "
                                 "answer. Reply with exactly one JSON object "
-                                '{"tool": "<name>", "args": {...}} or answer '
-                                "in plain text."),
+                                '{"tool": "<name>", "args": {...}} (or an '
+                                "array of them) or answer in plain text."),
                 })
                 continue
 
-            # ── Valid tool call → execute (global cap) ───────────────────
+            # ── Valid tool call(s) → execute (global cap) ───────────────
             messages.append({"role": "assistant", "content": turn_text})
-            if len(meta.tool_calls) >= RAG_AGENT_MAX_TOOL_CALLS:
+            remaining_calls = RAG_AGENT_MAX_TOOL_CALLS - len(meta.tool_calls)
+            if remaining_calls <= 0:
                 messages.append({
                     "role": "user",
                     "content": ("Tool-call limit reached — answer now in "
-                               "plain text with the information gathered so "
-                               "far."),
+                                "plain text with the information gathered so "
+                                "far."),
                 })
                 continue
+            batch = calls[:remaining_calls]
+            skipped = len(calls) - len(batch)
 
-            call_id = f"call_{len(meta.tool_calls) + 1}"
-            try:
-                result = await execute_tool(name, args)
-            except ToolCallParseError as exc:
-                result = f"Tool error: {exc}"
-            except Exception as exc:  # noqa: BLE001 — tool failure is data
-                log.warning("agent tool %s failed: %s", name, exc)
-                result = f"Tool error: {type(exc).__name__}: {exc}"
+            # Independent, read-only tools — run the WHOLE BATCH in parallel
+            # (wall clock ≈ slowest call, not the sum). Every failure is
+            # data for the model, never fatal.
+            async def _run_one(
+                pair: tuple[str, dict[str, Any]],
+            ) -> str:
+                cname, cargs = pair
+                try:
+                    return await execute_tool(cname, cargs)
+                except ToolCallParseError as exc:
+                    return f"Tool error: {exc}"
+                except Exception as exc:  # noqa: BLE001 — tool failure is data
+                    log.warning("agent tool %s failed: %s", cname, exc)
+                    return f"Tool error: {type(exc).__name__}: {exc}"
 
-            meta.tool_calls.append(name)
-            _note_gathered(
-                f"[{name} {json.dumps(args, ensure_ascii=False)}]", result)
-            messages.append({
-                "role": "tool", "tool_call_id": call_id,
-                "content": result[:4000],
-            })
+            results = await asyncio.gather(*(_run_one(c) for c in batch))
+            for (cname, cargs), result in zip(batch, results):
+                meta.tool_calls.append(cname)
+                _note_gathered(
+                    f"[{cname} {json.dumps(cargs, ensure_ascii=False)}]",
+                    result)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": f"call_{len(meta.tool_calls)}",
+                    "content": result[:4000],
+                })
+            if skipped > 0:
+                messages.append({
+                    "role": "user",
+                    "content": (f"{skipped} more call(s) were not executed — "
+                                "the tool-call limit was reached. Answer now "
+                                "in plain text with what you have."),
+                })
 
         # Iteration cap reached — force the final answer.
         messages.append({

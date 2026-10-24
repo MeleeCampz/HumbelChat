@@ -680,8 +680,9 @@ RAG_DEDUP_ENABLED: bool = _safe_bool(os.getenv("RAG_DEDUP_ENABLED"), True)
 RAG_DEDUP_COSINE_TAU: float = _safe_float(os.getenv("RAG_DEDUP_COSINE_TAU"), 0.92)
 
 # ── Agent mode: bounded tool-calling loop (#39, research doc §3) ──────────
-# When triggered, the model gets three in-process tools (search_kb /
-# read_section / list_sections — kb/tools.py) and may call them for up to
+# When triggered, the model gets five in-process tools (search_kb /
+# read_section / list_sections / find_in_kb / list_sessions — kb/tools.py),
+# batchable per turn (independent calls run in parallel), for up to
 # RAG_AGENT_MAX_ITERATIONS decision turns / RAG_AGENT_MAX_TOOL_CALLS total
 # calls within RAG_AGENT_BUDGET_SECONDS of wall clock; any cap, parse error,
 # or timeout falls back to a single-turn answer with the best context gathered.
@@ -694,7 +695,11 @@ RAG_AGENT_MODE: str = os.getenv("RAG_AGENT_MODE", "off").strip().lower()
 RAG_AGENT_SCORE_GATE: float = _safe_float(os.getenv("RAG_AGENT_SCORE_GATE"), 0.55)
 RAG_AGENT_BUDGET_SECONDS: int = _safe_int(os.getenv("RAG_AGENT_BUDGET_SECONDS"), 45)
 RAG_AGENT_MAX_ITERATIONS: int = _safe_int(os.getenv("RAG_AGENT_MAX_ITERATIONS"), 2)
-RAG_AGENT_MAX_TOOL_CALLS: int = _safe_int(os.getenv("RAG_AGENT_MAX_TOOL_CALLS"), 4)
+# Raised 4→6 once the tool set gained millisecond-scale CPU tools
+# (find_in_kb, list_sessions): with parallel batch execution the binding
+# constraint is the wall-clock budget, not call count — 6 covers the
+# common enumeration shape (1 find + up to 5 targeted reads).
+RAG_AGENT_MAX_TOOL_CALLS: int = _safe_int(os.getenv("RAG_AGENT_MAX_TOOL_CALLS"), 6)
 # Hits returned per search_kb tool call (snippet ≈300 chars each).
 RAG_AGENT_SEARCH_TOP_K: int = _safe_int(os.getenv("RAG_AGENT_SEARCH_TOP_K"), 8)
 
