@@ -230,11 +230,19 @@ def tool_prompt_block() -> str:
         lines.append(f"  args: {args_desc}   (* = required)")
     lines += [
         "",
-        "Rules: search BEFORE answering a KB question; at most a few tool "
-        "turns total, then answer in plain text (no JSON) with the findings, "
-        "citing file/section per key claim. If nothing you find is relevant, "
-        "say plainly that it is not in the rules/campaign notes instead of "
-        "guessing.",
+        "When NOT to call tools: if the knowledge-base context already attached "
+        "to this conversation fully answers the question, answer directly from "
+        "it — do not call tools to re-verify what is right there. Call tools "
+        "only for what the attached context does not cover: other files or "
+        "sections, enumeration ('which/all ...', 'list every ...'), exact names "
+        "or terms, or which session something happened in.",
+        "Batching: if you need several INDEPENDENT lookups (none needs another's "
+        "result), put them all in ONE array so they run in parallel. Only "
+        "serialize calls that depend on a previous result.",
+        "Answering: after at most a few tool turns, answer in plain text (no "
+        "JSON) with the findings, citing file/section per key claim. If nothing "
+        "you find is relevant, say plainly that it is not in the rules/campaign "
+        "notes instead of guessing.",
     ]
     return "\n".join(lines)
 

@@ -117,9 +117,18 @@ class TestScopesAndPrompt:
 
     def test_prompt_block_names_all_tools_and_limits(self):
         block = tools.tool_prompt_block()
-        for t in ("search_kb", "read_section", "list_sections"):
+        for t in ("search_kb", "read_section", "list_sections", "find_in_kb",
+                  "list_sessions"):
             assert t in block
         assert '"tool"' in block
+
+    def test_prompt_block_steers_away_from_redundant_calls(self):
+        # #49: the model must skip tools when attached context suffices and
+        # batch independent lookups — both measured failure modes.
+        block = tools.tool_prompt_block()
+        assert "When NOT to call tools" in block
+        assert "do not call tools to re-verify" in block
+        assert "ONE array so they run in parallel" in block
 
 
 # ── Execution against a fake index store ───────────────────────────────────
