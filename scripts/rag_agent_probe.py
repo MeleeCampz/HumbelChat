@@ -42,6 +42,8 @@ except ModuleNotFoundError:  # pragma: no cover — environment guard
 
 # The bot's main.py loads .env; standalone scripts must do it themselves or
 # MODEL_NAME / INFER_URL silently fall back to defaults (see rag_floor_probe).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _sandbox_shim  # noqa: F401,E402 — endpoint shims BEFORE .env load (sandbox only)
 from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")

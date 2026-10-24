@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # The bot's main.py loads .env; standalone scripts must do it themselves or
 # INFER_URL/INFER_API_KEY (rewrite LLM) silently fall back to defaults.
+import _sandbox_shim  # noqa: F401,E402 — endpoint shims BEFORE .env load (sandbox only)
 from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(REPO / ".env")

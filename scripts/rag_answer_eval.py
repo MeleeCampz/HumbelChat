@@ -46,6 +46,8 @@ except ModuleNotFoundError:  # pragma: no cover — environment guard
         "  Linux/macOS:  .venv/bin/python scripts/rag_answer_eval.py")
 
 # The bot's main.py loads .env; standalone scripts must do it themselves.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _sandbox_shim  # noqa: F401,E402 — endpoint shims BEFORE .env load (sandbox only)
 from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")

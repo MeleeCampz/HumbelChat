@@ -223,7 +223,9 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=REPO / "data" / "rag_benchmark_results.json")
     args = ap.parse_args()
 
-    _load_dotenv(REPO / ".env")
+    sys.path.insert(0, str(REPO / "scripts"))
+    import _sandbox_shim  # noqa: F401 — endpoint shims BEFORE .env load (sandbox only)
+    _load_dotenv(REPO / ".env")  # sets only vars NOT already in the environment
     for cand in (Path("/app"), REPO):
         if (cand / "kb").exists():
             sys.path.insert(0, str(cand))
