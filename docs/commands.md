@@ -219,6 +219,18 @@ Show info about the **current** session — or the most recent ended session if 
 - uploaded documents (`📎 Attachments`), plus any legacy voice transcripts (`🎙️ Transcripts` from sessions recorded before the voice feature was removed), each listed with filename and size;
 - the session folder name (`notes.md` is the single RAG document; raw files stay in the hidden folders).
 
+
+### `/session_file`
+
+```
+/session_file [session: <number or name fragment>]
+```
+
+Get an **old session's full notes as a downloadable file** (#43). Without an
+argument it lists all campaign sessions (same ordinals the AI sees); with a
+number (`/session_file 3`) or a name fragment (`/session_file alderheart`) it
+sends a short overview plus that session's `notes.md` attached as a file.
+
 ### `/help`
 
 Shows a categorized overview of **all** available commands (AI & Chat, D&D Items, Knowledge Base, Sessions, Utility, Maintenance). The listing is generated from the live command set, so it always matches what the bot actually has.

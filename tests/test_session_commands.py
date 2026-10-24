@@ -686,3 +686,75 @@ class TestOverviewPromptIncludesSources:
         assert "## Session notes" in user_content
         assert "OUTPUT LANGUAGE" not in user_content
         assert "LANGUAGE" in system_content
+
+
+# ── /session_file (#43) ──────────────────────────────────────────────────────
+
+class TestSessionFile:
+    """Old-session file access: roster, ordinal/name resolution, attachment."""
+
+    @pytest.fixture()
+    def kb_tree(self, tmp_path, monkeypatch):
+        logs = tmp_path / "vault" / "SessionLogs"
+        for name in ("2026-09-09_01_DerAnfang",
+                     "2026-09-14_02_Die_zweite_Session",
+                     "2026-10-20_02_Back_to_Alderheart"):
+            d = logs / name
+            d.mkdir(parents=True)
+            (d / "notes.md").write_text(
+                f"# {name}\nSession: {name}\nReal note content for {name}.\n",
+                encoding="utf-8")
+        # a folder without notes.md must not appear in the roster
+        (logs / "2026-12-31_99_Empty").mkdir()
+        monkeypatch.setattr("config.settings.KB_PATH", str(tmp_path / "vault"))
+
+    @pytest.mark.asyncio
+    async def test_no_arg_sends_roster_with_ordinals(self, ix, kb_tree):
+        from commands.session_commands import handle_session_file
+        await handle_session_file(ix)
+        msg = ix._sent[0]
+        assert "3 campaign sessions" in msg
+        assert "Session 1 · 2026-09-09 · DerAnfang" in msg
+        assert "Session 3 · 2026-10-20 · Back_to_Alderheart" in msg
+        assert "/session_file 3" in msg
+
+    @pytest.mark.asyncio
+    async def test_ordinal_attaches_notes_file(self, ix, kb_tree):
+        from commands.session_commands import handle_session_file
+        await handle_session_file(ix, session="2")
+        text = ix._sent[0]
+        assert "Session 2" in text and "2026-09-14" in text
+        f = ix.response.send_message.call_args.kwargs["file"]
+        assert f.filename == "session_2_20260914_notes.md"
+        raw = f.fp.read() if hasattr(f.fp, "read") else b""
+        assert b"Real note content for 2026-09-14_02_Die_zweite_Session" in raw
+
+    @pytest.mark.asyncio
+    async def test_name_fragment_resolves_unique_match(self, ix, kb_tree):
+        from commands.session_commands import handle_session_file
+        await handle_session_file(ix, session="alderheart")
+        assert "Session 3" in ix._sent[0]
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_fragment_lists_roster_hint(self, ix, kb_tree):
+        # 'session' appears in no folder/title; a fragment matching nothing
+        # falls back to the roster hint with an explicit warning.
+        from commands.session_commands import handle_session_file
+        await handle_session_file(ix, session="zzz")
+        msg = ix._sent[0]
+        assert "No session matching **zzz**" in msg
+        assert "/session_file 1" in msg
+
+    @pytest.mark.asyncio
+    async def test_no_sessions(self, ix, tmp_path, monkeypatch):
+        from commands.session_commands import handle_session_file
+        monkeypatch.setattr("config.settings.KB_PATH", str(tmp_path))
+        await handle_session_file(ix)
+        assert "No session logs found" in ix._sent[0]
+
+    def test_roster_helper_shared_with_tool(self, kb_tree):
+        from kb.tools import _session_roster_entries
+        entries = _session_roster_entries()
+        assert [e.ordinal for e in entries] == ["1", "2", "3"]
+        assert entries[0].folder == "2026-09-09_01_DerAnfang"
+        assert "Real note content" in entries[0].teaser

@@ -710,3 +710,95 @@ async def handle_session_info(interaction: discord.Interaction) -> None:
             )
         except discord.DiscordException:
             pass  # nothing left to try; the warning above is for the logs
+
+
+# ── /session_file (backlog #43) ─────────────────────────────────────────────
+#: Max size of a notes file attached to the channel. Discord's bot upload
+#: limit is 25 MB; notes.md files are text and far smaller in practice — this
+#: guard only exists so an abnormally large session can't fail the send.
+_SESSION_FILE_MAX_BYTES = 8 * 1024 * 1024
+
+
+async def handle_session_file(
+    interaction: discord.Interaction,
+    session: str | None = None,
+) -> None:
+    """Get an old session's full notes as a downloadable file (#43).
+
+    No argument → the chronological roster (same ordinals the AI sees via
+    list_sessions). With a number or name fragment → a short overview plus
+    the session's notes.md attached as a file.
+    """
+    from kb.tools import _session_roster_entries
+
+    entries = _session_roster_entries()
+    if not entries:
+        await interaction.response.send_message(
+            "ℹ️ No session logs found in the knowledge base."
+        )
+        return
+
+    def _roster_hint() -> str:
+        return "\n".join(
+            f"Session {e.ordinal}"
+            + (f" · {e.date}" if e.date else "")
+            + (f" · {e.title}" if e.title else "")
+            + f" — `/session_file {e.ordinal}`"
+            for e in entries
+        )
+
+    if not session:
+        await interaction.response.send_message(
+            f"**{len(entries)} campaign sessions** (oldest → newest):\n"
+            + _roster_hint()
+        )
+        return
+
+    arg = session.strip()
+    hit = None
+    if arg.isdigit():
+        for e in entries:
+            if e.ordinal == arg:
+                hit = e
+                break
+    if hit is None:
+        needle = arg.lower()
+        matches = [
+            e for e in entries
+            if needle in e.folder.lower()
+            or (e.title and needle in e.title.lower())
+        ]
+        if len(matches) == 1:
+            hit = matches[0]
+    if hit is None:
+        await interaction.response.send_message(
+            f"⚠️ No session matching **{session}** (by number or name).\n"
+            + _roster_hint()
+        )
+        return
+
+    notes = hit.path / "notes.md"
+    try:
+        size = notes.stat().st_size
+    except OSError as e:
+        await interaction.response.send_message(
+            f"⚠️ Could not read session {hit.ordinal}'s notes file ({e.__class__.__name__})."
+        )
+        return
+    if size > _SESSION_FILE_MAX_BYTES:
+        await interaction.response.send_message(
+            f"⚠️ Session {hit.ordinal}'s notes are too large to attach "
+            f"({_format_size(size)})."
+        )
+        return
+
+    head = (f"**Session {hit.ordinal}**"
+            + (f" · {hit.date}" if hit.date else "")
+            + (f" · {hit.title}" if hit.title else ""))
+    file_name = (f"session_{hit.ordinal}_"
+                 f"{(hit.date or 'undated').replace('-', '')}_"
+                 "notes.md")
+    text = head + (f"\n{hit.teaser}" if hit.teaser else "")
+    await interaction.response.send_message(
+        text, file=discord.File(notes, filename=file_name)
+    )

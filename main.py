@@ -569,6 +569,22 @@ async def session_info_command(interaction: discord.Interaction) -> None:
     await handle_session_info(interaction)
 
 
+@bot.tree.command(
+    name="session_file",
+    description="Get an old session's full notes as a downloadable file.",
+)
+@app_commands.describe(
+    session="Session number (e.g. 3) or part of its name; omit to list all sessions"
+)
+async def session_file_command(
+    interaction: discord.Interaction,
+    session: str | None = None,
+) -> None:
+    """Old session file — delegated to commands/session_commands.py."""
+    from commands.session_commands import handle_session_file
+    await handle_session_file(interaction, session=session)
+
+
 # ════════════════════════════════════════════════════════════════════════
 #  Event handlers
 # ════════════════════════════════════════════════════════════════════════

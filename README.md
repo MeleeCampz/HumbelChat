@@ -80,6 +80,7 @@ foreground without tmux: `./.venv/bin/python main.py` (Windows:
 - `/end_session` — end the session and generate a brief AI recap (what happened + next steps)
 - `/remind_next_session` — queue a reminder for the next session start
 - `/session_notes` — add/view notes for the current or last session
+- `/session_file` — get an old session's full notes as a downloadable file (number or name; no arg lists all sessions)
 
 Prefix command: `<BOT_PREFIX><message>` (example: `!ai hello`)
 

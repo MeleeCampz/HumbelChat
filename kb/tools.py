@@ -30,6 +30,7 @@ import json
 import pathlib
 import logging
 import re
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 log = logging.getLogger(__name__)
@@ -490,13 +491,25 @@ async def _tool_find_in_kb(term: str) -> str:
     return _cap("\n".join(lines))
 
 
-async def _tool_list_sessions() -> str:
-    """Chronological campaign session roster with 1-based ordinals.
+@dataclass(frozen=True)
+class _SessionEntry:
+    """One campaign session folder (see _session_roster_entries)."""
+
+    ordinal: str
+    date: str
+    title: str
+    folder: str
+    path: pathlib.Path
+    teaser: str
+
+
+def _session_roster_entries() -> list[_SessionEntry]:
+    """Chronological campaign session roster (oldest first).
 
     Session folders are date-named (``2026-10-20_02_Title``), so 'session N'
     questions need the ordinal mapping this provides: sort by date, number
-    from 1 (oldest), and hand the model both the ordinal and the exact
-    folder name for a follow-up read_section.
+    from 1 (oldest). Shared between the ``list_sessions`` tool and the
+    /session_file command — one source of truth for the ordinals.
     """
     root = _kb_path()
     folders: list[pathlib.Path] = []
@@ -505,33 +518,47 @@ async def _tool_list_sessions() -> str:
             continue
         folders.extend(d for d in sorted(log_dir.iterdir())
                        if d.is_dir() and (d / "notes.md").is_file())
-    if not folders:
-        return "No session logs found under the knowledge base."
 
-    entries = []
+    parsed: list[tuple[tuple[str, int], _SessionEntry]] = []
     for d in folders:
         # Folder names: 'YYYY-MM-DD_NN' or 'YYYY-MM-DD_NN_Title_With_Gaps'
         # (the ordinal is the first underscore group; everything after it —
         # underscores included — is the title).
-        m = re.match(r"^(\d{4}-\d{2}-\d{2})_(\d+)(?:[_](.*))?$",
-                     d.name)
+        m = re.match(r"^(\d{4}-\d{2}-\d{2})_(\d+)(?:[_](.*))?$", d.name)
         date = m.group(1) if m else ""
         title = (m.group(3) or "").strip() if m else ""
-        teaser = _first_line_teaser(d / "notes.md")
-        entries.append(((date, int(m.group(2)) if m and m.group(2).isdigit() else 0),
-                        date, title, d.name, teaser))
-    entries.sort(key=lambda e: e[0])
+        sort_key = (date, int(m.group(2)) if m and m.group(2).isdigit() else 0)
+        parsed.append((sort_key, _SessionEntry(
+            ordinal="", date=date, title=title, folder=d.name, path=d,
+            teaser=_first_line_teaser(d / "notes.md"),
+        )))
+    parsed.sort(key=lambda pair: pair[0])
+    return [
+        replace(entry, ordinal=str(ordinal))
+        for ordinal, (_key, entry) in enumerate(parsed, 1)
+    ]
+
+
+async def _tool_list_sessions() -> str:
+    """Chronological campaign session roster with 1-based ordinals.
+
+    Hands the model both the ordinal and the exact folder name for a
+    follow-up read_section (see _session_roster_entries).
+    """
+    entries = _session_roster_entries()
+    if not entries:
+        return "No session logs found under the knowledge base."
 
     lines = [f"{len(entries)} campaign session(s), oldest → newest:"]
-    for ordinal, (_sort_key, date, title, folder, teaser) in enumerate(entries, 1):
-        head = f"Session {ordinal}"
-        if date:
-            head += f" · {date}"
-        if title:
-            head += f" · {title}"
-        lines.append(f"{head} — folder `{folder}`")
-        if teaser:
-            lines.append(f"    {teaser}")
+    for e in entries:
+        head = f"Session {e.ordinal}"
+        if e.date:
+            head += f" · {e.date}"
+        if e.title:
+            head += f" · {e.title}"
+        lines.append(f"{head} — folder `{e.folder}`")
+        if e.teaser:
+            lines.append(f"    {e.teaser}")
     lines.append("")
     lines.append('To read a session\'s full notes: '
                  'read_section(file="<folder name>").')

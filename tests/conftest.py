@@ -180,7 +180,9 @@ def _build_ix(**attrs) -> MagicMock:
     """Return a mock Interaction where followup.send / response.send_message are real async."""
     sent = []
 
-    async def on_send(content="", ephemeral=False):
+    async def on_send(content="", ephemeral=False, **_kw):
+        # **_kw: callers may pass extras (e.g. file= for /session_file);
+        # only the content string is collected in ix._sent.
         sent.append(str(content))
 
     ix = MagicMock()
