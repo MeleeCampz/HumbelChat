@@ -1,6 +1,37 @@
 # Handoff — reranker on pinned llama-server (replaces vLLM container)
 
-For a pi session WITH host/system access. Goal: serve Qwen3-Reranker-4B via a
+**STATUS: DONE 2026-10-25 (evening).** Cutover complete and verified — bot runs
+against the pinned llama-server (`host.docker.internal:8090/v1`, alias
+`reranker-4b`). Deviations from this plan, all benign:
+
+- §1: the "already in local HF cache" `Qwen/Qwen3-Reranker-4B-GGUF` was NOT on
+disk, and **every** community 4B GGUF found (mradermacher incl. f16,
+QuantFactory, Mungert, DevQuasar…) had dropped the classifier head — so
+fallback (a) was taken: official `Qwen/Qwen3-Reranker-4B` safetensors →
+`convert_hf_to_gguf.py` (this tree maps yes/no lm_head rows →
+`cls.output.weight`, bakes `pooling_type=rank` + rerank chat template) →
+`llama-quantize Q4_K_M`. Artifacts in `C:\Users\Tobias\.unsloth\models\
+` (`…-f16.gguf` 8.0 GB kept for re-quants, `…-Q4_K_M.gguf` 2.38 GB served).
+- §2: needed `--host 0.0.0.0` — on this box `host.docker.internal` resolves
+to the LAN IP (192.168.178.96), and the default 127.0.0.1 bind was
+unreachable from the bot container.
+- §4: quality strong ≈ 0.9+ / weak 0.2–0.5 / irrelevant ≈ 1e-4 (probability
+scale, same family as vLLM) — `RAG_ATTACH_FLOOR=0.50` re-checked against
+known attach/detach pairs, still separates cleanly, **no .env change**.
+Speed: 150-pair batch **4.15 s** (vLLM baseline 10.8 s); 12-case benchmark
+11/12 (only miss = known Griffon part-2 long-tail), rerank passes 12/12 OK;
+GPU-1 SM util 94% during batches (WDDM hides the VRAM number).
+- §5: vLLM container already stopped by user; left in compose as rollback.
+- §8: backlog #42 annotated + new #56 (embedder migration + server
+persistence); docs/configuration.md reranker section updated.
+
+**Still open:** persistence for the pinned llama-server (currently a bare
+background process — Task Scheduler task or docker service, see backlog #56)
++ §6 embedder migration (separate session).
+
+---
+
+Original plan — for a pi session WITH host/system access. Goal: serve Qwen3-Reranker-4B via a
 standalone `llama-server` pinned to GPU 1 (dynamic memory, ~2.6 GB flat)
 instead of the vLLM container (8 GB pool pre-allocation that crash-loops on
 this contended WDDM card). Frees ~8 GB of GPU 1 permanently for the

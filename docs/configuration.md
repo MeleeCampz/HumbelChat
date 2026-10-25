@@ -131,11 +131,23 @@ empirical verification and the fast reindex flow.
 
 ### Cross-encoder reranking (opt-in sidecar)
 
-A cross-encoder (vLLM Qwen3-Reranker, jina wire format) re-scores the fused
+A cross-encoder (Qwen3-Reranker-4B, jina wire format) re-scores the fused
 candidates and reorders them before attach; any failure degrades to the RRF
 order. The 0.50 attach floor is calibrated against these scores — do not
-shrink `RERANK_TOP_K` / `RERANK_MAX_CHARS` or the model's `--max-model-len`
+shrink `RERANK_TOP_K` / `RERANK_MAX_CHARS` or the server's `-c` context
 without re-running `scripts/rag_floor_probe.py`.
+
+**Serving (since 2026-10-25):** standalone pinned llama-server on GPU 1
+(`CUDA_VISIBLE_DEVICES=1`, `Qwen3-Reranker-4B-Q4_K_M.gguf` self-converted from
+official weights — community GGUFs had dropped the classifier head; see
+HANDOFF_RERANKER_LLAMA.md), `--alias reranker-4b --reranking --pooling rank
+-c 2048 --host 0.0.0.0 --port 8090` (~2.4 GB flat, 150-pair batch ~4 s).
+`RERANK_API_BASE=http://host.docker.internal:8090/v1`,
+`RERANK_MODEL=reranker-4b` (the `model` field is required by llama.cpp,
+ignored harmlessly by vLLM). Score scale ≈ probability (strong ≈ 0.9+, weak
+≈ 0.2–0.5, irrelevant ≈ 1e-4) — the 0.50 floor still separates cleanly.
+The old vLLM container (`reranker-qwen`, `:8000`) stays in compose as the
+rollback path.
 
 | Variable | Description | Default |
 |---|---|---|
