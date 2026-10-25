@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import tempfile
 from unittest.mock import MagicMock, AsyncMock
 
 import pytest
@@ -35,6 +36,16 @@ os.environ.setdefault(
 # default unless they monkeypatch them explicitly.
 os.environ.setdefault("RERANK_MODE", "local")
 os.environ.setdefault("RERANK_API_BASE", "")
+#
+# AI turn logger: config.settings reads AI_TURN_LOG_DIR at import time
+# (default: logs/ai_turns relative to CWD). Without this pin, any test that
+# exercises an /ai code path writes real JSON records into the repo's live
+# log directory — 69 fixture "hello" turns leaked in on 2026-10-24 exactly
+# this way. Point it at a throwaway dir for the whole session; tests that
+# assert logging behaviour (test_turn_logger.py) stub their own tmp_path.
+os.environ.setdefault(
+    "AI_TURN_LOG_DIR", tempfile.mkdtemp(prefix="ai_turns_test_")
+)
 # The 2026-10-15 reranker swap added two more .env vars with the same hazard:
 # a reload bakes RERANK_API_FORMAT=jina / RERANK_INSTRUCT into config.settings
 # and later TEI-format tests then see jina payloads (KeyError 'texts').
