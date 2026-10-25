@@ -292,7 +292,9 @@ class TestLowPrioPolish:
         for seed in ("0", "123"):
             r = subprocess.run(
                 [sys.executable, "-c", code], capture_output=True, text=True,
-                env={"PYTHONHASHSEED": seed, "PATH": __import__("os").environ["PATH"]},
+                # Keep the base environment (Windows Python needs SYSTEMROOT &
+                # co. just to import asyncio) and only override the hash seed.
+                env={**__import__("os").environ, "PYTHONHASHSEED": seed},
                 cwd=".",
             )
             assert r.returncode == 0, r.stderr

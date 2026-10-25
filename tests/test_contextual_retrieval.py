@@ -43,7 +43,9 @@ def _make_store(kb: pathlib.Path):
 def kb(tmp_path) -> pathlib.Path:
     root = tmp_path / "kbctx"
     root.mkdir()
-    (root / "one.md").write_text("# Alpha\n\nalpha section body text here")
+    # Explicit LF bytes: write_text() would translate \n to CRLF on Windows and
+    # break the sidecar's content-hash key (computed with LF) below.
+    (root / "one.md").write_bytes(b"# Alpha\n\nalpha section body text here")
     (root / "two.md").write_text("whole two file body")
     return root
 

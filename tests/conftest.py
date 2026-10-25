@@ -56,6 +56,23 @@ os.environ.setdefault("RERANK_INSTRUCT", "")
 # sets it explicitly (test_query_instruct::test_query_plain_by_default et al.).
 os.environ.setdefault("EMBED_QUERY_INSTRUCT", "")
 #
+# Same hazard for the agent-mode gate: .env sets RAG_AGENT_MODE=always for the
+# host deployment. The autouse fixture's `import main` runs load_dotenv(), and
+# test_p5_streaming / test_path_resolution then importlib.reload(config.settings)
+# — baking "always" into the module for every LATER test, so ask_ai tests
+# (test_reasoning_effort, test_turn_logger, ...) silently took the agent loop and
+# failed. Pin the off default; per-test overrides go through monkeypatch on the
+# module attribute (test_agent_trigger), which this does not disturb.
+os.environ.setdefault("RAG_AGENT_MODE", "off")
+# Same hazard for the per-task reasoning-effort knobs: .env sets
+# AI_REASONING_EFFORT=low / SUMMARY_REASONING_EFFORT=low for the host
+# deployment, but the call-site tests assert the UNSET defaults (thinking-off
+# payloads) unless they set the env var explicitly. Pin all four empty so a
+# reload after main's load_dotenv() can't bake the host values in.
+for _var in ("AI_REASONING_EFFORT", "SUMMARY_REASONING_EFFORT",
+             "RECAP_REASONING_EFFORT", "MERGE_LOG_REASONING_EFFORT"):
+    os.environ.setdefault(_var, "")
+#
 # NOTE: .env is intentionally NOT loaded here (a full load_dotenv() would
 # leak KB_PATH/CHUNK_SIZE/etc. into every test and break the assumptions of
 # tests that monkeypatch env explicitly).  A few modules bake env values at
