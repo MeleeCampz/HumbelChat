@@ -1,0 +1,112 @@
+# Handoff — reranker on pinned llama-server (replaces vLLM container)
+
+For a pi session WITH host/system access. Goal: serve Qwen3-Reranker-4B via a
+standalone `llama-server` pinned to GPU 1 (dynamic memory, ~2.6 GB flat)
+instead of the vLLM container (8 GB pool pre-allocation that crash-loops on
+this contended WDDM card). Frees ~8 GB of GPU 1 permanently for the
+image-generation work (#42/#50) and kills the Ollama-can't-pin-GPU problem
+for the embedder migration in §6.
+
+**Bot side is ALREADY DONE** (commits on `feat/tool-calling`, pushed):
+jina `/rerank` payload now sends `"model"` (required by llama.cpp, accepted
+by vLLM) + tests updated. Only `.env` + host work remain.
+
+## 0. Current state (2026-10-25 evening)
+- `humbelchat-reranker-qwen` container: **stopped** (user stopped it after the
+  0.3/0.35 crash-loop saga). `.env` still points at `http://…:8000` → bot is
+  running rerank-less (fails open to pre-rerank order — safe but degraded).
+- compose reverted to the proven `--gpu-memory-utilization 0.5` (committed) —
+  the rollback path in §7 still works.
+- llama.cpp Windows build exists: `C:\Users\Tobias\.unsloth\llama.cpp\build\bin\Release\llama-server.exe`
+- Candidate GGUF already in local HF cache: `Qwen/Qwen3-Reranker-4B-GGUF`
+  (seen in the Studio catalog at :8888) →
+  `C:\Users\Tobias\.cache\huggingface\hub\models--Qwen--Qwen3-Reranker-4B-GGUF\snapshots\<hash>\*.gguf`
+
+## 1. VERIFY the GGUF (critical — do not skip)
+Community 4B conversions sometimes drop the classifier head; such files load
+and answer fine but score everything ~1e-28 (garbage). Check:
+
+```powershell
+python "C:\Users\Tobias\.unsloth\llama.cpp\gguf-py\gguf\scripts\gguf_dump.py" "$env:USERPROFILE\.cache\huggingface\hub\models--Qwen--Qwen3-Reranker-4B-GGUF\snapshots\*\*.gguf" | Select-String "cls.output|general.architecture"
+```
+
+- **Expect:** a `cls.output.weight` tensor + architecture `qwen3` (or similar).
+  Note the exact file path + quant for step 2.
+- **If `cls.output` is MISSING:** do not use it. Fallbacks, in order:
+  (a) convert official weights yourself: `convert_hf_to_gguf.py` on
+  `Qwen/Qwen3-Reranker-4B` then `llama-quantize` Q4_K_M (both tools are in
+  the same llama.cpp dir); (b) use `ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF`
+  (maintainers' build, known-good — but a quality step down, benchmark before/after);
+  (c) keep the vLLM container at 0.5 and drop this plan.
+
+## 2. Launch pinned to GPU 1
+```powershell
+$env:CUDA_VISIBLE_DEVICES = "1"
+& "C:\Users\Tobias\.unsloth\llama.cpp\build\bin\Release\llama-server.exe" `
+  -m "<gguf path from step 1>" `
+  --alias reranker-4b --reranking --pooling rank `
+  -c 2048 --no-context-shift --flash-attn on `
+  --port 8090
+```
+Flag notes: `--reranking --pooling rank` enables the OpenAI-style `/v1/rerank`
+(+ `/rerank`) endpoint returning `{results:[{index, relevance_score}]}` —
+exactly our jina wire shape. `-c 2048` mirrors the old `--max-model-len 2048`
+(scoring input unchanged). Leave this window open (or wrap in a Task
+Scheduler task / docker service later — persistence is a follow-up, not a
+gate).
+
+Sanity from any machine: `curl http://host.docker.internal:8090/v1/models`
+should list `reranker-4b`.
+
+## 3. Point the bot at it (.env)
+```
+RERANK_API_BASE=http://host.docker.internal:8090/v1   # was ...:8000 (vLLM)
+RERANK_MODEL=reranker-4b                               # must match --alias
+# RERANK_API_FORMAT=jina stays; RERANK_INSTRUCT stays (llama.cpp ignores it)
+```
+Then `docker compose restart bot` (env change = recreate). Startup log should
+show "Reranker endpoint healthy" — NOTE: the startup check hits `/health`;
+if llama.cpp 404s there it only logs a warning and retries per request, so
+verify with a real call instead of trusting the log line.
+
+## 4. VERIFY quality + speed (before killing vLLM)
+Run from the repo (sandbox shims apply automatically outside the sandbox):
+```powershell
+python -c "import sys; sys.path.insert(0,'scripts'); import kb.reranker as R, asyncio, time, config.settings as S; print(S.RERANK_API_BASE); ..."
+```
+…or simpler: two checks.
+1. **Quality:** one `/rerank` call with 3 docs (one clearly relevant to the
+   query) → relevant must score highest, in the same ballpark as vLLM's
+   previous outputs (~0.3+ relevant vs <0.1 irrelevant; exact scale may
+   differ slightly between servers — what matters is ORDERING + separation).
+   ⚠ The attach floor is calibrated on vLLM scores (`RAG_ATTACH_FLOOR=0.50`
+   rerank-source) — if llama.cpp's score scale differs materially, re-check
+   the floor against a few known attach/detach cases and adjust .env.
+2. **Speed:** timed 150-pair batch (the benchmark does this automatically):
+   `python scripts/rag_benchmark.py --limit 12` → compare rerank stage times
+   vs the 10.8 s /150-pairs vLLM baseline and the 41/42 hit rate.
+
+## 5. Cut over
+All green → `docker compose stop reranker-qwen` (leave it defined in compose
+as the rollback). GPU 1 should drop ~8 GB. Watch a few live /ai turns
+(`logs/ai_turns/`) for "Rerank failed" warnings — there should be none.
+
+## 6. Follow-up: embedder migration (same pattern, separate session)
+`Qwen/Qwen3-Embedding-4B-GGUF` (also in local cache) → second pinned
+llama-server (`--embed`, `/v1/embeddings` is OpenAI-compatible — `EMBED_URL`
+swap only), then retire the Ollama container. This finally solves
+"embedder on a specific GPU, held resident" (Ollama cannot pin GPUs at all).
+Do NOT do this in the same session as the reranker cutover — one variable.
+
+## 7. Rollback (any step goes wrong)
+```powershell
+# .env: RERANK_API_BASE=http://host.docker.internal:8000
+#       RERANK_MODEL=boboliu/Qwen3-Reranker-4B-W4A16-G128
+docker compose up -d reranker-qwen     # 0.5 reservation, proven stable
+docker compose restart bot
+```
+
+## 8. Record when done
+Backlog: note under #42 (image gen) that the GPU-1 room prerequisite landed;
+add/annotate a line for the embedder migration (#6 above); update
+`docs/configuration.md` reranker section + this file's status header.
