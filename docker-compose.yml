@@ -81,8 +81,8 @@ services:
   # quantization". A custom Dockerfile installing the plugin is the only way to
   # keep NF4-on-official-weights; the INT4 checkpoint avoids that maintenance.
   #
-  # GPU 1 budget: vLLM reserves --gpu-memory-utilization 0.5 of the 16 GB card
-  # (~8 GB: INT4 weights + KV); the Ollama embedder-qwen sidecar keeps ~2.5-3 GB
+  # GPU 1 budget: vLLM reserves --gpu-memory-utilization 0.3 of the 16 GB card
+  # (~5 GB: INT4 weights + KV); the Ollama embedder-qwen sidecar keeps ~2.5-3 GB
   # outside that reservation. max-model-len 2048 covers our truncated pairs
   # (RERANK_MAX_CHARS=1200 chars ≈ 350 tokens + query + template overhead).
   #
@@ -126,21 +126,23 @@ services:
       - '{"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
       - --chat-template
       - /templates/qwen3_reranker.jinja
-      # 0.5 (shrunk from 0.7, 2026-10-24 — host VRAM pressure): the old 0.7
-      # reservation (~11 GB of the shared 16 GB card) carried ~7 GiB of KV
-      # headroom our workload never uses. It now fits at 0.5 because the
-      # original init blocker is gone: --enforce-eager drops the ~0.7 GiB
-      # CUDA-graph reservation (latency cost is irrelevant for a reranker),
-      # which alone lifts KV headroom from 0.06 to ~0.8 GiB at max-model-len
-      # 2048 — above the 0.28 GiB minimum that failed init before. Scoring
-      # inputs are UNCHANGED (max-model-len 2048 keeps covering our full
-      # RERANK_MAX_CHARS=1200 pairs ≈ 350-500 tokens + query + template; no
-      # truncation, floor calibration stays valid). --max-num-seqs 32 caps
-      # concurrent KV: a 150-pair request (RERANK_TOP_K=150) runs as ~5
-      # waves of 32 — memory bounded by the cap, not the request size; the
-      # bot's RERANK_TIMEOUT_SECONDS=60 gives chunked batches time to finish.
+      # 0.3 (shrunk from 0.7 → 0.5 on 2026-10-24, then 0.5 → 0.3 on
+      # 2026-10-25 — making room for a text-to-image model on GPU 1): the
+      # INT4 weights are only ~2.6 GB, so 0.3 (~5 GB) still leaves ~1+ GiB
+      # of KV headroom at max-model-len 2048 — above the 0.28 GiB minimum
+      # that failed init before (--enforce-eager drops the CUDA-graph
+      # reservation, which is what made small budgets viable; its latency cost
+      # is irrelevant for a reranker). Scoring inputs are UNCHANGED
+      # (max-model-len 2048 keeps covering our full RERANK_MAX_CHARS=1200
+      # pairs ≈ 350-500 tokens + query + template; no truncation, floor
+      # calibration stays valid). --max-num-seqs 32 caps concurrent KV: a
+      # 150-pair request (RERANK_TOP_K=150) runs as ~5 waves of 32 — memory
+      # bounded by the cap, not the request size; the bot's
+      # RERANK_TIMEOUT_SECONDS=60 gives chunked batches time to finish.
+      # Trade-off accepted: worst-case KV concurrency queues instead of errors
+      # (our traffic is chunked ≤32 from one client — no practical impact).
       - --gpu-memory-utilization
-      - "0.5"
+      - "0.3"
       - --max-model-len
       - "2048"
       - --max-num-seqs
