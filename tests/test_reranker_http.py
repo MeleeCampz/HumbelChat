@@ -248,6 +248,7 @@ class TestJinaFormat:
     async def test_documents_field_and_relevance_score(self, monkeypatch):
         monkeypatch.setattr(S, "RERANK_API_FORMAT", "jina")
         monkeypatch.setattr(S, "RERANK_INSTRUCT", "find D&D items")
+        monkeypatch.setattr(S, "RERANK_MODEL", "test-reranker")
         chunks = ["alpha", "beta", "gamma"]
         _FakeTEIClient.payload = {
             "results": [
@@ -264,6 +265,8 @@ class TestJinaFormat:
         assert req["json"] == {
             "query": "q",
             "documents": chunks,
+            # model name: required by llama.cpp's /v1/rerank, accepted by vLLM
+            "model": "test-reranker",
             "instruction": "find D&D items",
         }
 
