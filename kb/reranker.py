@@ -149,7 +149,7 @@ async def _rerank_http(base_url: str, query: str, chunks: list[str]) -> list[flo
     Raises on any HTTP / schema problem — the caller (``rerank``) degrades to the
     original order.
     """
-    from config.settings import RERANK_API_FORMAT, RERANK_INSTRUCT
+    from config.settings import RERANK_API_FORMAT, RERANK_INSTRUCT, RERANK_MODEL
 
     jina = RERANK_API_FORMAT == "jina"
     doc_field = "documents" if jina else "texts"
@@ -158,8 +158,12 @@ async def _rerank_http(base_url: str, query: str, chunks: list[str]) -> list[flo
     for start in range(0, len(chunks), _MAX_TEXTS_PER_RERANK_REQUEST):
         batch = chunks[start : start + _MAX_TEXTS_PER_RERANK_REQUEST]
         payload: dict[str, Any] = {"query": query, doc_field: batch}
-        if jina and RERANK_INSTRUCT:
-            payload["instruction"] = RERANK_INSTRUCT
+        if jina:
+            # llama.cpp's OpenAI-style /v1/rerank expects a model name; vLLM
+            # accepts (and matches) it too — safe for both backends.
+            payload["model"] = RERANK_MODEL
+            if RERANK_INSTRUCT:
+                payload["instruction"] = RERANK_INSTRUCT
         resp = await client.post(f"{base_url}/rerank", json=payload)
         resp.raise_for_status()
         data = resp.json()
