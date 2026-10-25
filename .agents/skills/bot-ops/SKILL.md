@@ -61,6 +61,16 @@ docker compose logs -f bot     # watch it come up
 Discord drops for a few seconds; the bot re-logs in on start. Run `/sync` in the
 bot's channel if slash commands misbehave after an update.
 
+### RAG GPU services (reranker + embedder)
+
+`reranker-llama` and `embedder-llama` pin ~6.4 GB of GPU-1 VRAM. To make room
+for an image model: `./scripts/gpu_switch.sh image` (bot degrades gracefully to
+dense+BM25; the embedder is only needed when indexing new chunks). Restore:
+`./scripts/gpu_switch.sh rag` (~19 s to healthy). `status` shows what is
+resident. Never run a bare `llama-server.exe` for these models — the compose
+services are the only canonical path (a stray bare process from the first
+cutover was found LAN-exposed on 0.0.0.0:8090 and killed, 2026-10-25).
+
 ### Verifying health (no healthcheck — read the logs)
 
 Give ~10–20 s after a start, then:

@@ -166,6 +166,15 @@ attribution for guest processes is unreliable under WDDM — verify placement by
 VRAM delta, not SM%. The old vLLM container (`reranker-qwen`, `:8000`) stays
 in compose as the rollback path.
 
+**Dynamic GPU-1 switching:** both RAG servers pin ~6.4 GB of GPU-1 VRAM
+(measured from the servers' own startup logs — nvidia-smi is unreliable under
+WDDM retention); the chat model keeps a further ~4–6 GB share on the same
+card. `./scripts/gpu_switch.sh image` stops both to free the room for an
+image model (the bot degrades gracefully: dense+BM25 retrieval, attach floor
+no-ops, nothing crashes); `./scripts/gpu_switch.sh rag` restores full quality
+in ~19 s; `status` shows what is resident. The embedder is only needed when
+indexing new chunks — plain search reads precomputed vectors.
+
 | Variable | Description | Default |
 |---|---|---|
 | `RERANK_ENABLED` | Enable the reranker sidecar | `0` |

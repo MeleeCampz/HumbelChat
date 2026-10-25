@@ -59,6 +59,44 @@ persistence); docs/configuration.md reranker section updated.
 migration — are done: both servers are compose services with
 `restart: unless-stopped`; see the status header above.)
 
+## 0b. GPU accounting + dynamic switching (2026-10-25, after user pushback)
+
+The earlier "~8 GB free on GPU 1" claim was **wrong** — it silently dropped
+the chat model's share. Measured ground truth (llama.cpp `-lv 4` startup
+"memory breakdown" logs are the ONLY reliable source here; nvidia-smi under
+WDDM shows lazily-retained freed VRAM as "used" and is useless for this):
+
+| Resident on GPU 1 (RTX 5070 Ti, 16,275 MiB) | VRAM |
+|---|---|
+| reranker-llama (Q4_K_M, ctx 2048 ×4 slots) | **2,742 MiB** (model 2375 + KV 288 + compute 79) + 325 host |
+| embedder-llama (Q4_K_M, ctx 8192) | **3,612 MiB** (model 2375 + KV 1152 + compute 85) + 331 host |
+| chat Qwen3.8-27B NVFP4_50 (Studio; 16.1 GB file, `--tensor-split 50,16`) | **~3.9 GB weights** on GPU 1 + KV/compute ≈ 4–6 GB total (estimate — verify by reloading in Studio and running a probe) |
+
+→ With ALL THREE resident: ~10.5–12.5 GB used, **only ~3.5–5.5 GB left** for
+an image model. Without the chat model: ~9.7–10 GB free (measured 8,086 MiB
+after the embedder loaded). Cold start is cheap: full stop→healthy compose
+cycle measures **~19 s** (reranker healthy ~8 s, embedder ~12 s).
+
+Also found + fixed that day: a **stray bare-process reranker** from the first
+cutover (pre-compose) was still running on `0.0.0.0:8090` — LAN-exposed with
+no auth and holding a second copy of the model; killed. The compose service
+is the only canonical path.
+
+**Dynamic switching = `scripts/gpu_switch.sh`** (repo root):
+- `./scripts/gpu_switch.sh image` — stops both RAG servers, frees ~6.4 GB on
+  GPU 1 for an image model. The bot degrades gracefully while they're down:
+  retrieval falls back to dense+BM25 (RRF) — the measured pre-reranker
+  baseline; the rerank attach floor no-ops (no gate scores); nothing crashes.
+- `./scripts/gpu_switch.sh rag` — starts both, waits for `/v1/models`
+  health on loopback :8090/:8091 (~19 s total).
+- `status` — service states + resident-VRAM table.
+
+Note: the **embedder is only needed when INDEXING new chunks** (search reads
+precomputed vectors and never touches it) — running it permanently costs
+3.6 GB for near-zero benefit. Candidate optimization: keep it stopped by
+default, start on demand for reindex/context-fill. Left as a user decision;
+current default keeps both running.
+
 ---
 
 Original plan — for a pi session WITH host/system access. Goal: serve Qwen3-Reranker-4B via a
