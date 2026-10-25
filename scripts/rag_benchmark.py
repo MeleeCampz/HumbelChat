@@ -44,6 +44,13 @@ import re
 import statistics
 import sys
 import time
+
+# Windows consoles default to cp1252; report text contains unicode arrows/dashes.
+# Never let a print crash the script before results are saved (2026-10-25: a
+# full 44-case run was lost this way).
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(errors="replace")
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -270,14 +277,15 @@ def main() -> None:
 
     results = asyncio.run(_run_all(retrieve_kb_documents, kb_path, args.top_n, cases))
 
-    _report(results, warm)
     if args.out:
+        # Save BEFORE reporting: a console/print failure must never eat the run.
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps({
             "started_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "top_n": args.top_n, "warmup": warm, "cases": results,
         }, indent=2, ensure_ascii=False), encoding="utf-8")
         print(f"results → {args.out}")
+    _report(results, warm)
 
 
 def _golden() -> list[tuple[str, list[str]]]:
