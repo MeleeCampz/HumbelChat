@@ -61,6 +61,12 @@ docker compose logs -f bot     # watch it come up
 Discord drops for a few seconds; the bot re-logs in on start. Run `/sync` in the
 bot's channel if slash commands misbehave after an update.
 
+**STALE-IMAGE WARNING (as of 2026-10-25, backlog #61):** the running image was
+built 2026-10-23 and predates this week's work (tool-calling, turn-logger,
+contextual sidecar #52, message-uploads #60, all llama.cpp RAG env changes) —
+none of it is live until you rebuild. When you do deploy, decide the ref first
+(feat/tool-calling tip vs a curated commit); expect one Discord drop.
+
 ### RAG GPU services (reranker + embedder)
 
 `reranker-llama` and `embedder-llama` pin ~6.4 GB of GPU-1 VRAM. To make room
