@@ -82,7 +82,7 @@ services:
   # keep NF4-on-official-weights; the INT4 checkpoint avoids that maintenance.
   #
   # GPU 1 budget: vLLM reserves --gpu-memory-utilization 0.3 of the 16 GB card
-  # (~5 GB: INT4 weights + KV); the Ollama embedder-qwen sidecar keeps ~2.5-3 GB
+  # (~5.2 GB: INT4 weights + KV); the Ollama embedder-qwen sidecar keeps ~2.5-3 GB
   # outside that reservation. max-model-len 2048 covers our truncated pairs
   # (RERANK_MAX_CHARS=1200 chars ≈ 350 tokens + query + template overhead).
   #
@@ -142,7 +142,7 @@ services:
       # Trade-off accepted: worst-case KV concurrency queues instead of errors
       # (our traffic is chunked ≤32 from one client — no practical impact).
       - --gpu-memory-utilization
-      - "0.3"
+      - "0.35"
       - --max-model-len
       - "2048"
       - --max-num-seqs
