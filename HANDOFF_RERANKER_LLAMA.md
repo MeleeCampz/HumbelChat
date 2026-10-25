@@ -1,8 +1,38 @@
 # Handoff — reranker on pinned llama-server (replaces vLLM container)
 
-**STATUS: DONE 2026-10-25 (evening).** Cutover complete and verified — bot runs
-against the pinned llama-server (`host.docker.internal:8090/v1`, alias
-`reranker-4b`). Deviations from this plan, all benign:
+**STATUS: FULLY DONE 2026-10-25 (late evening).** Reranker AND embedder (§6)
+both run as **compose services** on the official digest-pinned
+ggml-org/llama.cpp server image (`sha256:2fe406…` = build 11870; numbered
+tags stop at b4738, which is pre-qwen3 and cannot load these models) —
+persistence solved for free (`restart: unless-stopped`). The bot reaches both
+over the compose network (`reranker-llama:8080`, `embedder-llama:8080`);
+loopback :8090/:8091 are host debug only (no auth — never LAN-bind).
+Late-evening additions to the deviations below:
+
+- **GPU pinning:** the Windows nvidia runtime exposes BOTH GPUs to a container
+  regardless of the compose `device_ids` reservation (verified: inference ran
+  on GPU 0 with zero GPU-1 activity), so both services set
+  `CUDA_VISIBLE_DEVICES=1`. Corollary: host-side `nvidia-smi dmon` SM
+  attribution is UNRELIABLE for guest processes under WDDM (showed GPU 0 busy
+  while the model sat on GPU 1) — verify placement by VRAM delta instead.
+- **Embedder (§6):** official `Qwen3-Embedding-4B-Q4_K_M.gguf` (copied to
+  `C:\Users\Tobias\.unsloth\models\`), `--embeddings` (singular `--embed`
+  removed upstream) `-c 8192` — 2048 overflowed the KV on code-heavy ~2k-token
+  chunks (HTTP 500 killed a full reindex mid-flight; atomic swap preserved the
+  old cache). Vectors ≈0.9987 cosine vs the old Ollama model; renamed
+  `EMBEDDING_MODEL`/`INDEX_EMBED_MODEL` → `qwen3-embedding-4b` so the bot
+  auto-reindexed once (5,901 chunks) — all vectors in one space.
+  Ollama + vLLM containers stay in compose (stopped) as rollback.
+- **Benchmark on the new stack:** 42 positive cases, single miss
+  ('armor stat block' — ambiguous query, sibling case hits @3); negatives
+  score 0.35–0.43 < the 0.50 floor; 150-pair rerank batch ~2.5 s in-container.
+- **Known oddity (not caused by this cutover):** the live bot's
+  `contextual-fill` worker never completes its `_ensure_index_store()`
+  (no "Vector index store ready" log, no embedder traffic after the 300 s
+  delay, in two separate boots; the identical code path works fine in a fresh
+  process). py-spy can't attach (no ptrace in the container). See backlog #59.
+
+Earlier deviations from this plan, all benign:
 
 - §1: the "already in local HF cache" `Qwen/Qwen3-Reranker-4B-GGUF` was NOT on
 disk, and **every** community 4B GGUF found (mradermacher incl. f16,
@@ -25,9 +55,9 @@ GPU-1 SM util 94% during batches (WDDM hides the VRAM number).
 - §8: backlog #42 annotated + new #56 (embedder migration + server
 persistence); docs/configuration.md reranker section updated.
 
-**Still open:** persistence for the pinned llama-server (currently a bare
-background process — Task Scheduler task or docker service, see backlog #56)
-+ §6 embedder migration (separate session).
+(Both formerly-open items — server persistence and the §6 embedder
+migration — are done: both servers are compose services with
+`restart: unless-stopped`; see the status header above.)
 
 ---
 

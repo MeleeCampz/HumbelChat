@@ -107,6 +107,17 @@ Query embeddings run **in-process on CPU**; index builds run on the GPU backend.
 Same model both sides, so vectors are interchangeable — see rag.md for the
 empirical verification and the fast reindex flow.
 
+**Index-side serving (since 2026-10-25):** the GPU index embedder is the
+`embedder-llama` compose service — official digest-pinned `ggml-org/llama.cpp`
+server image, official `Qwen3-Embedding-4B-Q4_K_M.gguf`, OpenAI-compatible
+`/v1/embeddings`, pinned to GPU 1 via `CUDA_VISIBLE_DEVICES=1` (same image,
+pattern and pinning as `reranker-llama`; the old Ollama `embedder-qwen`
+container stays in compose, stopped, as rollback). `EMBED_URL` points at the
+compose service name; loopback `:8091` is host debug only. Renaming
+`EMBEDDING_MODEL`/`INDEX_EMBED_MODEL` invalidates the vector cache and triggers
+a one-time full reindex on next bot start (atomic swap keeps the old cache until
+the new one is built).
+
 | Variable | Description | Default |
 |---|---|---|
 | `EMBED_BACKEND` | `local` (in-process CPU query embeddings) or `remote` (legacy backend `/embeddings`) | `local` |
@@ -137,17 +148,23 @@ order. The 0.50 attach floor is calibrated against these scores — do not
 shrink `RERANK_TOP_K` / `RERANK_MAX_CHARS` or the server's `-c` context
 without re-running `scripts/rag_floor_probe.py`.
 
-**Serving (since 2026-10-25):** standalone pinned llama-server on GPU 1
-(`CUDA_VISIBLE_DEVICES=1`, `Qwen3-Reranker-4B-Q4_K_M.gguf` self-converted from
-official weights — community GGUFs had dropped the classifier head; see
-HANDOFF_RERANKER_LLAMA.md), `--alias reranker-4b --reranking --pooling rank
--c 2048 --host 0.0.0.0 --port 8090` (~2.4 GB flat, 150-pair batch ~4 s).
-`RERANK_API_BASE=http://host.docker.internal:8090/v1`,
+**Serving (since 2026-10-25):** pinned `llama.cpp` **container** on GPU 1
+(`reranker-llama` service, official digest-pinned `ggml-org/llama.cpp` server
+image; `Qwen3-Reranker-4B-Q4_K_M.gguf` self-converted from official weights —
+community GGUFs had dropped the classifier head; see HANDOFF_RERANKER_LLAMA.md),
+`--alias reranker-4b --reranking --pooling rank -c 2048` (~2.4 GB flat,
+150-pair batch ~2.5 s). The bot reaches it on the compose network as
+`RERANK_API_BASE=http://reranker-llama:8080/v1`; loopback `:8090` is host
+debug only (llama.cpp's server has no auth — never bind to the LAN).
 `RERANK_MODEL=reranker-4b` (the `model` field is required by llama.cpp,
 ignored harmlessly by vLLM). Score scale ≈ probability (strong ≈ 0.9+, weak
 ≈ 0.2–0.5, irrelevant ≈ 1e-4) — the 0.50 floor still separates cleanly.
-The old vLLM container (`reranker-qwen`, `:8000`) stays in compose as the
-rollback path.
+GPU pinning is `CUDA_VISIBLE_DEVICES=1` inside the container: the Windows
+nvidia runtime exposes both GPUs to the container regardless of the compose
+`device_ids` reservation (verified), and host-side `nvidia-smi dmon` SM
+attribution for guest processes is unreliable under WDDM — verify placement by
+VRAM delta, not SM%. The old vLLM container (`reranker-qwen`, `:8000`) stays
+in compose as the rollback path.
 
 | Variable | Description | Default |
 |---|---|---|

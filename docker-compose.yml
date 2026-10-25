@@ -183,3 +183,86 @@ services:
             - driver: nvidia
               device_ids: ["1"]
               capabilities: [gpu]
+
+  # Pinned llama.cpp reranker (2026-10-25, replaces the vLLM container above —
+  # kept as rollback). Self-converted Q4_K_M GGUF with the classifier head
+  # intact (every community build had dropped it; see HANDOFF_RERANKER_LLAMA.md).
+  # ~2.4 GB flat on GPU 1, 150-pair batch ~4 s. The bot reaches it on the
+  # compose network via the service name; loopback publish is debug-only
+  # (llama-server has NO auth — never bind to the LAN).
+  reranker-llama:
+    image: ghcr.io/ggml-org/llama.cpp@sha256:2fe406b2bcc86647e3b17638504c04802a4514f774a1395f303e66b0bc5f650e   # build 11870 (floating :server-cuda as of 2026-10-25; numbered tags stopped at b4738, pre-qwen3)
+    container_name: humbelchat-reranker-llama
+    restart: unless-stopped
+    environment:
+      - CUDA_DEVICE_ORDER=PCI_BUS_ID
+      # The Windows nvidia runtime exposes BOTH GPUs to the container despite
+      # the device_ids reservation below (verified 2026-10-25: inference ran
+      # on GPU 0 with zero GPU-1 activity), and llama.cpp defaults to device 0.
+      # This is what actually pins it to the 5070 Ti.
+      - CUDA_VISIBLE_DEVICES=1
+    ports:
+      - "127.0.0.1:8090:8080"
+    volumes:
+      - C:\Users\Tobias\.unsloth\models:/models:ro
+    command:
+      - -m
+      - /models/Qwen3-Reranker-4B-Q4_K_M.gguf
+      - --alias
+      - reranker-4b
+      - --reranking
+      - --pooling
+      - rank
+      - -c
+      - "2048"
+      - --no-context-shift
+      - --flash-attn
+      - on   # [on|off|auto] in build 11870 (boolean flag in the old b4738)
+      - --host
+      - 0.0.0.0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
+
+  # Pinned llama.cpp embedder (2026-10-25, replaces the Ollama container above
+  # — kept as rollback). Official Qwen3-Embedding-4B Q4_K_M GGUF (~2.5 GB,
+  # quality ≈ Q8_0 per docs/internal/EVAL_QWEN3_EMBEDDING.md); OpenAI-compatible
+  # /v1/embeddings, so the bot only swaps EMBED_URL + model name (the one-time
+  # auto-reindex keeps all vectors in one space). Shares GPU 1 with the reranker.
+  embedder-llama:
+    image: ghcr.io/ggml-org/llama.cpp@sha256:2fe406b2bcc86647e3b17638504c04802a4514f774a1395f303e66b0bc5f650e   # build 11870 (floating :server-cuda as of 2026-10-25; numbered tags stopped at b4738, pre-qwen3)
+    container_name: humbelchat-embedder-llama
+    restart: unless-stopped
+    environment:
+      - CUDA_DEVICE_ORDER=PCI_BUS_ID
+      # Same pinning rationale as reranker-llama (device_ids is ignored by the
+      # Windows nvidia runtime; see that service's comment).
+      - CUDA_VISIBLE_DEVICES=1
+    ports:
+      - "127.0.0.1:8091:8080"
+    volumes:
+      - C:\Users\Tobias\.unsloth\models:/models:ro
+    command:
+      - -m
+      - /models/Qwen3-Embedding-4B-Q4_K_M.gguf
+      - --alias
+      - qwen3-embedding-4b
+      - --embeddings   # singular --embed was removed; plural flag in build 11870
+      - -c
+      # Some KB chunks tokenize to ~2k tokens (code-heavy files); 2048 overflowed
+      # the KV under concurrent slots (HTTP 500 "Context size has been exceeded"
+      # killed a full reindex on 2026-10-25). Qwen3-Embedding supports 32k.
+      - "8192"
+      - --host
+      - 0.0.0.0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
