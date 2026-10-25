@@ -156,18 +156,17 @@ services:
               device_ids: ["1"]
               capabilities: [gpu]
 
-  # Optional Qwen3-Embedding host for the RAG embedding swap (Phase 2 — see
-  # docs/internal/EVAL_QWEN3_EMBEDDING.md). Inactive unless started with
-  # `docker compose --profile qwen-embed up -d embedder-qwen`.
-  # After first start: `docker compose exec embedder-qwen ollama pull
-  # qwen3-embedding:4b` (2.5 GB Q4_K_M — tested, quality ≈ Q8_0 ≈ 8B,
-  # see EVAL_QWEN3_EMBEDDING.md) or `:4b-q8_0` (4.3 GB), then point the
-  # bot at it: EMBED_URL=http://embedder-qwen:11434/v1 (+EMBEDDING_MODEL /
-  # INDEX_EMBED_MODEL, /reindex_kb). Shares GPU 1 with the reranker.
+  # Ollama host — now ALWAYS ON because it serves /speak (TTS_BACKEND=ollama,
+  # phonon:de, #57). Idle models auto-unload after ~5 min, so the resident
+  # footprint is just the small base server. History: originally the optional
+  # Qwen3-Embedding host for the RAG embedding swap (Phase 2 — see
+  # docs/internal/EVAL_QWEN3_EMBEDDING.md; models qwen3-embedding:4b and
+  # phonon{,:de} already pulled into ./ollama-models). Stop it with
+  # `docker compose stop embedder-qwen` — /speak then degrades to an error
+  # reply until it's back up.
   embedder-qwen:
     image: ollama/ollama:latest
     container_name: humbelchat-embedder-qwen
-    profiles: ["qwen-embed"]
     restart: unless-stopped
     # Debug access for the dev sandbox (host.docker.internal:11435). Host port
     # 11435 (not 11434) so a natively installed Ollama on the host is unaffected.

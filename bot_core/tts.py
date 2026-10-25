@@ -3,7 +3,8 @@
 Unsloth Studio serves ``/v1/audio/speech`` at the same base URL as its chat
 API (e.g. a Kokoro GGUF TTS model), so this module reuses the provider-agnostic
 ``AsyncOpenAI`` pattern from :mod:`bot_core.ai_client`. The synthesized audio
-comes back as mp3 bytes, ready for a Discord attachment.
+comes back as audio bytes (mp3 from Studio, wav from Ollama), ready for a
+Discord attachment.
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ from openai import AsyncOpenAI
 from config.settings import (
     DEFAULT_MODEL,
     TTS_API_KEY,
+    TTS_BACKEND,
     TTS_MODEL,
     TTS_TIMEOUT_S,
     TTS_VOICE,
@@ -41,8 +43,9 @@ def _make_tts_client() -> AsyncOpenAI:
     if _tts_client is None:
         # max_retries=0: the bot owns its retry policy (no retries here —
         # a second synthesis attempt would just double the wait).
+        # Ollama needs no key, but AsyncOpenAI requires a non-empty one.
         _tts_client = AsyncOpenAI(
-            api_key=TTS_API_KEY, base_url=TTS_URL, max_retries=0
+            api_key=TTS_API_KEY or "ollama", base_url=TTS_URL, max_retries=0
         )
     return _tts_client
 
@@ -113,7 +116,12 @@ async def _ensure_slug_loaded(model_path: str, wait_s: float) -> bool:
 
 
 async def _ensure_model_loaded() -> bool:
-    """Load the TTS model via Studio's /api/inference/load and wait until resident."""
+    """Load the TTS model via Studio's /api/inference/load and wait until resident.
+
+    Ollama loads on demand by itself — nothing to ensure (and no Studio API).
+    """
+    if TTS_BACKEND != "studio":
+        return True
     return await _ensure_slug_loaded(TTS_MODEL, TTS_TIMEOUT_S)
 
 
@@ -130,6 +138,8 @@ _CHAT_RELOAD_WAIT_S = 120  # cold chat-model loads can take upwards of a minute
 async def _swap_chat_model_back() -> None:
     """Best-effort background reload of the chat model after a TTS evicted it."""
     global _chat_reload_task
+    if TTS_BACKEND != "studio":
+        return  # Ollama is a separate process — it never evicts Studio's chat model
     if not DEFAULT_MODEL or _unsloth_api_base() is None:
         return
     await _ensure_slug_loaded(DEFAULT_MODEL, _CHAT_RELOAD_WAIT_S)
@@ -139,6 +149,8 @@ async def _swap_chat_model_back() -> None:
 def _schedule_chat_swap_back() -> None:
     """Schedule :func:`_swap_chat_model_back` without awaiting it (deduped)."""
     global _chat_reload_task
+    if TTS_BACKEND != "studio":
+        return  # Ollama is a separate process — no swap-back needed
     if not DEFAULT_MODEL or _unsloth_api_base() is None:
         return  # nothing to reload / no Studio API to reload it with
     if _chat_reload_task is not None and not _chat_reload_task.done():
@@ -183,19 +195,24 @@ async def synthesize(text: str) -> bytes:
 async def _speech_once(client: AsyncOpenAI, text: str) -> bytes:
     # Qwen3-TTS (Unsloth Studio): clone via speaker embedding only — the base
     # model's ICL reference prompting otherwise leaks the saved voice's
-    # transcript tail into the output. Ignored by other backends.
+    # transcript tail into the output. Ollama phonon has exactly one fixed
+    # voice per language checkpoint and rejects unknown voice names.
+    voice = TTS_VOICE if TTS_BACKEND == "studio" else "default"
+    # Ollama serves wav/pcm only (mp3 is rejected with a 400); Discord accepts
+    # both — wav at 24 kHz mono 16-bit is ~48 KB/s, far under the 10 MB cap.
+    response_format = "mp3" if TTS_BACKEND == "studio" else "wav"
     extra_body: dict[str, Any] | None = (
         {"audio_options": {"x_vector_only_mode": True}}
-        if TTS_X_VECTOR_ONLY_MODE
+        if TTS_BACKEND == "studio" and TTS_X_VECTOR_ONLY_MODE
         else None
     )
     try:
         resp = await asyncio.wait_for(
             client.audio.speech.create(
                 model=TTS_MODEL,
-                voice=TTS_VOICE,
+                voice=voice,
                 input=text,
-                response_format="mp3",
+                response_format=response_format,
                 extra_body=extra_body,
             ),
             timeout=TTS_TIMEOUT_S,

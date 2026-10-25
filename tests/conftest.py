@@ -64,6 +64,11 @@ os.environ.setdefault("EMBED_QUERY_INSTRUCT", "")
 # failed. Pin the off default; per-test overrides go through monkeypatch on the
 # module attribute (test_agent_trigger), which this does not disturb.
 os.environ.setdefault("RAG_AGENT_MODE", "off")
+# Same hazard for the TTS backend switch (#57): .env sets TTS_BACKEND=ollama +
+# TTS_URL/TTS_MODEL for the host deployment, but the tts tests assert the
+# legacy Studio behaviour (swap-back scheduling, x-vector cloning) unless they
+# set the backend explicitly. Pin studio so a reload can't flip them.
+os.environ.setdefault("TTS_BACKEND", "studio")
 # Same hazard for the per-task reasoning-effort knobs: .env sets
 # AI_REASONING_EFFORT=low / SUMMARY_REASONING_EFFORT=low for the host
 # deployment, but the call-site tests assert the UNSET defaults (thinking-off

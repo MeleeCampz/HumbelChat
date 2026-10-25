@@ -79,6 +79,18 @@ EMBED_API_KEY: str = os.getenv("EMBED_API_KEY", "") or INFER_API_KEY
 #  TTS (/speak, #34 — any OpenAI-compatible /v1/audio/speech endpoint;
 #  Unsloth Studio serves it at the same base URL as its chat API)
 # ════════════════════════════════════
+# Backend selector (#57): "studio" (Unsloth Studio, default — Qwen3-TTS +
+# saved voice clone + chat-model swap-back) or "ollama" (any Ollama TTS model,
+# e.g. phonon:de — one fixed "default" voice per language checkpoint, no
+# cloning, separate process so no Studio swap-back dance). Unknown values fall
+# back to studio with a warning.
+_raw_tts_backend = os.getenv("TTS_BACKEND", "studio").strip().lower()
+if _raw_tts_backend not in ("studio", "ollama"):
+    if _raw_tts_backend:
+        logging.getLogger("config.settings").warning(
+            "unknown TTS_BACKEND %r — treating as studio", _raw_tts_backend)
+    _raw_tts_backend = "studio"
+TTS_BACKEND: str = _raw_tts_backend
 # Empty = feature off: /speak replies with a "not configured" hint.
 TTS_MODEL: str = os.getenv("TTS_MODEL", "")
 # Voice name sent with each request (the OpenAI-compatible API requires the
