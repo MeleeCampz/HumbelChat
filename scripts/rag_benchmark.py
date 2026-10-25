@@ -119,20 +119,28 @@ async def _preflight() -> dict:
     """Check all three endpoints before spending a run; abort clearly on failure."""
     import httpx
 
-    from config.settings import EMBED_URL, INFER_API_KEY, INFER_URL, RERANK_API_BASE
+    from config.settings import (EMBED_URL, INFER_API_KEY, INFER_URL,
+                                 RERANK_API_BASE, RERANK_MODEL)
     out = {}
-    async with httpx.AsyncClient(timeout=15) as c:
-        for name, url, headers in (
-            ("embedder", f"{EMBED_URL}/models", {}),
-            ("reranker", f"{RERANK_API_BASE}/health", {}),
-            ("llm", f"{INFER_URL}/models", {"Authorization": f"Bearer {INFER_API_KEY}"}),
+    async with httpx.AsyncClient(timeout=30) as c:
+        for name, check in (
+            ("embedder", lambda: c.get(f"{EMBED_URL}/models")),
+            # Functional probe, NOT /health: the vLLM build serving the Qwen3
+            # reranker answers /health with 500 while /rerank works fine.
+            ("reranker", lambda: c.post(
+                f"{RERANK_API_BASE}/rerank",
+                json={"model": RERANK_MODEL, "query": "ping",
+                      "documents": ["a", "b"]},
+            )),
+            ("llm", lambda: c.get(f"{INFER_URL}/models",
+                                   headers={"Authorization": f"Bearer {INFER_API_KEY}"})),
         ):
             try:
-                r = await c.get(url, headers=headers)
+                r = await check()
                 r.raise_for_status()
-                out[name] = f"OK ({url})"
+                out[name] = "OK"
             except Exception as exc:  # noqa: BLE001
-                raise SystemExit(f"PREFLIGHT FAIL — {name} unreachable at {url}: {exc}")
+                raise SystemExit(f"PREFLIGHT FAIL — {name}: {exc}")
     return out
 
 
@@ -228,6 +236,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="In-depth RAG benchmark (single run)")
     ap.add_argument("--kb-path", type=Path, default=None)
     ap.add_argument("--top-n", type=int, default=4)
+    ap.add_argument("--limit", type=int, default=0,
+                    help="run only the first N cases (0 = all); use with an explicit --out "
+                         "so the full results file is not clobbered")
     ap.add_argument("--out", type=Path, default=REPO / "data" / "rag_benchmark_results.json")
     args = ap.parse_args()
 
@@ -242,6 +253,11 @@ def main() -> None:
 
     kb_path = args.kb_path or REPO / "data" / "knowledge"
     cases: list[tuple[str, list[str], str]] = [(q, e, "golden") for q, e in _golden()] + EXTRA_CASES
+    if args.limit > 0:
+        cases = cases[:args.limit]
+        if args.out == REPO / "data" / "rag_benchmark_results.json":
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M")
+            args.out = REPO / "data" / f"rag_benchmark_small_{args.limit}_{stamp}.json"
 
     print(f"RAG benchmark — {len(cases)} cases, KB={kb_path}, top_n={args.top_n}")
     print(f"started {datetime.now(timezone.utc).isoformat(timespec='seconds')}")
