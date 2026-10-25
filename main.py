@@ -845,6 +845,14 @@ async def on_message(message: discord.Message) -> None:
 
     content = message.content.strip()
     if not content.startswith(BOT_PREFIX):
+        # #60: a plain message carrying file attachment(s) is treated like a
+        # regular /upload_kb upload (validate → store → auto-index).
+        if message.attachments:
+            from commands.kb_commands import handle_message_uploads
+            try:
+                await handle_message_uploads(message)
+            except Exception as exc:  # noqa: BLE001 — never break on_message over an upload
+                log.warning("Message upload failed for %s: %s", message.author, exc)
         return
 
     prompt = content[len(BOT_PREFIX):].strip()

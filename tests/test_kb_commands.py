@@ -175,12 +175,112 @@ class TestReindexKBCommand:
         assert any("rebuilt" in s.lower() for s in sent)
 
 
+class TestMessageUploads:
+    """#60: plain messages with file attachment(s) are stored like regular uploads."""
+
+    @staticmethod
+    def _message(attachments):
+        message = MagicMock()
+        message.author = MagicMock(id=9, __str__=lambda s: "Ada")
+        message.channel.send = AsyncMock()
+        message.attachments = attachments
+        return message
+
+    @pytest.mark.asyncio
+    async def test_message_attachment_stored_and_indexed(self, temp_kb_dir, monkeypatch):
+        attachment = MagicMock()
+        attachment.filename = "long_notes.txt"
+        attachment.size = len(b"Session notes content.")
+        attachment.read = AsyncMock(return_value=b"Session notes content.")
+
+        # Indexing is out of scope here — stub the retriever path.
+        monkeypatch.setattr(
+            "kb.retrievers.update_kb_document", AsyncMock(return_value=True), raising=False)
+
+        message = self._message([attachment])
+        with patch("kb.storage.KB_PATH", temp_kb_dir):
+            from commands.kb_commands import handle_message_uploads
+            await handle_message_uploads(message)
+
+        sent = " ".join(str(c) for c in message.channel.send.call_args_list)
+        assert "long_notes" in sent
+        assert "Indexed for search." in sent
+        from kb.storage import list_kb_files
+        names = [d["name"] for d in list_kb_files(temp_kb_dir, recursive=True)]
+        assert any("long_notes" in n for n in names)
+
+    @pytest.mark.asyncio
+    async def test_message_oversized_attachment_rejected_before_read(self, temp_kb_dir):
+        attachment = MagicMock()
+        attachment.filename = "huge.bin"
+        attachment.size = 99 * 1024 * 1024  # over the 20 MB cap
+        attachment.read = AsyncMock()  # must NOT be called
+
+        message = self._message([attachment])
+        with patch("kb.storage.KB_PATH", temp_kb_dir):
+            from commands.kb_commands import handle_message_uploads
+            await handle_message_uploads(message)
+
+        attachment.read.assert_not_called()
+        sent = " ".join(str(c) for c in message.channel.send.call_args_list)
+        assert "too large" in sent.lower()
+        from kb.storage import list_kb_files
+        names = [d["name"] for d in list_kb_files(temp_kb_dir, recursive=True)]
+        assert not any("huge" in n for n in names)
+
+    @pytest.mark.asyncio
+    async def test_on_message_routes_attachments_to_upload_handler(self, monkeypatch):
+        """main.on_message: non-prefix message with attachments → upload path."""
+        import main
+
+        calls = []
+        monkeypatch.setattr(
+            "commands.kb_commands.handle_message_uploads",
+            AsyncMock(side_effect=lambda m: calls.append(m)),
+        )
+
+        attachment = MagicMock(filename="notes.txt", size=10)
+        message = MagicMock()
+        message.author = MagicMock(id=9, __str__=lambda s: "Ada")
+        message.guild = None
+        message.channel.id = 7
+        message.content = "here are my notes"
+        message.attachments = [attachment]
+
+        await main.on_message(message)
+        assert calls and calls[0] is message
+
+    @pytest.mark.asyncio
+    async def test_on_message_plain_text_without_attachments_is_ignored(self, monkeypatch):
+        import main
+
+        monkeypatch.setattr(
+            "commands.kb_commands.handle_message_uploads", AsyncMock())
+
+        message = MagicMock()
+        message.author = MagicMock(id=9)
+        message.guild = None
+        message.channel.id = 7
+        message.content = "just a remark"
+        message.attachments = []
+
+        await main.on_message(message)  # must return quietly, no upload path
+
+
 class TestKBCommandsStructural:
     """Test that KB commands module is properly structured."""
 
     def test_handle_upload_kb_exists(self):
         from commands.kb_commands import handle_upload_kb
         assert callable(handle_upload_kb)
+
+    def test_store_upload_bytes_exists(self):
+        from commands.kb_commands import store_upload_bytes
+        assert callable(store_upload_bytes)
+
+    def test_handle_message_uploads_exists(self):
+        from commands.kb_commands import handle_message_uploads
+        assert callable(handle_message_uploads)
 
     def test_handle_list_kb_docs_exists(self):
         from commands.kb_commands import handle_list_kb_docs

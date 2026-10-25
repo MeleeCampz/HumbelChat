@@ -69,25 +69,15 @@ async def handle_upload_kb(
         )
         return
 
-    # --- step 2 & 3: validate + write to KB_PATH ---
-    # P0 #4: the write + SHA-256 hash run in a worker thread so a large
-    # upload can't freeze the event loop (gateway/typing).
+    # --- step 2–4: validate + write + index (shared with message uploads) ---
     try:
-        dest, summary = await validate_upload_async(data, filename=fname, kb_path=None, subfolder=subfolder)
+        dest, summary, indexed = await store_upload_bytes(data, filename=fname, subfolder=subfolder)
     except ValueError as exc:
         await interaction.followup.send(f"Upload rejected: **{exc}**")
         return
     except FileNotFoundError as exc:
         await interaction.followup.send(f"KB storage not found: **{exc}**")
         return
-
-    # --- step 4: index the new document so RAG can find it immediately ---
-    indexed = False
-    try:
-        from kb.retrievers import update_kb_document
-        indexed = await update_kb_document(dest)
-    except Exception as exc:
-        log.warning("Auto-index after upload failed for %s: %s", dest.name, exc)
 
     index_note = "Indexed for search." if indexed else "⚠️ Not auto-indexed — run `/reindex_kb` to make it searchable."
 
@@ -110,6 +100,69 @@ async def handle_upload_kb(
         f"Auto-chunked.{approx_chunks_display}\n"
         f"{index_note}"
     )
+
+
+async def store_upload_bytes(
+    data: bytes,
+    filename: str,
+    subfolder: str | None = None,
+) -> tuple[pathlib.Path, dict, bool]:
+    """Validate + write *data* into KB storage and auto-index it (#60 shared core).
+
+    Returns ``(dest_path, summary, indexed)``.  Raises ``ValueError`` (upload
+    rejected — see :func:`validate_upload_async`) or ``FileNotFoundError``
+    (KB storage missing).  Callers decide how to report the error.
+    """
+    # P0 #4: the write + SHA-256 hash run in a worker thread so a large
+    # upload can't freeze the event loop (gateway/typing).
+    dest, summary = await validate_upload_async(data, filename=filename, kb_path=None, subfolder=subfolder)
+
+    # Index the new document so RAG can find it immediately.
+    indexed = False
+    try:
+        from kb.retrievers import update_kb_document
+        indexed = await update_kb_document(dest)
+    except Exception as exc:  # noqa: BLE001 — indexing must never kill the upload
+        log.warning("Auto-index after upload failed for %s: %s", dest.name, exc)
+    return dest, summary, indexed
+
+
+async def handle_message_uploads(message: discord.Message) -> None:
+    """#60: a plain message carrying file attachment(s) = /upload_kb without the slash.
+
+    Users dropping long notes into the channel get the same treatment as a
+    regular upload (validate → store under KB_PATH → auto-index), with the
+    same summary reply.  Text alongside the files is ignored for storage
+    (it is logged).  Mirrors /upload_kb's permission surface (ungated, like
+    every other command on this personal bot).
+    """
+    channel = message.channel
+    for attachment in message.attachments:
+        fname = attachment.filename or "attachment"
+        if (attachment.size or 0) > UPLOAD_MAX_DOWNLOAD_BYTES:
+            await channel.send(
+                f"⚠️ `{fname}` is too large: {attachment.size:,} bytes "
+                f"(max {UPLOAD_MAX_DOWNLOAD_BYTES:,}). Use `/upload_kb` with a URL instead."
+            )
+            continue
+        data = await attachment.read()
+        try:
+            dest, summary, indexed = await store_upload_bytes(data, filename=fname)
+        except ValueError as exc:
+            await channel.send(f"Upload rejected: **{exc}**")
+            continue
+        except FileNotFoundError as exc:
+            await channel.send(f"KB storage not found: **{exc}**")
+            return
+        index_note = ("Indexed for search." if indexed
+                     else "⚠️ Not auto-indexed — run `/reindex_kb` to make it searchable.")
+        log.info("Message upload from %s: %s -> %s", message.author, fname, dest.name)
+        await channel.send(
+            f"✅ Stored `{summary['name']}` ({summary['size']:,} bytes) like a regular upload\n"
+            f"Location: ``{dest.name}``\n"
+            f"Hash SHA256 prefix: ``{summary['sha256']}...``\n"
+            f"{index_note}"
+        )
 
 
 def get_root_directories(kb_path: pathlib.Path) -> list[str]:
