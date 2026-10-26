@@ -168,6 +168,12 @@ services:
     image: ollama/ollama:latest
     container_name: humbelchat-embedder-qwen
     restart: unless-stopped
+    environment:
+      # Keep phonon warm (#57): every idle-unload → MLX-runner restart is a
+      # cold-start window where the first /speak can hit the runner's
+      # intermittent Windows panic (bot retries once, but warmth also saves
+      # the 6-16 s load). Drop this if the resident VRAM ever matters.
+      - OLLAMA_KEEP_ALIVE=24h
     # Debug access for the dev sandbox (host.docker.internal:11435). Host port
     # 11435 (not 11434) so a natively installed Ollama on the host is unaffected.
     # Loopback-only, same rationale as reranker-qwen.

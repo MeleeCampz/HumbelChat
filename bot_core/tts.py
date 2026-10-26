@@ -13,7 +13,7 @@ import logging
 from typing import Any
 
 import httpx
-from openai import AsyncOpenAI
+from openai import APIStatusError, AsyncOpenAI
 
 from config.settings import (
     DEFAULT_MODEL,
@@ -31,7 +31,16 @@ log = logging.getLogger("bot.bot_core.tts")
 
 
 class TTSError(RuntimeError):
-    """TTS synthesis failed (backend down, model not loaded, timeout, …)."""
+    """TTS synthesis failed (backend down, model not loaded, timeout, …).
+
+    ``retryable`` marks transient server-side failures (e.g. Ollama's MLX
+    runner panicking on the first request after a reload) — :func:`synthesize`
+    retries those exactly once.
+    """
+
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 # ── Shared client (singleton) ─────────────────────────────────────────
@@ -179,12 +188,15 @@ async def synthesize(text: str) -> bytes:
     try:
         audio = await _speech_once(client, text)
     except TTSError as e:
-        # One bounded recovery: the model was idle-unloaded (or never
-        # co-loaded) — load it next to the chat model and retry exactly once.
-        if not _is_not_loaded_error(e):
+        # One bounded recovery for transient failures: (a) the model was
+        # idle-unloaded (Studio) — load it next to the chat model; (b) the
+        # server errored on a cold runner (Ollama MLX panic, 5xx) — let it
+        # settle. Either way: retry exactly once.
+        if not (_is_not_loaded_error(e) or e.retryable):
             raise
         if not await _ensure_model_loaded():
             raise
+        await asyncio.sleep(1.0)
         audio = await _speech_once(client, text)
     # The TTS load just evicted the resident chat model — bring it back in
     # the background so the next question doesn't pay the cold load.
@@ -220,7 +232,14 @@ async def _speech_once(client: AsyncOpenAI, text: str) -> bytes:
     except asyncio.TimeoutError as e:
         raise TTSError(f"timed out after {TTS_TIMEOUT_S:.0f}s") from e
     except Exception as e:  # APIStatusError / connection errors / …
-        raise TTSError(f"{e.__class__.__name__}: {e}") from e
+        # Ollama's MLX runner intermittently panics on the first request
+        # after a (re)load — "mlx runner failed" 500 that recovers at once
+        # (Windows driver doesn't expose the MLX working-set hint, so it falls
+        # back to pageable memory; WDDM lazy commit can lose the race). One
+        # bounded retry in synthesize().
+        status = e.status_code if isinstance(e, APIStatusError) else None
+        retryable = isinstance(status, int) and status >= 500
+        raise TTSError(f"{e.__class__.__name__}: {e}", retryable=retryable) from e
 
     audio = resp.read()
     if not audio:

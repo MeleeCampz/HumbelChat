@@ -158,3 +158,85 @@ class TestOllamaBackend:
         assert calls["voice"] == "f1a84294-studio-clone-id"
         assert calls["extra_body"] == {"audio_options": {"x_vector_only_mode": True}}
         assert calls["response_format"] == "mp3"
+
+
+async def _done() -> None:
+    return None
+
+
+class TestTransientRetry:
+    """#57 follow-up: Ollama's MLX runner panics intermittently on the first
+    request after a reload (500) — synthesize() must retry exactly once."""
+
+    async def test_server_error_retries_once_then_succeeds(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        monkeypatch.setattr(tts, "TTS_BACKEND", "ollama")
+        monkeypatch.setattr(tts, "TTS_MODEL", "phonon:de")
+        calls = []
+
+        async def flaky(client, text):
+            calls.append(1)
+            if len(calls) == 1:
+                raise tts.TTSError("InternalServerError: mlx runner failed", retryable=True)
+            return b"wav-bytes"
+
+        monkeypatch.setattr(tts, "_speech_once", flaky)
+        sleeps = []
+        monkeypatch.setattr(tts.asyncio, "sleep", lambda s: sleeps.append(s) or _done())
+
+        audio = await tts.synthesize("Hallo")
+        assert audio == b"wav-bytes"
+        assert calls == [1, 1]  # exactly one retry
+
+    async def test_permanent_error_raises_immediately(self, monkeypatch):
+        monkeypatch.setattr(tts, "TTS_BACKEND", "ollama")
+        monkeypatch.setattr(tts, "TTS_MODEL", "phonon:de")
+        calls = []
+
+        async def broken(client, text):
+            calls.append(1)
+            raise tts.TTSError("BadRequestError: voice not found")  # retryable=False
+
+        monkeypatch.setattr(tts, "_speech_once", broken)
+
+        with pytest.raises(tts.TTSError, match="voice not found"):
+            await tts.synthesize("Hallo")
+        assert calls == [1]  # no retry for client errors
+
+    async def test_5xx_from_openai_client_is_retryable(self, monkeypatch):
+        from openai import APIStatusError
+        from unittest.mock import AsyncMock, MagicMock
+
+        resp = MagicMock(status_code=500)
+        boom = APIStatusError(
+            "InternalServerError: mlx runner failed", response=resp, body={"error": "x"}
+        )
+        client = MagicMock()
+        client.audio.speech.create = AsyncMock(side_effect=boom)
+
+        monkeypatch.setattr(tts, "TTS_BACKEND", "ollama")
+        monkeypatch.setattr(tts, "TTS_MODEL", "phonon:de")
+
+        with pytest.raises(tts.TTSError) as excinfo:
+            await tts._speech_once(client, "Hallo")
+        assert excinfo.value.retryable is True
+
+    async def test_4xx_from_openai_client_is_not_retryable(self, monkeypatch):
+        from openai import APIStatusError
+        from unittest.mock import AsyncMock, MagicMock
+
+        resp = MagicMock(status_code=400)
+        boom = APIStatusError(
+            'BadRequestError: response_format "mp3" is not supported',
+            response=resp, body={"error": "x"},
+        )
+        client = MagicMock()
+        client.audio.speech.create = AsyncMock(side_effect=boom)
+
+        monkeypatch.setattr(tts, "TTS_BACKEND", "ollama")
+        monkeypatch.setattr(tts, "TTS_MODEL", "phonon:de")
+
+        with pytest.raises(tts.TTSError) as excinfo:
+            await tts._speech_once(client, "Hallo")
+        assert excinfo.value.retryable is False
