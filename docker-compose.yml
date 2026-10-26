@@ -81,10 +81,9 @@ services:
   # quantization". A custom Dockerfile installing the plugin is the only way to
   # keep NF4-on-official-weights; the INT4 checkpoint avoids that maintenance.
   #
-  # GPU 1 budget: vLLM reserves --gpu-memory-utilization 0.5 of the 16 GB card
-  # (~8 GB: INT4 weights + KV); the Ollama embedder-qwen sidecar keeps ~2.5-3 GB
-  # outside that reservation. max-model-len 2048 covers our truncated pairs
-  # (RERANK_MAX_CHARS=1200 chars ≈ 350 tokens + query + template overhead).
+  # GPU 1 budget (llama.cpp era, 2026-10-25+): reranker ~2.7 GB + embedder
+  # ~3.6 GB + chat-model share 4-6 GB + tts-ollama (phonon) when warm — all on
+  # the 16 GB card; see scripts/gpu_switch.sh for the image-gen trade-off.
   #
   # Pinned to v0.31.0 (first release line with native Qwen3-Reranker support via
   # --hf_overrides is_original_qwen3_reranker). The chat template is vendored in
@@ -156,17 +155,18 @@ services:
               device_ids: ["1"]
               capabilities: [gpu]
 
-  # Ollama host — now ALWAYS ON because it serves /speak (TTS_BACKEND=ollama,
+  # Ollama host — ALWAYS ON because it serves /speak (TTS_BACKEND=ollama,
   # phonon:de, #57). Idle models auto-unload after ~5 min, so the resident
   # footprint is just the small base server. History: originally the optional
   # Qwen3-Embedding host for the RAG embedding swap (Phase 2 — see
   # docs/internal/EVAL_QWEN3_EMBEDDING.md; models qwen3-embedding:4b and
-  # phonon{,:de} already pulled into ./ollama-models). Stop it with
-  # `docker compose stop embedder-qwen` — /speak then degrades to an error
-  # reply until it's back up.
-  embedder-qwen:
+  # phonon{,:de} already pulled into ./ollama-models). Renamed from
+  # `embedder-qwen` on 2026-10-26 — it no longer serves embeddings (that's
+  # embedder-llama now), only TTS. Stop it with `docker compose stop tts-ollama`
+  # — /speak then degrades to an error reply until it's back up.
+  tts-ollama:
     image: ollama/ollama:latest
-    container_name: humbelchat-embedder-qwen
+    container_name: humbelchat-tts-ollama
     restart: unless-stopped
     environment:
       # Keep phonon warm (#57): every idle-unload → MLX-runner restart is a

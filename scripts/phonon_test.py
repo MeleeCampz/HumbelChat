@@ -9,7 +9,7 @@ Usage (from anywhere; stdlib only, any Python 3.8+):
 
 Requires the Ollama container to be up (loopback :11435):
 
-    docker compose --profile qwen-embed up -d embedder-qwen
+    docker compose up -d tts-ollama     # always-on service (renamed from embedder-qwen)
 
 First synthesis after idle pays a ~6 s model load (Ollama auto-unloads
 after 5 min). Output WAV lands in data/tts_voice_candidates/ by default and
@@ -56,7 +56,7 @@ def main() -> int:
         audio, dt = synthesize(text, args.model)
     except Exception as e:  # connection refused → container down
         print(f"synthesis failed: {e}\n"
-              f"(is the Ollama container up? docker compose --profile qwen-embed up -d embedder-qwen)",
+              f"(is the Ollama container up? docker compose up -d tts-ollama)",
               file=sys.stderr)
         return 1
 
