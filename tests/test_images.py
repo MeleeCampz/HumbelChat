@@ -7,6 +7,7 @@ come back.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 from unittest.mock import AsyncMock, MagicMock
 
@@ -58,40 +59,75 @@ class TestResolveSize:
 
 
 class TestRewritePrompt:
-    async def test_returns_stripped_content(self, monkeypatch):
+    """The rewrite runs the SAME bounded tool-calling loop as normal chat
+    (bot_core.agent_loop) — so campaign specifics can be looked up in the KB."""
+
+    @staticmethod
+    def _resp(content: str):
+        return MagicMock(choices=[MagicMock(message=MagicMock(content=content))])
+
+    async def test_plain_answer_returned_stripped(self, monkeypatch):
         client = MagicMock()
-        client.chat.completions.create = AsyncMock(return_value=MagicMock(
-            choices=[MagicMock(message=MagicMock(content='  "a bird" '))]))
+        client.chat.completions.create = AsyncMock(
+            return_value=self._resp('  "A rich painterly bird-folk prompt in Humblewood" '))
         monkeypatch.setattr(images, "_rewrite_client", lambda: client)
         out = await images.rewrite_prompt("a bird")
-        assert out == "a bird"
+        assert out == "A rich painterly bird-folk prompt in Humblewood"
 
-    async def test_empty_content_raises_after_retry(self, monkeypatch):
-        # Reasoning model can truncate before any content (observed live) —
-        # one retry, then the error lets the caller fall back to the raw prompt.
+    async def test_all_empty_raises(self, monkeypatch):
+        # Every turn empty (reasoning truncation) → the loop's forced final is
+        # empty too → ImageGenError lets the caller fall back to the raw prompt.
         client = MagicMock()
-        client.chat.completions.create = AsyncMock(return_value=MagicMock(
-            choices=[MagicMock(message=MagicMock(content="   "))]))
+        client.chat.completions.create = AsyncMock(return_value=self._resp("   "))
         monkeypatch.setattr(images, "_rewrite_client", lambda: client)
         with pytest.raises(images.ImageGenError, match="empty rewrite"):
             await images.rewrite_prompt("a bird")
-        assert client.chat.completions.create.call_count == 2
+        assert client.chat.completions.create.call_count >= 2
 
-    async def test_empty_then_retry_recovers(self, monkeypatch):
-        empty = MagicMock(choices=[MagicMock(message=MagicMock(content=""))])
-        good = MagicMock(choices=[MagicMock(message=MagicMock(content="a rich bird"))])
+    async def test_empty_then_recovery(self, monkeypatch):
+        # First turn empty (nudged), second a real answer → recovered.
         client = MagicMock()
-        client.chat.completions.create = AsyncMock(side_effect=[empty, good])
+        client.chat.completions.create = AsyncMock(side_effect=[
+            self._resp(""),
+            self._resp("A rich painterly bird-folk prompt in Humblewood"),
+        ])
         monkeypatch.setattr(images, "_rewrite_client", lambda: client)
-        assert await images.rewrite_prompt("a bird") == "a rich bird"
-        assert client.chat.completions.create.call_count == 2
+        assert await images.rewrite_prompt("a bird") == \
+            "A rich painterly bird-folk prompt in Humblewood"
 
-    async def test_api_failure_wrapped(self, monkeypatch):
+    async def test_total_backend_failure_raises(self, monkeypatch):
+        # The agent loop never raises — it returns an apology sentence on total
+        # failure; the sentinel guard must turn that into ImageGenError so the
+        # caller falls back to the raw prompt (not paint the apology).
         client = MagicMock()
         client.chat.completions.create = AsyncMock(side_effect=RuntimeError("boom"))
         monkeypatch.setattr(images, "_rewrite_client", lambda: client)
-        with pytest.raises(images.ImageGenError, match="prompt rewrite failed"):
+        with pytest.raises(images.ImageGenError, match="rewrite"):
             await images.rewrite_prompt("a bird")
+
+    async def test_campaign_lookup_goes_through_kb_tools(self, monkeypatch):
+        """The user-facing capability: the rewrite may query the KB (same tools
+        as normal chat) before answering — e.g. grounding 'Marvin #13'."""
+        import bot_core.agent_loop as agent_loop
+
+        executed: list[str] = []
+
+        async def fake_execute(name, args):
+            executed.append(name)
+            return f"{name} result for {args}"
+
+        monkeypatch.setattr(agent_loop, "execute_tool", fake_execute)
+
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(side_effect=[
+            self._resp('{"tool": "search_kb", "args": {"query": "Marvin #13"}}'),
+            self._resp("A rich painterly prompt with Marvin the Steel Defender golem"),
+        ])
+        monkeypatch.setattr(images, "_rewrite_client", lambda: client)
+
+        out = await images.rewrite_prompt("Marvin #13 guarding a camp")
+        assert "Steel Defender" in out
+        assert executed == ["search_kb"]
 
 
 class TestGenerateImage:
@@ -148,6 +184,48 @@ class TestGenerateImage:
         _, kwargs = client.images.generate.call_args
         assert kwargs["extra_body"] == {"negative_prompt": "humans, text, blurry"}
 
+    async def test_backend_5xx_retried_once(self, monkeypatch):
+        # Observed live: Studio 'Image generation failed' (HTTP 500) mid-run,
+        # recovered on the next attempt. 4xx must NOT retry.
+        monkeypatch.setattr(images, "IMAGE_MODEL", "unsloth/x")
+        monkeypatch.setattr(images, "_warm_chat_reload", AsyncMock())
+        monkeypatch.setattr(images, "ensure_image_loaded", AsyncMock())
+        monkeypatch.setattr(images, "_unload_image", AsyncMock())
+
+        class _Fake5xx(Exception):
+            status_code = 500
+
+        monkeypatch.setattr(images, "APIStatusError", _Fake5xx)
+
+        client = MagicMock()
+        resp = MagicMock()
+        resp.data = [MagicMock(b64_json=_b64_png())]
+        client.images.generate = AsyncMock(side_effect=[_Fake5xx("boom"), resp])
+        monkeypatch.setattr(images, "_rewrite_client", lambda: client)
+
+        out = await images.generate_image("a bird")
+        assert out == _PNG
+        assert client.images.generate.call_count == 2
+
+    async def test_backend_4xx_not_retried(self, monkeypatch):
+        monkeypatch.setattr(images, "IMAGE_MODEL", "unsloth/x")
+        monkeypatch.setattr(images, "_warm_chat_reload", AsyncMock())
+        monkeypatch.setattr(images, "ensure_image_loaded", AsyncMock())
+        monkeypatch.setattr(images, "_unload_image", AsyncMock())
+
+        class _Fake4xx(Exception):
+            status_code = 400
+
+        monkeypatch.setattr(images, "APIStatusError", _Fake4xx)
+
+        client = MagicMock()
+        client.images.generate = AsyncMock(side_effect=_Fake4xx("bad model"))
+        monkeypatch.setattr(images, "_rewrite_client", lambda: client)
+
+        with pytest.raises(_Fake4xx):
+            await images.generate_image("a bird")
+        assert client.images.generate.call_count == 1
+
     async def test_empty_negative_prompt_omitted(self, monkeypatch):
         monkeypatch.setattr(images, "IMAGE_MODEL", "unsloth/x")
         monkeypatch.setattr(images, "IMAGE_NEGATIVE_PROMPT", "")
@@ -203,6 +281,36 @@ class TestGenerateImage:
         with pytest.raises(images.ImageGenError, match="no image data"):
             await images.generate_image("a bird")
         assert unloaded == [True]
+
+
+class TestWarmChatReloadSerialization:
+    """The warm chat-load must never run CONCURRENTLY with an image load —
+    two concurrent Studio model loads stall each other for minutes (observed
+    live: every back-to-back generation idled ~300 s on a stuck load)."""
+
+    async def test_waits_for_generation_lock(self, monkeypatch):
+        import bot_core.images as images_mod
+
+        monkeypatch.setattr(images_mod, "DEFAULT_MODEL", "unsloth/model")
+        ran: list[bool] = []
+
+        async def fake_studio(client, method, path, **kwargs):
+            if path == "/api/inference/loaded-models":
+                return {"data": []}
+            ran.append(True)
+            return {}
+
+        monkeypatch.setattr(images_mod, "_studio", fake_studio)
+
+        # Hold the generation lock (a next generation is in its swap window).
+        images_mod._gen_lock = type(images_mod._gen_lock)()
+        held = images_mod._gen_lock
+        async with held:
+            task = asyncio.create_task(images_mod._warm_chat_reload())
+            await asyncio.sleep(0.2)
+            assert ran == []  # still waiting behind the generation — no race
+        await asyncio.wait_for(task, timeout=5)
+        assert ran == [True]  # ran only after the lock was released
 
 
 class TestCommandHandler:

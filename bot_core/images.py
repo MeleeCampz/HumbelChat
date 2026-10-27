@@ -25,9 +25,11 @@ import os
 import time
 
 import httpx
-from openai import AsyncOpenAI
+from openai import APIStatusError, AsyncOpenAI
 
+from bot_core.agent_loop import run_agent_loop
 from bot_core.ai_client import _create_with_reasoning_fallback
+from bot_core.errors import extract_reply_text
 from config.settings import (
     DEFAULT_MODEL,
     IMAGE_DEFAULT_SIZE,
@@ -71,25 +73,50 @@ async def _image_status(client: httpx.AsyncClient) -> dict:
 
 
 async def ensure_image_loaded() -> None:
-    """Load the configured image model if not resident (evicts chat by design)."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        st = await _image_status(client)
-        if st.get("loaded"):
-            return
-        log.info("loading image model %s (evicts chat model)", IMAGE_MODEL)
-        await _studio(client, "POST", "/api/inference/images/load", json={
-            "model_path": IMAGE_MODEL,
-            "model_kind": "gguf",
-            "gguf_filename": IMAGE_GGUF_FILENAME,
-            "gpu_ids": IMAGE_GPU_IDS,
-        })
-        deadline = time.monotonic() + IMAGE_LOAD_TIMEOUT_S
-        while time.monotonic() < deadline:
-            await asyncio.sleep(10)
-            if (await _image_status(client)).get("loaded"):
-                log.info("image model loaded (resident=%s MiB)", st.get("resident_mib"))
+    """Load the configured image model if not resident (evicts chat by design).
+
+    Hardened 2026-10-27 after back-to-back generation runs: Studio's diffusion
+    slot bookkeeping can be mid-load when we ask (409 'A diffusion load is
+    already in progress' — our own swap-back racing the next request) or a
+    load can STALL without ever reaching ready. Both observed live. Handling:
+    409 → just poll for ready; stalled attempt → unload to clear the stuck
+    state and retry once (speed is not a concern — reliability is).
+    """
+    last_err = ""
+    for attempt in (1, 2):
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            st = await _image_status(client)
+            if st.get("loaded"):
                 return
-        raise ImageGenError(f"image model did not load within {IMAGE_LOAD_TIMEOUT_S:.0f}s")
+            log.info("loading image model %s (attempt %d, evicts chat model)",
+                     IMAGE_MODEL, attempt)
+            try:
+                await _studio(client, "POST", "/api/inference/images/load", json={
+                    "model_path": IMAGE_MODEL,
+                    "model_kind": "gguf",
+                    "gguf_filename": IMAGE_GGUF_FILENAME,
+                    "gpu_ids": IMAGE_GPU_IDS,
+                })
+            except ImageGenError as e:
+                # 409: a load is already in progress (slot bookkeeping) — the
+                # model will become ready; just fall through to polling.
+                if "HTTP 409" not in str(e):
+                    raise
+                log.warning("image load already in progress — polling for ready")
+            deadline = time.monotonic() + IMAGE_LOAD_TIMEOUT_S
+            while time.monotonic() < deadline:
+                await asyncio.sleep(10)
+                fresh = await _image_status(client)
+                if fresh.get("loaded"):
+                    log.info("image model loaded (attempt %d, resident=%s MiB)",
+                             attempt, fresh.get("resident_mib"))
+                    return
+            last_err = f"attempt {attempt}: not ready within {IMAGE_LOAD_TIMEOUT_S:.0f}s"
+        # Not ready in time — clear whatever stuck state Studio holds and retry.
+        log.warning("image load %s — unloading stuck state and retrying", last_err)
+        await _unload_image()
+        await asyncio.sleep(15)
+    raise ImageGenError(f"image model did not load ({last_err})")
 
 
 async def _unload_image() -> None:
@@ -106,14 +133,35 @@ async def _unload_image() -> None:
 async def _warm_chat_reload() -> None:
     """Background: re-resident the chat model after an image generation so the
     next chat turn doesn't pay a cold load. Failure is harmless — Studio
-    auto-loads the chat model on the bot's next completion request."""
+    auto-loads the chat model on the bot's next completion request.
+
+    Serialized on the generation lock (2026-10-27, observed live): a warm
+    chat-load running CONCURRENTLY with the next image load stalls both for
+    minutes — every back-to-back generation idled ~300 s on a stuck image
+    load while the previous generation's warm reload was still in flight.
+    Two concurrent Studio model loads are the trap; serialized, they're just
+    a no-op (chat already resident) or a clean sequential swap. If another
+    generation is queued this simply waits behind it — and by then the image
+    path has evicted chat again anyway, so skipping the redundant load is
+    correct.
+    """
     if not DEFAULT_MODEL:
         return
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            await _studio(client, "POST", "/api/inference/load", json={"model_path": DEFAULT_MODEL})
-    except Exception as e:  # noqa: BLE001 — best-effort by design
-        log.warning("background chat re-load failed (harmless): %s", e)
+    async with _gen_lock:
+        try:
+            # Cheap pre-check: don't even POST when chat is already resident
+            # (the common case right after a generation that failed before
+            # evicting, or a double-scheduled reload).
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                loaded = [m.get("id", "") for m in
+                         (await _studio(client, "GET", "/api/inference/loaded-models")).get("data", [])]
+            if any(DEFAULT_MODEL and m.endswith(DEFAULT_MODEL.split("/")[-1]) for m in loaded):
+                log.debug("chat model already resident — skipping warm reload")
+                return
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                await _studio(client, "POST", "/api/inference/load", json={"model_path": DEFAULT_MODEL})
+        except Exception as e:  # noqa: BLE001 — best-effort by design
+            log.warning("background chat re-load failed (harmless): %s", e)
 
 
 # ── Prompt rewriting (chat model — MUST run before the swap) ──────────────
@@ -135,8 +183,13 @@ _REWRITE_SYSTEM = (
     "in the prompt. Species trait: bird-folk have VERY large, oversized "
     "round googly eyes — clearly bigger than a normal animal's, their most prominent "
     "facial feature. If the image contains bird-folk, give EVERY one of them those "
-    "eyes; if it contains no birds at all, do not mention googly eyes. Reply with the "
-    "rewritten prompt only — no quotes, no commentary."
+    "eyes; if it contains no birds at all, do not mention googly eyes. Campaign "
+    "grounding: when the request references campaign specifics (character names, "
+    "companions, places, items or events — e.g. party members or their gear), FIRST "
+    "look them up with the knowledge-base tools and ground every such detail in what "
+    "you actually find (species, class, appearance, gear) instead of inventing one; "
+    "only then write the final prompt. Reply with the rewritten prompt only — no "
+    "quotes, no commentary."
 )
 
 
@@ -150,36 +203,61 @@ async def rewrite_prompt(text: str) -> str:
     """Expand a short user request into a rich image prompt via the chat model.
 
     Runs on the resident chat model — call this BEFORE ensure_image_loaded().
+    The rewrite goes through the SAME bounded tool-calling loop as normal chat
+    (bot_core.agent_loop) with the SAME knowledge-base tools, so campaign
+    specifics in the request (characters, companions, places, items) are looked
+    up and grounded instead of invented. Speed is not a concern — reliability
+    is: the loop NEVER raises; every failure degrades to a single-turn answer
+    over whatever context was gathered.
     Raises ImageGenError on failure (caller falls back to the raw prompt).
     """
     client = _rewrite_client()
+
+    async def _complete(
+        messages: list[dict], model: str, *, thinking: bool,
+    ) -> str:
+        # Decision turns: reasoning OFF (fast, no leak); the final turn gets a
+        # LOW effort — the chat model is a reasoning model and at default effort
+        # its thinking budget can eat the token cap and leave content empty
+        # (observed live). Same param plumbing + 4xx fallback as the main AI
+        # path (bot_core.ai_client, #20).
+        resp = await asyncio.wait_for(
+            _create_with_reasoning_fallback(
+                client,
+                "low" if thinking else "off",
+                model=model,
+                messages=list(messages),
+                max_tokens=2048,
+            ),
+            timeout=120.0,
+        )
+        return extract_reply_text(resp, default="").strip()
+
     try:
-        # The chat model is a reasoning model — without an explicit low effort
-        # the thinking budget eats the token cap and ``content`` comes back
-        # empty (observed live, intermittently even WITH low effort: one run
-        # rambled ~700 reasoning tokens and truncated before any content).
-        # Same param plumbing + 4xx fallback as the main AI path
-        # (bot_core.ai_client, #20); generous cap + one retry on empty.
-        rewritten = ""
-        for attempt in (1, 2):
-            resp = await asyncio.wait_for(
-                _create_with_reasoning_fallback(
-                    client,
-                    "low",
-                    model=DEFAULT_MODEL,
-                    messages=[
-                        {"role": "system", "content": _REWRITE_SYSTEM},
-                        {"role": "user", "content": text},
-                    ],
-                    max_tokens=2048,
-                ),
-                timeout=120.0,
-            )
-            rewritten = (resp.choices[0].message.content or "").strip().strip('"')
-            if rewritten:
-                return rewritten
-            log.warning("prompt rewrite attempt %d came back empty — retrying", attempt)
-        raise ImageGenError("empty rewrite")
+        out, meta = await run_agent_loop(
+            complete=_complete,
+            model=DEFAULT_MODEL,
+            system_prompt=_REWRITE_SYSTEM,
+            user_message=text,
+        )
+        out = (out or "").strip().strip('"')
+        if not out:
+            raise ImageGenError("empty rewrite")
+        # The loop NEVER raises — on total backend failure it returns an
+        # apology sentence instead of a prompt. Those sentinels must fall back
+        # to the RAW user prompt, not be painted.
+        if meta.fallback and any(
+            s in out.lower()
+            for s in ("unexpected error", "couldn't finish that lookup")
+        ):
+            raise ImageGenError(f"rewrite unusable ({meta.fallback_reason})")
+        log.info(
+            "prompt rewrite done: %d iteration(s), tools=%s fallback=%s%s",
+            meta.iterations, ",".join(meta.tool_calls) or "-",
+            meta.fallback,
+            f" ({meta.fallback_reason})" if meta.fallback else "",
+        )
+        return out
     except ImageGenError:
         raise
     except Exception as e:  # noqa: BLE001 — fall back to raw prompt in the caller
@@ -218,27 +296,44 @@ async def generate_image(prompt: str, size: int | None = None) -> bytes:
             await ensure_image_loaded()
             log.info("generating image (%dx%d): %s", side, side, prompt[:80])
             t0 = time.monotonic()
-            resp = await asyncio.wait_for(
-                client.images.generate(
-                    model=IMAGE_MODEL,
-                    prompt=prompt,
-                    n=1,
-                    size=f"{side}x{side}",  # SDK maps this to width/height
-                    response_format="b64_json",
-                    # Studio's /v1 spec accepts negative_prompt; this openai SDK
-                    # version has no native kwarg for it → extra_body passthrough.
-                    extra_body={"negative_prompt": IMAGE_NEGATIVE_PROMPT}
-                    if IMAGE_NEGATIVE_PROMPT
-                    else None,
-                ),
-                timeout=IMAGE_GEN_TIMEOUT_S,
-            )
-            b64 = resp.data[0].b64_json
-            if not b64:
-                raise ImageGenError("backend returned no image data")
-            png = base64.b64decode(b64)
-            log.info("image generated in %.1f s (%d bytes)", time.monotonic() - t0, len(png))
-            return png
+            # One retry on transient backend 5xx — observed live: Studio
+            # 'Image generation failed' (HTTP 500) mid-run, recovered on the
+            # next attempt. 4xx is a real config/prompt error → no retry.
+            for gen_attempt in (1, 2):
+                try:
+                    resp = await asyncio.wait_for(
+                        client.images.generate(
+                            model=IMAGE_MODEL,
+                            prompt=prompt,
+                            n=1,
+                            size=f"{side}x{side}",  # SDK maps this to width/height
+                            response_format="b64_json",
+                            # Studio's /v1 spec accepts negative_prompt; this
+                            # openai SDK version has no native kwarg for it →
+                            # extra_body passthrough.
+                            extra_body={"negative_prompt": IMAGE_NEGATIVE_PROMPT}
+                            if IMAGE_NEGATIVE_PROMPT
+                            else None,
+                        ),
+                        timeout=IMAGE_GEN_TIMEOUT_S,
+                    )
+                    b64 = resp.data[0].b64_json
+                    if not b64:
+                        raise ImageGenError("backend returned no image data")
+                    png = base64.b64decode(b64)
+                    log.info("image generated in %.1f s (%d bytes)",
+                             time.monotonic() - t0, len(png))
+                    return png
+                except (APIStatusError, ImageGenError) as e:
+                    transient = (
+                        isinstance(e, APIStatusError) and e.status_code is not None
+                        and e.status_code >= 500
+                    ) or isinstance(e, ImageGenError)
+                    if gen_attempt == 2 or not transient:
+                        raise
+                    log.warning("image generation attempt 1 failed (%s: %s) — retrying",
+                               e.__class__.__name__, str(e)[:120])
+                    await asyncio.sleep(5.0)
         finally:
             # ALWAYS swap back, even on failure — never leave the image model
             # resident (it would keep evicting the chat model).
