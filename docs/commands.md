@@ -103,8 +103,8 @@ its chat API. Config-gated: with `TTS_MODEL` empty the command replies with a
 ```
 
 Paint an image from a short prompt via the Unsloth Studio diffusion model and
-send it as a PNG. Base style: semi-realistic painterly fantasy with soft
-watercolor touches, set in Humblewood (the D&D world). The rewrite enforces
+send it as a PNG. Base style: semi-realistic fantasy illustration (explicitly
+no painterly/watercolor look), set in Humblewood (the D&D world). The rewrite enforces
 "no humans — only animals or humanoid animals (Humbelfolk style)" drawn as
 upright D&D player characters in adventurer gear, bird-folk always get their
 signature VERY large googly eyes (only when birds are in the picture), no
