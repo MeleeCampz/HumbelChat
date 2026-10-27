@@ -136,6 +136,17 @@ IMAGE_GPU_IDS: list[int] = [
 # Working set scales with resolution (10 GB+ at high res) — cap the default.
 IMAGE_DEFAULT_SIZE: int = _safe_int(os.getenv("IMAGE_DEFAULT_SIZE"), 1024)
 IMAGE_MAX_SIZE: int = _safe_int(os.getenv("IMAGE_MAX_SIZE"), 2048)
+# Negative prompt for the diffusion model (what to steer AWAY from). Mirrors
+# the hard rules of the rewrite system prompt (no humans / no text / no modern
+# objects) plus standard quality guards — as negative conditioning, which Qwen-
+# Image supports as a first-class input. Override via IMAGE_NEGATIVE_PROMPT.
+_DEFAULT_IMAGE_NEGATIVE_PROMPT = (
+    "humans, human, person, realistic human face,"
+    " text, words, letters, typography, watermark, signature, logo, username,"
+    " modern objects, car, smartphone, plastic, neon,"
+    " blurry, lowres, bad anatomy, extra limbs, deformed, cropped out of frame"
+)
+IMAGE_NEGATIVE_PROMPT: str = os.getenv("IMAGE_NEGATIVE_PROMPT", _DEFAULT_IMAGE_NEGATIVE_PROMPT).strip()
 IMAGE_GEN_TIMEOUT_S: float = _safe_float(os.getenv("IMAGE_GEN_TIMEOUT_S"), 600.0)
 IMAGE_LOAD_TIMEOUT_S: float = _safe_float(os.getenv("IMAGE_LOAD_TIMEOUT_S"), 300.0)
 

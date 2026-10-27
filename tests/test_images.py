@@ -130,6 +130,41 @@ class TestGenerateImage:
         assert kwargs["model"] == "unsloth/Qwen-Image-2.1-Turbo-GGUF"
         assert kwargs["size"] == "512x512"
 
+    async def test_negative_prompt_passed_via_extra_body(self, monkeypatch):
+        # Studio accepts negative_prompt; this SDK version has no native kwarg.
+        monkeypatch.setattr(images, "IMAGE_MODEL", "unsloth/x")
+        monkeypatch.setattr(images, "IMAGE_NEGATIVE_PROMPT", "humans, text, blurry")
+        monkeypatch.setattr(images, "_warm_chat_reload", AsyncMock())
+        monkeypatch.setattr(images, "ensure_image_loaded", AsyncMock())
+        monkeypatch.setattr(images, "_unload_image", AsyncMock())
+
+        client = MagicMock()
+        resp = MagicMock()
+        resp.data = [MagicMock(b64_json=_b64_png())]
+        client.images.generate = AsyncMock(return_value=resp)
+        monkeypatch.setattr(images, "_rewrite_client", lambda: client)
+
+        await images.generate_image("a bird")
+        _, kwargs = client.images.generate.call_args
+        assert kwargs["extra_body"] == {"negative_prompt": "humans, text, blurry"}
+
+    async def test_empty_negative_prompt_omitted(self, monkeypatch):
+        monkeypatch.setattr(images, "IMAGE_MODEL", "unsloth/x")
+        monkeypatch.setattr(images, "IMAGE_NEGATIVE_PROMPT", "")
+        monkeypatch.setattr(images, "_warm_chat_reload", AsyncMock())
+        monkeypatch.setattr(images, "ensure_image_loaded", AsyncMock())
+        monkeypatch.setattr(images, "_unload_image", AsyncMock())
+
+        client = MagicMock()
+        resp = MagicMock()
+        resp.data = [MagicMock(b64_json=_b64_png())]
+        client.images.generate = AsyncMock(return_value=resp)
+        monkeypatch.setattr(images, "_rewrite_client", lambda: client)
+
+        await images.generate_image("a bird")
+        _, kwargs = client.images.generate.call_args
+        assert kwargs["extra_body"] is None
+
     async def test_failed_generation_still_unloads(self, monkeypatch):
         """The critical invariant: even a failed generation swaps the chat back."""
         monkeypatch.setattr(images, "IMAGE_MODEL", "unsloth/x")

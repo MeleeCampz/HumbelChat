@@ -32,6 +32,7 @@ from config.settings import (
     DEFAULT_MODEL,
     IMAGE_DEFAULT_SIZE,
     IMAGE_GEN_TIMEOUT_S,
+    IMAGE_NEGATIVE_PROMPT,
     IMAGE_GGUF_FILENAME,
     IMAGE_GPU_IDS,
     IMAGE_LOAD_TIMEOUT_S,
@@ -222,6 +223,11 @@ async def generate_image(prompt: str, size: int | None = None) -> bytes:
                     n=1,
                     size=f"{side}x{side}",  # SDK maps this to width/height
                     response_format="b64_json",
+                    # Studio's /v1 spec accepts negative_prompt; this openai SDK
+                    # version has no native kwarg for it → extra_body passthrough.
+                    extra_body={"negative_prompt": IMAGE_NEGATIVE_PROMPT}
+                    if IMAGE_NEGATIVE_PROMPT
+                    else None,
                 ),
                 timeout=IMAGE_GEN_TIMEOUT_S,
             )
