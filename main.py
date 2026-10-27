@@ -461,6 +461,20 @@ async def speak_command(interaction: discord.Interaction, text: str) -> None:
     await handle_speak_command(interaction, text=text)
 
 
+@bot.tree.command(name="generate_image", description="Paint an image from a short prompt (whimsical storybook style).")
+@app_commands.describe(
+    prompt="What to paint (short is fine — it gets expanded into a rich prompt)",
+    raw="Skip the AI prompt rewrite and use your text verbatim",
+    size="Optional square edge length in pixels (default 1024, max 2048)",
+)
+async def generate_image_command(
+    interaction: discord.Interaction, prompt: str, raw: bool = False, size: str | None = None
+) -> None:
+    """Image generation — delegated to commands/generate_image_command.py."""
+    from commands.generate_image_command import handle_generate_image_command
+    await handle_generate_image_command(interaction, prompt=prompt, raw=raw, size=size)
+
+
 @bot.tree.command(name="upload_kb", description="Upload a file or URL into the knowledge base.")
 @app_commands.describe(
     file="File attachment to upload",

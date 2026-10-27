@@ -119,6 +119,26 @@ TTS_GPU_IDS: list[int] = [
     if part.lstrip("-").isdigit()
 ]
 
+# ── Image generation (/generate_image, #42) ────────────────────────
+# Unsloth Studio diffusion via the OpenAI-compatible /v1/images/generations
+# endpoint (SAME host as chat). Swap-based: loading the image model evicts
+# the resident chat model (Studio design), so the bot generates inside a
+# no-chat-calls window and swaps the chat back afterwards.
+# Empty IMAGE_MODEL = feature disabled (command replies "not configured").
+IMAGE_MODEL: str = os.getenv("IMAGE_MODEL", "")
+# Load params for single-file GGUF image repos (Studio images/load):
+IMAGE_GGUF_FILENAME: str = os.getenv("IMAGE_GGUF_FILENAME", "qwen-image-2.1-turbo-Q4_K_M.gguf")
+IMAGE_GPU_IDS: list[int] = [
+    int(part)
+    for part in os.getenv("IMAGE_GPU_IDS", "1").replace(",", " ").split()
+    if part.lstrip("-").isdigit()
+]
+# Working set scales with resolution (10 GB+ at high res) — cap the default.
+IMAGE_DEFAULT_SIZE: int = _safe_int(os.getenv("IMAGE_DEFAULT_SIZE"), 1024)
+IMAGE_MAX_SIZE: int = _safe_int(os.getenv("IMAGE_MAX_SIZE"), 2048)
+IMAGE_GEN_TIMEOUT_S: float = _safe_float(os.getenv("IMAGE_GEN_TIMEOUT_S"), 600.0)
+IMAGE_LOAD_TIMEOUT_S: float = _safe_float(os.getenv("IMAGE_LOAD_TIMEOUT_S"), 300.0)
+
 # ════════════════════════════════════
 #  CHARACTER defaults (per-char in characters.json)
 # ════════════════════════════════════

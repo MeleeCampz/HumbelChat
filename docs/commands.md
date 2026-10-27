@@ -96,6 +96,24 @@ its chat API. Config-gated: with `TTS_MODEL` empty the command replies with a
 "not configured" hint instead of failing. See the TTS section in `.env.example`
 (`TTS_MODEL`, `TTS_VOICE`, `TTS_URL`, `TTS_API_KEY`, `TTS_TIMEOUT_S`, `TTS_MAX_CHARS`).
 
+### `/generate_image`
+
+```
+/generate_image <prompt> [raw: false] [size: 1024]
+```
+
+Paint an image from a short prompt (whimsical storybook style) via the Unsloth
+Studio diffusion model and send it as a PNG. The prompt is first expanded into
+a rich image prompt by the CHAT model (no extra model involved — `raw: true`
+skips the rewrite). Swap-based under the hood: loading the image model evicts
+the resident chat model (Studio design), generation runs inside a no-chat-calls
+window, and the chat model is swapped back automatically afterwards — expect
+tens of seconds per image. Size is capped (`IMAGE_MAX_SIZE`, default 2048)
+because the working set scales with resolution (10 GB+ at high res).
+Config-gated: with `IMAGE_MODEL` empty the command replies with a "not
+configured" hint. See the image section in `.env` (`IMAGE_MODEL`,
+`IMAGE_GGUF_FILENAME`, `IMAGE_GPU_IDS`, `IMAGE_DEFAULT_SIZE`, `IMAGE_MAX_SIZE`).
+
 ### `/roll_items`
 
 ```

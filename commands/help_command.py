@@ -53,6 +53,7 @@ _CATEGORIES: dict[str, str] = {
     "summarize": "Utility",
     "translate": "Utility",
     "speak": "Utility",
+    "generate_image": "Utility",
     "sync": "Maintenance",
 }
 

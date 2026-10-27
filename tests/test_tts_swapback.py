@@ -92,14 +92,14 @@ class TestOllamaBackend:
     async def test_ensure_model_loaded_is_noop(self, monkeypatch):
         # Ollama loads on demand — no Studio /api/inference/load round-trip.
         monkeypatch.setattr(tts, "TTS_BACKEND", "ollama")
-        monkeypatch.setattr(tts, "TTS_URL", "http://embedder-qwen:11434/v1")
+        monkeypatch.setattr(tts, "TTS_URL", "http://tts-ollama:11434/v1")
         assert await tts._ensure_model_loaded() is True
 
     async def test_no_swap_back_scheduled(self, monkeypatch):
         # Separate process — an Ollama TTS load never evicts Studio's chat model.
         monkeypatch.setattr(tts, "TTS_BACKEND", "ollama")
         monkeypatch.setattr(tts, "DEFAULT_MODEL", "unsloth/model")
-        monkeypatch.setattr(tts, "TTS_URL", "http://embedder-qwen:11434/v1")
+        monkeypatch.setattr(tts, "TTS_URL", "http://tts-ollama:11434/v1")
 
         def boom() -> None:
             raise AssertionError("swap-back must not run for the ollama backend")
