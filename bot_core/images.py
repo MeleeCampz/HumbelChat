@@ -125,7 +125,10 @@ _REWRITE_SYSTEM = (
     "user asked for; do not add named characters or brands they didn't mention. Hard "
     "rules: NO humans — only animals or humanoid animals (bird-folk and other beast-"
     "folk in the D&D Humbelfolk style); no text or lettering in the image; no modern "
-    "objects. Reply with the rewritten prompt only — no quotes, no commentary."
+    "objects. Species trait: bird-folk have big round googly eyes — their signature "
+    "look. If the image contains bird-folk, give EVERY one of them those eyes; if it "
+    "contains no birds at all, do not mention googly eyes. Reply with the rewritten "
+    "prompt only — no quotes, no commentary."
 )
 
 
