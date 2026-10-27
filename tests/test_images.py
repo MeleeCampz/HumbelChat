@@ -283,6 +283,26 @@ class TestGenerateImage:
         assert unloaded == [True]
 
 
+class TestRewriteSystemPolicy:
+    """Base-prompt policy strings (regression guards for user decisions)."""
+
+    def test_luma_gogglies_exception(self):
+        import bot_core.images as images_mod
+        s = images_mod._REWRITE_SYSTEM
+        assert "Column Bidae (Luma) does NOT get googly eyes" in s
+
+    def test_character_style_lines_never_copied_into_prompt(self):
+        import bot_core.images as images_mod
+        s = images_mod._REWRITE_SYSTEM
+        assert "do NOT copy them into the final prompt" in s
+
+    def test_no_painterly_style_prescribed(self):
+        # 'painterly' may only appear as a prohibition, never as the style itself.
+        import bot_core.images as images_mod
+        s = images_mod._REWRITE_SYSTEM.lower()
+        assert "semi-realistic painterly" not in s
+
+
 class TestWarmChatReloadSerialization:
     """The warm chat-load must never run CONCURRENTLY with an image load —
     two concurrent Studio model loads stall each other for minutes (observed

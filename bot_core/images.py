@@ -166,7 +166,7 @@ async def _warm_chat_reload() -> None:
 
 # ── Prompt rewriting (chat model — MUST run before the swap) ──────────────
 _REWRITE_SYSTEM = (
-    "You are a prompt engineer for a semi-realistic painterly fantasy image model set "
+    "You are a prompt engineer for a semi-realistic fantasy image model set "
     "in Humblewood, a world from the Dungeons & Dragons universe (D&D 5e setting). "
     "Rewrite the user's short request into ONE rich paragraph (max ~80 words) that the "
     "image model can render directly: concrete subject, setting, lighting, mood and "
@@ -182,13 +182,19 @@ _REWRITE_SYSTEM = (
     "in the prompt. Species trait: bird-folk have VERY large, oversized "
     "round googly eyes — clearly bigger than a normal animal's, their most prominent "
     "facial feature. If the image contains bird-folk, give EVERY one of them those "
-    "eyes; if it contains no birds at all, do not mention googly eyes. Campaign "
+    "eyes; if it contains no birds at all, do not mention googly eyes. Exception: "
+    "Column Bidae (Luma) does NOT get googly eyes — she keeps her canonical small, "
+    "narrowed fierce dark eyes from her character sheet. Campaign "
     "grounding: when the request references campaign specifics (character names, "
     "companions, places, items or events — e.g. party members or their gear), FIRST "
     "look them up with the knowledge-base tools and ground every such detail in what "
     "you actually find (species, class, appearance, gear) instead of inventing one; "
-    "only then write the final prompt. Reply with the rewritten prompt only — no "
-    "quotes, no commentary."
+    "only then write the final prompt. Character sheets also carry per-character "
+    "rendering-style lines (e.g. 'photorealistic CGI render…', 'digital painting…' "
+    "plus palette/lighting notes): use those ONLY to understand how the character "
+    "looks — do NOT copy them into the final prompt; its style comes solely from the "
+    "base style above. Reply with the rewritten prompt only — no quotes, no "
+    "commentary."
 )
 
 
