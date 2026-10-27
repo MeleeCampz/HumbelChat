@@ -286,10 +286,13 @@ class TestGenerateImage:
 class TestRewriteSystemPolicy:
     """Base-prompt policy strings (regression guards for user decisions)."""
 
-    def test_luma_gogglies_exception(self):
+    def test_gogglies_only_column_bidae(self):
+        # 2026-10-27 correction: NOBODY has googly eyes except Column Bidae (he).
         import bot_core.images as images_mod
         s = images_mod._REWRITE_SYSTEM
-        assert "Column Bidae (Luma) does NOT get googly eyes" in s
+        assert "Googly eyes are NOT a species trait" in s
+        assert "The single exception is Column Bidae (he)" in s
+        assert "give EVERY one of them those" not in s
 
     def test_character_style_lines_never_copied_into_prompt(self):
         import bot_core.images as images_mod

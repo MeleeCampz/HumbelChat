@@ -106,8 +106,9 @@ Paint an image from a short prompt via the Unsloth Studio diffusion model and
 send it as a PNG. Base style: semi-realistic fantasy illustration (explicitly
 no painterly/watercolor look), set in Humblewood (the D&D world). The rewrite enforces
 "no humans — only animals or humanoid animals (Humbelfolk style)" drawn as
-upright D&D player characters in adventurer gear, bird-folk always get their
-signature VERY large googly eyes (only when birds are in the picture), no
+upright D&D player characters in adventurer gear. Googly eyes are NOT a
+bird-folk trait — only Column Bidae (Luma) has them, and they're mentioned only
+when he's in the picture. No
 modern objects, and no unsolicited text — but user-requested text (signs,
 book titles, labels) is included verbatim and NOT suppressed by the negative
 prompt. The prompt is first
