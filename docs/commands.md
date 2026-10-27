@@ -102,10 +102,12 @@ its chat API. Config-gated: with `TTS_MODEL` empty the command replies with a
 /generate_image <prompt> [raw: false] [size: 1024]
 ```
 
-Paint an image from a short prompt (whimsical storybook style) via the Unsloth
-Studio diffusion model and send it as a PNG. The prompt is first expanded into
-a rich image prompt by the CHAT model (no extra model involved — `raw: true`
-skips the rewrite). Swap-based under the hood: loading the image model evicts
+Paint an image from a short prompt via the Unsloth Studio diffusion model and
+send it as a PNG. Base style: whimsical watercolor storybook, set in Humblewood
+(the D&D world), and the rewrite enforces "no humans — only animals or humanoid
+animals (Humbelfolk style)" plus no text/modern objects. The prompt is first
+expanded into a rich image prompt by the CHAT model (no extra model involved —
+`raw: true` skips the rewrite entirely, sending your text verbatim). Swap-based under the hood: loading the image model evicts
 the resident chat model (Studio design), generation runs inside a no-chat-calls
 window, and the chat model is swapped back automatically afterwards — expect
 tens of seconds per image. Size is capped (`IMAGE_MAX_SIZE`, default 2048)
