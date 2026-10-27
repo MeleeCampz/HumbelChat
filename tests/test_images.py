@@ -283,6 +283,36 @@ class TestGenerateImage:
         assert unloaded == [True]
 
 
+class TestPreparePrompt:
+    """prepare_prompt: shared final-prompt step (live path + dry run, #65b)."""
+
+    async def test_raw_passthrough(self):
+        assert await images.prepare_prompt("  verbatim bird ", raw=True) == "verbatim bird"
+
+    async def test_empty_returns_empty_without_model_call(self, monkeypatch):
+        called = False
+
+        async def fake_rewrite(text):
+            nonlocal called
+            called = True
+            return "x"
+
+        monkeypatch.setattr(images, "rewrite_prompt", fake_rewrite)
+        assert await images.prepare_prompt("   ") == ""
+        assert not called
+
+    async def test_rewrite_used_when_not_raw(self, monkeypatch):
+        monkeypatch.setattr(
+            images, "rewrite_prompt", AsyncMock(return_value="rich bird"))
+        assert await images.prepare_prompt("bird") == "rich bird"
+
+    async def test_rewrite_failure_falls_back_to_raw(self, monkeypatch):
+        monkeypatch.setattr(
+            images, "rewrite_prompt",
+            AsyncMock(side_effect=images.ImageGenError("backend down")))
+        assert await images.prepare_prompt("bird") == "bird"
+
+
 class TestRewriteSystemPolicy:
     """Base-prompt policy strings (regression guards for user decisions)."""
 
@@ -368,7 +398,8 @@ class TestCommandHandler:
     async def test_raw_skips_rewrite(self, monkeypatch):
         import commands.generate_image_command as cmd
         monkeypatch.setattr(cmd, "image_gen_configured", lambda: True)
-        monkeypatch.setattr(cmd, "rewrite_prompt", AsyncMock())
+        prepared = AsyncMock(side_effect=lambda text, raw=False: text)
+        monkeypatch.setattr(cmd, "prepare_prompt", prepared)
         generated: list[str] = []
 
         async def fake_gen(prompt, size=None):
@@ -378,11 +409,11 @@ class TestCommandHandler:
         monkeypatch.setattr(cmd, "generate_image", fake_gen)
         inter, followups = self._interaction()
         await handle_generate_image_command(inter, prompt="verbatim bird", raw=True)
-        cmd.rewrite_prompt.assert_not_called()
+        prepared.assert_awaited_once_with("verbatim bird", raw=True)
         assert generated == ["verbatim bird"]
         assert "file" in followups[0]
 
-    async def test_rewrite_used_when_not_raw_and_falls_back_on_failure(self, monkeypatch):
+    async def test_prepare_prompt_used_when_not_raw(self, monkeypatch):
         import commands.generate_image_command as cmd
         monkeypatch.setattr(cmd, "image_gen_configured", lambda: True)
         generated: list[str] = []
@@ -394,23 +425,32 @@ class TestCommandHandler:
         monkeypatch.setattr(cmd, "generate_image", fake_gen)
         inter, followups = self._interaction()
 
-        # rewrite succeeds → rewritten prompt is what gets generated
-        monkeypatch.setattr(cmd, "rewrite_prompt", AsyncMock(return_value="rich bird"))
+        # prepare_prompt (rewrite inside) → its output is what gets generated
+        monkeypatch.setattr(cmd, "prepare_prompt", AsyncMock(return_value="rich bird"))
         await handle_generate_image_command(inter, prompt="bird")
         assert generated == ["rich bird"]
-
-        # rewrite fails → falls back to the raw prompt (no error reply)
-        generated.clear()
-        followups.clear()
-        monkeypatch.setattr(cmd, "rewrite_prompt", AsyncMock(side_effect=images.ImageGenError("down")))
-        await handle_generate_image_command(inter, prompt="bird")
-        assert generated == ["bird"]
         assert "file" in followups[0]
+
+    async def test_dry_run_returns_prompt_without_generating(self, monkeypatch):
+        import commands.generate_image_command as cmd
+        monkeypatch.setattr(cmd, "image_gen_configured", lambda: True)
+        monkeypatch.setattr(cmd, "prepare_prompt", AsyncMock(return_value="rich bird"))
+
+        def explode(prompt, size=None):  # must never be called in dry run
+            raise AssertionError("generate_image called during dry run")
+
+        monkeypatch.setattr(cmd, "generate_image", explode)
+        inter, followups = self._interaction()
+        await handle_generate_image_command(inter, prompt="bird", dry_run=True)
+        assert len(followups) == 1
+        assert "Dry run" in followups[0]["content"]
+        assert "rich bird" in followups[0]["content"]
+        assert "file" not in followups[0]
 
     async def test_generation_failure_replies_error(self, monkeypatch):
         import commands.generate_image_command as cmd
         monkeypatch.setattr(cmd, "image_gen_configured", lambda: True)
-        monkeypatch.setattr(cmd, "rewrite_prompt", AsyncMock(return_value="rich"))
+        monkeypatch.setattr(cmd, "prepare_prompt", AsyncMock(return_value="rich"))
 
         async def boom(prompt, size=None):
             raise images.ImageGenError("studio 500")

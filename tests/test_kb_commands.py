@@ -210,9 +210,9 @@ class TestMessageUploads:
         assert any("long_notes" in n for n in names)
 
     @pytest.mark.asyncio
-    async def test_message_oversized_attachment_rejected_before_read(self, temp_kb_dir):
+    async def test_message_oversized_text_attachment_rejected_before_read(self, temp_kb_dir):
         attachment = MagicMock()
-        attachment.filename = "huge.bin"
+        attachment.filename = "huge.txt"
         attachment.size = 99 * 1024 * 1024  # over the 20 MB cap
         attachment.read = AsyncMock()  # must NOT be called
 
@@ -227,6 +227,53 @@ class TestMessageUploads:
         from kb.storage import list_kb_files
         names = [d["name"] for d in list_kb_files(temp_kb_dir, recursive=True)]
         assert not any("huge" in n for n in names)
+
+    @pytest.mark.asyncio
+    async def test_message_image_attachment_skipped_silently(self, temp_kb_dir):
+        """#64: dropping an image into the channel (no upload intent) must not
+        answer 'Upload rejected' — non-KB file types are skipped, no reply."""
+        attachment = MagicMock()
+        attachment.filename = "screenshot.png"
+        attachment.size = 123456
+        attachment.content_type = "image/png"
+        attachment.read = AsyncMock()  # must NOT be called
+
+        message = self._message([attachment])
+        with patch("kb.storage.KB_PATH", temp_kb_dir):
+            from commands.kb_commands import handle_message_uploads
+            await handle_message_uploads(message)
+
+        attachment.read.assert_not_called()
+        message.channel.send.assert_not_called()  # no reply at all
+        from kb.storage import list_kb_files
+        names = [d["name"] for d in list_kb_files(temp_kb_dir, recursive=True)]
+        assert not any("screenshot" in n for n in names)
+
+    @pytest.mark.asyncio
+    async def test_message_mixed_text_and_image(self, temp_kb_dir, monkeypatch):
+        """#64: only the KB-supported attachment is stored; the image is skipped."""
+        text_att = MagicMock()
+        text_att.filename = "notes.md"
+        text_att.size = len(b"# Notes")
+        text_att.read = AsyncMock(return_value=b"# Notes")
+        img_att = MagicMock()
+        img_att.filename = "pic.jpg"
+        img_att.size = 10
+        img_att.content_type = "image/jpeg"
+        img_att.read = AsyncMock()
+
+        monkeypatch.setattr(
+            "kb.retrievers.update_kb_document", AsyncMock(return_value=True), raising=False)
+
+        message = self._message([img_att, text_att])
+        with patch("kb.storage.KB_PATH", temp_kb_dir):
+            from commands.kb_commands import handle_message_uploads
+            await handle_message_uploads(message)
+
+        img_att.read.assert_not_called()
+        sent = " ".join(str(c) for c in message.channel.send.call_args_list)
+        assert "notes.md" in sent          # text stored + summarized
+        assert "rejected" not in sent.lower()  # no error about the image
 
     @pytest.mark.asyncio
     async def test_on_message_routes_attachments_to_upload_handler(self, monkeypatch):

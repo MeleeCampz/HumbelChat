@@ -238,6 +238,7 @@ async def rewrite_prompt(text: str) -> str:
         )
         return extract_reply_text(resp, default="").strip()
 
+    log.info("prompt rewrite started: %s", text[:120])
     try:
         out, meta = await run_agent_loop(
             complete=_complete,
@@ -257,10 +258,11 @@ async def rewrite_prompt(text: str) -> str:
         ):
             raise ImageGenError(f"rewrite unusable ({meta.fallback_reason})")
         log.info(
-            "prompt rewrite done: %d iteration(s), tools=%s fallback=%s%s",
+            "prompt rewrite done: %d iteration(s), tools=%s fallback=%s%s — %s",
             meta.iterations, ",".join(meta.tool_calls) or "-",
             meta.fallback,
             f" ({meta.fallback_reason})" if meta.fallback else "",
+            out[:200] + ("…" if len(out) > 200 else ""),
         )
         return out
     except ImageGenError:
@@ -287,6 +289,26 @@ def resolve_size(raw: str | None) -> int | None:
     return min(n, IMAGE_MAX_SIZE)
 
 
+async def prepare_prompt(text: str, raw: bool = False) -> str:
+    """Final prompt for the image backend: rewrite via the chat model unless
+    ``raw`` (verbatim passthrough).  A failed rewrite degrades to the raw
+    text (never blocks a generation over a rewrite hiccup).
+
+    Shared by the live path and the dry-run mode (#65b) so both see exactly
+    what would be sent.
+    """
+    text = (text or "").strip()
+    if not text:
+        return ""
+    if raw:
+        return text
+    try:
+        return await rewrite_prompt(text)
+    except ImageGenError as exc:
+        log.warning("prompt rewrite failed (%s) — using the raw prompt", exc)
+        return text
+
+
 async def generate_image(prompt: str, size: int | None = None) -> bytes:
     """Generate one image and return PNG bytes.
 
@@ -299,6 +321,12 @@ async def generate_image(prompt: str, size: int | None = None) -> bytes:
         client = _rewrite_client()  # reused for images.generate (same host)
         try:
             await ensure_image_loaded()
+            # #66: full debug trail of exactly what goes to the backend —
+            # dev.log runs at DEBUG so the complete prompt + negative prompt
+            # are inspectable after the fact.
+            log.debug("final image prompt (%d chars): %s", len(prompt), prompt)
+            if IMAGE_NEGATIVE_PROMPT:
+                log.debug("image negative prompt: %s", IMAGE_NEGATIVE_PROMPT)
             log.info("generating image (%dx%d): %s", side, side, prompt[:80])
             t0 = time.monotonic()
             # One retry on transient backend 5xx — observed live: Studio

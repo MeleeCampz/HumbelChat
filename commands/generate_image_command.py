@@ -21,8 +21,8 @@ from bot_core.images import (
     ImageGenError,
     generate_image,
     image_gen_configured,
+    prepare_prompt,
     resolve_size,
-    rewrite_prompt,
 )
 
 log = logging.getLogger("bot.commands.generate_image")
@@ -31,9 +31,18 @@ _PROMPT_PREVIEW_CHARS = 80
 
 
 async def handle_generate_image_command(
-    interaction: discord.Interaction, prompt: str, raw: bool = False, size: str | None = None
+    interaction: discord.Interaction,
+    prompt: str,
+    raw: bool = False,
+    size: str | None = None,
+    dry_run: bool = False,
 ) -> None:
-    """Generate an image from ``prompt`` and send it as a PNG message."""
+    """Generate an image from ``prompt`` and send it as a PNG message.
+
+    ``dry_run`` (#65b): do the prompt work (rewrite unless ``raw``) and reply
+    with the FINAL prompt that would be sent to the image backend — no model
+    swap, no generation. For iterating on prompts without burning generations.
+    """
     await interaction.response.defer()
 
     if not image_gen_configured():
@@ -55,12 +64,17 @@ async def handle_generate_image_command(
         return
 
     # 1) Rewrite FIRST, on the resident chat model (no image loaded yet).
-    final_prompt = prompt
-    if not raw:
-        try:
-            final_prompt = await rewrite_prompt(prompt)
-        except ImageGenError as e:
-            log.warning("prompt rewrite failed (%s) — using the raw prompt", e)
+    final_prompt = await prepare_prompt(prompt, raw=raw)
+
+    # Dry run (#65b): show exactly what would be sent — no swap, no image.
+    if dry_run:
+        log.info("dry-run: returning final prompt without generating (%d chars)",
+                 len(final_prompt))
+        await interaction.followup.send(
+            "🔍 **Dry run — nothing generated.** Final prompt that would be sent:\n\n" +
+            f"```\n{final_prompt}\n```"
+        )
+        return
 
     # 2) The no-chat-calls window: hold the AI slot for load→generate→unload.
     try:

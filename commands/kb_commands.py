@@ -8,7 +8,12 @@ import pathlib
 import discord
 import httpx
 
-from kb.storage import validate_upload_async, list_kb_files_async
+from kb.storage import (
+    ALLOWED_EXTENSIONS,
+    _infer_extension,
+    list_kb_files_async,
+    validate_upload_async,
+)
 
 log = logging.getLogger("bot.commands.kb")
 
@@ -139,6 +144,16 @@ async def handle_message_uploads(message: discord.Message) -> None:
     channel = message.channel
     for attachment in message.attachments:
         fname = attachment.filename or "attachment"
+        # #64: a plain message may carry non-text attachments (images, audio…)
+        # with no upload intent — only KB-supported file types go through the
+        # upload path; everything else is skipped silently (logged for
+        # observability) instead of answering an unprompted "Upload rejected".
+        if _infer_extension(fname) not in ALLOWED_EXTENSIONS:
+            log.info(
+                "Skipping non-KB attachment from %s: %s (%s)",
+                message.author, fname, attachment.content_type,
+            )
+            continue
         if (attachment.size or 0) > UPLOAD_MAX_DOWNLOAD_BYTES:
             await channel.send(
                 f"⚠️ `{fname}` is too large: {attachment.size:,} bytes "

@@ -99,7 +99,7 @@ its chat API. Config-gated: with `TTS_MODEL` empty the command replies with a
 ### `/generate_image`
 
 ```
-/generate_image <prompt> [raw: false] [size: 1024]
+/generate_image <prompt> [raw: false] [size: 1024] [dry: false]
 ```
 
 Paint an image from a short prompt via the Unsloth Studio diffusion model and
@@ -113,7 +113,10 @@ modern objects, and no unsolicited text — but user-requested text (signs,
 book titles, labels) is included verbatim and NOT suppressed by the negative
 prompt. The prompt is first
 expanded into a rich image prompt by the CHAT model (no extra model involved —
-`raw: true` skips the rewrite entirely, sending your text verbatim). Swap-based under the hood: loading the image model evicts
+`raw: true` skips the rewrite entirely, sending your text verbatim). `dry: true`
+does the prompt work and replies with the FINAL prompt that would be sent — no
+model swap, no generation (for iterating on prompts without burning images).
+Swap-based under the hood: loading the image model evicts
 the resident chat model (Studio design), generation runs inside a no-chat-calls
 window, and the chat model is swapped back automatically afterwards — expect
 tens of seconds per image. Size is capped (`IMAGE_MAX_SIZE`, default 2048)
@@ -121,6 +124,10 @@ because the working set scales with resolution (10 GB+ at high res).
 Config-gated: with `IMAGE_MODEL` empty the command replies with a "not
 configured" hint. See the image section in `.env` (`IMAGE_MODEL`,
 `IMAGE_GGUF_FILENAME`, `IMAGE_GPU_IDS`, `IMAGE_DEFAULT_SIZE`, `IMAGE_MAX_SIZE`).
+Debug trail (#66): every phase logs to `logs/dev.log` (DEBUG) — the raw user
+request, rewrite iterations + tool calls + a 200-char preview of the result,
+the FULL final prompt and negative prompt actually sent to the backend, load
+attempts, generation timing + byte size.
 
 ### `/roll_items`
 
