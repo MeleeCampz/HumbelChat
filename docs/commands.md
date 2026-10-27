@@ -107,8 +107,10 @@ send it as a PNG. Base style: semi-realistic painterly fantasy with soft
 watercolor touches, set in Humblewood (the D&D world). The rewrite enforces
 "no humans — only animals or humanoid animals (Humbelfolk style)" drawn as
 upright D&D player characters in adventurer gear, bird-folk always get their
-signature VERY large googly eyes (only when birds are in the picture), plus no
-text/modern objects. The prompt is first
+signature VERY large googly eyes (only when birds are in the picture), no
+modern objects, and no unsolicited text — but user-requested text (signs,
+book titles, labels) is included verbatim and NOT suppressed by the negative
+prompt. The prompt is first
 expanded into a rich image prompt by the CHAT model (no extra model involved —
 `raw: true` skips the rewrite entirely, sending your text verbatim). Swap-based under the hood: loading the image model evicts
 the resident chat model (Studio design), generation runs inside a no-chat-calls

@@ -137,12 +137,15 @@ IMAGE_GPU_IDS: list[int] = [
 IMAGE_DEFAULT_SIZE: int = _safe_int(os.getenv("IMAGE_DEFAULT_SIZE"), 1024)
 IMAGE_MAX_SIZE: int = _safe_int(os.getenv("IMAGE_MAX_SIZE"), 2048)
 # Negative prompt for the diffusion model (what to steer AWAY from). Mirrors
-# the hard rules of the rewrite system prompt (no humans / no text / no modern
-# objects) plus standard quality guards — as negative conditioning, which Qwen-
-# Image supports as a first-class input. Override via IMAGE_NEGATIVE_PROMPT.
+# the hard rules of the rewrite system prompt (no humans / no modern objects)
+# plus standard quality guards — as negative conditioning, which Qwen-Image
+# supports as a first-class input. Override via IMAGE_NEGATIVE_PROMPT.
+# NOTE: deliberately NO generic text/words/letters here — the user may want
+# readable text in the image ("...holding a plan reading 'Prototype V'"), and a
+# blanket negative would fight that. Only AI-artifact lettering is suppressed.
 _DEFAULT_IMAGE_NEGATIVE_PROMPT = (
     "humans, human, person, realistic human face,"
-    " text, words, letters, typography, watermark, signature, logo, username,"
+    " watermark, signature, username,"
     " modern objects, car, smartphone, plastic, neon,"
     " blurry, lowres, bad anatomy, extra limbs, deformed, cropped out of frame"
 )
