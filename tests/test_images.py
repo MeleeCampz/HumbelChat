@@ -66,13 +66,25 @@ class TestRewritePrompt:
         out = await images.rewrite_prompt("a bird")
         assert out == "a bird"
 
-    async def test_empty_content_raises(self, monkeypatch):
+    async def test_empty_content_raises_after_retry(self, monkeypatch):
+        # Reasoning model can truncate before any content (observed live) —
+        # one retry, then the error lets the caller fall back to the raw prompt.
         client = MagicMock()
         client.chat.completions.create = AsyncMock(return_value=MagicMock(
             choices=[MagicMock(message=MagicMock(content="   "))]))
         monkeypatch.setattr(images, "_rewrite_client", lambda: client)
         with pytest.raises(images.ImageGenError, match="empty rewrite"):
             await images.rewrite_prompt("a bird")
+        assert client.chat.completions.create.call_count == 2
+
+    async def test_empty_then_retry_recovers(self, monkeypatch):
+        empty = MagicMock(choices=[MagicMock(message=MagicMock(content=""))])
+        good = MagicMock(choices=[MagicMock(message=MagicMock(content="a rich bird"))])
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(side_effect=[empty, good])
+        monkeypatch.setattr(images, "_rewrite_client", lambda: client)
+        assert await images.rewrite_prompt("a bird") == "a rich bird"
+        assert client.chat.completions.create.call_count == 2
 
     async def test_api_failure_wrapped(self, monkeypatch):
         client = MagicMock()

@@ -117,18 +117,23 @@ async def _warm_chat_reload() -> None:
 
 # ── Prompt rewriting (chat model — MUST run before the swap) ──────────────
 _REWRITE_SYSTEM = (
-    "You are a prompt engineer for a whimsical watercolor storybook image model set in "
-    "Humblewood, a world from the Dungeons & Dragons universe (D&D 5e setting). "
-    "Rewrite the user's short request into ONE rich paragraph (max ~70 words) that the "
+    "You are a prompt engineer for a semi-realistic painterly fantasy image model set "
+    "in Humblewood, a world from the Dungeons & Dragons universe (D&D 5e setting). "
+    "Rewrite the user's short request into ONE rich paragraph (max ~80 words) that the "
     "image model can render directly: concrete subject, setting, lighting, mood and "
-    "palette, 'soft watercolor storybook illustration' style. Keep every element the "
-    "user asked for; do not add named characters or brands they didn't mention. Hard "
-    "rules: NO humans — only animals or humanoid animals (bird-folk and other beast-"
-    "folk in the D&D Humbelfolk style); no text or lettering in the image; no modern "
-    "objects. Species trait: bird-folk have big round googly eyes — their signature "
-    "look. If the image contains bird-folk, give EVERY one of them those eyes; if it "
-    "contains no birds at all, do not mention googly eyes. Reply with the rewritten "
-    "prompt only — no quotes, no commentary."
+    "palette. Style: 'semi-realistic painterly fantasy illustration with soft "
+    "watercolor touches — detailed fur and feather texture, natural light, storybook "
+    "charm'. Characters are D&D player characters, NOT wild animals: bipedal humanoid "
+    "animal adventurers standing upright, in fitting clothing and gear (tunic, leather "
+    "armor, satchel, tool or weapon matching their role), confident and expressive. "
+    "Keep every element the user asked for; do not add named characters or brands they "
+    "didn't mention. Hard rules: NO humans — only animals or humanoid animals (bird-"
+    "folk and other beast-folk in the D&D Humbelfolk style); no text or lettering in "
+    "the image; no modern objects. Species trait: bird-folk have VERY large, oversized "
+    "round googly eyes — clearly bigger than a normal animal's, their most prominent "
+    "facial feature. If the image contains bird-folk, give EVERY one of them those "
+    "eyes; if it contains no birds at all, do not mention googly eyes. Reply with the "
+    "rewritten prompt only — no quotes, no commentary."
 )
 
 
@@ -148,25 +153,30 @@ async def rewrite_prompt(text: str) -> str:
     try:
         # The chat model is a reasoning model — without an explicit low effort
         # the thinking budget eats the token cap and ``content`` comes back
-        # empty (observed live). Same param plumbing + 4xx fallback as the main
-        # AI path (bot_core.ai_client, #20).
-        resp = await asyncio.wait_for(
-            _create_with_reasoning_fallback(
-                client,
-                "low",
-                model=DEFAULT_MODEL,
-                messages=[
-                    {"role": "system", "content": _REWRITE_SYSTEM},
-                    {"role": "user", "content": text},
-                ],
-                max_tokens=1024,
-            ),
-            timeout=120.0,
-        )
-        rewritten = (resp.choices[0].message.content or "").strip().strip('"')
-        if not rewritten:
-            raise ImageGenError("empty rewrite")
-        return rewritten
+        # empty (observed live, intermittently even WITH low effort: one run
+        # rambled ~700 reasoning tokens and truncated before any content).
+        # Same param plumbing + 4xx fallback as the main AI path
+        # (bot_core.ai_client, #20); generous cap + one retry on empty.
+        rewritten = ""
+        for attempt in (1, 2):
+            resp = await asyncio.wait_for(
+                _create_with_reasoning_fallback(
+                    client,
+                    "low",
+                    model=DEFAULT_MODEL,
+                    messages=[
+                        {"role": "system", "content": _REWRITE_SYSTEM},
+                        {"role": "user", "content": text},
+                    ],
+                    max_tokens=2048,
+                ),
+                timeout=120.0,
+            )
+            rewritten = (resp.choices[0].message.content or "").strip().strip('"')
+            if rewritten:
+                return rewritten
+            log.warning("prompt rewrite attempt %d came back empty — retrying", attempt)
+        raise ImageGenError("empty rewrite")
     except ImageGenError:
         raise
     except Exception as e:  # noqa: BLE001 — fall back to raw prompt in the caller
