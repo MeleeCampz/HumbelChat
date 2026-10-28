@@ -127,11 +127,14 @@ configured" hint. See the image section in `.env` (`IMAGE_MODEL`,
 Debug trail (#66): every phase logs to `logs/dev.log` (DEBUG) — the raw user
 request, rewrite iterations + tool calls + a 200-char preview of the result,
 the FULL final prompt and negative prompt actually sent to the backend, load
-attempts, generation timing + byte size. Progress updates: the deferred
-placeholder is edited per phase (Preparing prompt → loading the image model →
+attempts, generation timing + byte size. Progress: ONE message carries the
+whole run — edited per phase (Preparing prompt → loading the image model →
 Painting) so the GPU-idle swap windows read as visible progress instead of a
-frozen "bot is thinking" — the stalls themselves are inherent to sequential
-model swapping on one GPU (unload chat → load image → paint → swap back).
+frozen "bot is thinking", and the final answer (text + PNG) replaces the last
+update IN PLACE on that same message (edit() can add attachments); only if
+that edit fails does the image go out as a separate reply. The stalls
+themselves are inherent to sequential model swapping on one GPU (unload chat →
+load image → paint → swap back).
 
 ### `/roll_items`
 

@@ -491,7 +491,11 @@ class TestCommandHandler:
         await handle_generate_image_command(inter, prompt="verbatim bird", raw=True)
         prepared.assert_awaited_once_with("verbatim bird", raw=True)
         assert generated == ["verbatim bird"]
-        assert "file" in followups[1]  # [0] is the progress message
+        # ONE message: the final answer (text + image) landed in place on the
+        # progress message — no separate reply.
+        assert len(followups) == 1
+        assert followups[0]["content"].startswith("🎨")
+        assert "attachments" in followups[0]
 
     async def test_prepare_prompt_used_when_not_raw(self, monkeypatch):
         import commands.generate_image_command as cmd
@@ -511,12 +515,13 @@ class TestCommandHandler:
         monkeypatch.setattr(cmd, "prepare_prompt", AsyncMock(return_value="rich bird"))
         await handle_generate_image_command(inter, prompt="bird")
         assert generated == ["rich bird"]
-        # the image is a fresh message; the progress message was edited per
-        # phase and then DELETED (no lone "✅" left next to the image)
-        img = next(f for f in followups if "file" in f)
-        assert img["content"].startswith("🎨")
+        # ONE message: live updates in place, final answer (text + image) on
+        # the same message — no separate reply, no leftover "✅".
+        assert len(followups) == 1
         progress = followups[0]
-        assert progress["deleted"] is True
+        assert progress["content"].startswith("🎨")
+        assert "attachments" in progress
+        assert progress["deleted"] is False
 
     async def test_dry_run_returns_prompt_without_generating(self, monkeypatch):
         import commands.generate_image_command as cmd
@@ -536,6 +541,43 @@ class TestCommandHandler:
         assert "rich bird" in reply["content"]
         assert "file" not in reply
         assert followups[0]["deleted"] is True
+
+    async def test_in_place_edit_failure_falls_back_to_fresh_message(self, monkeypatch):
+        """If the final in-place edit can't carry the attachment (API edge),
+        degrade to a fresh follow-up — the image is never lost."""
+        import commands.generate_image_command as cmd
+        monkeypatch.setattr(cmd, "image_gen_configured", lambda: True)
+        monkeypatch.setattr(cmd, "prepare_prompt", AsyncMock(return_value="rich bird"))
+
+        async def fake_gen(prompt, size=None, on_phase=None):
+            return _PNG
+
+        monkeypatch.setattr(cmd, "generate_image", fake_gen)
+
+        inter = MagicMock()
+        inter.response.defer = AsyncMock()
+        followups: list[dict] = []
+
+        async def capture(content=None, **kwargs):
+            msg = {"content": content, **kwargs}
+            followups.append(msg)
+
+            async def edit(**ekwargs):
+                if "attachments" in ekwargs:
+                    raise RuntimeError("edit-with-attachment rejected")
+                msg.update(ekwargs)
+
+            msg["edit"] = edit
+            msg["deleted"] = False
+            return MagicMock(edit=edit, delete=AsyncMock())
+
+        inter.followup.send = capture
+
+        await handle_generate_image_command(inter, prompt="bird")
+        # progress message (kept) + fresh image message as the fallback
+        assert len(followups) == 2
+        assert followups[0]["deleted"] is False
+        assert "file" in followups[1]
 
     async def test_generation_failure_replies_error(self, monkeypatch):
         import commands.generate_image_command as cmd

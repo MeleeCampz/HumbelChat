@@ -6,7 +6,9 @@ Flow (see bot_core/images.py for the why):
    unless ``--raw``
 3. hold the global AI slot across the whole load→generate→unload window so no
    other chat turn can re-resident the chat model and evict the image mid-run
-4. deliver the PNG as a fresh message (Discord edits can't add attachments)
+4. deliver the final text + PNG IN PLACE on the progress message (edit() can
+   add attachments — Discord API + discord.py 2.7); only if that edit fails
+   does it degrade to a fresh follow-up message
 """
 from __future__ import annotations
 
@@ -68,9 +70,10 @@ async def handle_generate_image_command(
         await interaction.followup.send(f"⚠️ {e}")
         return
 
-    # Progress message (after the early-return checks above): edited per phase,
-    # DELETED on every exit so only the meaningful message(s) remain — a lone
-    # "✅" next to the image read as a duplicate response.
+    # Progress message (after the early-return checks above): edited per phase
+    # AND it is the final answer — edit() can add attachments (Discord API +
+    # discord.py 2.7), so the finished text+image replace the last update
+    # in place: ONE message, live feedback preserved.
     progress_msg = await interaction.followup.send("🎨 Preparing prompt…")
 
     async def _progress(text: str) -> None:
@@ -121,5 +124,9 @@ async def handle_generate_image_command(
         preview += "…"
     filename = f"image-{int(time.time())}.png"
     file = discord.File(io.BytesIO(png), filename=filename)
-    await interaction.followup.send(f"🎨 {preview}", file=file)
-    await _cleanup()
+    # Final answer IN PLACE on the progress message (text + image together).
+    try:
+        await progress_msg.edit(content=f"🎨 {preview}", attachments=[file])
+    except Exception as exc:  # noqa: BLE001 — degrade to a fresh message
+        log.warning("final in-place edit failed (%s) — sending fresh message", exc)
+        await interaction.followup.send(f"🎨 {preview}", file=file)
