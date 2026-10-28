@@ -249,7 +249,12 @@ async def rewrite_prompt(text: str) -> str:
                 "low" if thinking else "off",
                 model=model,
                 messages=list(messages),
-                max_tokens=2048,
+                # Multi-character prompts run up to ~2000 chars (~500+ tokens)
+                # and the chat model is a reasoning model — at 2048 its thinking
+                # budget could eat the cap and truncate content mid-sentence
+                # (observed live: party prompt died at 671 chars). 4096 leaves
+                # headroom for both.
+                max_tokens=4096,
             ),
             timeout=120.0,
         )
