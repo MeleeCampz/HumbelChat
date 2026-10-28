@@ -185,14 +185,13 @@ _POLICY_FILE = Path(__file__).resolve().parent.parent / "prompts" \
 _CHAR_RULES_FILE = Path(KB_PATH) / "humblewood" / "HumbleWood" \
     / "Image Generation Policy.md"
 
-# Safety net ONLY — the vault note is the source of truth for character rules.
+# Safety net ONLY — the vault note is the source of truth for character rules
+# (per-character facts live on the sheets themselves; only cross-cutting rules
+# belong in the note, and its googly-eyes rule is mirrored here).
 _DEFAULT_CHARACTER_RULES = (
     "Googly eyes are NOT a species trait and belong ONLY to Column Bidae: "
     "never give any other character googly eyes, and if he is not in the "
-    "image do not mention googly eyes at all. Never invent or mangle a "
-    "species word (Seta is a quokka-like mammal — never 'cochran'). Use each "
-    "character's pronouns exactly as their sheet states them (Trixy is "
-    "she/her, Column Bidae is he/him)."
+    "image do not mention googly eyes at all."
 )
 
 # Last-resort policy if the repo file is missing from the image entirely.
