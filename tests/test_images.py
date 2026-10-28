@@ -399,8 +399,9 @@ class TestRewriteSystemPolicy:
         s = images_mod._REWRITE_SYSTEM
         for part in ("[STYLE]", "[SCENE]", "[CHARACTERS]", "[LIGHTING]"):
             assert part in s
-        assert "reuse that anchor text VERBATIM" in s
+        assert "copy the ENTIRE anchor block VERBATIM" in s
         assert "under 1300 characters" in s
+        assert "up to 2000 characters" in s
         # negations stay OUT of the positive prompt (negative prompt handles them)
         assert "Never write negations" in s
 
