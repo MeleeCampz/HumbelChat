@@ -116,3 +116,25 @@ Test suite: ~1181 passed / 6 skipped at last full run (host venv).
   campfire scene they're comparing against (§5 step 4) → then #42 can close.
   Backlog #42 carries the full completion note. GitHub push still 403 —
   `ba9e942..c44ed2d` are local-only like the earlier commits.
+
+## 7. Second fix same day — party+bandit prompt dropped 4 of 5 characters
+
+- **Symptom:** user's "whole party + bandit sneaking up" request rendered
+  ONLY Column (dev.log 14:52, `fallback=False`, tools fine). Root cause:
+  policy conflict — "At most 5 characters total" vs "never silently drop any
+  of them"; with 6 entities the model dropped 4 party members to fit the
+  2000-char cap.
+- **Fix (repo, `de4f05d`, deployed stamped):** inclusion now explicitly BEATS
+  the char cap; >5 characters compress anchors to identity-critical cores
+  (species + top three features + signature item) instead of dropping any.
+  Never-drop rule also mirrored into vault `Image Generation Policy.md`
+  (bind-mounted — applies to the next image without a rebuild).
+- **Sheet bloat cleanup (user decision):** `Player Characters.md` condensed IN
+  PLACE (vault commit `dd2e2cf`) — per character: header line + merged
+  Appearance block (~70 words, identity-critical details) + verbatim Visual
+  Anchor + one Rendering line; detailed sections and the duplicate Reusable
+  Prompt Blocks deleted. 28k → ~7.5k chars; anchors byte-identical (googly-
+  eyes rule unaffected). Repo policy's rendering-style reference updated to
+  the new structure in `de4f05d`.
+- **Verified** in-container with the user's exact failing prompt: all 5 party
+  members + bandit present, zero drops, anchors compressed per the new rule.
