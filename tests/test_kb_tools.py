@@ -484,3 +484,153 @@ async def test_find_in_kb_caps_locations(fake_store, monkeypatch):
 async def test_find_in_kb_requires_term():
     with pytest.raises(ToolCallParseError, match="term"):
         await tools.execute_tool("find_in_kb", {})
+
+
+# ── Fuzzy filename resolution + full-file reads (#42 handoff fix A) ────────
+
+_PARTY = ("Column Bidae", "Seta Onix", "Romi Stachelpfote",
+          "Bubo Krallensturm", "Trixy Smoldersome")
+
+
+def _party_index():
+    """The real Player Characters shape: ONE file, many sections."""
+    chunks = []
+    for char in _PARTY:
+        chunks.append((f"Player Characters.md [{char}]",
+                       f"{char}: species line, pronouns."))
+        chunks.append((f"Player Characters.md [{char} -> Visual Anchor]",
+                       f"> {char} visual anchor text."))
+    return chunks
+
+
+def _kb_root_with(tmp_path, *filenames):
+    for fn in filenames:
+        (tmp_path / fn).write_text("x", encoding="utf-8")
+    return tmp_path
+
+
+@pytest.mark.asyncio
+async def test_read_section_bare_stem_fuzzy_match(fake_store, tmp_path, monkeypatch):
+    """'Player Characters' (no .md) resolves case/extension-insensitively —
+    the exact call that failed live at 13:33 ('No chunk found for file=…')."""
+    async def _ensure(kb_path):
+        return _FakeStore(_FakeIdx(_party_index()))
+
+    import kb.retrievers as R
+    monkeypatch.setattr(R, "_ensure_index_store", _ensure)
+    monkeypatch.setattr(
+        "config.settings.KB_PATH",
+        str(_kb_root_with(tmp_path, "Player Characters.md")))
+    for arg in ("Player Characters", "player characters",
+                "PLAYER CHARACTERS.MD"):
+        out = await tools.execute_tool("read_section", {"file": arg})
+        for char in _PARTY:  # EVERY section of the sheet, one shot
+            assert f"> {char} visual anchor text." in out, arg
+
+
+@pytest.mark.asyncio
+async def test_read_section_full_file_not_capped_at_three(
+        fake_store, tmp_path, monkeypatch):
+    """The old 3-chunk cap returned only the first sections of a sheet; a
+    unique-on-disk file now yields ALL its sections in document order."""
+    async def _ensure(kb_path):
+        return _FakeStore(_FakeIdx(_party_index()))
+
+    import kb.retrievers as R
+    monkeypatch.setattr(R, "_ensure_index_store", _ensure)
+    monkeypatch.setattr(
+        "config.settings.KB_PATH",
+        str(_kb_root_with(tmp_path, "Player Characters.md")))
+    out = await tools.execute_tool("read_section", {"file": "Player Characters"})
+    first = out.index("Column Bidae: species")
+    last = out.index("Trixy Smoldersome: species")
+    assert first < last  # document order preserved
+    assert out.count("### Player Characters.md") == len(_party_index())
+
+
+@pytest.mark.asyncio
+async def test_read_section_full_file_section_filter(
+        fake_store, tmp_path, monkeypatch):
+    """A section fragment narrows the full-file read to just those sections."""
+    async def _ensure(kb_path):
+        return _FakeStore(_FakeIdx(_party_index()))
+
+    import kb.retrievers as R
+    monkeypatch.setattr(R, "_ensure_index_store", _ensure)
+    monkeypatch.setattr(
+        "config.settings.KB_PATH",
+        str(_kb_root_with(tmp_path, "Player Characters.md")))
+    out = await tools.execute_tool(
+        "read_section", {"file": "Player Characters", "section": "Visual Anchor"})
+    assert out.count("visual anchor text.") == 5
+    assert "species line" not in out
+
+
+@pytest.mark.asyncio
+async def test_read_section_no_false_match_similar_names(
+        fake_store, tmp_path, monkeypatch):
+    """Exact stem equality: 'Player Character' must NOT match the sheet."""
+    async def _ensure(kb_path):
+        return _FakeStore(_FakeIdx(_party_index()))
+
+    import kb.retrievers as R
+    monkeypatch.setattr(R, "_ensure_index_store", _ensure)
+    monkeypatch.setattr(
+        "config.settings.KB_PATH",
+        str(_kb_root_with(tmp_path, "Player Characters.md")))
+    out = await tools.execute_tool("read_section", {"file": "Player Character"})
+    assert out.startswith("No chunk found")
+
+
+@pytest.mark.asyncio
+async def test_read_section_ambiguous_bare_name_keeps_legacy_cap(
+        fake_store, tmp_path, monkeypatch):
+    """Several files share the bare name (every session folder's notes.md)
+    → chunks are indistinguishable by name → legacy ≤3-chunk join, NOT one
+    big mixed blob."""
+    kb_root = _make_session_kb(tmp_path)  # 3 folders, each with notes.md
+    chunks = [("notes.md [Full Document -> Part %d]" % i, f"chunk {i}")
+              for i in range(6)]
+
+    async def _ensure(kb_path):
+        return _FakeStore(_FakeIdx(chunks))
+
+    import kb.retrievers as R
+    monkeypatch.setattr(R, "_ensure_index_store", _ensure)
+    monkeypatch.setattr("config.settings.KB_PATH", str(kb_root))
+    out = await tools.execute_tool("read_section", {"file": "notes.md"})
+    assert out.count("### notes.md") <= 3
+
+
+@pytest.mark.asyncio
+async def test_read_section_full_file_cap_truncates_with_hint(
+        fake_store, tmp_path, monkeypatch):
+    """Worst-case files (950 KB rulebooks) must never go through whole."""
+    async def _ensure(kb_path):
+        return _FakeStore(_FakeIdx(_party_index()))
+
+    import kb.retrievers as R
+    monkeypatch.setattr(R, "_ensure_index_store", _ensure)
+    monkeypatch.setattr(
+        "config.settings.KB_PATH",
+        str(_kb_root_with(tmp_path, "Player Characters.md")))
+    monkeypatch.setattr(tools, "_READ_FILE_CAP", 200)
+    out = await tools.execute_tool("read_section", {"file": "Player Characters"})
+    assert len(out) <= 200 + 120  # cap + the truncation hint itself
+    assert "[truncated" in out and "section' fragment" in out
+
+
+@pytest.mark.asyncio
+async def test_list_sections_bare_stem_fuzzy_match(fake_store, tmp_path, monkeypatch):
+    """The shared matcher: list_sections accepts bare stems too."""
+    async def _ensure(kb_path):
+        return _FakeStore(_FakeIdx(_party_index()))
+
+    import kb.retrievers as R
+    monkeypatch.setattr(R, "_ensure_index_store", _ensure)
+    monkeypatch.setattr(
+        "config.settings.KB_PATH",
+        str(_kb_root_with(tmp_path, "Player Characters.md")))
+    out = await tools.execute_tool("list_sections", {"file": "Player Characters"})
+    assert "Visual Anchor" in out
+    assert "Romi Stachelpfote" in out

@@ -56,6 +56,9 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                        "section, stat block or item entry) instead of a "
                        "snippet. Give the file from a search_kb hit and "
                        "optionally a section path fragment to disambiguate. "
+                       "A bare name without extension works too — 'Player "
+                       "Characters' reads that sheet's EVERY section in one "
+                       "shot (use a section fragment for just some of them). "
                        "A session FOLDER name from list_sessions also works "
                        "as 'file' (reads that session's full notes).",
         "args": {
@@ -369,23 +372,68 @@ def _kb_path() -> pathlib.Path:
     return pathlib.Path(KB_PATH)
 
 
+_READ_FILE_CAP = 40000  # full-file reads (see _tool_read_section)
+
+
+def _stem(name: str) -> str:
+    """Case/extension-insensitive file identity: 'Player Characters' ≡
+    'humblewood/HumbleWood/Player Characters.md' (bare stem, no extension)."""
+    s = (name or "").strip().lower()
+    for ext in (".markdown", ".md"):
+        if s.endswith(ext):
+            return s[: -len(ext)]
+    return s
+
+
 def _file_matches(file_part: str, file: str) -> bool:
     """Match a chunk's file part against the model's file argument.
 
     Display names are BARE filenames (no directory prefix), but the model
     may pass a path it inferred from content or search context — so also
-    accept a basename match (case-insensitive).
+    accept a basename match (case-insensitive). Fuzzy fallback (#42,
+    2026-10-28): bare stems WITHOUT the extension ('Player Characters')
+    resolve case/extension-insensitively — EXACT stem equality only, so
+    similarly named files never cross-match.
     """
     f = (file or "").strip()
     if not f:
         return False
     if file_part == f or file_part.endswith(f"/{f}"):
         return True
-    return pathlib.Path(file_part).name.lower() == pathlib.Path(f).name.lower()
+    if pathlib.Path(file_part).name.lower() == pathlib.Path(f).name.lower():
+        return True
+    arg_stems = {_stem(f), _stem(pathlib.Path(f).name)}
+    return _stem(file_part) in arg_stems
+
+
+def _single_file_on_disk(file_part: str) -> bool:
+    """True when exactly ONE file with this bare name exists under the KB root.
+
+    A full-file read is unambiguous only then: several indexed files can
+    share a BARE display name (every session folder's notes.md), and their
+    chunks are indistinguishable by name alone — those keep the legacy
+    capped path instead of one big mixed blob.
+    """
+    name = pathlib.Path(file_part).name
+    if not name:
+        return False
+    try:
+        hits = [p for p in _kb_path().rglob(name) if p.is_file()]
+    except OSError:
+        return False
+    return len(hits) == 1
 
 
 async def _tool_read_section(file: str, section: str | None = None) -> str:
-    """Full chunk text for (file[, section fragment])."""
+    """Full chunk text for (file[, section fragment]).
+
+    A bare stem ('Player Characters') resolves to the whole file when its
+    name is unique on disk — EVERY section of it in one shot (#42,
+    2026-10-28: the old 3-chunk cap returned only the first sections of a
+    multi-section sheet, so group-scene rewrites never saw all anchors).
+    Bounded by _READ_FILE_CAP (the backend context absorbs it; worst-case
+    rulebook files are ~950 KB and must NOT go through whole).
+    """
     from kb.retrievers import _ensure_index_store
 
     store = await _ensure_index_store(_kb_path())
@@ -403,8 +451,20 @@ async def _tool_read_section(file: str, section: str | None = None) -> str:
             if section.lower() not in sec.lower():
                 continue
         matches.append((name, content))
-        if len(matches) >= 3:
-            break
+
+    # Full-file read: the argument names ONE file whose bare name is unique
+    # on disk → return ALL its (section-filtered) chunks in document order.
+    distinct_parts = {n.split(" [")[0] if " [" in n else n
+                      for n, _c in matches}
+    if (matches and len(distinct_parts) == 1
+            and _single_file_on_disk(next(iter(distinct_parts)))):
+        body = "\n\n".join(f"### {n}\n{c}" for n, c in matches)
+        if len(body) > _READ_FILE_CAP:
+            body = (body[:_READ_FILE_CAP]
+                    + f"\n…[truncated at {_READ_FILE_CAP} chars — this file "
+                      "has more sections; re-read with a 'section' fragment "
+                      "for the rest]")
+        return body
 
     # Every session folder's notes is indexed under the SAME bare name
     # ('notes.md'), so a bare-name hit set is ambiguous across sessions —
@@ -419,7 +479,7 @@ async def _tool_read_section(file: str, section: str | None = None) -> str:
         return f"No chunk found for file={file!r}" + (f" section~{section!r}"
                                                       if section else "")
     parts = []
-    for name, content in matches:
+    for name, content in matches[:3]:
         parts.append(f"### {name}\n{content}")
     return _cap("\n\n".join(parts))
 
