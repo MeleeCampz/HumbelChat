@@ -111,7 +111,12 @@ else:
     log.addHandler(console_handler)
     log.addHandler(bot_log)
     log.addHandler(dev_log)
-    log.setLevel(logging.INFO)
+    # Logger level DEBUG (not INFO): the logger gates records BEFORE handler
+    # levels, so an INFO logger silently dropped every DEBUG record and
+    # dev.log's DEBUG handler level was dead config (#66 shipped this way —
+    # zero [DEBUG] lines in a full day of logs). console_handler + bot_log
+    # stay at their own INFO level; only dev.log receives DEBUG.
+    log.setLevel(logging.DEBUG)
 
     _configure_discord_logger(dev_handler=dev_log)
 
@@ -124,7 +129,7 @@ else:
     _kb_logger.addHandler(console_handler)
     _kb_logger.addHandler(bot_log)
     _kb_logger.addHandler(dev_log)
-    _kb_logger.setLevel(logging.INFO)
+    _kb_logger.setLevel(logging.DEBUG)
 
     # bot_core modules log under their own top-level "bot_core" namespace
     # (e.g. bot_core.roll_buttons) — same treatment as "kb". Without this,
@@ -134,7 +139,7 @@ else:
     _bot_core_logger.addHandler(console_handler)
     _bot_core_logger.addHandler(bot_log)
     _bot_core_logger.addHandler(dev_log)
-    _bot_core_logger.setLevel(logging.INFO)
+    _bot_core_logger.setLevel(logging.DEBUG)
 
 
 # ── Intents ─────────────────────────────────────────────────────────────

@@ -101,6 +101,48 @@ async def test_malformed_call_gets_one_nudge_then_answer():
 
 
 @pytest.mark.asyncio
+async def test_broken_tool_call_fragment_is_nudged_not_returned():
+    """Regression (2026-10-28 live incident): a mangled mixed JSON/XML tool
+    call that is long enough to clear the plain-answer gate must NOT be
+    returned as the answer — it gets the same nudge as a too-short turn."""
+    fragment = (
+        "< tool_call>\n{\"search_kb\"}\n< /parameter>\n"
+        "< parameter=query>\nRomi character species appearance class gear\n"
+        "< /parameter>\n< /function>\n< /tool_call>"
+    )
+    assert len(fragment) >= agent_loop._MIN_ANSWER_CHARS  # the old bug's entry
+    coro, comp = _start([
+        fragment,  # unparseable + fragment markers → nudge, not an answer
+        "Romi is a hedgehog monk of the Way of the Drunken Master.",
+    ])
+    text, meta = await coro
+    assert "hedgehog" in text.lower()
+    assert "tool_call" not in text
+    # Nudged exactly once, then answered on the next turn.
+    assert len(comp.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_prose_mentioning_tools_still_passes():
+    """The fragment guard must not eat legitimate prose that talks about tools."""
+    coro, _comp = _start([
+        "I used the search_kb tool to check the equipment section and found "
+        "that armor entries list weight class per item.",
+    ])
+    text, _meta = await coro
+    assert "search_kb tool" in text
+
+
+def test_looks_like_tool_call_fragment_unit():
+    from bot_core.agent_loop import looks_like_tool_call_fragment as chk
+    assert chk("< tool_call>{\"tool\": \"x\"}")
+    assert chk('{"tool": "search_kb", "args": {')  # truncated JSON, no markers
+    assert chk("[1, 2, 3]")  # bare array is never an answer
+    assert not chk("A raccoon artificer at her workbench.")
+    assert not chk("I used the search_kb tool twice.")
+
+
+@pytest.mark.asyncio
 async def test_tool_call_cap_forces_answer(monkeypatch):
     # One call per decision turn → with the default 2-iteration cap only two
     # calls can execute; raise the iteration cap to exercise the GLOBAL call

@@ -24,10 +24,12 @@ import logging
 import os
 import time
 
+from typing import Any, Callable
+
 import httpx
 from openai import APIStatusError, AsyncOpenAI
 
-from bot_core.agent_loop import run_agent_loop
+from bot_core.agent_loop import looks_like_tool_call_fragment, run_agent_loop
 from bot_core.ai_client import _create_with_reasoning_fallback
 from bot_core.errors import extract_reply_text
 from config.settings import (
@@ -257,6 +259,12 @@ async def rewrite_prompt(text: str) -> str:
             for s in ("unexpected error", "couldn't finish that lookup")
         ):
             raise ImageGenError(f"rewrite unusable ({meta.fallback_reason})")
+        # Defense in depth: a mangled tool-call fragment is never a usable
+        # image prompt (the loop already rejects these — but the fallback
+        # single-turn path can still emit one, observed live 2026-10-28).
+        if looks_like_tool_call_fragment(out):
+            raise ImageGenError(
+                "rewrite returned a tool-call fragment: " + out[:80].replace("\n", " "))
         log.info(
             "prompt rewrite done: %d iteration(s), tools=%s fallback=%s%s — %s",
             meta.iterations, ",".join(meta.tool_calls) or "-",
@@ -309,18 +317,40 @@ async def prepare_prompt(text: str, raw: bool = False) -> str:
         return text
 
 
-async def generate_image(prompt: str, size: int | None = None) -> bytes:
+async def generate_image(
+    prompt: str,
+    size: int | None = None,
+    on_phase: Callable[[str], Any] | None = None,
+) -> bytes:
     """Generate one image and return PNG bytes.
 
     Holds the generation lock for the whole load→generate→unload window; the
     CALLER is responsible for holding the global AI slot around this call so
     no other chat turn can re-resident the chat model mid-swap.
+
+    ``on_phase`` (optional, #stall-visibility): awaited with ``"loading"``
+    before the image-model load and ``"painting"`` once it is resident — so a
+    caller can update the user while the GPU sits idle during the swap. A
+    callback error is logged and never fails the generation.
     """
     side = size or IMAGE_DEFAULT_SIZE
+
+    async def _phase(name: str) -> None:
+        if on_phase is None:
+            return
+        try:
+            res = on_phase(name)
+            if asyncio.iscoroutine(res):
+                await res
+        except Exception as exc:  # noqa: BLE001 — progress must never kill the gen
+            log.debug("on_phase(%s) failed: %s", name, exc)
+
     async with _gen_lock:
         client = _rewrite_client()  # reused for images.generate (same host)
         try:
+            await _phase("loading")
             await ensure_image_loaded()
+            await _phase("painting")
             # #66: full debug trail of exactly what goes to the backend —
             # dev.log runs at DEBUG so the complete prompt + negative prompt
             # are inspectable after the fact.

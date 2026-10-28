@@ -55,6 +55,33 @@ def _is_tool_call(text: str) -> bool:
         return False
 
 
+# Markers of a BROKEN tool-call emission: the model mixes its XML function-
+# calling instinct with our JSON protocol (observed live 2026-10-28: a rewrite
+# turn answered `< tool_call>{"search_kb"}< parameter=query>…</tool_call>` —
+# unparseable, yet long enough to pass the plain-answer length gate and get
+# painted verbatim). Prose never contains these.
+# Both slash widths — the model emits either (observed live 2026-10-28).
+_FRAGMENT_MARKERS = (
+    "< tool_call",
+    "< /tool_call>", "<⁄/tool_call>",
+    "<parameter", "< /parameter>",
+    '"tool":', "'tool':",
+)
+
+def looks_like_tool_call_fragment(text: str) -> bool:
+    """True when *text* is (or contains) a mangled tool call — not an answer.
+
+    Catches what :func:`_is_tool_call` cannot: syntactically broken calls
+    (mixed JSON/XML, truncated JSON) that fail to parse but are clearly the
+    model attempting the protocol. Also flags text that is bare JSON/JSON-
+    array at all — a real answer never starts with ``{`` or ``[``.
+    """
+    t = text.strip()
+    if any(m in t for m in _FRAGMENT_MARKERS):
+        return True
+    return t.startswith(("{", "["))
+
+
 def _strip_tool_json(text: str) -> str:
     """Remove JSON objects carrying a 'tool' key (fenced or bare)."""
     decoder = json.JSONDecoder()
@@ -199,11 +226,11 @@ async def run_agent_loop(
         model: str,
     ) -> str:
         """A forced/final answer must be PROSE. If the model emits a tool
-        call instead (there is no budget left to execute it), nudge once for
-        plain text; if that still yields a call, strip the JSON and return
-        whatever prose remains."""
+        call (or a mangled tool-call fragment) instead — there is no budget
+        left to execute it — nudge once for plain text; if that still yields
+        one, strip the JSON and return whatever prose remains."""
         text = text.strip()
-        if not _is_tool_call(text):
+        if not _is_tool_call(text) and not looks_like_tool_call_fragment(text):
             return text
         log.warning("final answer was a tool call; nudging once for plain text")
         nudged = list(messages) + [
@@ -247,9 +274,14 @@ async def run_agent_loop(
             except ToolCallParseError:
                 calls = None  # invalid JSON present — same handling as none
             if not calls:
-                if len(turn_text.strip()) >= _MIN_ANSWER_CHARS:
-                    return turn_text.strip(), meta  # plain-text answer
-                # Too short to be an answer — malformed/missing call; nudge.
+                t = turn_text.strip()
+                # A mangled tool-call fragment is NOT an answer even when it
+                # clears the length gate (observed live: `< tool_call>{…}` got
+                # painted verbatim as an image prompt, 2026-10-28).
+                if len(t) >= _MIN_ANSWER_CHARS and \
+                        not looks_like_tool_call_fragment(turn_text):
+                    return t, meta  # plain-text answer
+                # Too short / malformed call fragment — nudge.
                 messages.append({"role": "assistant", "content": turn_text})
                 messages.append({
                     "role": "user",

@@ -105,6 +105,26 @@ class TestRewritePrompt:
         with pytest.raises(images.ImageGenError, match="rewrite"):
             await images.rewrite_prompt("a bird")
 
+    async def test_broken_tool_call_fragment_raises_not_painted(self, monkeypatch):
+        """Regression (2026-10-28 live incident): the model answered a rewrite
+        with a mangled mixed JSON/XML tool call; it must become ImageGenError
+        (→ raw-prompt fallback), never a painted prompt."""
+        fragment = (
+            "< tool_call>\n{\"search_kb\"}\n< /parameter>\n"
+            "< parameter=query>\nRomi character species appearance class gear\n"
+            "< /parameter>\n< /function>\n< /tool_call>"
+        )
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(
+            return_value=self._resp(fragment))  # every turn, incl. the fallback
+        monkeypatch.setattr(images, "_rewrite_client", lambda: client)
+        with pytest.raises(images.ImageGenError, match="tool-call fragment"):
+            await images.rewrite_prompt("Romi eating a nice steaming mushroom soop")
+        # prepare_prompt degrades to the RAW user prompt instead.
+        assert await images.prepare_prompt(
+            "Romi eating a nice steaming mushroom soop") == \
+            "Romi eating a nice steaming mushroom soop"
+
     async def test_campaign_lookup_goes_through_kb_tools(self, monkeypatch):
         """The user-facing capability: the rewrite may query the KB (same tools
         as normal chat) before answering — e.g. grounding 'Marvin #13'."""
@@ -165,6 +185,53 @@ class TestGenerateImage:
         _, kwargs = client.images.generate.call_args
         assert kwargs["model"] == "unsloth/Qwen-Image-2.1-Turbo-GGUF"
         assert kwargs["size"] == "512x512"
+
+    async def test_on_phase_reports_loading_then_painting(self, monkeypatch):
+        """Stall visibility: callers get phase updates around the GPU-idle swap."""
+        monkeypatch.setattr(images, "IMAGE_MODEL", "unsloth/Qwen-Image-2.1-Turbo-GGUF")
+        monkeypatch.setattr(images, "IMAGE_DEFAULT_SIZE", 512)
+        monkeypatch.setattr(images, "_warm_chat_reload", AsyncMock())
+
+        order: list[str] = []
+
+        async def fake_ensure() -> None:
+            order.append("ensure")
+
+        monkeypatch.setattr(images, "ensure_image_loaded", fake_ensure)
+        monkeypatch.setattr(images, "_unload_image", AsyncMock())
+
+        client = MagicMock()
+        resp = MagicMock()
+        resp.data = [MagicMock(b64_json=_b64_png())]
+        client.images.generate = AsyncMock(return_value=resp)
+        monkeypatch.setattr(images, "_rewrite_client", lambda: client)
+
+        async def on_phase(name: str) -> None:
+            order.append(name)
+
+        out = await images.generate_image("a bird", on_phase=on_phase)
+        assert out == _PNG
+        assert order.index("loading") < order.index("ensure") < order.index("painting")
+
+    async def test_on_phase_callback_error_never_fails_generation(self, monkeypatch):
+        """A broken progress callback (e.g. Discord edit rejected) must not kill the gen."""
+        monkeypatch.setattr(images, "IMAGE_MODEL", "unsloth/Qwen-Image-2.1-Turbo-GGUF")
+        monkeypatch.setattr(images, "IMAGE_DEFAULT_SIZE", 512)
+        monkeypatch.setattr(images, "_warm_chat_reload", AsyncMock())
+        monkeypatch.setattr(images, "ensure_image_loaded", AsyncMock())
+        monkeypatch.setattr(images, "_unload_image", AsyncMock())
+
+        client = MagicMock()
+        resp = MagicMock()
+        resp.data = [MagicMock(b64_json=_b64_png())]
+        client.images.generate = AsyncMock(return_value=resp)
+        monkeypatch.setattr(images, "_rewrite_client", lambda: client)
+
+        async def broken(name: str) -> None:
+            raise RuntimeError("discord edit failed")
+
+        out = await images.generate_image("a bird", on_phase=broken)
+        assert out == _PNG
 
     async def test_negative_prompt_passed_via_extra_body(self, monkeypatch):
         # Studio accepts negative_prompt; this SDK version has no native kwarg.
@@ -372,6 +439,7 @@ class TestCommandHandler:
     def _interaction(self):
         inter = MagicMock()
         inter.response.defer = AsyncMock()
+        inter.response.edit_message = AsyncMock()  # progress updates
         followups: list[dict] = []
 
         async def capture(content=None, **kwargs):
@@ -402,8 +470,10 @@ class TestCommandHandler:
         monkeypatch.setattr(cmd, "prepare_prompt", prepared)
         generated: list[str] = []
 
-        async def fake_gen(prompt, size=None):
+        async def fake_gen(prompt, size=None, on_phase=None):
             generated.append(prompt)
+            if on_phase is not None:
+                await on_phase("painting")
             return _PNG
 
         monkeypatch.setattr(cmd, "generate_image", fake_gen)
@@ -418,8 +488,10 @@ class TestCommandHandler:
         monkeypatch.setattr(cmd, "image_gen_configured", lambda: True)
         generated: list[str] = []
 
-        async def fake_gen(prompt, size=None):
+        async def fake_gen(prompt, size=None, on_phase=None):
             generated.append(prompt)
+            if on_phase is not None:
+                await on_phase("painting")  # simulate the real phase callback
             return _PNG
 
         monkeypatch.setattr(cmd, "generate_image", fake_gen)
@@ -430,6 +502,11 @@ class TestCommandHandler:
         await handle_generate_image_command(inter, prompt="bird")
         assert generated == ["rich bird"]
         assert "file" in followups[0]
+        # stall visibility: the deferred placeholder was edited per phase
+        edits = " | ".join(
+            str(c.kwargs.get("content", "")) for c in inter.response.edit_message.call_args_list)
+        assert "loading the image model" in edits
+        assert "Painting" in edits
 
     async def test_dry_run_returns_prompt_without_generating(self, monkeypatch):
         import commands.generate_image_command as cmd
@@ -452,7 +529,7 @@ class TestCommandHandler:
         monkeypatch.setattr(cmd, "image_gen_configured", lambda: True)
         monkeypatch.setattr(cmd, "prepare_prompt", AsyncMock(return_value="rich"))
 
-        async def boom(prompt, size=None):
+        async def boom(prompt, size=None, on_phase=None):
             raise images.ImageGenError("studio 500")
 
         monkeypatch.setattr(cmd, "generate_image", boom)

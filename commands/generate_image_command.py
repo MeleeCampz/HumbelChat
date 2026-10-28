@@ -42,8 +42,18 @@ async def handle_generate_image_command(
     ``dry_run`` (#65b): do the prompt work (rewrite unless ``raw``) and reply
     with the FINAL prompt that would be sent to the image backend — no model
     swap, no generation. For iterating on prompts without burning generations.
+
+    Progress updates: the deferred placeholder is edited at each phase
+    (prompt → loading → painting) so the long GPU-idle swap windows read as
+    visible progress instead of a frozen "bot is thinking".
     """
-    await interaction.response.defer()
+    await interaction.response.defer(content="🎨 Preparing prompt…")
+
+    async def _progress(text: str) -> None:
+        try:
+            await interaction.response.edit_message(content=text)
+        except Exception as exc:  # noqa: BLE001 — progress must never fail the gen
+            log.debug("progress update failed: %s", exc)
 
     if not image_gen_configured():
         await interaction.followup.send(
@@ -77,9 +87,16 @@ async def handle_generate_image_command(
         return
 
     # 2) The no-chat-calls window: hold the AI slot for load→generate→unload.
+    await _progress("📖 Prompt ready — loading the image model (up to a minute)…")
+
+    def _phase(name: str):
+        if name == "painting":
+            return _progress(f"🖌️ Painting… ({side} px)")
+        return None  # "loading" already announced above
+
     try:
         async with _ai_slot():
-            png = await generate_image(final_prompt, size=side)
+            png = await generate_image(final_prompt, size=side, on_phase=_phase)
     except ImageGenError as e:
         log.error("image generation failed: %s", e)
         await interaction.followup.send(f"⚠️ Image generation failed ({e}). Try again in a moment.")
