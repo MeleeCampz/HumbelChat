@@ -137,3 +137,22 @@ Test suite: ~1181 passed / 6 skipped at last full run (host venv).
   the new structure in `de4f05d`.
 - **Verified** in-container with the user's exact failing prompt: all 5 party
   members + bandit present, zero drops, anchors compressed per the new rule.
+  Also confirmed LIVE by the user's own 15:18 regeneration (all five present).
+
+## 8. Third fix same day — background bandit rendered as a human
+
+- **Symptom:** user's live regen looked good except the sneaking bandit read as
+  human. Negative prompt verified intact + applied every run (dev.log
+  `image negative prompt:` lines). Root cause: the REWRITE described him as
+  "fox-like … sharp features, hood drawn low" — vague species + human-face
+  tropes; a global "no humans" negative cannot override ambiguous positive
+  wording for one character.
+- **Fix:** beast-folk rule for ALL creatures (vault `Image Generation Policy.md`
+  + repo `prompts/image_rewrite_system.md`, deployed stamped): non-party
+  creatures need an explicit animal species + ≥2 visible animal features
+  (ears, snout, fur, tail); never "X-like", never human-face cues; NO-humans
+  hard limit extended to NPCs/enemies.
+- **Verified** 3 in-container runs of the party+bandit prompt: bandit came out
+  as explicit wolf / fox beast-folk with visible animal features every time,
+  all 5 party members present, main-loop completion (one transient
+  wall-clock-budget fallback on run 1, clean on 2–3).
