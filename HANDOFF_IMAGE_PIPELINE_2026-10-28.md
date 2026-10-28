@@ -98,3 +98,21 @@ Test suite: ~1181 passed / 6 skipped at last full run (host venv).
 3. Verify with the exact German party request via the in-container trace pattern (§4); expect 5 named characters with anchors, zero invented animals.
 4. Rebuild+deploy (stamped), user tests `/generate_image` live; regenerate the campfire scene they're comparing against.
 5. Backlog: #42 tuning/live validation ongoing; #47 blocked on user decisions; #50 depends on #42; #65 prompt-cleanup deferred; #67 has a capture recipe if the silence gap recurs; GitHub 403 blocks pushes.
+
+## 6. Status — evening of 2026-10-28, after clean-context takeover (§5 steps 1–3 DONE)
+
+- **Fix (A) + (B) implemented, deployed (stamped), verified** — commits
+  `ba9e942` (kb fuzzy stem + full-file reads), `15183fb` (gathered-context
+  re-append in forced-final/nudge/fallback messages), `c44ed2d`
+  (trace script). Running container stamp-verified on tip; backend probe 200.
+- **In-container verification GREEN** (`scripts/image_rewrite_trace.py`, the
+  exact German party request, 3 runs): first call
+  `read_section(file="Player Characters")` now succeeds with the FULL sheet
+  (34.5k chars, all 49 sections); every run paints all 5 named characters
+  with anchors and **zero invented animals**; `fallback=False` each time.
+  Run 2 compressed some anchors to ~50% — the KNOWN SOFT LIMIT from §3.3,
+  not a regression (identity-critical features survived; run 3 fully verbatim).
+- **Still open:** user live-tests `/generate_image` and regenerates the
+  campfire scene they're comparing against (§5 step 4) → then #42 can close.
+  Backlog #42 carries the full completion note. GitHub push still 403 —
+  `ba9e942..c44ed2d` are local-only like the earlier commits.
