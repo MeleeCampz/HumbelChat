@@ -35,11 +35,20 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 WORKDIR /app
 
+# Build stamp: which commit this image was built from. The bot logs it at
+# startup and deploys can verify the running container matches the repo tip —
+# a stale cached build once served pre-fix code while looking healthy (#68
+# follow-up, 2026-10-28). Pass: docker compose build --build-arg GIT_SHA=$(git rev-parse HEAD)
+ARG GIT_SHA=unknown
+ENV BOT_BUILD_SHA=${GIT_SHA}
+LABEL org.opencontainers.image.revision=${GIT_SHA}
+
 COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements.txt
 
 COPY . .
+RUN echo "${GIT_SHA}" > /app/.build_sha
 
 # NOTE: intentionally runs as root. The bind-mounted host dirs (./data, ./logs,
 # ./hf-cache) are owned by uid 0 inside the container on Docker Desktop, so a

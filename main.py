@@ -1018,6 +1018,16 @@ def run_bot() -> None:
 
     _enforce_single_instance()
 
+    # Build stamp (Dockerfile ARG GIT_SHA → /app/.build_sha): makes "is the
+    # running bot on the repo tip?" a one-liner instead of log archaeology —
+    # a stale cached image once served pre-fix code while looking healthy.
+    try:
+        _sha = open("/app/.build_sha").read().strip()
+        if _sha and _sha != "unknown":
+            log.info("Bot build sha: %s", _sha)
+    except OSError:
+        pass  # local dev (no stamp file) — nothing to verify
+
     log.info("Connecting to AI backend at: %s", INFER_URL)
     log.info(
         "Bot prefix: `%s` — Default character: %s",

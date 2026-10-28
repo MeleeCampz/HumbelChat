@@ -39,11 +39,23 @@ Full docs: `docs/docker.md`.
 ### Control (always from the repo root)
 
 ```bash
-docker compose up -d --build   # start; also the UPDATE flow after git pull
+# start / UPDATE flow after git pull — ALWAYS with the build stamp (see below):
+docker compose build --build-arg GIT_SHA=$(git rev-parse HEAD) bot
+docker compose up -d bot
 docker compose ps              # status ("Up …" — there is no healthcheck)
 docker compose logs -f bot     # live stdout
 docker compose restart bot     # restart
 docker compose down            # stop (host data untouched)
+```
+
+**Build stamp (verify every deploy):** the image bakes the git SHA into
+`/app/.build_sha` and the bot logs `Bot build sha: …` at startup. After any
+deploy, confirm the running container is on the repo tip — a stale cached
+build once served pre-fix code while looking healthy (2026-10-28):
+
+```bash
+diff <(docker exec humbelchat-bot cat /app/.build_sha) <(git rev-parse HEAD) \
+  && echo "bot on repo tip" || echo "STALE IMAGE — rebuild with --build-arg GIT_SHA=$(git rev-parse HEAD)"
 ```
 
 - `restart: unless-stopped` — the container self-recovers from crashes/reboots.
@@ -54,8 +66,10 @@ docker compose down            # stop (host data untouched)
 
 ```bash
 git pull
-docker compose up -d --build   # rebuilds image, recreates container
-docker compose logs -f bot     # watch it come up
+docker compose build --build-arg GIT_SHA=$(git rev-parse HEAD) bot  # stamp it
+docker compose up -d bot
+docker compose logs -f bot     # watch it come up (look for "Bot build sha: …")
+# then verify the running container matches the repo tip (stamp diff, above)
 ```
 
 Discord drops for a few seconds; the bot re-logs in on start. Run `/sync` in the
