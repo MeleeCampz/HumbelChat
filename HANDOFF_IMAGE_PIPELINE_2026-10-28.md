@@ -89,7 +89,7 @@ Test suite: ~1181 passed / 6 skipped at last full run (host venv).
 - **Live prompt trail**: `logs/dev.log` → grep "final image prompt" / "image negative prompt" / "prompt rewrite done" (shows iterations, tools, fallback).
 - **Shared backend**: pi-session chat, bot completions and image gen share one model/engine. Stay quiet during batch image runs; contention causes load stalls/500s.
 - **Vault sync**: two-way git push/pull every ~300 s; `data/` is gitignored by the repo (vault has its own git). After editing sheets, KB auto re-embeds changed files on next index tick (content-hash diff) — no manual reindex needed.
-- **Branch/push**: work on `feat/tool-calling`; GitHub push currently 403 (token permissions) — many local commits unpushed. Never push master without explicit intent. `.env` never committed.
+- **Branch/push**: work on `feat/tool-calling`. Pushes FROM THIS ENVIRONMENT 403 (its git credentials are read-only — sandbox token in GCM, SSH key is pi-remote-access only); the user pushes from their own machine. As of end of 2026-10-28 `feat/tool-calling` is fully pushed (tip `08ed8b5`). Never push master without explicit intent. `.env` never committed.
 
 ## 5. Immediate next steps
 
@@ -97,7 +97,7 @@ Test suite: ~1181 passed / 6 skipped at last full run (host venv).
 2. Implement fix (B) gathered-context re-append in the nudge/forced-final messages (`bot_core/agent_loop.py`).
 3. Verify with the exact German party request via the in-container trace pattern (§4); expect 5 named characters with anchors, zero invented animals.
 4. Rebuild+deploy (stamped), user tests `/generate_image` live; regenerate the campfire scene they're comparing against.
-5. Backlog: #42 tuning/live validation ongoing; #47 blocked on user decisions; #50 depends on #42; #65 prompt-cleanup deferred; #67 has a capture recipe if the silence gap recurs; GitHub 403 blocks pushes.
+5. Backlog: #42 tuning/live validation ongoing; #47 blocked on user decisions; #50 depends on #42; #65 prompt-cleanup deferred; #67 has a capture recipe if the silence gap recurs. (Pushes from this environment 403 — user pushes from their machine.)
 
 ## 6. Status — evening of 2026-10-28, after clean-context takeover (§5 steps 1–3 DONE)
 
@@ -114,8 +114,7 @@ Test suite: ~1181 passed / 6 skipped at last full run (host venv).
   not a regression (identity-critical features survived; run 3 fully verbatim).
 - **Still open:** user live-tests `/generate_image` and regenerates the
   campfire scene they're comparing against (§5 step 4) → then #42 can close.
-  Backlog #42 carries the full completion note. GitHub push still 403 —
-  `ba9e942..c44ed2d` are local-only like the earlier commits.
+  Backlog #42 carries the full completion note.
 
 ## 7. Second fix same day — party+bandit prompt dropped 4 of 5 characters
 
