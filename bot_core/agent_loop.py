@@ -148,6 +148,26 @@ class AgentTurnMeta:
     gathered_context: str = ""   # best-so-far context (search + reads)
 
 
+# Forced-answer messages repeat the gathered context INLINE so the model
+# cannot lose it in a long transcript (observed live 2026-10-28, #42: after
+# one failed read + one successful search_kb, the nudged final turn wrote
+# from memory — invented animals — instead of the searched Visual Anchors).
+# The block duplicates what is already in the transcript, so it is capped.
+_GATHERED_REAPPEND_CAP = 6000
+
+
+def _gathered_reappend(meta: AgentTurnMeta) -> str:
+    """The gathered context as a self-contained block for forced-answer msgs."""
+    ctx = meta.gathered_context.strip()
+    if not ctx:
+        return ""
+    if len(ctx) > _GATHERED_REAPPEND_CAP:
+        ctx = ctx[:_GATHERED_REAPPEND_CAP] + "\n…[gathered context truncated]"
+    return ("\nThe information gathered so far, repeated here for your final "
+            "answer (use it directly — do not rely on memory):\n"
+            f"<gathered-context>\n{ctx}\n</gathered-context>")
+
+
 def _agent_system_addendum() -> str:
     from config.settings import RAG_AGENT_MAX_ITERATIONS, RAG_AGENT_MAX_TOOL_CALLS
 
@@ -232,7 +252,8 @@ async def run_agent_loop(
                         "final answer now in plain text, using the "
                         "information above. Cite file/section per key claim; "
                         "if nothing relevant was found, say plainly that it "
-                        "is not in the rules/campaign notes."),
+                        "is not in the rules/campaign notes."
+                        + _gathered_reappend(meta)),
         }]
         try:
             text = await complete(fb_messages, model, thinking=True)
@@ -259,7 +280,8 @@ async def run_agent_loop(
             {"role": "assistant", "content": text},
             {"role": "user",
              "content": ("No more tool calls — the budget is spent. Answer in "
-                         "PLAIN TEXT now, using the information above.")},
+                         "PLAIN TEXT now, using the information above."
+                         + _gathered_reappend(meta))},
         ]
         try:
             retry = (await complete(nudged, model, thinking=True)).strip()
@@ -366,7 +388,8 @@ async def run_agent_loop(
         messages.append({
             "role": "user",
             "content": ("Iteration limit reached — give your final answer "
-                        "now in plain text with the information gathered."),
+                        "now in plain text with the information gathered."
+                        + _gathered_reappend(meta)),
         })
         forced = await complete(messages, model, thinking=True)
         return await _plain_final(forced, messages, complete, model), meta

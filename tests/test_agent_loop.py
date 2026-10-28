@@ -329,6 +329,101 @@ async def test_batch_truncated_to_remaining_cap_reports_skipped(monkeypatch):
     assert "not executed" in last_user
 
 
+# ── Gathered-context re-append in forced-answer messages (#42 handoff B) ──
+#
+# Observed live 2026-10-28: after one failed read + one successful search,
+# the nudged final turn wrote from memory (invented animals) instead of the
+# searched Visual Anchors. Every budget-exhausted "answer in plain text"
+# message now repeats meta.gathered_context inline so it cannot be lost.
+
+
+def _last_user(messages: list[dict]) -> str:
+    return [m for m in messages if m.get("role") == "user"][-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_forced_final_message_reappends_gathered_context(monkeypatch):
+    import config.settings as S
+    monkeypatch.setattr(S, "RAG_AGENT_MAX_ITERATIONS", 1)
+
+    comp = _ScriptedComplete([
+        '{"tool": "search_kb", "args": {"query": "party"}}',
+        "Final answer using the searched anchors.",
+    ])
+    text, meta = await agent_loop.run_agent_loop(
+        complete=comp, model="m", system_prompt="P", user_message="Q")
+    assert not meta.fallback
+    # The forced-final turn's prompt carries the tool result BOTH as the
+    # role:"tool" message and inside the re-append block.
+    final_user = _last_user(comp.calls[1][0])
+    assert "RESULT[search_kb" in final_user
+    assert "<gathered-context>" in final_user
+    assert text.startswith("Final answer")
+
+
+@pytest.mark.asyncio
+async def test_nudge_reappends_gathered_context(monkeypatch):
+    """The exact live failure shape: forced-final turn emits a tool call →
+    the nudge must carry the gathered context so the retry cannot write
+    from memory."""
+    import config.settings as S
+    monkeypatch.setattr(S, "RAG_AGENT_MAX_ITERATIONS", 1)
+
+    comp = _ScriptedComplete([
+        '{"tool": "search_kb", "args": {"query": "party"}}',
+        'Still a call. {"tool": "read_section", "args": {"file": "x.md"}}',
+        "Prose after the nudge, grounded in the search results.",
+    ])
+    text, meta = await agent_loop.run_agent_loop(
+        complete=comp, model="m", system_prompt="P", user_message="Q")
+    assert "Prose after the nudge" in text
+    nudged_user = _last_user(comp.calls[2][0])
+    assert "No more tool calls" in nudged_user
+    assert "RESULT[search_kb" in nudged_user
+    assert "<gathered-context>" in nudged_user
+
+
+@pytest.mark.asyncio
+async def test_fallback_reappends_gathered_context():
+    """A decision-turn error AFTER a successful tool call → the fallback
+    single-turn message also carries the gathered result."""
+    comp = _ScriptedComplete([
+        '{"tool": "search_kb", "args": {"query": "a"}}',
+        RuntimeError("backend 500"),
+        "Fallback answer.",
+    ])
+    text, meta = await agent_loop.run_agent_loop(
+        complete=comp, model="m", system_prompt="P", user_message="Q")
+    assert meta.fallback
+    fb_user = _last_user(comp.calls[2][0])
+    assert "RESULT[search_kb" in fb_user
+    assert "<gathered-context>" in fb_user
+
+
+@pytest.mark.asyncio
+async def test_gathered_reappend_is_capped(monkeypatch):
+    """The block duplicates the transcript — it must stay bounded."""
+    import config.settings as S
+    monkeypatch.setattr(S, "RAG_AGENT_MAX_ITERATIONS", 1)
+    monkeypatch.setattr(agent_loop, "_GATHERED_REAPPEND_CAP", 50)
+
+    comp = _ScriptedComplete([
+        '{"tool": "search_kb", "args": {"query": "party"}}',
+        "Final answer.",
+    ])
+    await agent_loop.run_agent_loop(
+        complete=comp, model="m", system_prompt="P", user_message="Q")
+    final_user = _last_user(comp.calls[1][0])
+    assert "truncated" in final_user
+
+
+def test_empty_gathered_reappend_is_omitted():
+    """Nothing gathered (no initial context, no tool calls) → empty string,
+    so forced-answer messages keep their old shape (no empty block)."""
+    from bot_core.agent_loop import AgentTurnMeta, _gathered_reappend
+    assert _gathered_reappend(AgentTurnMeta()) == ""
+
+
 @pytest.mark.asyncio
 async def test_batch_runs_calls_concurrently(monkeypatch):
     """Independent calls in one batch overlap in time (gather, not sum)."""
