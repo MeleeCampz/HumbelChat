@@ -23,6 +23,7 @@ import base64
 import logging
 import os
 import time
+from pathlib import Path
 
 from typing import Any, Callable
 
@@ -43,6 +44,7 @@ from config.settings import (
     IMAGE_MAX_SIZE,
     IMAGE_MODEL,
     INFER_API_KEY,
+    KB_PATH,
     INFER_URL,
 )
 
@@ -167,62 +169,72 @@ async def _warm_chat_reload() -> None:
 
 
 # ── Prompt rewriting (chat model — MUST run before the swap) ──────────────
-_REWRITE_SYSTEM = (
-    "You are a prompt engineer for a semi-realistic fantasy image model set in "
-    "Humblewood, a world from the Dungeons & Dragons universe (D&D 5e setting). "
-    "Rewrite the user's short request into ONE rich prompt following this EXACT "
-    "structure and order: [STYLE] . [SCENE] . [CHARACTERS] . [LIGHTING].\n"
-    "1. STYLE — begin with the base style sentence VERBATIM: 'Semi-realistic "
-    "fantasy illustration — detailed fur and feather texture, natural light, "
-    "storybook charm.' You may append ONE scene-fitting lighting word (e.g. 'warm "
-    "firelight glow'). No painterly/watercolor look, ever.\n"
-    "2. SCENE — setting, action and composition in at most 45 words. Keep every "
-    "element the user asked for; do not add named characters or brands they didn't "
-    "mention.\n"
-    "3. CHARACTERS — one line per character in this form: Name (VISUAL ANCHOR), "
-    "pose/action/expression in THIS scene (at most 12 words). For any character "
-    "whose sheet carries a 'Visual Anchor' section, copy the ENTIRE anchor block "
-    "VERBATIM — every clause, including all outfit and gear details; do not "
-    "rephrase, summarize or truncate it; consistency across images depends on it. "
-    "For creatures or characters WITHOUT an anchor: species + at most 3 distinctive "
-    "features + outfit, in at most 25 words. At most 5 characters total.\n"
-    "4. LIGHTING — closing lighting/mood phrase, at most 15 words.\n"
-    "HARD LIMITS: keep the whole prompt under 1300 characters for solo shots; when "
-    "3+ characters share the frame you may go up to 2000 characters (the model reads "
-    "long structured prompts well — character detail beats brevity there). Characters are "
-    "D&D player characters, NOT wild animals: bipedal humanoid animal adventurers "
-    "standing upright in fitting clothing and gear (tunic, leather armor, satchel, "
-    "tool or weapon matching their role), confident and expressive. NO humans — only "
-    "animals or humanoid beast-folk (bird-folk and other Humbelfolk); this is a rule "
-    "for YOU, not text to include. Never write negations ('no …', 'without …') into "
-    "the prompt — suppression is handled by a separate negative prompt. Do not add "
-    "text or lettering on your own initiative — BUT if the user asks for specific "
-    "text in the image (a sign, book title, label, plan), include it VERBATIM in "
-    "quotes. Googly eyes are NOT a species trait and belong ONLY to Column Bidae "
-    "(his visual anchor already says so): never give any other character googly "
-    "eyes, and if he is not in the image do not mention googly eyes at all.\n"
-    "Campaign grounding: when the request references campaign specifics (character "
-    "names, companions, places, items or events — e.g. party members or their gear), "
-    "FIRST look them up with the knowledge-base tools and ground every such detail "
-    "in what you actually find (species, class, appearance, gear) instead of "
-    "inventing one; only then write the final prompt. Never invent or mangle a "
-    "species word — use the plain-English species from the character's Visual Anchor "
-    "(Seta is a quokka-like mammal, for example — never 'cochran' or any invented "
-    "word), and use each character's pronouns exactly as their sheet states them "
-    "(Trixy is she/her, Column is he/him). Efficiency: for multi-character "
-    "requests, read the 'Player Characters' sheet ONCE — it contains every party "
-    "member with their Visual Anchor — instead of one search per character; the "
-    "iteration budget must still leave room to WRITE the final prompt. Include "
-    "EVERY character the request calls for ('the whole party' / 'alle' means all "
-    "characters listed in the Player Characters sheet) — never silently drop any "
-    "of them. Character sheets also carry "
-    "per-character rendering-style lines (e.g. 'photorealistic CGI render…', "
-    "'digital painting…' plus palette/lighting notes) inside their long 'Reusable "
-    "Prompt Block': use those ONLY to understand how the character looks — do NOT "
-    "copy them into the final prompt; its style comes solely from the base style in "
-    "step 1, and appearance comes from the Visual Anchor. Reply with the rewritten "
-    "prompt only — no quotes, no commentary, no headings."
+# ── Rewrite policy (layered: repo file + vault character rules) ────────────
+# The prompt-engineering policy is NOT hardcoded here — it lives in two
+# editable places so rule changes never need a code edit:
+#   1. prompts/image_rewrite_system.md (repo, ships in the image) — world,
+#      style, template, budgets, generic rules.
+#   2. the vault note HumbleWood/Image Generation Policy.md —
+#      CHARACTER-specific rules (googly eyes, species hotfixes, pronouns),
+#      editable directly in Obsidian; fills the {{CHARACTER_RULES}} slot.
+# Both are re-read on EVERY rewrite call, so edits apply to the next image
+# without a restart. Missing files degrade to safe built-ins (logged).
+
+_POLICY_FILE = Path(__file__).resolve().parent.parent / "prompts" \
+    / "image_rewrite_system.md"
+_CHAR_RULES_FILE = Path(KB_PATH) / "humblewood" / "HumbleWood" \
+    / "Image Generation Policy.md"
+
+# Safety net ONLY — the vault note is the source of truth for character rules.
+_DEFAULT_CHARACTER_RULES = (
+    "Googly eyes are NOT a species trait and belong ONLY to Column Bidae: "
+    "never give any other character googly eyes, and if he is not in the "
+    "image do not mention googly eyes at all. Never invent or mangle a "
+    "species word (Seta is a quokka-like mammal — never 'cochran'). Use each "
+    "character's pronouns exactly as their sheet states them (Trixy is "
+    "she/her, Column Bidae is he/him)."
 )
+
+# Last-resort policy if the repo file is missing from the image entirely.
+_FALLBACK_POLICY = (
+    "You are a prompt engineer for a semi-realistic fantasy image model set "
+    "in Humblewood (D&D 5e world). Rewrite the user's request into ONE rich "
+    "prompt: [STYLE] base style 'Semi-realistic fantasy illustration — "
+    "detailed fur and feather texture, natural light, storybook charm'; "
+    "[SCENE] setting/action ≤45 words; [CHARACTERS] one line per character, "
+    "D&D player characters (bipedal animal adventurers, no humans), reuse "
+    "each character's Visual Anchor verbatim when their sheet has one, at "
+    "most 5 characters; [LIGHTING] ≤15 words. Total under 1300 characters "
+    "(2000 for 3+ characters). No negations in the prompt; include user-"
+    "requested text VERBATIM.\n"
+    "Character rules: {{CHARACTER_RULES}}\n"
+    "Ground campaign specifics with the knowledge-base tools before writing."
+)
+
+
+def _load_rewrite_system() -> str:
+    """Assemble the rewrite system prompt (repo policy + vault char rules)."""
+    try:
+        raw = _POLICY_FILE.read_text(encoding="utf-8")
+        # The file starts with a human-facing header (how the layering works);
+        # only the policy sections themselves belong in the system prompt.
+        policy = raw.split("## World", 1)[1] if "## World" in raw else raw
+    except OSError as exc:
+        log.error("rewrite policy file missing (%s) — using built-in fallback",
+                  exc)
+        policy = _FALLBACK_POLICY
+    try:
+        char_rules = _CHAR_RULES_FILE.read_text(encoding="utf-8").strip()
+        if not char_rules:
+            raise OSError("empty")
+    except OSError as exc:
+        log.warning("character-rules vault note missing (%s) — using built-in "
+                    "default", exc)
+        char_rules = _DEFAULT_CHARACTER_RULES
+    return policy.replace("{{CHARACTER_RULES}}", char_rules).strip()
+
+
+
 
 
 def _rewrite_client() -> AsyncOpenAI:
@@ -275,7 +287,7 @@ async def rewrite_prompt(text: str) -> str:
         out, meta = await run_agent_loop(
             complete=_complete,
             model=DEFAULT_MODEL,
-            system_prompt=_REWRITE_SYSTEM,
+            system_prompt=_load_rewrite_system(),
             user_message=text,
         )
         out = (out or "").strip().strip('"')

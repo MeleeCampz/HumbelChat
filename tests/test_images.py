@@ -386,7 +386,7 @@ class TestRewriteSystemPolicy:
     def test_gogglies_only_column_bidae(self):
         # 2026-10-27 correction: NOBODY has googly eyes except Column Bidae (he).
         import bot_core.images as images_mod
-        s = images_mod._REWRITE_SYSTEM
+        s = images_mod._load_rewrite_system()
         assert "Googly eyes are NOT a species trait" in s
         assert "belong ONLY to Column Bidae" in s
         assert "give EVERY one of them those" not in s
@@ -396,7 +396,7 @@ class TestRewriteSystemPolicy:
         # structure + verbatim visual anchors + hard character budget, so
         # prompts stay detailed but never bloat.
         import bot_core.images as images_mod
-        s = images_mod._REWRITE_SYSTEM
+        s = images_mod._load_rewrite_system()
         for part in ("[STYLE]", "[SCENE]", "[CHARACTERS]", "[LIGHTING]"):
             assert part in s
         assert "copy the ENTIRE anchor block VERBATIM" in s
@@ -414,14 +414,46 @@ class TestRewriteSystemPolicy:
 
     def test_character_style_lines_never_copied_into_prompt(self):
         import bot_core.images as images_mod
-        s = images_mod._REWRITE_SYSTEM
+        s = images_mod._load_rewrite_system()
         assert "do NOT copy them into the final prompt" in s
 
     def test_no_painterly_style_prescribed(self):
         # 'painterly' may only appear as a prohibition, never as the style itself.
         import bot_core.images as images_mod
-        s = images_mod._REWRITE_SYSTEM.lower()
+        s = images_mod._load_rewrite_system().lower()
         assert "semi-realistic painterly" not in s
+
+
+class TestRewritePolicyLoading:
+    """The policy is layered: repo file + vault character-rules note, both
+    re-read per generation; missing files degrade to built-in defaults."""
+
+    def test_vault_character_rules_are_injected(self, monkeypatch, tmp_path):
+        import bot_core.images as images_mod
+        note = tmp_path / "note.md"
+        note.write_text("ZZZ_CUSTOM_RULE_MARKER applies.", encoding="utf-8")
+        monkeypatch.setattr(images_mod, "_CHAR_RULES_FILE", note)
+        assert "ZZZ_CUSTOM_RULE_MARKER" in images_mod._load_rewrite_system()
+
+    def test_missing_vault_note_falls_back_to_default(self, monkeypatch, tmp_path):
+        import bot_core.images as images_mod
+        monkeypatch.setattr(
+            images_mod, "_CHAR_RULES_FILE", tmp_path / "absent.md")
+        s = images_mod._load_rewrite_system()
+        assert "Googly eyes are NOT a species trait" in s  # built-in default
+
+    def test_missing_repo_file_falls_back_to_builtin_policy(
+            self, monkeypatch, tmp_path):
+        import bot_core.images as images_mod
+        monkeypatch.setattr(images_mod, "_POLICY_FILE", tmp_path / "absent.md")
+        s = images_mod._load_rewrite_system()
+        assert "[STYLE]" in s  # built-in fallback, not a crash
+
+    def test_human_header_and_placeholder_not_injected(self):
+        import bot_core.images as images_mod
+        s = images_mod._load_rewrite_system()
+        assert "Source of truth for" not in s  # human-facing header stripped
+        assert "{{CHARACTER_RULES}}" not in s  # placeholder fully replaced
 
 
 class TestWarmChatReloadSerialization:
