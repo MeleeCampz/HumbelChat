@@ -388,8 +388,21 @@ class TestRewriteSystemPolicy:
         import bot_core.images as images_mod
         s = images_mod._REWRITE_SYSTEM
         assert "Googly eyes are NOT a species trait" in s
-        assert "The single exception is Column Bidae (he)" in s
+        assert "belong ONLY to Column Bidae" in s
         assert "give EVERY one of them those" not in s
+
+    def test_fixed_template_with_length_budgets(self):
+        # 2026-10-28 optimization: fixed [STYLE][SCENE][CHARACTERS][LIGHTING]
+        # structure + verbatim visual anchors + hard character budget, so
+        # prompts stay detailed but never bloat.
+        import bot_core.images as images_mod
+        s = images_mod._REWRITE_SYSTEM
+        for part in ("[STYLE]", "[SCENE]", "[CHARACTERS]", "[LIGHTING]"):
+            assert part in s
+        assert "reuse that anchor text VERBATIM" in s
+        assert "under 1300 characters" in s
+        # negations stay OUT of the positive prompt (negative prompt handles them)
+        assert "Never write negations" in s
 
     def test_character_style_lines_never_copied_into_prompt(self):
         import bot_core.images as images_mod

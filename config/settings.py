@@ -147,6 +147,9 @@ _DEFAULT_IMAGE_NEGATIVE_PROMPT = (
     "humans, human, person, realistic human face,"
     " watermark, signature, username,"
     " modern objects, car, smartphone, plastic, neon,"
+    # Trixy's facial markings are natural fur coloration — the model kept
+    # painting them as a WORN mask (observed live); steer away from that.
+    " worn mask on face, raccoon mask,"
     " blurry, lowres, bad anatomy, extra limbs, deformed, cropped out of frame"
 )
 IMAGE_NEGATIVE_PROMPT: str = os.getenv("IMAGE_NEGATIVE_PROMPT", _DEFAULT_IMAGE_NEGATIVE_PROMPT).strip()
