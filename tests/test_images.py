@@ -448,8 +448,12 @@ class TestCommandHandler:
             async def edit(**ekwargs):
                 msg.update(ekwargs)  # latest state wins (single message)
 
+            async def delete():
+                msg["deleted"] = True
+
             msg["edit"] = edit
-            return MagicMock(edit=edit)
+            msg["deleted"] = False
+            return MagicMock(edit=edit, delete=delete)
 
         inter.followup.send = capture
         return inter, followups
@@ -507,12 +511,12 @@ class TestCommandHandler:
         monkeypatch.setattr(cmd, "prepare_prompt", AsyncMock(return_value="rich bird"))
         await handle_generate_image_command(inter, prompt="bird")
         assert generated == ["rich bird"]
-        # the image is a fresh message; the progress message was edited per phase
+        # the image is a fresh message; the progress message was edited per
+        # phase and then DELETED (no lone "✅" left next to the image)
         img = next(f for f in followups if "file" in f)
         assert img["content"].startswith("🎨")
         progress = followups[0]
-        assert progress["edit"] is not None
-        assert progress["content"] == "✅"  # final phase edit won
+        assert progress["deleted"] is True
 
     async def test_dry_run_returns_prompt_without_generating(self, monkeypatch):
         import commands.generate_image_command as cmd
@@ -525,12 +529,13 @@ class TestCommandHandler:
         monkeypatch.setattr(cmd, "generate_image", explode)
         inter, followups = self._interaction()
         await handle_generate_image_command(inter, prompt="bird", dry_run=True)
-        # progress message + the dry-run reply (no image, no generation)
+        # progress message (deleted) + the dry-run reply (no image, no generation)
         assert len(followups) == 2
         reply = followups[1]
         assert "Dry run" in reply["content"]
         assert "rich bird" in reply["content"]
         assert "file" not in reply
+        assert followups[0]["deleted"] is True
 
     async def test_generation_failure_replies_error(self, monkeypatch):
         import commands.generate_image_command as cmd
@@ -543,8 +548,9 @@ class TestCommandHandler:
         monkeypatch.setattr(cmd, "generate_image", boom)
         inter, followups = self._interaction()
         await handle_generate_image_command(inter, prompt="bird")
-        # [0] progress message, [1] the error reply
+        # [0] progress message (deleted), [1] the error reply
         assert "failed" in followups[1]["content"].lower()
+        assert followups[0]["deleted"] is True
 
     async def test_bad_size_replies_error(self, monkeypatch):
         import commands.generate_image_command as cmd

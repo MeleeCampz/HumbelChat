@@ -68,7 +68,9 @@ async def handle_generate_image_command(
         await interaction.followup.send(f"⚠️ {e}")
         return
 
-    # Progress message (after the early-return checks above): edited per phase.
+    # Progress message (after the early-return checks above): edited per phase,
+    # DELETED on every exit so only the meaningful message(s) remain — a lone
+    # "✅" next to the image read as a duplicate response.
     progress_msg = await interaction.followup.send("🎨 Preparing prompt…")
 
     async def _progress(text: str) -> None:
@@ -76,6 +78,12 @@ async def handle_generate_image_command(
             await progress_msg.edit(content=text)
         except Exception as exc:  # noqa: BLE001 — progress must never fail the gen
             log.debug("progress update failed: %s", exc)
+
+    async def _cleanup() -> None:
+        try:
+            await progress_msg.delete()
+        except Exception as exc:  # noqa: BLE001 — cosmetic only
+            log.debug("progress cleanup failed: %s", exc)
 
     # 1) Rewrite FIRST, on the resident chat model (no image loaded yet).
     final_prompt = await prepare_prompt(prompt, raw=raw)
@@ -88,6 +96,7 @@ async def handle_generate_image_command(
             "🔍 **Dry run — nothing generated.** Final prompt that would be sent:\n\n" +
             f"```\n{final_prompt}\n```"
         )
+        await _cleanup()
         return
 
     # 2) The no-chat-calls window: hold the AI slot for load→generate→unload.
@@ -104,6 +113,7 @@ async def handle_generate_image_command(
     except ImageGenError as e:
         log.error("image generation failed: %s", e)
         await interaction.followup.send(f"⚠️ Image generation failed ({e}). Try again in a moment.")
+        await _cleanup()
         return
 
     preview = prompt[:_PROMPT_PREVIEW_CHARS]
@@ -112,4 +122,4 @@ async def handle_generate_image_command(
     filename = f"image-{int(time.time())}.png"
     file = discord.File(io.BytesIO(png), filename=filename)
     await interaction.followup.send(f"🎨 {preview}", file=file)
-    await _progress("✅")
+    await _cleanup()
