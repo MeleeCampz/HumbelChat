@@ -20,6 +20,7 @@ import discord
 
 from bot_core.ai_client import _ai_slot
 from bot_core.images import (
+    IMAGE_DEFAULT_SIZE,
     ImageGenError,
     generate_image,
     image_gen_configured,
@@ -107,7 +108,9 @@ async def handle_generate_image_command(
 
     def _phase(name: str):
         if name == "painting":
-            return _progress(f"🖌️ Painting… ({side} px)")
+            # `side` is None when the user gave no size — the effective
+            # default is applied inside generate_image; show that, not "None".
+            return _progress(f"🖌️ Painting… ({side or IMAGE_DEFAULT_SIZE} px)")
         return None  # "loading" already announced above
 
     try:

@@ -445,13 +445,18 @@ class TestCommandHandler:
             msg = {"content": content, **kwargs}
             followups.append(msg)
 
+            edits: list[str] = []
+
             async def edit(**ekwargs):
+                if "content" in ekwargs:
+                    edits.append(str(ekwargs["content"]))
                 msg.update(ekwargs)  # latest state wins (single message)
 
             async def delete():
                 msg["deleted"] = True
 
             msg["edit"] = edit
+            msg["edits"] = edits
             msg["deleted"] = False
             return MagicMock(edit=edit, delete=delete)
 
@@ -541,6 +546,26 @@ class TestCommandHandler:
         assert "rich bird" in reply["content"]
         assert "file" not in reply
         assert followups[0]["deleted"] is True
+
+    async def test_painting_update_shows_effective_size_not_none(self, monkeypatch):
+        """Regression: with no --size given, `side` is None and the update used
+        to read 'Painting…(None px)' — it must show the effective default."""
+        import commands.generate_image_command as cmd
+        monkeypatch.setattr(cmd, "image_gen_configured", lambda: True)
+        monkeypatch.setattr(cmd, "IMAGE_DEFAULT_SIZE", 1024)
+        monkeypatch.setattr(cmd, "prepare_prompt", AsyncMock(return_value="rich bird"))
+
+        async def fake_gen(prompt, size=None, on_phase=None):
+            if on_phase is not None:
+                await on_phase("painting")
+            return _PNG
+
+        monkeypatch.setattr(cmd, "generate_image", fake_gen)
+        inter, followups = self._interaction()
+        await handle_generate_image_command(inter, prompt="bird")  # no size
+        edits = followups[0]["edits"]
+        assert any("1024 px" in e for e in edits)
+        assert not any("None px" in e for e in edits)
 
     async def test_in_place_edit_failure_falls_back_to_fresh_message(self, monkeypatch):
         """If the final in-place edit can't carry the attachment (API edge),
