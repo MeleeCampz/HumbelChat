@@ -405,6 +405,10 @@ class TestRewriteSystemPolicy:
         # species words must come from the sheet, never be invented (live: Seta
         # kept coming out a mangled 'cochran')
         assert "Never invent or mangle a species word" in s
+        # group scenes: one sheet read, and no silent character-dropping
+        # (live: 'the whole party' came back with 3 of 5 members)
+        assert "read the 'Player Characters' sheet ONCE" in s
+        assert "never silently drop any" in s
         # negations stay OUT of the positive prompt (negative prompt handles them)
         assert "Never write negations" in s
 
