@@ -438,12 +438,18 @@ class TestCommandHandler:
 
     def _interaction(self):
         inter = MagicMock()
-        inter.response.defer = AsyncMock()
-        inter.response.edit_message = AsyncMock()  # progress updates
+        inter.response.defer = AsyncMock()  # discord.py 2.7: no content kwarg
         followups: list[dict] = []
 
         async def capture(content=None, **kwargs):
-            followups.append({"content": content, **kwargs})
+            msg = {"content": content, **kwargs}
+            followups.append(msg)
+
+            async def edit(**ekwargs):
+                msg.update(ekwargs)  # latest state wins (single message)
+
+            msg["edit"] = edit
+            return MagicMock(edit=edit)
 
         inter.followup.send = capture
         return inter, followups
@@ -481,7 +487,7 @@ class TestCommandHandler:
         await handle_generate_image_command(inter, prompt="verbatim bird", raw=True)
         prepared.assert_awaited_once_with("verbatim bird", raw=True)
         assert generated == ["verbatim bird"]
-        assert "file" in followups[0]
+        assert "file" in followups[1]  # [0] is the progress message
 
     async def test_prepare_prompt_used_when_not_raw(self, monkeypatch):
         import commands.generate_image_command as cmd
@@ -501,12 +507,12 @@ class TestCommandHandler:
         monkeypatch.setattr(cmd, "prepare_prompt", AsyncMock(return_value="rich bird"))
         await handle_generate_image_command(inter, prompt="bird")
         assert generated == ["rich bird"]
-        assert "file" in followups[0]
-        # stall visibility: the deferred placeholder was edited per phase
-        edits = " | ".join(
-            str(c.kwargs.get("content", "")) for c in inter.response.edit_message.call_args_list)
-        assert "loading the image model" in edits
-        assert "Painting" in edits
+        # the image is a fresh message; the progress message was edited per phase
+        img = next(f for f in followups if "file" in f)
+        assert img["content"].startswith("🎨")
+        progress = followups[0]
+        assert progress["edit"] is not None
+        assert progress["content"] == "✅"  # final phase edit won
 
     async def test_dry_run_returns_prompt_without_generating(self, monkeypatch):
         import commands.generate_image_command as cmd
@@ -519,10 +525,12 @@ class TestCommandHandler:
         monkeypatch.setattr(cmd, "generate_image", explode)
         inter, followups = self._interaction()
         await handle_generate_image_command(inter, prompt="bird", dry_run=True)
-        assert len(followups) == 1
-        assert "Dry run" in followups[0]["content"]
-        assert "rich bird" in followups[0]["content"]
-        assert "file" not in followups[0]
+        # progress message + the dry-run reply (no image, no generation)
+        assert len(followups) == 2
+        reply = followups[1]
+        assert "Dry run" in reply["content"]
+        assert "rich bird" in reply["content"]
+        assert "file" not in reply
 
     async def test_generation_failure_replies_error(self, monkeypatch):
         import commands.generate_image_command as cmd
@@ -535,7 +543,8 @@ class TestCommandHandler:
         monkeypatch.setattr(cmd, "generate_image", boom)
         inter, followups = self._interaction()
         await handle_generate_image_command(inter, prompt="bird")
-        assert "failed" in followups[0]["content"].lower()
+        # [0] progress message, [1] the error reply
+        assert "failed" in followups[1]["content"].lower()
 
     async def test_bad_size_replies_error(self, monkeypatch):
         import commands.generate_image_command as cmd
