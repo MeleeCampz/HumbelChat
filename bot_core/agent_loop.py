@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Protocol
@@ -61,10 +62,14 @@ def _is_tool_call(text: str) -> bool:
 # unparseable, yet long enough to pass the plain-answer length gate and get
 # painted verbatim). Prose never contains these.
 # Both slash widths — the model emits either (observed live 2026-10-28).
+# Space-COLLAPSED tag shapes: the model emits the tags with a stray space
+# (``< tool_call>``) but may also emit them tight (``<tool_call>``), and log/
+# console renderers can widen or drop characters. Matching on the collapsed
+# form (all whitespace removed) covers every spacing/width variant at once —
+# prose never contains these tag shapes, so zero false-positive risk.
 _FRAGMENT_MARKERS = (
-    "< tool_call",
-    "< /tool_call>", "<⁄/tool_call>",
-    "<parameter", "< /parameter>",
+    "<tool_call", "<" + chr(0x2F) + "tool_call>", "<" + chr(0x2044) + "/tool_call>",
+    "<parameter", "<" + chr(0x2F) + "parameter>",
     '"tool":', "'tool':",
 )
 
@@ -75,9 +80,26 @@ def looks_like_tool_call_fragment(text: str) -> bool:
     (mixed JSON/XML, truncated JSON) that fail to parse but are clearly the
     model attempting the protocol. Also flags text that is bare JSON/JSON-
     array at all — a real answer never starts with ``{`` or ``[``.
+
+    The tag markers are matched on the NORMALIZED form: the model emits the
+    tags as literal ``<tool_call>`` (and sometimes with stray spaces), while
+    log/console rendering can widen the angle brackets (observed live
+    2026-10-28: a ``<tool_call>["{\\\"tool\\\": …}"]`` turn sailed through
+    every marker because the stored text carried U+FF1C/U+FF1E — the guard
+    saw ``＜tool_call＞`` and matched nothing). Normalizing both bracket
+    widths + collapsing inner spaces makes the check width- and spacing-
+    agnostic; prose never contains these tag shapes.
     """
     t = text.strip()
     if any(m in t for m in _FRAGMENT_MARKERS):
+        return True
+    # Also collapse every ZERO-WIDTH character: the model (and some log
+    # renderers) interleave U+200B/U+FEFF inside tags — ``<\u200btool_call>``
+    # defeats a plain substring match while being visually identical.
+    n = (t.replace("\uff1c", "<").replace("\uff1e", ">")
+           .replace("\u2039", "<").replace("\u203a", ">"))
+    n = re.sub(r"[\u200b\u200c\u200d\ufeff]", "", n)
+    if any(m in re.sub(r"\s+", "", n) for m in _FRAGMENT_MARKERS):
         return True
     return t.startswith(("{", "["))
 
