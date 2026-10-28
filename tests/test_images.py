@@ -402,6 +402,9 @@ class TestRewriteSystemPolicy:
         assert "copy the ENTIRE anchor block VERBATIM" in s
         assert "under 1300 characters" in s
         assert "up to 2000 characters" in s
+        # species words must come from the sheet, never be invented (live: Seta
+        # kept coming out a mangled 'cochran')
+        assert "Never invent or mangle a species word" in s
         # negations stay OUT of the positive prompt (negative prompt handles them)
         assert "Never write negations" in s
 
