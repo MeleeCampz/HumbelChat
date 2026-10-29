@@ -233,5 +233,61 @@ class TestMalformedResponseLength:
         assert vecs[0] == [0.9] * 8 and vecs[1] == [0.9] * 8
 
 
+class TestBatchProgressHook:
+    """#70: encode(texts, on_batch) reports (done, total) per batch."""
+
+    @pytest.mark.asyncio
+    async def test_on_batch_reported_per_batch(self):
+        recorded: list[dict] = []
+        emb = E.Embedder(model_name="m", batch_size=2)
+        texts = [f"text {i}" for i in range(5)]  # 5 → 3 batches (2+2+1)
+        calls: list[tuple[int, int]] = []
+
+        def on_batch(done, total):
+            calls.append((done, total))
+
+        with patch.object(E.httpx, "AsyncClient", _factory(recorded)):
+            vecs = await emb.encode(texts, on_batch=on_batch)
+
+        assert len(vecs) == 5
+        assert calls == [(2, 5), (4, 5), (5, 5)]
+
+    @pytest.mark.asyncio
+    async def test_async_on_batch_also_supported(self):
+        recorded: list[dict] = []
+        emb = E.Embedder(model_name="m", batch_size=2)
+        calls: list[tuple[int, int]] = []
+
+        async def on_batch(done, total):
+            calls.append((done, total))
+
+        with patch.object(E.httpx, "AsyncClient", _factory(recorded)):
+            await emb.encode(["a", "b", "c"], on_batch=on_batch)
+
+        assert calls == [(2, 3), (3, 3)]
+
+    @pytest.mark.asyncio
+    async def test_broken_on_batch_does_not_fail_encode(self):
+        recorded: list[dict] = []
+        emb = E.Embedder(model_name="m", batch_size=2)
+
+        def bad(done, total):
+            raise RuntimeError("discord edit failed")
+
+        with patch.object(E.httpx, "AsyncClient", _factory(recorded)):
+            vecs = await emb.encode(["a", "b"], on_batch=bad)
+
+        assert len(vecs) == 2
+
+    @pytest.mark.asyncio
+    async def test_no_hook_is_default(self):
+        """Back-compat: encode(texts) without a hook behaves as before."""
+        recorded: list[dict] = []
+        emb = E.Embedder(model_name="m", batch_size=2)
+        with patch.object(E.httpx, "AsyncClient", _factory(recorded)):
+            vecs = await emb.encode(["a", "b"])
+        assert len(vecs) == 2
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

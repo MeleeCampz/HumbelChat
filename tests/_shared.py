@@ -2,19 +2,45 @@
 from __future__ import annotations
 
 
+class MockMessage:
+    """Stand-in for a sent discord.Message: awaitable edit/delete + records.
+
+    Progress-message patterns (e.g. #70 /speak, /reindex_kb) do
+    ``msg = await interaction.followup.send(...)`` and later
+    ``await msg.edit(content=...)`` / ``await msg.delete()``.
+    """
+
+    def __init__(self, content):
+        self.content = str(content)
+        self.edits: list[str] = []
+        self.deleted = False
+
+    async def edit(self, content=None, **kwargs):
+        if content is not None:
+            self.edits.append(str(content))
+
+    async def delete(self):
+        self.deleted = True
+
+
 class Followup:
     """A real followup object with an async send method.
 
     In production slash commands you call ``interaction.followup.send()``
     after deferring the response (or immediately if you used
     ``interaction.response.send_message()``).  This mock always records
-    what was sent so assertions can be made against it.
+    what was sent so assertions can be made against it, and — like the real
+    Discord API — returns the sent message (with awaitable edit/delete).
     """
     def __init__(self, sent_list):
         self._sent = sent_list
+        self.messages: list[MockMessage] = []
 
     async def send(self, content="", ephemeral=False, **kwargs):
         self._sent.append(str(content))
+        msg = MockMessage(content)
+        self.messages.append(msg)
+        return msg
 
 
 class Response:

@@ -18,9 +18,10 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import inspect
 import logging
 import threading
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -37,6 +38,21 @@ from config.settings import EMBED_TIMEOUT
 # This removes the per-request model swap entirely: the llama.cpp backend only
 # ever loads the chat model. The model is loaded once (lazy) and kept resident,
 # so per-query cost is just a small CPU encode of the short text.
+async def _emit_progress(on_batch: Callable[[int, int], Any] | None, done: int, total: int) -> None:
+    """Invoke an optional batch-progress hook without ever failing the encode.
+
+    The callback may be sync or async (``(done, total)`` chunk counts).
+    """
+    if on_batch is None:
+        return
+    try:
+        result = on_batch(done, total)
+        if inspect.isawaitable(result):
+            await result
+    except Exception as exc:  # noqa: BLE001 - progress must never fail the build
+        logger.debug("batch progress callback failed: %s", exc)
+
+
 _local_model: Any = None
 _local_model_lock: threading.Lock | None = None
 
@@ -180,7 +196,7 @@ class Embedder:
 
     # ── Public API ─────────────────────────────────────────────────────
 
-    async def encode(self, texts: list[str]) -> list[list[float]]:
+    async def encode(self, texts: list[str], on_batch: Callable[[int, int], Any] | None = None) -> list[list[float]]:
         """Encode *texts* into embedding vectors.  Returns ``[vec1, vec2, …]``.
 
         Handles batching automatically and raises :class:`EmbeddingError` on
@@ -188,6 +204,11 @@ class Embedder:
         When constructed with ``fallback_local=True`` a backend failure instead
         transparently re-encodes in-process on CPU, so batch index builds never
         hard-fail on a downed backend.
+
+        *on_batch* (#70) is an optional progress hook — sync or async callable
+        taking ``(done, total)`` chunk counts — called after each remote batch
+        (once at the end for the fast local path). A broken callback never
+        fails the encode.
         """
         if not texts:
             return []
@@ -195,20 +216,24 @@ class Embedder:
         # Local (in-process CPU) backend: encode off the event loop. Deterministic
         # and fast, so no HTTP batching/endpoint probing is needed.
         if self._use_local:
-            return await asyncio.to_thread(self._local_encode, list(texts))
+            out = await asyncio.to_thread(self._local_encode, list(texts))
+            await _emit_progress(on_batch, len(texts), len(texts))
+            return out
 
         try:
-            return await self._remote_encode(list(texts))
+            return await self._remote_encode(list(texts), on_batch=on_batch)
         except EmbeddingError as exc:
             if self._fallback_local and importlib.util.find_spec("sentence_transformers") is not None:
                 logger.warning(
                     "Backend /embeddings failed (%s); falling back to local CPU for %d text(s).",
                     exc, len(texts),
                 )
-                return await asyncio.to_thread(self._local_encode, list(texts))
+                out = await asyncio.to_thread(self._local_encode, list(texts))
+                await _emit_progress(on_batch, len(texts), len(texts))
+                return out
             raise
 
-    async def _remote_encode(self, texts: list[str]) -> list[list[float]]:
+    async def _remote_encode(self, texts: list[str], on_batch: Callable[[int, int], Any] | None = None) -> list[list[float]]:
         """Encode *texts* via the HTTP /embeddings endpoint (batched + deduped)."""
         # Deduplicate while preserving order for result alignment
         seen: dict[str, int] = {}
@@ -219,7 +244,8 @@ class Embedder:
                 unique_texts.append(t)
 
         all_embeddings: dict[int, list[float]] = {}
-        for i in range(0, len(unique_texts), self.batch_size):
+        total = len(unique_texts)
+        for i in range(0, total, self.batch_size):
             batch = unique_texts[i : i + self.batch_size]
             try:
                 vectors = await self._call_api(batch)
@@ -248,6 +274,7 @@ class Embedder:
                 vectors = await asyncio.to_thread(self._local_encode, list(batch))
             for idx, vec in enumerate(vectors):
                 all_embeddings[seen[batch[idx]]] = vec
+            await _emit_progress(on_batch, min(i + len(batch), total), total)
 
         # Reconstruct result in original order, mapping each text back to its seen index
         result: list[list[float]] = []

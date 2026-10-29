@@ -41,13 +41,20 @@ class FakeEmbedder:
         self.call_count = 0
         self.encoded_texts: list[str] = []
         self.fail = fail
+        self.batch_calls: list[tuple[int, int]] = []
 
-    async def encode(self, texts: list[str]) -> list[list[float]]:
+    async def encode(self, texts: list[str], on_batch=None) -> list[list[float]]:
         self.call_count += 1
         self.encoded_texts.extend(texts)
         if self.fail:
             raise RuntimeError("embedding backend down (simulated)")
-        return [_fake_vector(t) for t in texts]
+        out = [_fake_vector(t) for t in texts]
+        if on_batch is not None:  # #70 progress hook — mirror the real embedder
+            import inspect as _inspect
+            result = on_batch(len(texts), len(texts))
+            if _inspect.isawaitable(result):
+                await result
+        return out
 
 
 def install_fake_embedder(store: KBIndexStore, fail: bool = False) -> FakeEmbedder:
@@ -561,6 +568,36 @@ class TestPerSessionFolders:
         # Session A's doc is gone, but session B's same-named doc remains.
         assert not any("ALPHA DOC UNIQUE" in d.content for d in idx._docs)
         assert any("BETA DOC UNIQUE" in d.content for d in idx._docs)
+
+
+class TestBatchProgressThreading:
+    """#70: store.load(on_batch=…) forwards chunk progress to the embedder."""
+
+    @pytest.mark.asyncio
+    async def test_load_forwards_on_batch_to_embedder(self, multi_chunk_kb, tmp_path):
+        store = make_store(tmp_path, multi_chunk_kb)
+        fake = install_fake_embedder(store)
+
+        def on_batch(done, total):
+            fake.batch_calls.append((done, total))
+
+        idx = await store.load(force_rebuild=True, on_batch=on_batch)
+
+        assert not idx.is_empty()
+        assert fake.batch_calls, "progress hook must reach the embedder"
+        done, total = fake.batch_calls[-1]
+        assert done == total  # ends complete
+
+    @pytest.mark.asyncio
+    async def test_load_without_hook_keeps_plain_encode_signature(self, kb_dir, tmp_path):
+        """Back-compat: no hook → the embedder is called as encode(texts)."""
+        store = make_store(tmp_path, kb_dir)
+        fake = install_fake_embedder(store)
+
+        await store.load(force_rebuild=True)
+
+        assert fake.call_count >= 1
+        assert fake.batch_calls == []
 
 
 if __name__ == "__main__":

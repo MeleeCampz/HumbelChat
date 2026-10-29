@@ -1,4 +1,6 @@
 """Tests for knowledge base commands: /upload_kb, /list_kb_docs, /reindex_kb."""
+import asyncio
+import inspect
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from tests._shared import Interaction
@@ -172,7 +174,97 @@ class TestReindexKBCommand:
                 from commands.kb_commands import handle_reindex_kb
                 await handle_reindex_kb(ix)
 
-        assert any("rebuilt" in s.lower() for s in sent)
+        # #70: the progress placeholder is edited in place into the final
+        # result — ONE message, no second send.
+        assert any("Rebuilding" in s for s in sent)
+        progress = ix.followup.messages[-1]
+        assert not progress.deleted
+        assert any("rebuilt" in e.lower() for e in progress.edits)
+
+    @pytest.mark.asyncio
+    async def test_reindex_kb_reports_embedding_progress(self, temp_kb_dir):
+        """#70: batch progress from the embedder updates the message live."""
+        ix = Interaction()
+        await ix.response.defer(ephemeral=True)
+
+        mock_idx = MagicMock()
+        mock_idx.count.return_value = 5
+        mock_idx.is_empty.return_value = False
+        mock_idx.search = AsyncMock(return_value=[MagicMock()])
+
+        async def fake_load(force_rebuild=False, on_batch=None):
+            assert force_rebuild is True
+            if on_batch is not None:
+                # the real embedder awaits awaitable callbacks — do the same
+                for done, total in ((3, 10), (10, 10)):
+                    result = on_batch(done, total)
+                    if inspect.isawaitable(result):
+                        await result
+            return mock_idx
+
+        mock_store = AsyncMock()
+        mock_store.load = AsyncMock(side_effect=fake_load)
+        mock_store.shutdown = AsyncMock()
+        mock_store.get_index = MagicMock(return_value=mock_idx)
+
+        with patch("kb.index.KBIndexStore", return_value=mock_store):
+            with patch("config.settings.KB_PATH", temp_kb_dir):
+                from commands.kb_commands import handle_reindex_kb
+                await handle_reindex_kb(ix)
+
+        edits = ix.followup.messages[-1].edits
+        assert any("Embedding 3/10 chunks" in e for e in edits)
+        assert any("Embedding 10/10 chunks" in e for e in edits)
+
+    @pytest.mark.asyncio
+    async def test_reindex_kb_final_edit_failure_falls_back_to_fresh_message(self, temp_kb_dir):
+        """#70: if the final in-place edit can't carry the result (API edge),
+        a fresh follow-up message is sent and the progress placeholder deleted."""
+        ix = Interaction()
+        await ix.response.defer(ephemeral=True)
+
+        mock_idx = MagicMock()
+        mock_idx.count.return_value = 5
+        mock_idx.is_empty.return_value = False
+
+        async def slow_load(force_rebuild=False, on_batch=None):
+            await asyncio.sleep(0.2)  # park the handler inside load()
+            return mock_idx
+
+        mock_store = AsyncMock()
+        mock_store.load = AsyncMock(side_effect=slow_load)
+        mock_store.shutdown = AsyncMock()
+        mock_store.get_index = MagicMock(return_value=mock_idx)
+
+        sent_before = len(ix._sent)
+
+        async def _run():
+            from commands.kb_commands import handle_reindex_kb
+            await handle_reindex_kb(ix)
+
+        with patch("kb.index.KBIndexStore", return_value=mock_store):
+            with patch("config.settings.KB_PATH", temp_kb_dir):
+                # make the progress message's FINAL edit raise (intermediate
+                # edits are fine): wrap once the placeholder is out and the
+                # handler is parked in load() — no race, slow_load guarantees it.
+                task = asyncio.ensure_future(_run())
+                while not ix.followup.messages:
+                    await asyncio.sleep(0.01)
+                progress = ix.followup.messages[0]
+                orig_edit = progress.edit  # bound method, captured before replacing
+
+                async def boom_edit(content=None, **kw):
+                    if content is not None and "rebuilt" in str(content).lower():
+                        raise RuntimeError("discord edit rejected")
+                    await orig_edit(content=content, **kw)
+
+                progress.edit = boom_edit
+                await task
+
+        # fresh message with the result + placeholder deleted
+        new_sends = ix._sent[sent_before:]
+        assert any("rebuilt" in s.lower() for s in new_sends)
+        assert ix.followup.messages[0].deleted is True
 
 
 class TestMessageUploads:

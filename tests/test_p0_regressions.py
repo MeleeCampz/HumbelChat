@@ -104,7 +104,9 @@ class TestIndexStoreSwap:
         assert retrievers._index_store is fresh, (
             "handler must swap the freshly built store into the singleton"
         )
-        assert any("rebuilt" in s.lower() for s in ix._sent)
+        # #70: the result is delivered by editing the progress message in place
+        edits = [e for m in ix.followup.messages for e in m.edits]
+        assert any("rebuilt" in s.lower() for s in [*ix._sent, *edits])
 
         # The replaced (stale) store is shut down out-of-band.
         for _ in range(3):
@@ -136,7 +138,9 @@ class TestIndexStoreSwap:
         assert retrievers._index_store is good, (
             "an empty rebuild must not replace a working index"
         )
-        assert any("could not be built" in s for s in ix._sent)
+        # #70: the result is delivered by editing the progress message in place
+        edits = [e for m in ix.followup.messages for e in m.edits]
+        assert any("could not be built" in s for s in [*ix._sent, *edits])
 
 
 # ─────────────────── P0 #2: history persisted each turn ───────────────────

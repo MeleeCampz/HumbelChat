@@ -64,7 +64,7 @@ import pathlib
 import re
 import sqlite3
 import time
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, Any, Callable, TypedDict
 
 from kb.vector_db import KBVectorIndex, _DocEntry
 from kb.embedder import Embedder
@@ -400,17 +400,29 @@ class KBIndexStore:
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 
-    async def load(self, force_rebuild: bool = False) -> KBVectorIndex:
-        """Load the vector index, using the disk cache when possible."""
+    async def load(
+        self,
+        force_rebuild: bool = False,
+        on_batch: Callable[[int, int], Any] | None = None,
+    ) -> KBVectorIndex:
+        """Load the vector index, using the disk cache when possible.
+
+        *on_batch* (#70) is an optional ``(done, total)`` chunk-progress hook
+        forwarded to the embedding step (used by /reindex_kb's status updates).
+        """
         if self._index is not None:
             return self._index
 
         # P0 #3: building/loading is a full read → embed → persist mutation;
         # serialize it against concurrent updates/syncs on this store.
         async with self._mutation_lock():
-            return await self._load_inner(force_rebuild)
+            return await self._load_inner(force_rebuild, on_batch=on_batch)
 
-    async def _load_inner(self, force_rebuild: bool = False) -> KBVectorIndex:
+    async def _load_inner(
+        self,
+        force_rebuild: bool = False,
+        on_batch: Callable[[int, int], Any] | None = None,
+    ) -> KBVectorIndex:
         """Lock-free load core.
 
         ``load()`` wraps this in the mutation lock; ``sync_changes`` /
@@ -436,7 +448,7 @@ class KBIndexStore:
             # ignored and publish via _persist_index_to_db's atomic swap.
             self._ignore_cache = True
             try:
-                self._index = await self._build_fresh()
+                self._index = await self._build_fresh(on_batch=on_batch)
             finally:
                 self._ignore_cache = False
         elif not await asyncio.to_thread(self._cache_identity_ok):
@@ -448,11 +460,11 @@ class KBIndexStore:
             # cache before the new one is ready to replace it atomically.
             self._ignore_cache = True
             try:
-                self._index = await self._build_fresh()
+                self._index = await self._build_fresh(on_batch=on_batch)
             finally:
                 self._ignore_cache = False
         else:
-            self._index = await self._load_incremental()
+            self._index = await self._load_incremental(on_batch=on_batch)
 
         return self._index
 
@@ -689,7 +701,9 @@ class KBIndexStore:
 
     # ── Build paths ─────────────────────────────────────────────────────
 
-    async def _build_fresh(self) -> KBVectorIndex:
+    async def _build_fresh(
+        self, on_batch: Callable[[int, int], Any] | None = None
+    ) -> KBVectorIndex:
         """Build the full index from disk, reusing cached embeddings where possible."""
         files = await self._iter_files()
         if not files:
@@ -732,7 +746,9 @@ class KBIndexStore:
 
         if to_embed_files:
             try:
-                new_entries, new_embeddings, new_fh = await self._embed_files(to_embed_files)
+                new_entries, new_embeddings, new_fh = await self._embed_files(
+                    to_embed_files, on_batch=on_batch
+                )
             except Exception as exc:
                 logger.warning(
                     "Fresh index build failed: %s — embedding backend may be down", exc
@@ -760,7 +776,9 @@ class KBIndexStore:
                     idx.count(), len(files), self._db_path)
         return idx
 
-    async def _load_incremental(self) -> KBVectorIndex:
+    async def _load_incremental(
+        self, on_batch: Callable[[int, int], Any] | None = None
+    ) -> KBVectorIndex:
         """Load from cache, re-embedding only changed/missing files.
 
         Never raises: if the embedding backend is down, the previously
@@ -792,7 +810,9 @@ class KBIndexStore:
         reused = len(entries)
         if to_embed_files:
             try:
-                new_entries, new_embeddings, new_fh = await self._embed_files(to_embed_files)
+                new_entries, new_embeddings, new_fh = await self._embed_files(
+                    to_embed_files, on_batch=on_batch
+                )
             except Exception as exc:
                 logger.warning(
                     "Incremental update failed (%d file(s) not re-embedded: %s): %s — "
@@ -823,7 +843,11 @@ class KBIndexStore:
 
     # ── Embedding helpers ───────────────────────────────────────────────
 
-    async def _embed_files(self, paths: list[pathlib.Path]) -> tuple[list[tuple[str, str, str]], list[list[float]], dict[str, str]]:
+    async def _embed_files(
+        self,
+        paths: list[pathlib.Path],
+        on_batch: Callable[[int, int], Any] | None = None,
+    ) -> tuple[list[tuple[str, str, str]], list[list[float]], dict[str, str]]:
         """Chunk + embed a set of files. Returns (entries, embeddings, file_hashes).
 
         *file_hashes* maps each file's KB-relative key to its SHA-256 (P2 #19),
@@ -868,7 +892,12 @@ class KBIndexStore:
             else content
             for _display, content, _key in flat
         ]
-        embeddings = await self._embedder.encode(passages)
+        # Only forward the hook when a caller asked for it — keeps duck-typed
+        # stand-ins with a plain encode(texts) signature working.
+        if on_batch is not None:
+            embeddings = await self._embedder.encode(passages, on_batch=on_batch)
+        else:
+            embeddings = await self._embedder.encode(passages)
         return flat, embeddings, file_hashes
 
     async def _embed_one_file(self, path: pathlib.Path) -> tuple[list[tuple[str, str, str]], list[list[float]], dict[str, str]]:

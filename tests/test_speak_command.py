@@ -21,13 +21,30 @@ class TestSpeakCommand:
         sent = []
         files = []
 
-        async def on_send(content="", *, file=None, **kw):
+        edited = []
+        deleted = []
+
+        async def on_send(content="", *, file=None, attachments=None, **kw):
             sent.append(str(content))
             if file is not None:
                 files.append(file)
+            msg = MagicMock()
+
+            async def on_edit(content=None, attachments=None, **ekw):
+                if content is not None:
+                    edited.append(str(content))
+                for a in (attachments or []):
+                    files.append(a)
+
+            async def on_delete():
+                deleted.append(True)
+
+            msg.edit.side_effect = on_edit
+            msg.delete.side_effect = on_delete
+            return msg
 
         ix.followup.send.side_effect = on_send
-        return sent, files
+        return sent, files, edited, deleted
 
     @pytest.mark.asyncio
     async def test_not_configured(self, ix, monkeypatch):
@@ -49,16 +66,42 @@ class TestSpeakCommand:
         monkeypatch.setattr(
             speak_command, "synthesize", AsyncMock(return_value=b"fake-mp3-bytes")
         )
-        sent, files = self._ix_with_files(ix)
+        sent, files, edited, _ = self._ix_with_files(ix)
 
         await speak_command.handle_speak_command(ix, text="Hello, world!")
 
+        # ONE message: the progress placeholder is edited in place into the
+        # final caption+mp3 (no second send).
         assert len(sent) == 1
-        assert sent[0].startswith("🔊")
-        assert "Hello, world!" in sent[0]
+        assert sent[0].startswith("🎙️")
+        assert len(edited) == 1
+        assert edited[0].startswith("🔊")
+        assert "Hello, world!" in edited[0]
         assert len(files) == 1
         assert re.fullmatch(r"speak-\d+\.mp3", files[0].filename)
         assert files[0].fp.read() == b"fake-mp3-bytes"
+
+    @pytest.mark.asyncio
+    async def test_loading_phase_edits_progress_message(self, ix, monkeypatch):
+        """#70: a voice-model load mid-synthesis updates the progress message."""
+        import inspect as _inspect
+        from commands import speak_command
+        monkeypatch.setattr(speak_command, "tts_configured", lambda: True)
+
+        async def fake_synthesize(text, on_phase=None):
+            if on_phase is not None:
+                result = on_phase("loading")
+                if _inspect.isawaitable(result):
+                    await result
+            return b"audio"
+
+        monkeypatch.setattr(speak_command, "synthesize", AsyncMock(side_effect=fake_synthesize))
+        sent, _, edited, _ = self._ix_with_files(ix)
+
+        await speak_command.handle_speak_command(ix, text="hello")
+
+        assert len(sent) == 1
+        assert any("Loading the voice model" in e for e in edited)
 
     @pytest.mark.asyncio
     async def test_long_caption_is_truncated(self, ix, monkeypatch):
@@ -67,14 +110,15 @@ class TestSpeakCommand:
         monkeypatch.setattr(
             speak_command, "synthesize", AsyncMock(return_value=b"audio")
         )
-        sent, _ = self._ix_with_files(ix)
+        sent, _, edited, _ = self._ix_with_files(ix)
 
         await speak_command.handle_speak_command(ix, text="x" * 200)
 
         assert len(sent) == 1
-        assert sent[0].endswith("…")
+        assert len(edited) == 1
+        assert edited[0].endswith("…")
         # caption preview is capped (80 chars + ellipsis), not the full text
-        assert "x" * 90 not in sent[0]
+        assert "x" * 90 not in edited[0]
 
     @pytest.mark.asyncio
     async def test_empty_text_rejected(self, ix, monkeypatch):
@@ -116,11 +160,16 @@ class TestSpeakCommand:
             AsyncMock(side_effect=TTSError("ConnectionError: backend down")),
         )
 
+        sent, _, edited, deleted = self._ix_with_files(ix)
+
         await speak_command.handle_speak_command(ix, text="hello")
 
-        assert len(ix._sent) == 1
-        assert "TTS failed" in ix._sent[0]
-        assert "kokoro-82m-v1.0-gguf" in ix._sent[0]
+        # progress placeholder + friendly error; the placeholder is cleaned up
+        assert len(sent) == 2
+        assert "TTS failed" in sent[1]
+        assert "kokoro-82m-v1.0-gguf" in sent[1]
+        assert edited == []
+        assert deleted
 
 
 # ── bot_core.tts client module ────────────────────────────────────────
@@ -252,6 +301,49 @@ class TestTtsClient:
             await tts.synthesize("hello")
         ensure.assert_awaited_once()
         assert client.audio.speech.create.await_count == 1  # no retry
+
+    @pytest.mark.asyncio
+    async def test_on_phase_emits_speaking_then_loading_on_retry(self, monkeypatch):
+        """#70: the caller sees live phases — speaking → (load) loading → speaking."""
+        import bot_core.tts as tts
+        from openai import APIStatusError
+        monkeypatch.setattr(tts, "TTS_MODEL", "kokoro")
+
+        resp = MagicMock()
+        resp.read.return_value = b"audio"
+        client = MagicMock()
+        client.audio.speech.create = AsyncMock(
+            side_effect=[APIStatusError("No model loaded.", response=MagicMock(), body=None), resp]
+        )
+        monkeypatch.setattr(tts, "_tts_client", client)
+        monkeypatch.setattr(tts, "_ensure_model_loaded", AsyncMock(return_value=True))
+
+        phases: list[str] = []
+        assert await tts.synthesize("hello", on_phase=phases.append) == b"audio"
+        assert phases == ["speaking", "loading", "speaking"]
+
+    @pytest.mark.asyncio
+    async def test_on_phase_emits_speaking_only_when_no_retry(self, monkeypatch):
+        import bot_core.tts as tts
+        monkeypatch.setattr(tts, "TTS_MODEL", "kokoro")
+        client = self._fake_client(b"audio-bytes")
+        monkeypatch.setattr(tts, "_tts_client", client)
+
+        phases: list[str] = []
+        await tts.synthesize("hello", on_phase=phases.append)
+        assert phases == ["speaking"]
+
+    @pytest.mark.asyncio
+    async def test_broken_phase_callback_does_not_fail_synthesis(self, monkeypatch):
+        import bot_core.tts as tts
+        monkeypatch.setattr(tts, "TTS_MODEL", "kokoro")
+        client = self._fake_client(b"audio-bytes")
+        monkeypatch.setattr(tts, "_tts_client", client)
+
+        def bad_phase(name):
+            raise RuntimeError("discord edit failed")
+
+        assert await tts.synthesize("hello", on_phase=bad_phase) == b"audio-bytes"
 
     @pytest.mark.asyncio
     async def test_other_errors_do_not_trigger_reload(self, monkeypatch):

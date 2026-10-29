@@ -9,8 +9,9 @@ Discord attachment.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 from openai import APIStatusError, AsyncOpenAI
@@ -176,16 +177,33 @@ def _is_not_loaded_error(e: Exception) -> bool:
     return "no model loaded" in str(e).lower()
 
 
-async def synthesize(text: str) -> bytes:
+async def synthesize(text: str, on_phase: Callable[[str], Any] | None = None) -> bytes:
     """Synthesize ``text`` to mp3 audio bytes.
 
     Raises :class:`TTSError` on any backend failure or timeout, and
     ``ValueError`` when no TTS model is configured.
+
+    *on_phase* (#70) is an optional progress hook — sync or async callable
+    taking a phase name ("speaking", "loading") — so the caller can show the
+    user live status during the long load windows. A broken callback never
+    fails the synthesis.
     """
     if not TTS_MODEL:
         raise ValueError("TTS_MODEL is not set — /speak is disabled.")
     client = _make_tts_client()
+
+    async def _phase(name: str) -> None:
+        if on_phase is None:
+            return
+        try:
+            result = on_phase(name)
+            if inspect.isawaitable(result):
+                await result
+        except Exception as e:  # noqa: BLE001 - progress must never fail the TTS
+            log.debug("phase callback failed (%s): %s", name, e)
+
     try:
+        await _phase("speaking")
         audio = await _speech_once(client, text)
     except TTSError as e:
         # One bounded recovery for transient failures: (a) the model was
@@ -194,9 +212,11 @@ async def synthesize(text: str) -> bytes:
         # settle. Either way: retry exactly once.
         if not (_is_not_loaded_error(e) or e.retryable):
             raise
+        await _phase("loading")
         if not await _ensure_model_loaded():
             raise
         await asyncio.sleep(1.0)
+        await _phase("speaking")
         audio = await _speech_once(client, text)
     # The TTS load just evicted the resident chat model — bring it back in
     # the background so the next question doesn't pay the cold load.

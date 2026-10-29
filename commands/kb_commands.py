@@ -281,9 +281,50 @@ async def handle_reindex_kb(interaction: discord.Interaction) -> None:
     strategy = DEFAULT_METHOD
     msg_parts: list[str] = []
 
+    # Progress message (#70, same pattern as /generate_image): edited per
+    # phase AND it is the final answer — the finished result replaces the
+    # last update in place: ONE message, live feedback preserved. A big KB
+    # rebuild embeds thousands of chunks over minutes, so the embedding
+    # phase reports throttled chunk counts instead of a frozen "Rebuilding…".
+    progress_msg = await interaction.followup.send(
+        "📚 Rebuilding the vector index… this can take a while on a big KB."
+    )
+
+    async def _progress(text: str) -> None:
+        try:
+            await progress_msg.edit(content=text)
+        except Exception as exc:  # noqa: BLE001 — progress must never fail the reindex
+            log.debug("progress update failed: %s", exc)
+
+    async def _cleanup() -> None:
+        try:
+            await progress_msg.delete()
+        except Exception as exc:  # noqa: BLE001 — cosmetic only
+            log.debug("progress cleanup failed: %s", exc)
+
+    state = {"last_done": -1, "last_t": 0.0}
+    loop = asyncio.get_running_loop()
+
+    def _embed_progress(done: int, total: int) -> None:
+        # Throttle Discord edits (~5/5 s per channel): update on the final
+        # batch, every ~1/30th of the build, or at most once per 5 s.
+        now = loop.time()
+        step = max(1, total // 30)
+        if not (
+            done == total
+            or (done - state["last_done"]) >= step
+            or (now - state["last_t"]) >= 5.0
+        ):
+            return
+        state["last_done"] = done
+        state["last_t"] = now
+        # _embed_progress is a sync callback — hand back the edit coroutine;
+        # the embedder's _emit_progress awaits it.
+        return _progress(f"📚 Embedding {done:,}/{total:,} chunks…")
+
     try:
         store = KBIndexStore(kb_path)
-        idx = await store.load(force_rebuild=True)
+        idx = await store.load(force_rebuild=True, on_batch=_embed_progress)
 
         if idx is None or idx.is_empty():
             # Index didn't build — check why (no KB files? no embedding backend?).
@@ -303,6 +344,7 @@ async def handle_reindex_kb(interaction: discord.Interaction) -> None:
             msg_parts.append(f"   • **{doc_count:,}** chunk(s) indexed")
             msg_parts.append(f"   • Strategy: `{strategy}`")
 
+            await _progress("🔍 Sanity-checking retrieval…")
             # Quick sanity test — does retrieval actually work?
             try:
                 sample_query = "test"
@@ -318,7 +360,15 @@ async def handle_reindex_kb(interaction: discord.Interaction) -> None:
         log.error("Reindexing failed: %s", e, exc_info=True)
         msg_parts = [f"❌ Failed to reindex KB: **{e}**"]
 
-    await interaction.followup.send("\n".join(msg_parts))
+    # Final result IN PLACE on the progress message; only if that edit fails
+    # does it degrade to a fresh follow-up message (+ delete the progress).
+    text = "\n".join(msg_parts)
+    try:
+        await progress_msg.edit(content=text)
+    except Exception as exc:  # noqa: BLE001 — degrade to a fresh message
+        log.warning("final in-place edit failed (%s) — sending fresh message", exc)
+        await interaction.followup.send(text)
+        await _cleanup()
 
 
 async def handle_sync_kb(interaction: discord.Interaction) -> None:
