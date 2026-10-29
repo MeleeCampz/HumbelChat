@@ -688,6 +688,38 @@ class TestOverviewPromptIncludesSources:
         assert "LANGUAGE" in system_content
 
 
+class TestMergePromptNoEcho:
+    """#74 regression: with a SINGLE document there is nothing to de-duplicate — the
+    merge prompt must demand a PROCESSED narrative record (restructured, polished),
+    never a near-verbatim echo of the player's own file."""
+
+    def test_default_merge_prompt_demands_processed_output(self):
+        from commands.session_commands import _merge_prompt
+        prompt = _merge_prompt()
+        assert "canonical session log for exactly ONE session" in prompt
+        # handles the single-document case explicitly …
+        assert "SINGLE document" in prompt
+        # … and forbids echoing the sources back.
+        assert "not as a copy of the input" in prompt
+        assert "near-verbatim copy" in prompt
+
+    @pytest.mark.asyncio
+    async def test_merge_user_message_flags_raw_drafts(self, monkeypatch):
+        from commands import session_commands as sc
+        S.start_session(name="Echo")
+        S.add_document("Wir reisen nach Alderheart.", title="log.md")
+        inst = MagicMock()
+        inst.chat.completions.create = AsyncMock(
+            return_value=FakeStream([chunk("merged", "stop")]))
+        monkeypatch.setattr(sc, "_make_client", lambda: inst)
+        monkeypatch.setattr(sc, "_validate_model", AsyncMock(return_value="test-model"))
+
+        await sc._generate_merged_log(S.get_current_session(), None, 1)
+
+        user_content = inst.chat.completions.create.await_args.kwargs["messages"][1]["content"]
+        assert "raw draft" in user_content
+
+
 # ── /session_file (#43) ──────────────────────────────────────────────────────
 
 class TestSessionFile:

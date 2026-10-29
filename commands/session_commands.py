@@ -244,7 +244,11 @@ async def _generate_merged_log(
     events with heavy overlap.  The merge combines them into ONE complete,
     well-formatted, de-duplicated session log — that single text replaces the
     mechanical full-text copy as the session's RAG content (see
-    ``sessions._session_file_content``).
+    ``sessions._session_file_content``).  Even a session with a SINGLE source
+    document is processed: the prompt demands a restructured, grammar-polished
+    narrative record, never a near-verbatim echo of the player's own file
+    (#74 — the old preservation-only prompt made the model copy the single
+    upload back almost unchanged).
 
     Returns None when there are no documents or the AI is unavailable — the
     caller then keeps the mechanical fallback so document content stays
@@ -267,7 +271,8 @@ async def _generate_merged_log(
     user_content = (
         f"Session name: {session.get('name') or 'Untitled'}\n"
         f"Session files included: {source_listing}\n\n"
-        f"## Session files (the only sources — one log per player)\n{docs_text}"
+        f"## Session files (the only sources — each player's own raw draft; rough and overlapping)\n"
+        f"{docs_text}"
     )
 
     client = _make_client()

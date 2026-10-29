@@ -312,19 +312,24 @@ FALLBACK_MODELS: list[str] = [
 ]
 
 # ── Session recap prompt (customizable) ──────────────────────────────────
-#: Default system prompt used by /end_session to write the session recap — a
-#: very brief digest (what happened + suggested next steps) that is stored
-#: with the session and delivered when the NEXT session starts.  Strict by
-#: design: it must (1) only use THIS session's own sources, (2) never invent
-#: or pull in events from other sessions, and (3) itself determine the
-#: language of the provided sources and write the recap in that language
-#: (no hard-coded language detection on the bot side).
+#: Default system prompt used by /end_session to write the canonical session
+#: log — ONE combined, well-formatted narrative record built from the
+#: session's own uploaded documents (one raw draft per player; a single
+#: document when only one player kept notes).  Strict by design: it must
+#: (1) only use THIS session's own sources, (2) never invent or pull in
+#: events from other sessions, and (3) itself determine the language of the
+#: provided sources and write the log in that language (no hard-coded
+#: language detection on the bot side).  Since #74 it also demands a
+#: PROCESSED result (restructured, grammar-polished narrative), never a
+#: near-verbatim copy of the input — with a single source document there is
+#: nothing to de-duplicate, and a preservation-only prompt made the model
+#: echo the player's own file back.
 DEFAULT_SESSION_MERGE_PROMPT: str = (
-    "You are merging the individual player logs of exactly ONE session into a single, "
-    "complete, well-formatted session log.\n"
-    "The user message contains the ONLY sources: the session's own documents — each "
-    "player's own log/notes for the SAME session. They cover the same chronological "
-    "events from different perspectives and overlap heavily.\n"
+    "You are writing the canonical session log for exactly ONE session.\n"
+    "The user message contains the ONLY sources: the session's own documents — one raw "
+    "log/notes draft per player covering the SAME chronological events (there may be a "
+    "SINGLE document when only one player kept notes).  The drafts overlap heavily and "
+    "are usually rough: fragmented lines, typos, grammar slips, filler.\n"
     "Produce ONE combined session log that:\n"
     "  - Follows the chronological order of the session, organised into Markdown sections\n"
     "    (one per location / scene / major event).\n"
@@ -333,8 +338,12 @@ DEFAULT_SESSION_MERGE_PROMPT: str = (
     "  - Keeps ALL concrete details from every source: names, places, numbers, amounts,\n"
     "    loot, dice results, decisions and open threads — if a detail appears in any log,\n"
     "    it must appear in the merged log.\n"
-    "  - Reads as one coherent narrative record, not as a list of quoted sources.\n"
-    "Return ONLY the merged session log in Markdown.\n\n"
+    "  - Reads as one coherent, POLISHED narrative record — not as a copy of the input:\n"
+    "    rewrite fragmented lines into flowing prose, fix grammar and spelling, and cut pure\n"
+    "    filler and repetition. The output must be visibly MORE PROCESSED than the raw drafts:\n"
+    "    a near-verbatim copy of them is a failure (this holds for a single-document session\n"
+    "    too — restructure and polish it, do not echo it back).\n"
+    "Return ONLY the combined session log in Markdown.\n\n"
     "STRICT RULES:\n"
     "- Use ONLY the provided documents. Add NOTHING, infer nothing, and do not recall any "
     "events, names or places that do not appear in them.\n"
