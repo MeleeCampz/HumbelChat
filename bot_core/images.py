@@ -151,19 +151,37 @@ async def _warm_chat_reload() -> None:
     """
     if not DEFAULT_MODEL:
         return
+    # Studio's /api/inference/load takes a plain HF repo id plus an optional
+    # gguf_variant — it does NOT accept the bot's "repo:quant" model slug.
+    # Sending the slug verbatim fails 100% (HF repo-id validation rejects the
+    # colon; observed live 2026-10-29: deferred 500 "Repo id must use
+    # alphanumeric chars...", chat left evicted until a completion request
+    # auto-loaded it). Split at the first ':' into repo + variant.
+    repo, _, variant = DEFAULT_MODEL.partition(":")
     async with _gen_lock:
         try:
             # Cheap pre-check: don't even POST when chat is already resident
             # (the common case right after a generation that failed before
-            # evicting, or a double-scheduled reload).
+            # evicting, or a double-scheduled reload). Match on the repo id —
+            # Studio reports loaded models as "owner/repo" without the quant,
+            # and verify the quant too when one is requested.
             async with httpx.AsyncClient(timeout=30.0) as client:
-                loaded = [m.get("id", "") for m in
-                         (await _studio(client, "GET", "/api/inference/loaded-models")).get("data", [])]
-            if any(DEFAULT_MODEL and m.endswith(DEFAULT_MODEL.split("/")[-1]) for m in loaded):
+                loaded = (await _studio(client, "GET", "/api/inference/loaded-models")).get("data", [])
+            if any(
+                m.get("id") == repo
+                and (not variant or m.get("quant") in (variant, None))
+                for m in loaded
+            ):
                 log.debug("chat model already resident — skipping warm reload")
                 return
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                await _studio(client, "POST", "/api/inference/load", json={"model_path": DEFAULT_MODEL})
+            payload: dict[str, str] = {"model_path": repo}
+            if variant:
+                payload["gguf_variant"] = variant
+            t0 = time.monotonic()
+            async with httpx.AsyncClient(timeout=IMAGE_LOAD_TIMEOUT_S) as client:
+                await _studio(client, "POST", "/api/inference/load", json=payload)
+            log.info("chat model re-loaded in background (%.1f s): %s",
+                     time.monotonic() - t0, DEFAULT_MODEL)
         except Exception as e:  # noqa: BLE001 — best-effort by design
             log.warning("background chat re-load failed (harmless): %s", e)
 
@@ -322,6 +340,8 @@ async def rewrite_prompt(text: str) -> str:
 
 # ── Generation (the no-chat-calls window) ─────────────────────────────────
 _gen_lock = asyncio.Lock()  # one generation at a time (swap is global state)
+_background_tasks: set[asyncio.Task] = set()  # strong refs — the loop only
+                                               # keeps weak refs to tasks
 
 
 def resolve_size(raw: str | None) -> int | None:
@@ -442,4 +462,10 @@ async def generate_image(
             # ALWAYS swap back, even on failure — never leave the image model
             # resident (it would keep evicting the chat model).
             await _unload_image()
-            asyncio.get_running_loop().create_task(_warm_chat_reload())
+            # Keep a strong reference: an unreferenced background task can be
+            # GC'd before/while it runs (observed live 2026-10-29: zero warm-
+            # reload log lines across every generation despite the code path
+            # existing in all deployed builds).
+            task = asyncio.get_running_loop().create_task(_warm_chat_reload())
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)

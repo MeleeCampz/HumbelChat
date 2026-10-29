@@ -486,6 +486,78 @@ class TestWarmChatReloadSerialization:
         assert ran == [True]  # ran only after the lock was released
 
 
+class TestWarmChatReloadPayload:
+    """Studio's /api/inference/load rejects the bot's "repo:quant" model slug
+    (HF repo-id validation chokes on the colon — observed live: deferred 500
+    after every image generation, chat left evicted = backlog #73). The warm
+    reload must split it into model_path + gguf_variant."""
+
+    def _patch(self, monkeypatch, default_model, loaded):
+        import bot_core.images as images_mod
+
+        monkeypatch.setattr(images_mod, "DEFAULT_MODEL", default_model)
+        posts: list[dict] = []
+
+        async def fake_studio(client, method, path, **kwargs):
+            if path == "/api/inference/loaded-models":
+                return {"data": loaded}
+            assert method == "POST"
+            assert path == "/api/inference/load"
+            posts.append(kwargs.get("json", {}))
+            return {}
+
+        monkeypatch.setattr(images_mod, "_studio", fake_studio)
+        return posts
+
+    async def test_splits_repo_and_variant(self, monkeypatch):
+        posts = self._patch(
+            monkeypatch,
+            "unsloth/Qwen3.8-27B-GGUF:Qwen3.8-27B-NVFP4_50-Q4K_M",
+            [],
+        )
+        await images._warm_chat_reload()
+        assert posts == [{"model_path": "unsloth/Qwen3.8-27B-GGUF",
+                          "gguf_variant": "Qwen3.8-27B-NVFP4_50-Q4K_M"}]
+
+    async def test_plain_repo_has_no_variant_key(self, monkeypatch):
+        posts = self._patch(monkeypatch, "unsloth/Qwen3.8-27B-GGUF", [])
+        await images._warm_chat_reload()
+        assert posts == [{"model_path": "unsloth/Qwen3.8-27B-GGUF"}]
+
+    async def test_skips_when_repo_and_quant_already_resident(self, monkeypatch):
+        posts = self._patch(
+            monkeypatch,
+            "unsloth/Qwen3.8-27B-GGUF:Qwen3.8-27B-NVFP4_50-Q4K_M",
+            [{"id": "unsloth/Qwen3.8-27B-GGUF",
+              "quant": "Qwen3.8-27B-NVFP4_50-Q4K_M", "loaded": True}],
+        )
+        await images._warm_chat_reload()
+        assert posts == []  # no redundant full reload of a resident model
+
+    async def test_reloads_when_quant_differs(self, monkeypatch):
+        posts = self._patch(
+            monkeypatch,
+            "unsloth/Qwen3.8-27B-GGUF:Qwen3.8-27B-NVFP4_50-Q4K_M",
+            [{"id": "unsloth/Qwen3.8-27B-GGUF", "quant": "UD-Q4_K_XL", "loaded": True}],
+        )
+        await images._warm_chat_reload()
+        assert len(posts) == 1  # wrong quant resident → load the right one
+
+    async def test_no_default_model_is_a_noop(self, monkeypatch):
+        import bot_core.images as images_mod
+
+        monkeypatch.setattr(images_mod, "DEFAULT_MODEL", None)
+        called = []
+
+        async def fake_studio(client, method, path, **kwargs):
+            called.append(path)
+            return {}
+
+        monkeypatch.setattr(images_mod, "_studio", fake_studio)
+        await images._warm_chat_reload()
+        assert called == []
+
+
 class TestCommandHandler:
     """commands/generate_image_command — mocked core, fake interaction."""
 
