@@ -1,6 +1,7 @@
 """Tests for AI chat slash command."""
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -378,6 +379,162 @@ class TestAIStopTargetsActiveTurn:
         release.set()
         await asyncio.gather(first, second, return_exceptions=True)
         _reset()
+
+
+class TestTurnProgress:
+    """#70: long /ai turns get ONE live progress message (pattern of /generate_image)."""
+
+    def _slow_source(self):
+        """Source mock whose followup.send returns the sent message (edit/delete)."""
+        source = MagicMock()
+        sent, edited, deleted = [], [], []
+
+        async def on_send(content="", **kw):
+            sent.append(str(content))
+            msg = MagicMock()
+
+            async def on_edit(content=None, **ekw):
+                if content is not None:
+                    edited.append(str(content))
+
+            async def on_delete():
+                deleted.append(True)
+
+            msg.edit.side_effect = on_edit
+            msg.delete.side_effect = on_delete
+            return msg
+
+        source.followup.send.side_effect = on_send
+        source.channel.send = AsyncMock()
+        return source, sent, edited, deleted
+
+    @pytest.mark.asyncio
+    async def test_fast_turn_shows_no_progress_message(self, monkeypatch):
+        from commands import ai_command
+        monkeypatch.setattr(ai_command._settings, "AI_STREAM", False)
+        monkeypatch.setattr(ai_command._settings, "EMBED_FORMAT", False)
+        source, sent, edited, deleted = self._slow_source()
+
+        async def fake_ask(**kwargs):
+            return ("quick reply", {})
+
+        monkeypatch.setattr(ai_command.ai_client, "ask_ai", fake_ask)
+
+        await ai_command.run_ai_turn(
+            source, user_message="hi", model_slug="m",
+            guild_id=1, channel_id=770001, char_name="C",
+        )
+
+        # no progress noise on a fast turn — only the reply itself
+        assert not any("Thinking" in s for s in sent)
+        assert edited == [] and deleted == []
+        delivered = [str(c) for c in source.channel.send.call_args_list] + sent
+        assert any("quick reply" in d for d in delivered)
+
+    @pytest.mark.asyncio
+    async def test_slow_turn_gets_live_progress_then_deletes_it(self, monkeypatch):
+        from commands import ai_command
+        monkeypatch.setattr(ai_command._settings, "AI_STREAM", False)
+        monkeypatch.setattr(ai_command._settings, "EMBED_FORMAT", False)
+        monkeypatch.setattr(ai_command, "_PROGRESS_DELAY_S", 0.05)
+        monkeypatch.setattr(ai_command, "_PROGRESS_TICK_S", 0.05)
+        source, sent, edited, deleted = self._slow_source()
+
+        async def fake_ask(**kwargs):
+            await asyncio.sleep(0.3)  # long generation → progress must appear
+            return ("slow reply", {})
+
+        monkeypatch.setattr(ai_command.ai_client, "ask_ai", fake_ask)
+
+        await ai_command.run_ai_turn(
+            source, user_message="hi", model_slug="m",
+            guild_id=1, channel_id=770002, char_name="C",
+        )
+
+        assert any("Thinking" in s for s in sent)   # placeholder appeared
+        assert edited                                # elapsed-time refreshes
+        assert deleted                               # cleaned up after the reply
+
+    @pytest.mark.asyncio
+    async def test_streaming_first_token_flips_to_writing(self, monkeypatch):
+        from commands import ai_command
+        monkeypatch.setattr(ai_command._settings, "AI_STREAM", True)
+        monkeypatch.setattr(ai_command._settings, "EMBED_FORMAT", False)
+        monkeypatch.setattr(ai_command, "_PROGRESS_DELAY_S", 0.05)
+        monkeypatch.setattr(ai_command, "_PROGRESS_TICK_S", 0.05)
+        source, sent, edited, deleted = self._slow_source()
+
+        async def fake_stream(**kwargs):
+            await asyncio.sleep(0.1)   # prefill silence → "Thinking…" is up
+            yield "He"
+            await asyncio.sleep(0.1)
+            yield "Hello there"
+
+        monkeypatch.setattr(ai_command.ai_client, "ask_ai_stream", fake_stream)
+
+        await ai_command.run_ai_turn(
+            source, user_message="hi", model_slug="m",
+            guild_id=1, channel_id=770003, char_name="C",
+        )
+
+        assert any("Thinking" in s for s in sent)
+        assert any("Writing" in e for e in edited)  # first token flipped the phase
+        assert deleted
+
+    @pytest.mark.asyncio
+    async def test_failed_turn_deletes_progress_and_delivers_error(self, monkeypatch):
+        from commands import ai_command
+        monkeypatch.setattr(ai_command._settings, "AI_STREAM", False)
+        monkeypatch.setattr(ai_command._settings, "EMBED_FORMAT", False)
+        monkeypatch.setattr(ai_command, "_PROGRESS_DELAY_S", 0.05)
+        source, sent, edited, deleted = self._slow_source()
+
+        async def fake_ask(**kwargs):
+            await asyncio.sleep(0.15)
+            raise RuntimeError("backend exploded")
+
+        monkeypatch.setattr(ai_command.ai_client, "ask_ai", fake_ask)
+
+        await ai_command.run_ai_turn(
+            source, user_message="hi", model_slug="m",
+            guild_id=1, channel_id=770004, char_name="C",
+        )
+
+        assert deleted                               # no orphaned "Thinking…"
+        assert any("went wrong" in s for s in sent)  # friendly error delivered
+
+
+    @pytest.mark.asyncio
+    async def test_broken_progress_display_never_fails_the_turn(self, monkeypatch):
+        from commands import ai_command
+        monkeypatch.setattr(ai_command._settings, "AI_STREAM", False)
+        monkeypatch.setattr(ai_command._settings, "EMBED_FORMAT", False)
+        monkeypatch.setattr(ai_command, "_PROGRESS_DELAY_S", 0.05)
+        source = MagicMock()
+        delivered = []
+
+        async def boom_send(content="", **kw):
+            text = str(content)
+            if "Thinking" in text or "Writing" in text:
+                raise RuntimeError("discord edit rejected")
+            delivered.append(text)  # the final reply goes through fine
+
+        source.followup.send.side_effect = boom_send
+        source.channel.send = AsyncMock()
+
+        async def fake_ask(**kwargs):
+            await asyncio.sleep(0.15)
+            return ("still delivered", {})
+
+        monkeypatch.setattr(ai_command.ai_client, "ask_ai", fake_ask)
+
+        # must complete — the reply lands even though every progress send failed
+        await ai_command.run_ai_turn(
+            source, user_message="hi", model_slug="m",
+            guild_id=1, channel_id=770005, char_name="C",
+        )
+
+        assert any("still delivered" in d for d in delivered)
 
 
 class TestAICommandStructural:

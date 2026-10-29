@@ -14,6 +14,13 @@ P3 additions:
   * #26 queue feedback — if other /ai requests are already in the global queue
     (the bot serializes AI requests process-wide), the user is told how many
     are ahead of them instead of waiting silently.
+  * #70 long-turn progress — fast turns still show nothing but the typing
+    indicator; a turn without a reply after ``_PROGRESS_DELAY_S`` gets ONE
+    follow-up "🧠 Thinking…" message that is edited with elapsed time until
+    the reply lands (flipping to "✍️ Writing…" when the first stream token
+    arrives), then deleted — the final embed/chunks are delivered as usual.
+    Same live-status pattern as /generate_image; a broken progress display
+    never fails the turn.
 
 The delivery helpers accept a generic *source*: either a
 ``discord.Interaction`` (slash) or a ``discord.Message`` (prefix), so the exact
@@ -23,7 +30,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any, cast
+import time
+from typing import TYPE_CHECKING, Any, Callable, cast
 
 import config.settings as _settings
 from config.characters import Character, get_character, default_character
@@ -46,6 +54,10 @@ if TYPE_CHECKING:  # discord is referenced only in string annotations
     Source = discord.Interaction | discord.Message
 
 log = logging.getLogger("bot.commands.ai_command")
+
+# #70: long-turn progress message (see module docstring).
+_PROGRESS_DELAY_S = 15.0   # silence before the first "Thinking…" appears
+_PROGRESS_TICK_S = 30.0    # elapsed-time refresh while still running
 
 
 def resolve_turn_character(
@@ -129,16 +141,20 @@ async def _deliver_final(source: Source, reply_text: str, char_name: str) -> Non
 async def _deliver_streaming(source: Source, user_message: str, model_slug: str,
                              guild_id: int, channel_id: int | None, username: str,
                              user_id: int | None, char_name: str,
-                             char_key: str | None) -> None:
+                             char_key: str | None,
+                             on_first_token: Callable[[], None] | None = None) -> None:
     """P3 #24: consume the streamed completion, then deliver it through the normal
     (embed/chunk) path.
 
     The stream is consumed internally for timing + mid-flight cancellation, but NO
-    placeholder message is posted — so the original slash command stays visible and
-    the reply appears exactly like the non-streaming path (one final embed). This
-    avoids Discord hiding the command when a bot follow-up is sent first.
+    placeholder message is posted here — the reply appears exactly like the
+    non-streaming path (one final embed). Long-turn feedback lives in
+    :class:`_TurnProgress` (started by ``run_ai_turn``): it stays out of the way
+    on fast turns and only posts ONE delayed "Thinking…" message that is deleted
+    when this delivery runs.
     """
     buf = ""
+    first = True
     async for text in ai_client.ask_ai_stream(
         user_message=user_message,
         model_slug=model_slug,
@@ -148,6 +164,13 @@ async def _deliver_streaming(source: Source, user_message: str, model_slug: str,
         user_id=user_id,
         char_key=char_key,
     ):
+        if first:
+            first = False
+            if on_first_token is not None:
+                try:
+                    on_first_token()
+                except Exception as exc:  # noqa: BLE001 — progress must never fail the turn
+                    log.debug("on_first_token hook failed: %s", exc)
         buf = text
     await _deliver_final(source, buf, char_name)
 
@@ -182,11 +205,14 @@ async def run_ai_turn(
         run_task = asyncio.current_task()
         if run_task is not None:
             register_run(channel_key, run_task)
+        progress = _TurnProgress(source)
+        progress.start()
         try:
             if _settings.AI_STREAM:
                 await _deliver_streaming(
                     source, user_message, model_slug, guild_id, channel_id,
                     username, user_id, char_name, char_key,
+                    on_first_token=progress.mark_writing,
                 )
             else:
                 reply_text, _extra = await ai_client.ask_ai(
@@ -212,6 +238,82 @@ async def run_ai_turn(
         finally:
             if run_task is not None:
                 clear_run(channel_key, run_task)
+            await progress.finish()
+
+
+class _TurnProgress:
+    """#70: delayed progress message for long /ai turns (pattern of /generate_image).
+
+    Fast turns show nothing but the typing indicator. If no reply arrives
+    within ``_PROGRESS_DELAY_S``, ONE follow-up (slash) / channel (prefix)
+    "🧠 Thinking…" message appears and is edited with elapsed time every
+    ``_PROGRESS_TICK_S`` — flipping to "✍️ Writing…" once the first stream
+    token arrives. When the turn ends it is deleted; the final embed/chunks
+    are delivered through the normal path. A broken progress display never
+    fails the turn.
+    """
+
+    def __init__(self, source: Source) -> None:
+        self._source = source
+        self._msg: Any = None
+        self._t0: float | None = None
+        self._writing = False
+        self._task: asyncio.Task[Any] | None = None
+
+    def start(self) -> None:
+        self._t0 = time.monotonic()
+        try:
+            self._task = spawn_tracked_task(
+                self._ticker(), name="ai-turn-progress"
+            )
+        except Exception as e:  # noqa: BLE001 — progress must never fail the turn
+            log.warning("turn progress start failed: %s", e)
+            self._task = None
+
+    def mark_writing(self) -> None:
+        """First stream token arrived — generation is visibly underway."""
+        self._writing = True
+
+    async def finish(self) -> None:
+        """Cancel the ticker and delete the progress message (best effort)."""
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except BaseException:  # noqa: BLE001 — already cancelled / interrupted
+                pass
+            self._task = None
+        if self._msg is not None:
+            try:
+                await self._msg.delete()
+            except Exception as e:  # noqa: BLE001 — cosmetic only
+                log.debug("turn progress delete failed: %s", e)
+            self._msg = None
+
+    def _render(self) -> str:
+        elapsed = int(time.monotonic() - (self._t0 or time.monotonic()))
+        stamp = f"{elapsed // 60}m {elapsed % 60:02d}s" if elapsed >= 60 else f"{elapsed}s"
+        return ("✍️ Writing…" if self._writing else "🧠 Thinking…") + f" ({stamp})"
+
+    async def _send(self, text: str) -> Any:
+        # Interactions have followup; prefix Messages go to the channel.
+        if hasattr(self._source, "followup"):
+            return await self._source.followup.send(text)
+        return await self._source.channel.send(text)
+
+    async def _ticker(self) -> None:
+        try:
+            await asyncio.sleep(_PROGRESS_DELAY_S)
+            while True:
+                if self._msg is None:
+                    self._msg = await self._send(self._render())
+                else:
+                    await self._msg.edit(content=self._render())
+                await asyncio.sleep(_PROGRESS_TICK_S)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — progress must never fail the turn
+            log.debug("turn progress ticker failed: %s", e)
 
 
 async def notify_if_queued(source: Source) -> None:
