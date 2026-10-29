@@ -101,10 +101,20 @@ async def _regenerate(session: dict[str, Any], from_state: bool) -> int:
         tmp.write_text(new, encoding="utf-8")
         tmp.replace(notes_path)
 
+    # Re-indexing is best-effort: the regen itself is already persisted above,
+    # and the bot's own KB sync re-indexes changed files at startup.  A dead
+    # embedding backend must not make a successful regen look like a failure.
+    indexed = 0
     for p in S._session_index_paths(session):
-        if pathlib.Path(p).exists():
-            await update_kb_document(p)
-    print(f"Done: {len(merged)} chars stored, {notes_path.name} re-written + re-indexed.")
+        if not pathlib.Path(p).exists():
+            continue
+        try:
+            if await update_kb_document(p):
+                indexed += 1
+        except Exception as e:
+            print(f"WARNING: re-index of {pathlib.Path(p).name} failed ({e.__class__.__name__}: {e}) "
+                  f"— the bot's KB sync will pick it up at startup.")
+    print(f"Done: {len(merged)} chars stored, {notes_path.name} re-written, {indexed} file(s) re-indexed.")
     return 0
 
 
