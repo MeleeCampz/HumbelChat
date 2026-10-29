@@ -19,7 +19,9 @@ import discord
 
 from bot_core.ai_client import _make_client, _validate_model, complete_text
 from bot_core.history import get_active_char_key
+from bot_core.sessions import session_documents_text as _session_documents_text
 from config.characters import get_character
+from utils.background_tasks import spawn_tracked_task
 from config.settings import (
     DEFAULT_MODEL,
     DEFAULT_SESSION_MERGE_PROMPT,
@@ -35,12 +37,6 @@ log = logging.getLogger("bot.session_commands")
 
 # Max chars of the recap posted to the channel (Discord limit is 2000).
 _OVERVIEW_POST_LIMIT = 1800
-# Total budget (chars) for the session documents that feed the AI recap.
-# The full session log(s) are the authoritative source for the recap — this
-# exists only to keep the prompt size bounded for very long sessions; each
-# included document keeps its header + full text (trimmed from the tail if it
-# alone exceeds the whole budget).
-_OVERVIEW_DOC_BUDGET = 60_000
 # Discord message cap is 2000 chars; keep view messages under it.
 _VIEW_MSG_LIMIT = 1900
 # How many recent notes to show (in full) in /session_info.
@@ -74,51 +70,6 @@ def _recap_prompt() -> str:
     falls back to the built-in default when unset/empty.
     """
     return SESSION_RECAP_PROMPT.strip() or DEFAULT_SESSION_RECAP_PROMPT
-
-
-# ── Overview source assembly ────────────────────────────────────────────
-
-def _session_documents_text(session: dict[str, Any]) -> tuple[str, list[str]]:
-    """Full text of the session's own documents (attachments + transcripts).
-
-    Returns ``(text, refs)`` where *refs* are ``<subdir>/<filename>`` labels
-    (one per non-empty document found).  *text* is the concatenation of those
-    documents (each with a small ``Source:`` header so the model can tell them
-    apart), trimmed to ``_OVERVIEW_DOC_BUDGET`` chars in total.  When the
-    budget is exhausted the remaining documents are dropped with a note so the
-    model knows more material exists for the session.
-    """
-    from bot_core import sessions as S
-
-    parts: list[str] = []
-    refs: list[str] = []
-    omitted: list[str] = []
-    budget_left = _OVERVIEW_DOC_BUDGET
-    for subdir in (S._SUBDIR_ATTACHMENTS, S._SUBDIR_TRANSCRIPTS):
-        for name in S._session_docs(session, subdir):
-            ref = f"{subdir}/{name}"
-            path = S._session_dir(session) / ref
-            try:
-                body = path.read_text(encoding="utf-8", errors="replace").strip()
-            except OSError:
-                continue
-            if not body:
-                continue
-            refs.append(ref)
-            if budget_left <= 0:
-                omitted.append(ref)
-                continue
-            # Keep each document whole when it fits; trim a single document
-            # that alone exceeds the whole budget from the tail (the head
-            # carries the session's most relevant opening material).
-            if len(body) > budget_left:
-                body = body[:budget_left].rstrip() + "\n…[document truncated]"
-            parts.append(f"Source: {ref}\n\n{body}")
-            budget_left -= len(body)
-    if omitted:
-        parts.append("…[additional documents not included due to size: "
-                     + ", ".join(omitted) + "]")
-    return "\n".join(parts).strip(), refs
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -395,10 +346,23 @@ async def handle_end_session(interaction: discord.Interaction, name: str | None 
     merge_line = ("\n📜 Session log combined from all uploads."
                   if merged_log else "")
     recap_block = f"\n\n{_truncate(recap)}" if recap else "\n(no recap — nothing was recorded for this session)"
+
+    # #69: automatic key-moment images — a tracked background task that never
+    # blocks this reply (selection + prompt prep on the chat model, then one
+    # batched paint window; results land in this channel as they finish).
+    from bot_core import session_images
+    highlights_coming = session_images.will_generate(ended, channel_id)
     await interaction.followup.send(
         f"🔚 **Session ended:** {ended.get('name') or '(untitled)'}\n"
         f"📄 Recap saved to `{fname}`.{merge_line}{recap_block}"
+        + ("\n🎨 Painting the session's key moments in a moment…"
+           if highlights_coming else "")
     )
+    if highlights_coming:
+        spawn_tracked_task(
+            session_images.generate_session_highlights(ended, channel_id, interaction.guild_id),
+            name="session-images",
+        )
 
 
 # ── /remind_next_session ─────────────────────────────────────────────────

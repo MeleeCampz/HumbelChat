@@ -350,6 +350,110 @@ class TestGenerateImage:
         assert unloaded == [True]
 
 
+class TestGenerateImagesBatch:
+    """generate_images (#69): every prompt painted in ONE swap window —
+    load once, paint all (one failure never aborts the rest), unload + warm-
+    reload the chat model exactly once."""
+
+    def _patch(self, monkeypatch) -> tuple[MagicMock, list[str]]:
+        """Fake the whole swap pipeline; returns (client, order log)."""
+        monkeypatch.setattr(images, "IMAGE_MODEL", "unsloth/x")
+        monkeypatch.setattr(images, "_warm_chat_reload", AsyncMock())
+        order: list[str] = []
+
+        async def fake_ensure() -> None:
+            order.append("load")
+
+        monkeypatch.setattr(images, "ensure_image_loaded", fake_ensure)
+
+        async def fake_unload() -> None:
+            order.append("unload")
+
+        monkeypatch.setattr(images, "_unload_image", fake_unload)
+
+        client = MagicMock()
+        resp = MagicMock()
+        resp.data = [MagicMock(b64_json=_b64_png())]
+        client.images.generate = AsyncMock(return_value=resp)
+        monkeypatch.setattr(images, "_rewrite_client", lambda: client)
+        return client, order
+
+    async def test_one_load_n_paints_one_unload(self, monkeypatch):
+        client, order = self._patch(monkeypatch)
+        out = await images.generate_images(["a", "b", "c"])
+        assert out == [_PNG, _PNG, _PNG]
+        # ONE swap window: load once before all paints, unload once after.
+        assert order.count("load") == 1
+        assert order.count("unload") == 1
+        assert order.index("load") < order.index("unload")
+        assert client.images.generate.call_count == 3
+
+    async def test_phases_loading_once_then_per_image(self, monkeypatch):
+        self._patch(monkeypatch)
+        phases: list[str] = []
+
+        async def on_phase(name: str) -> None:
+            phases.append(name)
+
+        await images.generate_images(["a", "b", "c"], on_phase=on_phase)
+        assert phases == ["loading", "painting 1/3", "painting 2/3", "painting 3/3"]
+
+    async def test_one_failure_does_not_abort_the_rest(self, monkeypatch):
+        client, _order = self._patch(monkeypatch)
+
+        class _Fake4xx(Exception):
+            status_code = 400
+
+        monkeypatch.setattr(images, "APIStatusError", _Fake4xx)
+        resp = MagicMock()
+        resp.data = [MagicMock(b64_json=_b64_png())]
+        client.images.generate = AsyncMock(side_effect=[_Fake4xx("bad prompt"), resp, resp])
+
+        out = await images.generate_images(["a", "b", "c"])
+        # Moment 1 failed (4xx → no retry), moments 2+3 still painted.
+        assert isinstance(out[0], _Fake4xx)
+        assert out[1] == _PNG
+        assert out[2] == _PNG
+
+    async def test_failed_batch_still_unloads_and_warm_reloads(self, monkeypatch):
+        client, order = self._patch(monkeypatch)
+        warm = AsyncMock()
+        monkeypatch.setattr(images, "_warm_chat_reload", warm)
+
+        class _Fake4xx(Exception):
+            status_code = 400
+
+        monkeypatch.setattr(images, "APIStatusError", _Fake4xx)
+        client.images.generate = AsyncMock(side_effect=_Fake4xx("down"))
+
+        out = await images.generate_images(["a", "b"])
+        assert all(isinstance(r, _Fake4xx) for r in out)
+        assert order == ["load", "unload"]  # swap-back still happened
+        # The warm reload runs as a BACKGROUND task — let it start.
+        for _ in range(5):
+            await asyncio.sleep(0)
+            if warm.await_count:
+                break
+        warm.assert_awaited_once()
+
+    async def test_broken_phase_callback_never_fails_batch(self, monkeypatch):
+        self._patch(monkeypatch)
+
+        def broken(name: str) -> None:
+            raise RuntimeError("discord edit failed")
+
+        out = await images.generate_images(["a", "b"], on_phase=broken)
+        assert out == [_PNG, _PNG]
+
+    async def test_empty_batch_is_a_noop_swap(self, monkeypatch):
+        client, order = self._patch(monkeypatch)
+        out = await images.generate_images([])
+        assert out == []
+        # Still one full swap window (consistent contract; caller gates anyway).
+        assert order == ["load", "unload"]
+        client.images.generate.assert_not_awaited()
+
+
 class TestPreparePrompt:
     """prepare_prompt: shared final-prompt step (live path + dry run, #65b)."""
 

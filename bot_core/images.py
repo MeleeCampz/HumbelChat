@@ -21,7 +21,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
-import os
 import time
 from pathlib import Path
 
@@ -378,6 +377,85 @@ async def prepare_prompt(text: str, raw: bool = False) -> str:
         return text
 
 
+async def _generate_one(client: AsyncOpenAI, prompt: str, side: int) -> bytes:
+    """One ``images.generate`` call with one retry on transient 5xx.
+
+    Observed live: Studio 'Image generation failed' (HTTP 500) mid-run,
+    recovered on the next attempt. 4xx is a real config/prompt error →
+    no retry.
+    """
+    # #66: full debug trail of exactly what goes to the backend —
+    # dev.log runs at DEBUG so the complete prompt + negative prompt
+    # are inspectable after the fact.
+    log.debug("final image prompt (%d chars): %s", len(prompt), prompt)
+    if IMAGE_NEGATIVE_PROMPT:
+        log.debug("image negative prompt: %s", IMAGE_NEGATIVE_PROMPT)
+    log.info("generating image (%dx%d): %s", side, side, prompt[:80])
+    t0 = time.monotonic()
+    for gen_attempt in (1, 2):
+        try:
+            resp = await asyncio.wait_for(
+                client.images.generate(
+                    model=IMAGE_MODEL,
+                    prompt=prompt,
+                    n=1,
+                    size=f"{side}x{side}",  # SDK maps this to width/height
+                    response_format="b64_json",
+                    # Studio's /v1 spec accepts negative_prompt; this
+                    # openai SDK version has no native kwarg for it →
+                    # extra_body passthrough.
+                    extra_body={"negative_prompt": IMAGE_NEGATIVE_PROMPT}
+                    if IMAGE_NEGATIVE_PROMPT
+                    else None,
+                ),
+                timeout=IMAGE_GEN_TIMEOUT_S,
+            )
+            b64 = resp.data[0].b64_json
+            if not b64:
+                raise ImageGenError("backend returned no image data")
+            png = base64.b64decode(b64)
+            log.info("image generated in %.1f s (%d bytes)",
+                     time.monotonic() - t0, len(png))
+            return png
+        except (APIStatusError, ImageGenError) as e:
+            transient = (
+                isinstance(e, APIStatusError) and e.status_code is not None
+                and e.status_code >= 500
+            ) or isinstance(e, ImageGenError)
+            if gen_attempt == 2 or not transient:
+                raise
+            log.warning("image generation attempt 1 failed (%s: %s) — retrying",
+                       e.__class__.__name__, str(e)[:120])
+            await asyncio.sleep(5.0)
+
+
+async def _swap_back() -> None:
+    """Swap the chat model back in — ALWAYS, even when a generation failed.
+
+    Never leave the image model resident (it would keep evicting the chat
+    model).  The warm reload runs as a background task with a strong
+    reference: an unreferenced task can be GC'd before/while it runs
+    (observed live 2026-10-29: zero warm-reload log lines across every
+    generation despite the code path existing in all deployed builds).
+    """
+    await _unload_image()
+    task = asyncio.get_running_loop().create_task(_warm_chat_reload())
+    _background_tasks.add(task)
+
+
+async def _emit_phase(on_phase: Callable[[str], Any] | None, name: str) -> None:
+    """Await an optional sync-or-async phase callback; a callback error is
+    logged and NEVER fails the generation (progress must not kill work)."""
+    if on_phase is None:
+        return
+    try:
+        res = on_phase(name)
+        if asyncio.iscoroutine(res):
+            await res
+    except Exception as exc:  # noqa: BLE001 — progress must never kill the gen
+        log.debug("on_phase(%s) failed: %s", name, exc)
+
+
 async def generate_image(
     prompt: str,
     size: int | None = None,
@@ -395,77 +473,49 @@ async def generate_image(
     callback error is logged and never fails the generation.
     """
     side = size or IMAGE_DEFAULT_SIZE
-
-    async def _phase(name: str) -> None:
-        if on_phase is None:
-            return
-        try:
-            res = on_phase(name)
-            if asyncio.iscoroutine(res):
-                await res
-        except Exception as exc:  # noqa: BLE001 — progress must never kill the gen
-            log.debug("on_phase(%s) failed: %s", name, exc)
-
     async with _gen_lock:
         client = _rewrite_client()  # reused for images.generate (same host)
         try:
-            await _phase("loading")
+            await _emit_phase(on_phase, "loading")
             await ensure_image_loaded()
-            await _phase("painting")
-            # #66: full debug trail of exactly what goes to the backend —
-            # dev.log runs at DEBUG so the complete prompt + negative prompt
-            # are inspectable after the fact.
-            log.debug("final image prompt (%d chars): %s", len(prompt), prompt)
-            if IMAGE_NEGATIVE_PROMPT:
-                log.debug("image negative prompt: %s", IMAGE_NEGATIVE_PROMPT)
-            log.info("generating image (%dx%d): %s", side, side, prompt[:80])
-            t0 = time.monotonic()
-            # One retry on transient backend 5xx — observed live: Studio
-            # 'Image generation failed' (HTTP 500) mid-run, recovered on the
-            # next attempt. 4xx is a real config/prompt error → no retry.
-            for gen_attempt in (1, 2):
-                try:
-                    resp = await asyncio.wait_for(
-                        client.images.generate(
-                            model=IMAGE_MODEL,
-                            prompt=prompt,
-                            n=1,
-                            size=f"{side}x{side}",  # SDK maps this to width/height
-                            response_format="b64_json",
-                            # Studio's /v1 spec accepts negative_prompt; this
-                            # openai SDK version has no native kwarg for it →
-                            # extra_body passthrough.
-                            extra_body={"negative_prompt": IMAGE_NEGATIVE_PROMPT}
-                            if IMAGE_NEGATIVE_PROMPT
-                            else None,
-                        ),
-                        timeout=IMAGE_GEN_TIMEOUT_S,
-                    )
-                    b64 = resp.data[0].b64_json
-                    if not b64:
-                        raise ImageGenError("backend returned no image data")
-                    png = base64.b64decode(b64)
-                    log.info("image generated in %.1f s (%d bytes)",
-                             time.monotonic() - t0, len(png))
-                    return png
-                except (APIStatusError, ImageGenError) as e:
-                    transient = (
-                        isinstance(e, APIStatusError) and e.status_code is not None
-                        and e.status_code >= 500
-                    ) or isinstance(e, ImageGenError)
-                    if gen_attempt == 2 or not transient:
-                        raise
-                    log.warning("image generation attempt 1 failed (%s: %s) — retrying",
-                               e.__class__.__name__, str(e)[:120])
-                    await asyncio.sleep(5.0)
+            await _emit_phase(on_phase, "painting")
+            return await _generate_one(client, prompt, side)
         finally:
-            # ALWAYS swap back, even on failure — never leave the image model
-            # resident (it would keep evicting the chat model).
-            await _unload_image()
-            # Keep a strong reference: an unreferenced background task can be
-            # GC'd before/while it runs (observed live 2026-10-29: zero warm-
-            # reload log lines across every generation despite the code path
-            # existing in all deployed builds).
-            task = asyncio.get_running_loop().create_task(_warm_chat_reload())
-            _background_tasks.add(task)
-            task.add_done_callback(_background_tasks.discard)
+            await _swap_back()
+
+
+async def generate_images(
+    prompts: list[str],
+    size: int | None = None,
+    on_phase: Callable[[str], Any] | None = None,
+) -> list[bytes | ImageGenError]:
+    """Batch variant of :func:`generate_image` (#69): paint every prompt in
+    ONE model-swap window — load once, paint all while the image model is
+    resident (a single failure does NOT abort the rest), unload + warm-
+    reload the chat model exactly once.
+
+    The caller holds the global AI slot around the whole call (same contract
+    as :func:`generate_image`).  ``on_phase`` is awaited with ``"loading"``
+    once, then ``"painting i/n"`` per image.  Returns one entry per prompt,
+    in order: PNG bytes or the exception that killed it (:class:`ImageGenError`
+    or a non-transient :class:`APIStatusError` — both are reported per image
+    so ONE bad moment never aborts the rest of the batch).
+    """
+    side = size or IMAGE_DEFAULT_SIZE
+    total = len(prompts)
+    results: list[bytes | Exception] = []
+    async with _gen_lock:
+        client = _rewrite_client()
+        try:
+            await _emit_phase(on_phase, "loading")
+            await ensure_image_loaded()
+            for i, prompt in enumerate(prompts, 1):
+                await _emit_phase(on_phase, f"painting {i}/{total}")
+                try:
+                    results.append(await _generate_one(client, prompt, side))
+                except (ImageGenError, APIStatusError) as exc:
+                    log.error("batch image %d/%d failed: %s", i, total, exc)
+                    results.append(exc)
+        finally:
+            await _swap_back()
+    return results

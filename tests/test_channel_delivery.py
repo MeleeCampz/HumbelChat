@@ -26,6 +26,7 @@ from bot_core.channel_delivery import (
     ChannelNotDeliverableError,
     can_post_in_channel,
     get_bot,
+    resolve_channel,
     send_to_channel,
 )
 
@@ -195,6 +196,45 @@ class TestSendToChannel:
         with pytest.raises(ChannelNotDeliverableError) as ei:
             await send_to_channel(bot, 666, "x")
         assert "cannot post" in str(ei.value).lower()
+
+
+class TestResolveChannel:
+    """resolve_channel (#69): channel resolution WITHOUT sending — so
+    background senders can post several messages (or edit/delete one they
+    sent) through a single resolved channel."""
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_returns_channel_and_via(self):
+        chan = MagicMock()
+        chan.send = AsyncMock()
+        bot = _bot(cache_get=lambda cid: chan)
+        result, via = await resolve_channel(bot, 111)
+        assert result is chan
+        assert via == "cache"
+        bot.http.get_channel.assert_not_awaited()
+        chan.send.assert_not_awaited()  # resolution must not send anything
+
+    @pytest.mark.asyncio
+    async def test_rest_fallback_when_cache_misses(self):
+        fetched = MagicMock()
+        bot = _bot(cache_get=lambda cid: None, rest_get=lambda cid: fetched)
+        result, via = await resolve_channel(bot, 222)
+        assert result is fetched
+        assert via == "rest"
+        bot.http.get_channel.assert_awaited_once_with(222)
+
+    @pytest.mark.asyncio
+    async def test_no_bot_instance_raises(self):
+        with pytest.raises(ChannelNotDeliverableError):
+            await resolve_channel(None, 333)
+
+    @pytest.mark.asyncio
+    async def test_not_found_on_lookup_raises_clean_error(self):
+        bot = _bot(cache_get=lambda cid: None,
+                   rest_get=lambda cid: (_ for _ in ()).throw(_not_found()))
+        with pytest.raises(ChannelNotDeliverableError) as ei:
+            await resolve_channel(bot, 555)
+        assert "does not exist" in str(ei.value)
 
 
 class TestCanPostInChannel:

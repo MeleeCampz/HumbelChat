@@ -135,6 +135,36 @@ async def send_to_channel(
     item queued rather than silently dropping it.  Returns the channel
     object that was used for the send.
     """
+    chan, via = await resolve_channel(bot, channel_id)
+    try:
+        await chan.send(content)
+    except discord.Forbidden:
+        guild = getattr(chan, "guild", None)
+        gname = getattr(guild, "name", "?") if guild is not None else "DM"
+        cname = getattr(chan, "name", str(channel_id))
+        raise ChannelNotDeliverableError(
+            channel_id,
+            f"bot cannot post in #{cname} (guild: {gname}) — "
+            "check View Channel / Send Messages permissions and role overwrites",
+        ) from None
+
+    log.info("Delivered message to channel %s via %s", channel_id, via)
+    return cast(discord.abc.Messageable, chan)
+
+
+async def resolve_channel(
+    bot: discord.Client | None,
+    channel_id: int,
+) -> tuple[discord.abc.Messageable, str]:
+    """Resolve a channel object for ``channel_id`` without sending anything.
+
+    Same two-step resolution as :func:`send_to_channel` (local cache first,
+    REST fallback second) so background senders can post MULTIPLE messages —
+    or edit/delete one they sent — through a single resolved channel.  Raises
+    :class:`ChannelNotDeliverableError` when the channel cannot be reached at
+    all; a permission failure only surfaces when the first actual send is
+    attempted (same as ``send_to_channel``).
+    """
     # NOTE: Any on purpose — discord.py's declared get_channel() return union
     # and its inferred one disagree (concrete classes don't visibly subclass
     # the ABCs), so no explicit union type-checks. Every concrete channel that
@@ -173,22 +203,7 @@ async def send_to_channel(
             channel_id,
             "no bot instance or channel available to deliver the message",
         )
-
-    try:
-        await chan.send(content)
-    except discord.Forbidden:
-        guild = getattr(chan, "guild", None)
-        gname = getattr(guild, "name", "?") if guild is not None else "DM"
-        cname = getattr(chan, "name", str(channel_id))
-        raise ChannelNotDeliverableError(
-            channel_id,
-            f"bot cannot post in #{cname} (guild: {gname}) — "
-            "check View Channel / Send Messages permissions and role overwrites",
-        ) from None
-
-    log.info("Delivered message to channel %s via %s", channel_id, via)
-    # Whatever concrete channel class got resolved above supports .send().
-    return cast(discord.abc.Messageable, chan)
+    return cast(discord.abc.Messageable, chan), via
 
 
 async def can_post_in_channel(interaction: discord.Interaction) -> bool:

@@ -521,9 +521,10 @@ class TestOverviewSourceAssembly:
         assert any(r.startswith(".transcripts/") for r in refs)
 
     def test_session_documents_text_respects_budget(self, monkeypatch):
-        import commands.session_commands as sc
+        # The helper (and its budget) now lives in bot_core.sessions — shared
+        # with the automatic highlight images (#69).
         from commands.session_commands import _session_documents_text
-        monkeypatch.setattr(sc, "_OVERVIEW_DOC_BUDGET", 20_000)
+        monkeypatch.setattr(S, "SESSION_DOCS_BUDGET", 20_000)
         S.start_session(name="Big")
         S.add_document("A" * 50_000, title="a.md")
         S.add_document("B" * 50_000, title="b.md")

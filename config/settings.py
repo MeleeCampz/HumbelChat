@@ -397,6 +397,44 @@ DEFAULT_SESSION_RECAP_PROMPT: str = (
 #: /end_session recap of the session is written. Empty = use DEFAULT_SESSION_RECAP_PROMPT.
 SESSION_RECAP_PROMPT: str = os.getenv("SESSION_RECAP_PROMPT", "")
 
+# ── #69: automatic key-moment images at /end_session ────────────────────
+#: Kill switch for the automatic session-highlight images ("0" disables;
+#: anything else enables).  The feature additionally requires IMAGE_MODEL to
+#: be configured — with no image model there is nothing to paint with.
+SESSION_IMAGES: str = os.getenv("SESSION_IMAGES", "1")
+#: How many key moments (→ one image each) to pick per ended session.
+SESSION_IMAGE_MAX_MOMENTS: int = _safe_int(os.getenv("SESSION_IMAGE_MAX_MOMENTS"), 3)
+
+DEFAULT_SESSION_IMAGES_PROMPT: str = (
+    "You pick the KEY MOMENTS of exactly ONE D&D campaign session so they can be "
+    "painted as images.\n"
+    "The user message contains the ONLY sources for this session:\n"
+    "  1) Session files (attachments/ and transcripts/) — the complete, verbatim session record.\n"
+    "  2) Session notes — short, timestamped bullet points created during the session.\n"
+    f"Choose AT MOST {SESSION_IMAGE_MAX_MOMENTS} moments — the ones that DEFINE this "
+    "session: turning points, big victories or defeats, emotional beats, firsts, striking "
+    "scenes.  Prefer visually distinct, paintable scenes over abstract talk; fewer is fine "
+    "(even just one) when the session has few highlights.\n"
+    "Respond with ONLY a JSON array — no prose, no code fences — of at most "
+    f"{SESSION_IMAGE_MAX_MOMENTS} objects: [{{\"title\": \"...\", \"scene\": \"...\"}}]\n"
+    '  - "title": a short name for the moment (max. ~8 words) — used as the image caption.\n'
+    '  - "scene": 1–3 sentences describing exactly what to paint: who is there, what is '
+    'happening, where, the mood.  No negations (the rewrite layer handles those).\n'
+    "STRICT RULES:\n"
+    "- Use ONLY the sources in the user message. Add NOTHING, infer nothing, and do not "
+    "recall any events, names or places that do not appear in them.\n"
+    "- The session files are authoritative; the notes serve only as a supplement. On "
+    "conflict, the session files take precedence.\n"
+    "- LANGUAGE: Determine the language of the provided sources yourself and write BOTH "
+    "fields entirely in that language (German sources → German, English sources → "
+    "English). Do not mix languages and do not translate proper names (characters, "
+    "places, items) — keep them exactly as they appear in the sources."
+)
+
+#: Override for SESSION_IMAGES_PROMPT — set in .env to customize how the key
+#: moments of an ended session are selected. Empty = use DEFAULT_SESSION_IMAGES_PROMPT.
+SESSION_IMAGES_PROMPT: str = os.getenv("SESSION_IMAGES_PROMPT", "")
+
 # ════════════════════════════════════
 #  BOT BEHAVIOUR
 # ════════════════════════════════════

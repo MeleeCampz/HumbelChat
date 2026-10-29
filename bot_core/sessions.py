@@ -397,6 +397,55 @@ def _session_docs(session: dict[str, Any], subdir: str) -> list[str]:
         return []
 
 
+#: Total char budget for the assembled session-document text fed to
+#: summary-type model calls (recap, merged log, highlight selection).  It
+#: exists only to keep the prompt size bounded for very long sessions; each
+#: included document keeps its header + full text (trimmed from the tail if it
+#: alone exceeds the whole budget).
+SESSION_DOCS_BUDGET = 60_000
+
+
+def session_documents_text(session: dict[str, Any]) -> tuple[str, list[str]]:
+    """Full text of the session's own documents (attachments + transcripts).
+
+    Returns ``(text, refs)`` where *refs* are ``<subdir>/<filename>`` labels
+    (one per non-empty document found).  *text* is the concatenation of those
+    documents (each with a small ``Source:`` header so the model can tell them
+    apart), trimmed to :data:`SESSION_DOCS_BUDGET` chars in total.  When the
+    budget is exhausted the remaining documents are dropped with a note so the
+    model knows more material exists for the session.
+    """
+    parts: list[str] = []
+    refs: list[str] = []
+    omitted: list[str] = []
+    budget_left = SESSION_DOCS_BUDGET
+    for subdir in (_SUBDIR_ATTACHMENTS, _SUBDIR_TRANSCRIPTS):
+        for name in _session_docs(session, subdir):
+            ref = f"{subdir}/{name}"
+            path = _session_dir(session) / ref
+            try:
+                body = path.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                continue
+            if not body:
+                continue
+            refs.append(ref)
+            if budget_left <= 0:
+                omitted.append(ref)
+                continue
+            # Keep each document whole when it fits; trim a single document
+            # that alone exceeds the whole budget from the tail (the head
+            # carries the session's most relevant opening material).
+            if len(body) > budget_left:
+                body = body[:budget_left].rstrip() + "\n…[document truncated]"
+            parts.append(f"Source: {ref}\n\n{body}")
+            budget_left -= len(body)
+    if omitted:
+        parts.append("…[additional documents not included due to size: "
+                     + ", ".join(omitted) + "]")
+    return "\n".join(parts).strip(), refs
+
+
 def _documents_block_for_dir(folder: pathlib.Path) -> list[str]:
     """Render the combined ``## Documents`` lines for one session folder.
 
