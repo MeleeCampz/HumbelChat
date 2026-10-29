@@ -6,6 +6,7 @@ re-embeds files that are new, renamed, changed, or were deleted on disk
 """
 from __future__ import annotations
 
+import logging
 import pathlib
 from unittest.mock import AsyncMock, patch
 
@@ -319,6 +320,30 @@ class TestIndexEmbedderFallback:
 
     def test_explicit_disable_wins_over_name_match(self):
         assert self._build("m", "m", "0") is False
+
+    def _build_logs(self, index_model, local_model, flag, caplog):
+        """Like _build, but also returns the log records emitted by kb.index."""
+        with caplog.at_level(logging.DEBUG, logger="kb.index"):
+            self._build(index_model, local_model, flag)
+        return [r for r in caplog.records if r.name == "kb.index"]
+
+    def test_auto_different_models_stays_quiet(self, caplog):
+        # The normal remote-backend configuration: auto mode safely disables the
+        # incompatible fallback. This used to log a WARNING on every startup.
+        records = self._build_logs("qwen3-embedding-4b", "BAAI/bge-m3", "auto", caplog)
+        assert not any(r.levelno >= logging.WARNING for r in records)
+
+    def test_explicit_enable_with_different_models_warns(self, caplog):
+        # The genuinely dangerous configuration: fallback on, different spaces.
+        records = self._build_logs("qwen3-embedding-4b", "BAAI/bge-m3", "1", caplog)
+        assert any(
+            r.levelno == logging.WARNING and "INDEX_EMBED_FALLBACK_LOCAL" in r.getMessage()
+            for r in records
+        )
+
+    def test_explicit_enable_same_model_no_warning(self, caplog):
+        records = self._build_logs("m", "m", "1", caplog)
+        assert not any(r.levelno >= logging.WARNING for r in records)
 
 
 if __name__ == "__main__":

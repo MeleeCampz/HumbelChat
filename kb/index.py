@@ -330,6 +330,13 @@ class KBIndexStore:
         only enabled when both sides use the SAME model (then a reindex never
         hard-fails). With mismatched models a downed backend fails loudly and
         the existing index stays intact; re-run /sync_kb once it recovers.
+
+        A WARNING is only emitted for the genuinely dangerous configuration —
+        the operator explicitly enabled the fallback (INDEX_EMBED_FALLBACK_LOCAL)
+        while the two models differ. The safe auto-disable of a mismatched
+        fallback stays quiet: this method runs on every startup, and a name
+        mismatch is normal whenever the local model isn't the one serving
+        queries.
         """
         from config.settings import (
             INDEX_EMBED_BACKEND,
@@ -339,13 +346,6 @@ class KBIndexStore:
             RAG_EMBED_BATCH_SIZE,
         )
         if INDEX_EMBED_BACKEND == "backend":
-            if INDEX_EMBED_MODEL != LOCAL_EMBED_MODEL:
-                logger.warning(
-                    "INDEX_EMBED_MODEL (%s) differs from the local fallback model "
-                    "LOCAL_EMBED_MODEL (%s); index and query vectors are only "
-                    "compatible when the QUERY embedder also uses %s.",
-                    INDEX_EMBED_MODEL, LOCAL_EMBED_MODEL, INDEX_EMBED_MODEL,
-                )
             # Local CPU fallback only produces vectors in the same space when it
             # runs the identical model — otherwise a mid-build backend outage
             # would corrupt the index silently. "auto" decides by name equality;
@@ -356,6 +356,30 @@ class KBIndexStore:
                 fallback = False
             else:  # auto
                 fallback = INDEX_EMBED_MODEL == LOCAL_EMBED_MODEL
+            if fallback and INDEX_EMBED_MODEL != LOCAL_EMBED_MODEL:
+                # The one genuinely dangerous configuration: the operator opted
+                # in to a local CPU fallback that would embed in a DIFFERENT
+                # vector space than the backend — a mid-build outage would mix
+                # two incompatible spaces into one index silently.
+                logger.warning(
+                    "INDEX_EMBED_FALLBACK_LOCAL is enabled but INDEX_EMBED_MODEL "
+                    "(%s) differs from the local fallback model LOCAL_EMBED_MODEL "
+                    "(%s): a mid-build backend outage would mix incompatible "
+                    "vector spaces into one index. Set INDEX_EMBED_FALLBACK_LOCAL=0 "
+                    "unless they are the same model under different names.",
+                    INDEX_EMBED_MODEL, LOCAL_EMBED_MODEL,
+                )
+            elif not fallback and INDEX_EMBED_MODEL != LOCAL_EMBED_MODEL:
+                # Safe: auto mode already disabled the incompatible fallback (a
+                # downed backend fails loudly instead). Not a warning — this is
+                # the normal configuration whenever the local model isn't the one
+                # serving queries, and it must stay quiet or it fires on every
+                # startup.
+                logger.debug(
+                    "Local CPU index fallback disabled: INDEX_EMBED_MODEL (%s) "
+                    "differs from LOCAL_EMBED_MODEL (%s).",
+                    INDEX_EMBED_MODEL, LOCAL_EMBED_MODEL,
+                )
             return Embedder(
                 model_name=INDEX_EMBED_MODEL,
                 backend="remote",
