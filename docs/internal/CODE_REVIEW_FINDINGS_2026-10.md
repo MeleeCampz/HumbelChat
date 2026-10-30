@@ -221,8 +221,8 @@ untested-against-Studio but payload-identical to the live-verified #73 shape):
 - **§1.4 done** — `/help` categorized under "AI & Chat".
 - **§4 done** — benchmark test switched to best-of-rounds timing (regression signal intact,
   absolute cap relaxed to 10 ms); passed inside a full-suite run.
-- **TRY400 sweep** — deliberately NOT done in this pass (27 cosmetic log-quality edits across
-  many modules; low value, needless diff noise). Left open.
+- **TRY400 sweep** — deliberately NOT done in the first pass (27 cosmetic log-quality edits across
+  many modules; low value, needless diff noise). **Done in the second batch below.**
 
 Full suite after all changes: **1279 passed, 0 failed**.
 
