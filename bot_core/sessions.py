@@ -562,9 +562,14 @@ def _index_session_file(path: pathlib.Path) -> None:
     try:
         import asyncio
         from kb.retrievers import update_kb_document
+        from utils.background_tasks import spawn_tracked_task
 
-        loop = asyncio.get_running_loop()
-        fut = loop.create_task(update_kb_document(path))
+        asyncio.get_running_loop()  # raises RuntimeError when no loop → skip
+        # Tracked task — an untracked create_task can be GC'd mid-flight, the
+        # same failure class as the #73 warm-reload bug (code review §1.3).
+        fut = spawn_tracked_task(
+            update_kb_document(path), name=f"session-index:{path.name}"
+        )
 
         def _on_done(t: "asyncio.Task[Any]") -> None:
             try:

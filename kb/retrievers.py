@@ -122,8 +122,9 @@ def replace_index_store(
         # Best-effort async cleanup of the replaced store.  It is no longer
         # referenced by any retrieval path, so shut it down out-of-band.
         try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(_safe_shutdown_store(old_store))
+            asyncio.get_running_loop()  # RuntimeError in a sync context
+            from utils.background_tasks import spawn_tracked_task
+            spawn_tracked_task(_safe_shutdown_store(old_store), name="index-store-shutdown")
         except RuntimeError:
             # No running loop (e.g. called from a sync test) — nothing to do;
             # the store's state is already persisted to disk.
@@ -151,8 +152,9 @@ async def reset_index_store() -> None:
     if old_store is not None:
         logger.info("Vector index store reset; will reload from disk on next use")
         try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(_safe_shutdown_store(old_store))
+            asyncio.get_running_loop()  # RuntimeError in a sync context
+            from utils.background_tasks import spawn_tracked_task
+            spawn_tracked_task(_safe_shutdown_store(old_store), name="index-store-shutdown")
         except RuntimeError:
             pass
 

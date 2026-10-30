@@ -398,10 +398,12 @@ DEFAULT_SESSION_RECAP_PROMPT: str = (
 SESSION_RECAP_PROMPT: str = os.getenv("SESSION_RECAP_PROMPT", "")
 
 # ── #69: automatic key-moment images at /end_session ────────────────────
-#: Kill switch for the automatic session-highlight images ("0" disables;
-#: anything else enables).  The feature additionally requires IMAGE_MODEL to
-#: be configured — with no image model there is nothing to paint with.
-SESSION_IMAGES: str = os.getenv("SESSION_IMAGES", "1")
+#: Kill switch for the automatic session-highlight images (_safe_bool per
+#: P3 #32: "0"/"false"/"no" disable; missing/anything else enables — the
+#: old raw=="0" check treated SESSION_IMAGES=false as ENABLED). The feature
+#: additionally requires IMAGE_MODEL to be configured — with no image model
+#: there is nothing to paint with.
+SESSION_IMAGES: bool = _safe_bool(os.getenv("SESSION_IMAGES"), True)
 #: How many key moments (→ one image each) to pick per ended session.
 SESSION_IMAGE_MAX_MOMENTS: int = _safe_int(os.getenv("SESSION_IMAGE_MAX_MOMENTS"), 3)
 
@@ -678,8 +680,7 @@ LAST_SESSION_MAX_CHARS: int = _safe_int(os.getenv("LAST_SESSION_MAX_CHARS"), 400
 # e.g. after new data was ingested — optionally generate the missing lines in
 # the background at startup: idle-delayed, batch-paused so live /ai traffic
 # keeps working, resumable, and live-reloaded per batch. Off by default.
-CONTEXTUAL_BACKGROUND_FILL: bool = os.getenv(
-    "CONTEXTUAL_BACKGROUND_FILL", "0").strip().lower() in ("1", "true", "yes")
+CONTEXTUAL_BACKGROUND_FILL: bool = _safe_bool(os.getenv("CONTEXTUAL_BACKGROUND_FILL"), False)
 # Seconds after startup before the fill begins (let the bot settle first).
 CONTEXTUAL_FILL_INITIAL_DELAY_S: int = int(os.getenv("CONTEXTUAL_FILL_INITIAL_DELAY_S", "300"))
 

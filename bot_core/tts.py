@@ -16,6 +16,8 @@ from typing import Any, Callable
 import httpx
 from openai import APIStatusError, AsyncOpenAI
 
+from utils.studio_model import is_resident, load_payload
+
 from config.settings import (
     DEFAULT_MODEL,
     TTS_API_KEY,
@@ -88,6 +90,14 @@ async def _ensure_slug_loaded(model_path: str, wait_s: float) -> bool:
     brings the new model up NEXT TO the currently resident one (both stay
     loaded at once), so loading the chat model back after a TTS use does not
     kick the TTS model out again.
+
+    #73 class fix (code review 2026-10): Studio's load endpoint takes a bare
+    repo id + optional ``gguf_variant`` — sending the colon-suffixed
+    ``repo:quant`` slug verbatim fails HF repo-id validation, and residency
+    is only ever reported under the bare id. Split via the shared helper;
+    check the POST status instead of silently polling a never-loaded model.
+    The POST itself blocks until the load completes (observed ~70 s for the
+    chat model in the images path), so its timeout IS the wait budget.
     """
     api_base = _unsloth_api_base()
     if api_base is None or not model_path:
@@ -96,16 +106,21 @@ async def _ensure_slug_loaded(model_path: str, wait_s: float) -> bool:
     # NOTE: this Studio version silently ignores gpu_ids for audio.cpp GGUF
     # models — a GPU TTS load evicts the resident chat model and the pair
     # swaps back per use (accepted trade-off; kept for future Studio builds).
-    payload: dict[str, object] = {"model_path": model_path}
-    if TTS_GPU_IDS:
-        payload["gpu_ids"] = TTS_GPU_IDS
+    extra = {"gpu_ids": TTS_GPU_IDS} if TTS_GPU_IDS else None
+    payload = load_payload(model_path, extra)
     try:
-        async with httpx.AsyncClient(timeout=30.0) as http:
-            await http.post(
+        async with httpx.AsyncClient(timeout=httpx.Timeout(wait_s, connect=10.0)) as http:
+            resp = await http.post(
                 f"{api_base}/api/inference/load",
                 json=payload,
                 headers=headers,
             )
+            if resp.status_code >= 400:
+                log.warning(
+                    "Model load request failed (%s): HTTP %d — %s",
+                    model_path, resp.status_code, (resp.text or "")[:200],
+                )
+                return False
             loop = asyncio.get_running_loop()
             deadline = loop.time() + wait_s
             while loop.time() < deadline:
@@ -113,7 +128,7 @@ async def _ensure_slug_loaded(model_path: str, wait_s: float) -> bool:
                     f"{api_base}/api/inference/loaded-models", headers=headers
                 )
                 data = resp.json().get("data", [])
-                if any(m.get("id") == model_path and m.get("loaded") for m in data):
+                if any(is_resident(m, model_path) for m in data):
                     log.info("Model re-loaded: %s", model_path)
                     return True
                 await asyncio.sleep(5)

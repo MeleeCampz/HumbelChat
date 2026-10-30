@@ -58,7 +58,7 @@ def will_generate(session: dict[str, Any], channel_id: int | None) -> bool:
     Feature enabled + an image model configured + a known ending channel +
     something actually recorded (notes, documents or a merged log).
     """
-    if SESSION_IMAGES.strip() == "0":
+    if not SESSION_IMAGES:
         return False
     if not I.image_gen_configured():
         return False

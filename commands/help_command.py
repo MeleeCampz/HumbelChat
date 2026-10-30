@@ -32,6 +32,7 @@ _CATEGORIES: dict[str, str] = {
     "ai_stop": "AI & Chat",
     "character": "AI & Chat",
     "clear_history": "AI & Chat",
+    "help": "AI & Chat",
     "roll_items": "D&D Items",
     "item_search": "D&D Items",
     "item_stats": "D&D Items",

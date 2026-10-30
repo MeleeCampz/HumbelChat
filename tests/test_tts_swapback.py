@@ -31,6 +31,100 @@ class TestEnsureSlugLoaded:
         monkeypatch.setattr(tts, "TTS_URL", "http://studio:8888/v1")
         assert await tts._ensure_slug_loaded("", 1) is False
 
+    # ── #73 class fix (code review §1.1): slug split + POST status check ──
+
+    @staticmethod
+    def _fake_http(monkeypatch, post_status=200, models=None, *, get=None):
+        """Stub tts.httpx.AsyncClient; returns the captured POST payload."""
+        captured: dict = {}
+        models = models or []
+
+        class _Resp:
+            def __init__(self, status: int = 200, text: str = "") -> None:
+                self.status_code = status
+                self.text = text
+
+            def json(self):
+                return {"data": models}
+
+        class _Client:
+            def __init__(self, *a, **kw) -> None:
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def post(self, url, json=None, headers=None):
+                captured["url"] = url
+                captured["payload"] = json
+                return _Resp(post_status, "AutoConfig error" if post_status >= 400 else "")
+
+            async def get(self, url, headers=None):
+                if get is not None:
+                    return get()
+                return _Resp()
+
+        monkeypatch.setattr(tts.httpx, "AsyncClient", _Client)
+        monkeypatch.setattr(tts, "TTS_GPU_IDS", [])
+        monkeypatch.setattr(tts, "TTS_URL", "http://studio:8888/v1")
+        monkeypatch.setattr(tts.asyncio, "sleep", lambda s: _done())
+        return captured
+
+    async def test_payload_splits_repo_and_variant(self, monkeypatch):
+        # Studio's load endpoint needs repo + gguf_variant — NOT the colon
+        # slug (sending it verbatim is the #73 failure).
+        captured = self._fake_http(monkeypatch)
+        result = await tts._ensure_slug_loaded(
+            "unsloth/Qwen3.8-27B-GGUF:Qwen3.8-27B-NVFP4_50-Q4K_M", 0.1
+        )
+        assert result is False  # never resident in this stub
+        assert captured["url"] == "http://studio:8888/api/inference/load"
+        assert captured["payload"] == {
+            "model_path": "unsloth/Qwen3.8-27B-GGUF",
+            "gguf_variant": "Qwen3.8-27B-NVFP4_50-Q4K_M",
+        }
+
+    async def test_plain_slug_gets_no_variant_key(self, monkeypatch):
+        captured = self._fake_http(monkeypatch)
+        await tts._ensure_slug_loaded("unsloth/Qwen-Image-2.1-Turbo-GGUF", 0.1)
+        assert captured["payload"] == {"model_path": "unsloth/Qwen-Image-2.1-Turbo-GGUF"}
+
+    async def test_failed_post_returns_false_without_polling(self, monkeypatch):
+        # A rejected load (e.g. 500) must surface immediately instead of
+        # silently polling a model that can never become resident.
+        def no_get():
+            raise AssertionError("must not poll after a failed load POST")
+
+        self._fake_http(monkeypatch, post_status=500, get=no_get)
+        assert await tts._ensure_slug_loaded("repo:variant", 1) is False
+
+    async def test_residency_matches_bare_id_plus_quant(self, monkeypatch):
+        # Studio reports loaded models under the BARE repo id with the quant
+        # in a separate field — matching on the full slug never succeeded.
+        models = [{
+            "id": "unsloth/Qwen3.8-27B-GGUF",
+            "quant": "Qwen3.8-27B-NVFP4_50-Q4K_M",
+            "loaded": True,
+        }]
+        self._fake_http(monkeypatch, models=models)
+        assert await tts._ensure_slug_loaded(
+            "unsloth/Qwen3.8-27B-GGUF:Qwen3.8-27B-NVFP4_50-Q4K_M", 1
+        ) is True
+
+    async def test_residency_wrong_quant_is_not_a_match(self, monkeypatch):
+        models = [{
+            "id": "unsloth/Qwen3.8-27B-GGUF",
+            "quant": "Some-Other-Quant",
+            "loaded": True,
+        }]
+        self._fake_http(monkeypatch, models=models)
+        assert await tts._ensure_slug_loaded(
+            "unsloth/Qwen3.8-27B-GGUF:Qwen3.8-27B-NVFP4_50-Q4K_M", 0.1
+        ) is False
+
 
 class TestScheduleChatSwapBack:
     async def test_noop_without_chat_model(self, monkeypatch):

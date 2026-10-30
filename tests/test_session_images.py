@@ -98,7 +98,7 @@ def _chan(monkeypatch, *, deliverable: bool = True):
 @pytest.fixture(autouse=True)
 def _enabled(monkeypatch):
     """Feature on + image model configured (per-test opt-out available)."""
-    monkeypatch.setattr(si, "SESSION_IMAGES", "1")
+    monkeypatch.setattr(si, "SESSION_IMAGES", True)
     monkeypatch.setattr(images, "IMAGE_MODEL", "unsloth/Qwen-Image-x")
 
 
@@ -106,7 +106,7 @@ def _enabled(monkeypatch):
 
 class TestGates:
     async def test_kill_switch_does_nothing(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(si, "SESSION_IMAGES", "0")
+        monkeypatch.setattr(si, "SESSION_IMAGES", False)
         calls = _patch_pipeline(monkeypatch)
         chan, _p = _chan(monkeypatch)
         await si.generate_session_highlights(_session(tmp_path), 123)
@@ -139,7 +139,7 @@ class TestGates:
         assert si.will_generate(_session(tmp_path), 123) is True
 
     def test_will_generate_false_when_killed(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(si, "SESSION_IMAGES", "0")
+        monkeypatch.setattr(si, "SESSION_IMAGES", False)
         assert si.will_generate(_session(tmp_path), 123) is False
 
 

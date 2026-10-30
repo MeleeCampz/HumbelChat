@@ -378,6 +378,9 @@ class TestTtsClient:
         sent: dict[str, object] = {}
 
         class _Resp:
+            status_code = 200
+            text = ""
+
             def json(self):
                 return {"data": [{"id": model, "loaded": True}]}
 
@@ -393,6 +396,7 @@ class TestTtsClient:
 
             async def post(self, url, json=None, headers=None):
                 sent["payload"] = json
+                return _Resp()
 
             async def get(self, url, headers=None):
                 return _Resp()

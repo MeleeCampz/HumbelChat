@@ -207,7 +207,14 @@ async def handle_roll_items_command(
         if not result["ok"]:
             await interaction.followup.send(result["error"])
             return
-        pairs: list[tuple[str, str]] = [(table, i.name) for i in result["items"]]
+        pairs: list[tuple[str, str]] = [
+            # Canonical table stem from the loaded Item (not the raw user
+            # string) — item_state keys and button custom_ids must agree, or
+            # rehydrated/toggled buttons render with the wrong 🚫/↩️ state
+            # (code review §1.2).
+            (i.table, i.name)
+            for i in result["items"]
+        ]
         # Per-item toggle buttons. For consume rolls the rolled items are
         # shown as already-consumed (↩️) even though the state write happens
         # after the send lands — a failed send loses nothing.
