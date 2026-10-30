@@ -151,7 +151,7 @@ without re-running `scripts/rag_floor_probe.py`.
 **Serving (since 2026-10-25):** pinned `llama.cpp` **container** on GPU 1
 (`reranker-llama` service, official digest-pinned `ggml-org/llama.cpp` server
 image; `Qwen3-Reranker-4B-Q4_K_M.gguf` self-converted from official weights —
-community GGUFs had dropped the classifier head; see HANDOFF_RERANKER_LLAMA.md),
+community GGUFs had dropped the classifier head; see docs/internal/HANDOFF_RERANKER_LLAMA.md),
 `--alias reranker-4b --reranking --pooling rank -c 2048` (~2.4 GB flat,
 150-pair batch ~2.5 s). The bot reaches it on the compose network as
 `RERANK_API_BASE=http://reranker-llama:8080/v1`; loopback `:8090` is host
