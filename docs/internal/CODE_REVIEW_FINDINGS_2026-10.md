@@ -201,9 +201,9 @@ turn into a real incident.
 
 ## 7. Implementation status (2026-10-29, same session)
 
-Implemented on `feat/tool-calling` (hermetic tests only — no live Studio verification in
-this pass; the host was out of GPU headroom, so the TTS fix ships untested-against-Studio
-but payload-identical to the live-verified #73 shape):
+Implemented on `feat/tool-calling` (commit `a97d331`; hermetic tests only — no live Studio
+verification in this pass; the host was out of GPU headroom, so the TTS fix ships
+untested-against-Studio but payload-identical to the live-verified #73 shape):
 
 - **§1.1 done** — new `utils/studio_model.py` (`split_repo_variant` / `load_payload` /
   `is_resident`); `bot_core/tts._ensure_slug_loaded` now splits repo:quant, checks the POST
