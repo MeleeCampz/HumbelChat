@@ -130,7 +130,29 @@ into the merge/recap user message so the model maps variants consistently.
 - Use clean standard language in the recap; never coin verbs and never invent words.
 ```
 
-## 6. Verification trail
+## 6. Status (2026-10-30): merge deltas APPLIED + existing files fixed
+
+- `DEFAULT_SESSION_MERGE_PROMPT` now includes all three deltas: VERBATIM-embeds strict rule,
+  pinned third-person ensemble view, TTRPG-jargon preservation. Recap deltas from §5 remain
+  proposals (the user asked for merge-prompt changes only).
+- Past sessions curated by hand (Studio backend was down, so a model re-merge was not
+  possible — the curation was done directly against the raw sources):
+  - 10-28: `![[BanditenLagerInDenRoots.png]]` restored at the tunnel-discovery passage;
+    "kritisiert" → "krittet"; `last_ended.merged_log` in `sessions.json` re-synced from the
+    corrected notes.md (backup: `data/sessions.json.pre-73fix`).
+  - 10-16: `(Bildreferenz: BrumbelwellCatacombs.png)` → real `![[BrumbelwellCatacombs.png]]` embed.
+  - 10-07: merged log converted from first-person ("wir", 18 sites) to third-person ensemble
+    view; "eine Rest" → "eine Rast" typo fixed; both images (webp + `![[Susan.png|334]]`) were
+    already preserved — left in place.
+  - 10-20: already conformant (2 embeds verbatim, third-person, no jargon damage) — untouched.
+- Verification: every merged section greps clean (`wir`/`Wir` = 0, embeds present, no
+  `Bildreferenz`, no `kritisiert`); full suite 1292 passed.
+- Note discovered while fixing: embed handling had THREE behaviours (kept verbatim / dropped /
+  down-converted to a `(Bildreferenz: …)` text note) — the new strict rule pins all runs to
+  the first behaviour. Changed notes.md files will be re-embedded automatically on next bot
+  start (index load validates source-file hashes), no manual re-index needed.
+
+## 7. Verification trail
 
 - Compared raw vs merged for 10-28 in full (134-line raw, 10,281-char merged) — coverage ~100%,
   1 dropped embed, 1 jargon mis-fix ("kritisiert"), nothing invented.
