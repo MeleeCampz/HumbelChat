@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import discord
+
 
 async def typing_loop_task(channel: Any, duration_sec: float | None = 30) -> None:
     """Send typing indicators every ~10 s.
@@ -31,6 +33,14 @@ async def typing_loop_task(channel: Any, duration_sec: float | None = 30) -> Non
         except (TypeError, asyncio.CancelledError):
             # Event loop already closed (shutting down) — stop immediately
             break
+        except discord.Forbidden:
+            # Typing permission revoked (or channel deleted under us) —
+            # retrying every 10 s until the duration lapses was the old
+            # behaviour; the docstring always promised a stop (code review §2.6).
+            break
+        except discord.NotFound:
+            # Channel gone — nothing to signal on.
+            break
         except Exception:
-            pass  # Permission error, channel deleted, etc.
+            pass  # transient transport hiccup — retry at the next interval
         await asyncio.sleep(10)

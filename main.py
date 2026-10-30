@@ -244,7 +244,8 @@ async def _ensure_commands_synced() -> None:
             try:
                 report = await command_sync.sync_commands(bot)
             except Exception as e:
-                log.error("Initial command sync failed (will retry on next restart): %s", e)
+                log.error("Initial command sync failed (will retry on next restart): %s", e,
+                          exc_info=True)
                 return
             if report.get("error"):
                 log.error(

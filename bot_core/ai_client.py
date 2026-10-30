@@ -22,7 +22,6 @@ from __future__ import annotations
 import logging
 import re
 import time
-from datetime import datetime
 from pathlib import Path
 
 import asyncio
@@ -627,8 +626,9 @@ def _build_last_session_context(session: object) -> str:
         ended = _session_field(session, "ended_at")
 
         def _fmt_ts(ts: Any) -> str:
+            from utils.timefmt import fmt_local
             try:
-                return datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M")
+                return fmt_local(float(ts))
             except (TypeError, ValueError, OSError):
                 return ""
 
@@ -1030,7 +1030,8 @@ def _friendly_ai_error(e: BaseException, *, model: str, backend_url: str) -> Non
     """
     from bot_core.errors import classify_ai_error
     classified = classify_ai_error(e, model=model, backend_url=backend_url)
-    log.error("AI request failed (%s): %s", getattr(classified, "category", "unknown"), e)
+    log.error("AI request failed (%s): %s", getattr(classified, "category", "unknown"), e,
+              exc_info=True)
     if isinstance(classified, RateLimitError):
         raise classified from e
     if isinstance(classified, ValueError) or getattr(classified, "category", "") in (

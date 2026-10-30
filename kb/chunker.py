@@ -1,7 +1,7 @@
 """Smart document chunking for KB vector search.
 
 Splits KB documents into semantically coherent chunks by:
-1. Full document strategy for small files (≤8000 chars) — preserves context
+1. Full document strategy for small files (≤ MAX_CHUNK_SIZE) — preserves context
 2. Smart header-based splitting with min-size merging for larger docs
 3. Adaptive paragraph boundaries as fallback with structural awareness
 
@@ -102,6 +102,12 @@ class Chunker:
 
     MIN_CHUNK_SIZE = 80   # chars — below this, merge with neighbor
     MAX_CHUNK_SIZE = 7500  # chars — never exceed embedder context safety margin (2048 tokens)
+    # A "full document" chunk must obey the same embedder budget as split
+    # chunks — a 7500-8000 char file used to stay intact and silently exceed
+    # the 2048-token embedder window (code review §2.3).  Existing caches are
+    # keyed by SOURCE-FILE hash (P2 #19), so lowering this never invalidates
+    # unchanged files; only re-ingested ones re-chunk.
+    FULL_DOC_CHAR_LIMIT = MAX_CHUNK_SIZE
     HEADER_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
 
     @classmethod
@@ -154,8 +160,9 @@ class Chunker:
         source_name = root.name
         display_name = _normalize_display_name(root, source_name)
 
-        # 1. Full Document Strategy: files ≤ 8000 chars stay intact to preserve semantic context
-        if len(content_text) <= 8000:
+        # 1. Full Document Strategy: files ≤ FULL_DOC_CHAR_LIMIT stay intact to
+        # preserve semantic context (kept ≤ MAX_CHUNK_SIZE — see §2.3 note above)
+        if len(content_text) <= cls.FULL_DOC_CHAR_LIMIT:
             logger.debug("File %s (%d chars): full document", source_name, len(content_text))
             return [
                 ChunkInfo(
@@ -177,6 +184,29 @@ class Chunker:
         # 3. Fallback to adaptive chunking if no headers found
         if not chunks:
             chunks.extend(cls._split_adaptive(content_text, display_name, source_name))
+
+        # Hard-cap enforcement (code review §2.3): the paragraph/recursive/adaptive
+        # splitters can each leave a single oversized block (one giant paragraph,
+        # one long line, a short-but-wide headerless file), and an oversized chunk
+        # silently truncates at the 2048-token embedder.  Re-run oversized pieces
+        # through _hard_split; a no-op for every strategy that already respects
+        # the cap (header splitting does).
+        capped: list[ChunkInfo] = []
+        for c in chunks:
+            if len(c.content) <= cls.MAX_CHUNK_SIZE:
+                capped.append(c)
+                continue
+            for piece in cls._hard_split(c.content):
+                capped.append(
+                    ChunkInfo(
+                        display_name=c.display_name,
+                        source_file=c.source_file,
+                        section_path=c.section_path,
+                        content=piece,
+                        header_hash=c.header_hash,
+                    )
+                )
+        chunks = capped
 
         logger.debug("File %s (%d chars): produced %d chunk(s)", source_name, len(content_text), len(chunks))
         return chunks
@@ -320,6 +350,22 @@ class Chunker:
         for line in text.splitlines():
             if not line.strip():
                 continue
+            if len(line) > cls.MAX_CHUNK_SIZE:
+                # Single monster line (no newlines at all) must still respect the
+                # cap — slice it at word boundaries (§2.3 enforcement).
+                if cur:
+                    pieces.append(cur)
+                    cur, size = "", 0
+                part = ""
+                for w in line.split(" "):
+                    if part and len(part) + len(w) + 1 > cls.MAX_CHUNK_SIZE:
+                        pieces.append(part)
+                        part = w
+                    else:
+                        part = f"{part} {w}" if part else w
+                if part.strip():
+                    pieces.append(part)
+                continue
             add = len(line) + (1 if cur else 0)
             if cur and size + add > cls.MAX_CHUNK_SIZE:
                 pieces.append(cur)
@@ -390,8 +436,10 @@ class Chunker:
         """
         line_count = len(content.splitlines())
 
-        # If small enough, keep as single block (preserves semantic coherence)
-        if line_count < 50:
+        # If small enough, keep as single block (preserves semantic coherence).
+        # Size-guarded (code review §2.3): a SHORT-but-WIDE headerless doc must
+        # not bypass the MAX_CHUNK_SIZE embedder budget.
+        if line_count < 50 and len(content) <= cls.FULL_DOC_CHAR_LIMIT:
             logger.debug("File %s: adaptive split to single block (%d lines)", source_file, line_count)
             return [
                 ChunkInfo(

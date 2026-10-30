@@ -65,11 +65,30 @@ def _get_index_init_lock() -> asyncio.Lock:
     return _index_init_lock
 
 
+def _warn_if_wrong_path(kb_path: str | pathlib.Path) -> None:
+    """Log when a request asks for a different KB than the live singleton (code review §2.4).
+
+    The singleton store is intentionally path-pinned after first build (single-KB
+    design).  If a caller ever passes a different ``kb_path`` (e.g. sessions notes
+    moved outside ``KB_PATH``), silently serving the old index is the bug class —
+    make it visible instead.
+    """
+    if _index_store is None or _kb_path_for_store is None:
+        return
+    if str(_kb_path_for_store) != str(kb_path):
+        logger.warning(
+            "Index store was built for %s but was asked for %s — serving the "
+            "built index; call reset_index_store()/reindex to repoint it.",
+            _kb_path_for_store, kb_path,
+        )
+
+
 async def _ensure_index_store(kb_path: str | pathlib.Path) -> Optional["KBIndexStore"]:
     """Create or return the cached index store, loading/building the index."""
     global _index_store, _kb_path_for_store
 
     if _index_store is not None:
+        _warn_if_wrong_path(kb_path)
         return _index_store  # already built
 
     async with _get_index_init_lock():
@@ -723,9 +742,6 @@ async def _retrieve_vector(
         from config.settings import RERANK_TOP_K, RERANK_USE_EXPANSION
         cands = hybrid_ranked[:RERANK_TOP_K]  # (name, content, score)
         contents = [c for _, c, _ in cands]
-        name_map: dict[str, str] = {}
-        for name, content, _ in cands:
-            name_map.setdefault(content, name)
         # Score against the original query AND — when expansions exist and
         # RERANK_USE_EXPANSION is on — the first expansion, keeping the MAX per
         # chunk. Cross-encoders score cross-lingual pairs (German question vs
@@ -742,8 +758,12 @@ async def _retrieve_vector(
             for c, s in scored:
                 if s > merged_scores.get(c, 0.0):
                     merged_scores[c] = s
+        # Rank the CANDIDATES (name+content pairs), not the contents — two
+        # chunks with byte-identical content keep their own names instead of
+        # collapsing into one entry via a content→name map (code review §2.5).
         final_ranked = sorted(
-            ((name_map.get(c, ""), c, merged_scores.get(c, 0.0)) for c in contents),
+            ((name, content, merged_scores.get(content, 0.0))
+             for name, content, _ in cands),
             key=lambda t: t[2],
             reverse=True,  # stable: all-0 (both passes failed) keeps candidate order
         )
@@ -754,8 +774,7 @@ async def _retrieve_vector(
         # RAG_ATTACH_FLOOR_SOURCE=rerank). If BOTH rerank passes failed every
         # score is 0.0 — treat that as "no gate" so the floor can't drop all.
         rerank_gate = {
-            name_map[c]: s for c, s in merged_scores.items()
-            if name_map.get(c) and s > 0.0
+            name: s for name, _, s in final_ranked if s > 0.0
         } or None
 
     from config.settings import (

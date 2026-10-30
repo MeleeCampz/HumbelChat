@@ -385,7 +385,7 @@ async def handle_ai_command(
         if not interaction.response.is_done():
             await interaction.response.defer()
     except Exception as e:
-        log.error("Error deferring interaction: %s", e)
+        log.error("Error deferring interaction: %s", e, exc_info=True)
         return
 
     # 2. Resolve character (explicit choice, else the channel's active key).

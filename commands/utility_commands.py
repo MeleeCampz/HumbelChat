@@ -231,7 +231,7 @@ async def handle_ocr_command(
         # friendly "OCR failed" message instead of an IndexError.
         reply = extract_reply_text(resp, default="(no text found)")
     except Exception as e:
-        log.error("OCR request failed: %s", e)
+        log.error("OCR request failed: %s", e, exc_info=True)
         await interaction.followup.send(
             f"⚠️ OCR failed: {e.__class__.__name__}. The AI backend may be down or the model may not support images.",
             
@@ -280,7 +280,7 @@ async def handle_summarize_command(
             await interaction.followup.send(f"⚠️ {e}")
             return
         except Exception as e:
-            log.error("Failed to fetch file_url: %s", e)
+            log.error("Failed to fetch file_url: %s", e, exc_info=True)
             await interaction.followup.send(f"⚠️ Error fetching URL: {e.__class__.__name__}")
             return
     else:
@@ -331,7 +331,7 @@ async def handle_summarize_command(
                 continue
             break  # Success!
         except Exception as e:
-            log.error("Summarize error with model %s: %s", model, e)
+            log.error("Summarize error with model %s: %s", model, e, exc_info=True)
             continue
 
     if summary is None:
@@ -401,7 +401,7 @@ async def handle_translate_command(
         # P1 #8: empty `choices` → friendly "Translation failed" (see OCR).
         translated = extract_reply_text(resp, default="(translation failed)")
     except Exception as e:
-        log.error("Translate request failed: %s", e)
+        log.error("Translate request failed: %s", e, exc_info=True)
         await interaction.followup.send(f"⚠️ Translation failed: {e.__class__.__name__}. Please try again.")
         return
 

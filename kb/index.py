@@ -1188,7 +1188,7 @@ class KBIndexStore:
             os.replace(tmp_path, self._db_path)  # atomic on POSIX
             logger.debug("Saved %d chunk(s) to %s", len(rows), self._db_path)
         except Exception as exc:
-            logger.error("Failed to save index to disk: %s", exc)
+            logger.error("Failed to save index to disk: %s", exc, exc_info=True)
             if tmp_path.exists():
                 try:
                     tmp_path.unlink()
@@ -1251,7 +1251,7 @@ class KBIndexStore:
             logger.debug("Incremental save: %d changed file(s) upserted, pruned removed → %s",
                          len(changed), self._db_path)
         except Exception as exc:
-            logger.error("Failed to incrementally save index: %s", exc)
+            logger.error("Failed to incrementally save index: %s", exc, exc_info=True)
             raise
         finally:
             try:

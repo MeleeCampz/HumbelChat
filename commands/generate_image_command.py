@@ -117,7 +117,7 @@ async def handle_generate_image_command(
         async with _ai_slot():
             png = await generate_image(final_prompt, size=side, on_phase=_phase)
     except ImageGenError as e:
-        log.error("image generation failed: %s", e)
+        log.error("image generation failed: %s", e, exc_info=True)
         await interaction.followup.send(f"⚠️ Image generation failed ({e}). Try again in a moment.")
         await _cleanup()
         return

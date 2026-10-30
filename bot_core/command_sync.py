@@ -140,7 +140,8 @@ async def sync_commands(bot: "Bot") -> dict[str, Any]:
     try:
         stale_globals = await purge_stale_globals(bot)
     except discord.HTTPException as e:
-        log.error("Global command sync FAILED — new commands are NOT registered: %s", e)
+        log.error("Global command sync FAILED — new commands are NOT registered: %s", e,
+                  exc_info=True)
         return {
             "guilds": [name for name, _ in guild_purged],
             "guild_names": guild_purged,

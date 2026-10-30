@@ -12,12 +12,12 @@ from __future__ import annotations
 
 import logging
 import pathlib
-from datetime import datetime
 from typing import Any
 
 import discord
 
 from bot_core.ai_client import _make_client, _validate_model, complete_text
+from utils.timefmt import fmt_local
 from bot_core.history import get_active_char_key
 from bot_core.sessions import session_documents_text as _session_documents_text
 from config.characters import get_character
@@ -182,7 +182,7 @@ async def _generate_recap(
             raise ValueError("empty recap")
         return summary.strip()
     except Exception as e:
-        log.error("Session recap AI request failed (%s): %s", model, e)
+        log.error("Session recap AI request failed (%s): %s", model, e, exc_info=True)
         return _fallback_recap(session)
 
 
@@ -250,7 +250,7 @@ async def _generate_merged_log(
             raise ValueError("empty merged log")
         return merged.strip()
     except Exception as e:
-        log.error("Session-log merge AI request failed (%s): %s", model, e)
+        log.error("Session-log merge AI request failed (%s): %s", model, e, exc_info=True)
         return None
 
 
@@ -309,7 +309,7 @@ async def handle_start_session(interaction: discord.Interaction, name: str | Non
             if n_rem:
                 parts.append(f"⏰ Delivered {n_rem} queued next-session reminder(s) to their channel(s).")
         except Exception as e:
-            log.error("Next-session reminder delivery failed: %s", e)
+            log.error("Next-session reminder delivery failed: %s", e, exc_info=True)
 
     await interaction.followup.send("\n".join(parts))
 
@@ -498,7 +498,7 @@ async def _add_document_from_attachment(interaction: discord.Interaction, file: 
     try:
         data = await file.read()
     except Exception as e:
-        log.error("Failed to read session-notes document %r: %s", filename, e)
+        log.error("Failed to read session-notes document %r: %s", filename, e, exc_info=True)
         await interaction.response.send_message(f"⚠️ Could not read `{filename or 'attachment'}`: {e.__class__.__name__}.")
         return
 
@@ -589,10 +589,10 @@ def _build_info_parts(session: dict[str, Any]) -> list[str]:
     status = "**current**" if S.get_current_session() else "**last (ended)**"
     lines = [f"ℹ️ **Session info — {session.get('name') or '(untitled)'}** ({status})"]
 
-    started = datetime.fromtimestamp(session["started_at"]).strftime("%Y-%m-%d %H:%M")
+    started = fmt_local(session["started_at"])
     timing = f"🕒 Started: {started}"
     if session.get("ended_at"):
-        ended = datetime.fromtimestamp(session["ended_at"]).strftime("%Y-%m-%d %H:%M")
+        ended = fmt_local(session["ended_at"])
         elapsed = session["ended_at"] - session["started_at"]
         h, rem = divmod(int(elapsed), 3600)
         m, s = divmod(rem, 60)

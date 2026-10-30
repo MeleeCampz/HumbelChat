@@ -514,7 +514,7 @@ async def generate_images(
                 try:
                     results.append(await _generate_one(client, prompt, side))
                 except (ImageGenError, APIStatusError) as exc:
-                    log.error("batch image %d/%d failed: %s", i, total, exc)
+                    log.error("batch image %d/%d failed: %s", i, total, exc, exc_info=True)
                     results.append(exc)
         finally:
             await _swap_back()

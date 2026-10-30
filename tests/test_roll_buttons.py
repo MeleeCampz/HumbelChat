@@ -172,6 +172,43 @@ class TestToggle:
         await btn.callback(ix)
 
         assert item_state.load_state().get("weapons") is None  # rolled back
+
+
+class TestToggleRecordPriority:
+    """Canonical record beats truncated rendered custom_ids (code review §1.2)."""
+
+    LONG_NAME = "Sword of the Deep Delving of the Eastern Under-Marches " + "x" * 40
+
+    async def test_record_name_survives_truncated_buttons(self):
+        item_state.reset("weapons")
+        assert len(self.LONG_NAME) > 80
+
+        # Rendered button carries the TRUNCATED custom_id (100-char cap).
+        cid = rb.encode_custom_id("weapons", self.LONG_NAME)
+        assert len(cid) == 100
+        decoded = rb.decode_custom_id(cid)
+        assert decoded is not None and decoded[1] != self.LONG_NAME
+
+        rendered_btn = MagicMock()
+        rendered_btn.custom_id = cid
+        author = MagicMock()
+        msg = _fake_message([rendered_btn], author)
+        msg.id = 4242
+        msg.edit = AsyncMock()
+
+        # Canonical record (what /roll_items stores) knows the full name.
+        rb.record_roll_message(111, 4242, [("weapons", self.LONG_NAME)])
+
+        view = rb.build_view([("weapons", self.LONG_NAME)])
+        btn = _buttons(view)[0]
+        ix = _FakeInteraction(msg)
+        ix.user = author
+        await btn.callback(ix)
+
+        # State written under the FULL name — not the truncated decode.
+        assert item_state.load_state().get("weapons") == [self.LONG_NAME]
+        # And the record was not overwritten with the truncated variant.
+        assert rb._message_pairs(4242) == [("weapons", self.LONG_NAME)]
         msg.edit.assert_awaited_once()
 
     def test_instance_callback_shadows_class_noop(self):

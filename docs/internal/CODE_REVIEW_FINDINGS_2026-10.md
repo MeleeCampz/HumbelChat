@@ -225,3 +225,40 @@ untested-against-Studio but payload-identical to the live-verified #73 shape):
   many modules; low value, needless diff noise). Left open.
 
 Full suite after all changes: **1279 passed, 0 failed**.
+
+### Second batch (same day — "fix the remaining issues before I test")
+
+- **§2.2 done** — new `utils/timefmt.py` (`DISPLAY_FMT` + `fmt_local`/`parse_local`);
+  the five duplicated `fromtimestamp().strftime("%Y-%m-%d %H:%M")` sites (sessions,
+  session_commands, ai_client) and the ad-hoc note re-parse now share one symmetric
+  pair. Naive-local storage semantics (and existing note files) unchanged; the DST
+  ambiguity is documented at the single parse site. The §2.2 note about `kb/storage.py`
+  was **wrong** — it already uses tz-aware UTC; left untouched.
+- **§2.3 done, deeper than first reported** — while fixing it, two more oversized-chunk
+  holes surfaced: `_split_adaptive`'s `line_count < 50` single-block shortcut had NO
+  size check (one-line 8 KB files bypassed everything), and neither `_split_by_paragraphs`
+  nor `_split_recursive_by_size` nor even `_hard_split` could split a single giant
+  paragraph/line. Fix: `FULL_DOC_CHAR_LIMIT = MAX_CHUNK_SIZE` (7500), adaptive shortcut
+  size-guarded, `_hard_split` slices monster lines at word boundaries, and
+  `split_file_sync` now enforces a hard cap on ALL chunks from every strategy.
+  Existing caches are keyed by SOURCE-FILE hash (P2 #19), so unchanged KB files are
+  NOT invalidated — only re-ingested files re-chunk. New test:
+  `tests/test_chunker_full_doc_limit.py`.
+- **§2.4 done** — `_ensure_index_store` logs a warning when asked for a KB path different
+  from the built singleton (`_warn_if_wrong_path`).
+- **§2.5 done** — the rerank block no longer builds a `content→name` map: candidates are
+  ranked as (name, content) pairs, so identical-content chunks keep their own names and
+  scores; `rerank_gate` derives from the ranked candidates.
+- **§2.6 done** — `typing_loop_task` now breaks on `discord.Forbidden`/`NotFound`
+  (the docstring always promised this); transient errors still retry.
+  New test: `tests/test_typing_loop.py`.
+- **§1.2 follow-up (custom_id truncation) done** — `_handle_toggle` prefers the canonical
+  message record over decoding rendered buttons (long names were truncated in `custom_id`
+  and could leak into records/rehydrated views); record saves unified in
+  `_save_records_logged` with `exc_info`. New test in `tests/test_roll_buttons.py`.
+- **TRY400 sweep done** — 22 `log.error(...: %s", exc)` sites across 13 modules now carry
+  `exc_info=True` (AI request failures, index saves, batch images, session reminders,
+  OCR/translate/summarize/TTS, command sync, subfolder creation, roll record saves).
+  Two candidates skipped (they hold no exception object).
+
+Full suite after second batch: **1292 passed, 0 failed**.

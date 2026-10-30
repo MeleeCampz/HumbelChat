@@ -215,6 +215,14 @@ def _save_records_locked() -> None:
         raise
 
 
+def _save_records_logged() -> None:
+    """Persist records (caller must hold ``_records_lock``), logging failures with context."""
+    try:
+        _save_records_locked()
+    except OSError:
+        log.error("roll_buttons: could not save message records", exc_info=True)
+
+
 def record_roll_message(
     channel_id: int, message_id: int, entries: Sequence[Entry]
 ) -> None:
@@ -228,19 +236,13 @@ def record_roll_message(
         # Drop oldest records beyond the cap (insertion order = recency).
         while len(cache) > _MAX_RECORDS:
             cache.pop(next(iter(cache)))
-        try:
-            _save_records_locked()
-        except OSError as e:
-            log.error("roll_buttons: could not save message records: %s", e)
+        _save_records_logged()
 
 
 def forget_record(message_id: int) -> None:
     with _records_lock:
         if _load_cache_locked().pop(int(message_id), None) is not None:
-            try:
-                _save_records_locked()
-            except OSError as e:
-                log.error("roll_buttons: could not save message records: %s", e)
+            _save_records_logged()
 
 
 def reset_records_for_tests() -> None:
@@ -319,7 +321,11 @@ async def _handle_toggle(interaction: discord.Interaction, table: str, name: str
 
     # The consumed list is shared guild state (like /item_exclude), so any
     # member may toggle — no per-user ownership check.
-    pairs = _sibling_pairs(msg) or _message_pairs(msg.id)
+    # Prefer the CANONICAL record over decoding the rendered buttons: long
+    # item names are truncated in custom_id (100-char Discord cap), and a
+    # decode-first order overwrote records — and later rehydrated views — with
+    # truncated names that no longer matched item_state (code review §1.2).
+    pairs = _message_pairs(msg.id) or _sibling_pairs(msg) or None
     if pairs is None:
         # Message components were stripped but we still know the items.
         pairs = [(table, name)]
@@ -342,10 +348,7 @@ async def _handle_toggle(interaction: discord.Interaction, table: str, name: str
         cache = _load_cache_locked()
         if msg.id in cache:
             cache[msg.id]["items"] = [[t, n] for t, n in pairs]
-            try:
-                _save_records_locked()
-            except OSError as e:
-                log.error("roll_buttons: could not save message records: %s", e)
+            _save_records_logged()
 
 
 async def _respond(

@@ -54,6 +54,8 @@ import re
 import threading
 import time
 from datetime import datetime
+
+from utils.timefmt import fmt_local, parse_local
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -504,8 +506,8 @@ def _session_file_content(session: dict[str, Any]) -> str:
     end-of-session overview, when present, sits right after the notes —
     before the session log / documents.
     """
-    started = datetime.fromtimestamp(session["started_at"]).strftime("%Y-%m-%d %H:%M")
-    ended = (datetime.fromtimestamp(session["ended_at"]).strftime("%Y-%m-%d %H:%M")
+    started = fmt_local(session["started_at"])
+    ended = (fmt_local(session["ended_at"])
              if session.get("ended_at") else None)
     lines = [
         f"# Session: {session.get('name') or 'Untitled'}",
@@ -516,7 +518,7 @@ def _session_file_content(session: dict[str, Any]) -> str:
         lines.append(f"- Ended: {ended}")
     lines += ["", "## Notes", ""]
     for ts, text in session.get("notes", []):
-        t = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+        t = fmt_local(ts)
         lines.append(f"- ({t}) {text}")
     if not session.get("notes"):
         lines.append("(no notes)")
@@ -634,7 +636,7 @@ def _reindex_notes_file(session: dict[str, Any]) -> None:
         bm = re.match(r"^\s*-\s*\(([^)]+)\)\s*(.+?)\s*$", line)
         if bm:
             try:
-                ts = datetime.strptime(bm.group(1), "%Y-%m-%d %H:%M").timestamp()
+                ts = parse_local(bm.group(1))
             except ValueError:
                 continue
             notes.append([ts, bm.group(2)])
@@ -797,7 +799,7 @@ def start_session(name: str | None = None) -> tuple[dict[str, Any], dict[str, An
             # Name the active session explicitly — after a restart the user
             # should see that the old session was resumed and can continue it
             # (#28) instead of getting an unexplained refusal.
-            started_when = datetime.fromtimestamp(current["started_at"]).strftime("%Y-%m-%d %H:%M")
+            started_when = fmt_local(current["started_at"])
             msg = (f"A session is already active: **{current.get('name') or 'Untitled'}** "
                    f"(started {started_when}) — you can continue it as usual, or end it "
                    "first with `/end_session` (or start again once it is older than 12 h "
@@ -1068,7 +1070,7 @@ async def deliver_queued_reminders(bot: "discord.Client") -> int:
             failed.append(r)
         except Exception as e:
             log.error("Failed to deliver next-session reminder in channel %s: %s",
-                      r["channel_id"], e)
+                      r["channel_id"], e, exc_info=True)
             failed.append(r)
 
     if failed:

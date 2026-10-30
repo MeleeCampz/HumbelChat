@@ -166,7 +166,7 @@ async def _select_moments(
             reasoning_effort="low",
         )
     except Exception as e:  # noqa: BLE001 — selection is best-effort
-        log.error("highlight selection call failed: %s", e)
+        log.error("highlight selection call failed: %s", e, exc_info=True)
         return None
 
     moments = _parse_moments(raw)
@@ -334,7 +334,7 @@ async def generate_session_highlights(
         chan, _via = await resolve_channel(get_bot(), int(channel_id))
     except ChannelNotDeliverableError as e:
         log.error("highlight channel %s undeliverable — images will only be archived to disk: %s",
-                  channel_id, e)
+                  channel_id, e, exc_info=True)
 
     try:
         await _run_highlights(session, chan, guild_id, channel_id)

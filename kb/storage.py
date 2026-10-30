@@ -142,7 +142,7 @@ def validate_upload(
         try:
             kb_root.mkdir(parents=True, exist_ok=True)
         except Exception as e:
-            log.error("Failed to create subfolder %s: %s", subfolder, e)
+            log.error("Failed to create subfolder %s: %s", subfolder, e, exc_info=True)
             raise FileNotFoundError(f"Could not create subfolder: {subfolder}")
 
     dest = kb_root / f"{stem_name}{ext}"

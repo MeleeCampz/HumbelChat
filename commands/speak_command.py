@@ -71,7 +71,7 @@ async def handle_speak_command(interaction: discord.Interaction, text: str) -> N
     try:
         audio = await synthesize(text, on_phase=_phase)
     except TTSError as e:
-        log.error("TTS request failed: %s", e)
+        log.error("TTS request failed: %s", e, exc_info=True)
         await interaction.followup.send(
             f"⚠️ TTS failed ({e}). Is the TTS model "
             f"`{TTS_MODEL}` loaded in your backend?"
