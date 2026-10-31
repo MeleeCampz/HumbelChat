@@ -91,6 +91,44 @@ def html_tables_to_plain_text(content: str) -> str:
     return _TABLE_RE.sub(lambda m: _table_to_plain_text(m.group(0)), content)
 
 
+# ── Session-note dedup (#75) ─────────────────────────────────────────────────
+# A session notes.md (bot_core/sessions.py) carries three layers: the user's
+# live `## Notes` bullets, the end-of-session `## Overview`, and — when the
+# session ended with a successful merge — the canonical
+# `## Session Log (combined from all uploads — AI-merged)`, which by design
+# "replaces the mechanical full-text copy" and is "the de-duplicated
+# combination of all uploads".  Once that canonical log exists the raw
+# `## Notes` region is DUPLICATE RAG content (the same events appear once
+# merged + once raw), so it is stripped before chunking for merged files.
+# Active sessions (no merged log yet) and sessions that ended WITHOUT a
+# merge keep their notes as primary content — the strip triggers only on
+# the canonical merged-log header, never on path or file name.
+CANON_SESSION_LOG_RE = re.compile(r"^## Session Log \(combined", re.M)
+SESSION_NOTES_HEADER_RE = re.compile(r"^## Notes[ \t]*$", re.M)
+_NEXT_TOP_HEADER_RE = re.compile(r"^#{1,2}[ \t]", re.M)
+
+
+def strip_merged_session_notes(content: str) -> str:
+    """Drop the superseded `## Notes` region from a merged session file.
+
+    No-op for every file without the canonical merged-log header (books,
+    rules, active session notes, unmerged ended sessions).  Only a `## Notes`
+    header that sits BEFORE the canonical log header is stripped — a `## Notes`
+    subsection inside the merged log body (possible when a session had no live
+    notes) is left intact.  The H2 region from `## Notes` up to the next H1/H2
+    header is removed; sub-headings inside Notes (H3+) go with it.
+    """
+    m = SESSION_NOTES_HEADER_RE.search(content)
+    if m is None:
+        return content
+    canon = CANON_SESSION_LOG_RE.search(content)
+    if canon is None or m.start() > canon.start():
+        return content
+    nxt = _NEXT_TOP_HEADER_RE.search(content, m.end())
+    end = nxt.start() if nxt else len(content)
+    return content[:m.start()].rstrip() + "\n" + content[end:].lstrip("\n")
+
+
 class Chunker:
     """Split documents into semantic chunks for better embedding quality.
 
@@ -156,6 +194,11 @@ class Chunker:
         # Convert HTML tables to plain text before any splitting strategy runs,
         # so every chunk (header/paragraph/adaptive) embeds clean item data.
         content_text = html_tables_to_plain_text(content_text)
+
+        # Session-note dedup (#75): for merged session files the raw
+        # `## Notes` region is superseded by the canonical merged log —
+        # strip it so it never becomes chunks duplicating that log.
+        content_text = strip_merged_session_notes(content_text)
 
         source_name = root.name
         display_name = _normalize_display_name(root, source_name)

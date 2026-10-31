@@ -204,13 +204,14 @@ them, so bot-generated session logs appear in Obsidian on every machine. Dot-dir
 (`.git/`, `.obsidian/`) are skipped by the indexer as usual; non-text attachments
 are never indexed. Full setup guide: `docs/obsidian-vault.md`.
 
-## Session notes — one RAG document per session (#11)
+## Session notes — one RAG document per session (#11, #75)
 
 Each session folder under `<SESSIONS_NOTES_DIR>/<date>_<idx>[_<name>]/`
 (default `<KB_PATH>/session_notes/`; see Obsidian vault sync above) holds
 exactly ONE RAG-indexed file — `notes.md` — which contains:
 
-- the timestamped session notes (`## Notes`),
+- the timestamped session notes (`## Notes`) — indexed while the session is
+  live; superseded once the merged log exists (see #75 note below),
 - the **AI-merged session log** (`## Session Log`) — when a session ends, the
   AI combines all player uploads/transcripts (the same chronological events,
   logged from different perspectives, with heavy overlap) into ONE complete,
@@ -232,6 +233,20 @@ for both the end-of-session recap and the log merge. The indexer skips
 dot-dirs and dot-files, so they can never be re-indexed by `/sync_kb` or a
 startup rebuild — which is what previously let near-identical session uploads
 get attached multiple times by retrieval.
+
+**#75 — superseded `## Notes` are dropped from the index.** While a session
+runs, its live `## Notes` bullets are its searchable content. When the
+session ends *with a successful merge*, the canonical
+`## Session Log (combined from all uploads — AI-merged)` already contains
+those events (deduplicated), so the raw region is indexed duplicate content:
+the chunker strips the `## Notes` section for files carrying that canonical
+header, and the store load purges such stale rows from pre-#75 caches
+(embeddings reused — zero re-embedding; the rows are pruned via the
+incremental upsert). Sessions that ended WITHOUT a merge (mechanical
+`## Documents` fallback) keep their notes — there the bullets are the only
+copy. The `## Overview` recap is always kept (digest, different granularity).
+The strip keys on the canonical merged-log header, never on path or file
+name, so a book section that happens to be named `Notes` is untouched.
 
 Legacy folders with visible `attachments/` / `transcripts/` sub-folders are
 migrated automatically at startup (rename to dot-dirs + append the combined

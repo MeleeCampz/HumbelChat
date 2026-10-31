@@ -209,6 +209,29 @@ def _rel_key(kb_path: pathlib.Path, path: pathlib.Path) -> str:
         return pathlib.Path(path).name
 
 
+# ── Session-note dedup helpers (#75) ────────────────────────────────────
+
+def _doc_name_section(doc_name: str) -> str:
+    """Section-chain suffix of a stored doc_name (``notes.md [A -> B]`` → ``A -> B``)."""
+    i = doc_name.find(" [")
+    if i == -1 or not doc_name.endswith("]"):
+        return ""
+    return doc_name[i + 2:-1]
+
+
+def _is_raw_session_notes_chunk(doc_name: str) -> bool:
+    """True when a stored doc_name's section chain contains the bare ``Notes``
+    segment — i.e. a chunk from the live bullet section of a session notes.md
+    (``Session: X -> Notes``).  Overview/merged-log chains never contain a bare
+    ``Notes`` segment, and a rules/book section literally named ``Notes`` only
+    matters for files that also carry the canonical merged-session-log header
+    (checked by the caller before this is consulted)."""
+    section = _doc_name_section(doc_name)
+    if not section:
+        return False
+    return any(seg.strip() == "Notes" for seg in section.split(" -> "))
+
+
 # ──────────────────────────── Index store ────────────────────────────────
 
 class KBIndexStore:
@@ -792,6 +815,7 @@ class KBIndexStore:
         embeddings: list[list[float]] = []
         to_embed_files: list[pathlib.Path] = []
         file_hash_by_key: dict[str, str] = {}      # P2 #19
+        purged_keys: set[str] = set()              # #75: stale Notes rows dropped
 
         for path in files:
             key = _rel_key(self.kb_path, path)
@@ -800,6 +824,9 @@ class KBIndexStore:
                 # New file, or any chunk changed → re-embed the whole file.
                 to_embed_files.append(path)
                 continue
+            cached = self._purge_superseded_notes(cached, path)
+            if len(cached) < len(cached_rows[key]):
+                purged_keys.add(key)
             for c in cached:
                 entries.append((c["doc_name"], c["content"], key))
                 embeddings.append(c["embedding"])
@@ -837,7 +864,7 @@ class KBIndexStore:
         # P2 #20: incremental persist — only the refreshed files changed; rows
         # for files deleted since the cache was written are pruned by the upsert path.
         if idx is not None:
-            changed = {_rel_key(self.kb_path, p) for p in to_embed_files}
+            changed = {_rel_key(self.kb_path, p) for p in to_embed_files} | purged_keys
             await self._save_to_disk_from(idx, changed=changed)
         return idx
 
@@ -960,6 +987,49 @@ class KBIndexStore:
         return all(ec == c["content"] for ec, c in zip(expected, cached))
 
     # ── In-memory merge helpers ─────────────────────────────────────────
+
+    # ── Session-log dedup purge (#75) ───────────────────────────────────
+
+    def _purge_superseded_notes(self, cached: list[_CacheRow], path: pathlib.Path) -> list[_CacheRow]:
+        """Drop stale raw-``Notes`` chunks from a file that has the canonical
+        merged Session Log (pipeline review #74 F1 companion, backlog #75).
+
+        The chunker already strips that region at split time, but files whose
+        bytes are unchanged since before the change still carry their Notes
+        chunks in the cache (file-hash validation skips re-chunking — by
+        design). This purge removes them from the loaded rows using the
+        already-validated embeddings (zero re-embedding); the caller adds the
+        file to the ``changed`` upsert set so the DB rows are pruned too.
+
+        Files WITHOUT the canonical merged header — an active session (no log
+        yet, live notes must stay searchable) or a session that ended without
+        a merge — keep their Notes chunks untouched.
+        """
+        if not any(_is_raw_session_notes_chunk(c["doc_name"]) for c in cached):
+            return cached
+        from kb.chunker import (  # lazy: kb.index ← kb.chunker
+            CANON_SESSION_LOG_RE, SESSION_NOTES_HEADER_RE,
+        )
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return cached
+        # Same guard as the chunker strip: a live Notes region is superseded
+        # only when it sits BEFORE the canonical merged-log header (a `## Notes`
+        # written inside the merged log body is part of the chronicle, not
+        # superseded scratch).
+        canon = CANON_SESSION_LOG_RE.search(text)
+        notes_at = SESSION_NOTES_HEADER_RE.search(text)
+        if canon is None or notes_at is None or notes_at.start() > canon.start():
+            return cached
+        kept = [c for c in cached if not _is_raw_session_notes_chunk(c["doc_name"])]
+        if len(kept) != len(cached):
+            logger.info(
+                "Session-note dedup (#75): dropped %d superseded `## Notes` chunk(s) "
+                "for '%s' — the canonical merged log is the session's RAG content",
+                len(cached) - len(kept), _rel_key(self.kb_path, path),
+            )
+        return kept
 
     # ── P0 #4: blocking-IO helpers (offloaded to a worker thread) ──
 

@@ -232,13 +232,20 @@ class KBVectorIndex:
         return ((d.display_name, d.passage_text()) for d in self._docs)
 
     def embedding_map(self) -> dict[str, list[float]]:
-        """display_name → embedding for every chunk that has one.
+        """retrieval_name → embedding for every chunk that has one.
 
         Built per call (a few ms for ~5K chunks) so callers never hold a
         stale view across index reloads. Used by the selection-time near-
         duplicate dedup (Tier 1 item 4).
+
+        Keyed by the chunk's **retrieval name** (KB-relative path + section),
+        which is the name space the ranked tuples handed to
+        :func:`kb.retrievers.select_ranked_chunks` actually iterate — not the
+        bare display name. Keying by display_name made every lookup miss for
+        files in subfolders (i.e. the entire production KB), silently
+        disabling dedup — pipeline review #74, finding F1.
         """
-        return {d.display_name: d.embedding for d in self._docs if d.embedding}
+        return {d.retrieval_name(): d.embedding for d in self._docs if d.embedding}
 
     def is_empty(self) -> bool:
         return len(self._docs) == 0

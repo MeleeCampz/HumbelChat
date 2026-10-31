@@ -80,7 +80,7 @@ session files, 56 chunks, hierarchical `doc_name` (`notes.md [Session: …]`).
 
 ## 3. Findings
 
-### F1 — HIGH: near-duplicate dedup is dead in production wiring (proved)
+### F1 — HIGH: near-duplicate dedup is dead in production wiring (proved) — ✅ FIXED under #75
 
 `select_ranked_chunks` dedups a candidate when its embedding (looked up by the
 **ranked name**) is within cosine τ=0.92 of an already-selected one. The production
@@ -224,7 +224,7 @@ one check of the loaded model's runtime ctx on Studio, and consider capping
 
 | # | Action | Effort | Risk |
 |---|--------|--------|------|
-| 1 | F1 dedup key fix (`embedding_map` → retrieval_name keys) + regression test | ~10 min | none (single consumer, strictly more correct) |
+| 1 | F1 dedup key fix (`embedding_map` → retrieval_name keys) + regression test — ✅ done (#75) | ~10 min | none (single consumer, strictly more correct) |
 | 2 | F5 add `profiles: ["vllm-rerank"]` to `reranker-qwen` | 2 min | none (check `docker compose ps` first) |
 | 3 | F2 `CONTEXTUAL_BACKGROUND_FILL=1` in `.env` (or run `scripts/contextual_reindex.py`) | 1 min / one run | low (chat-model calls are batch-paused) |
 | 4 | F6 warm the index store at startup (background task) | ~20 min | low |
