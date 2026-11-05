@@ -200,6 +200,22 @@ class TestOrchestration:
         # Only the successful moments are archived.
         assert sorted(p.name for p in imgs.iterdir()) == ["moment-1.png", "moment-3.png"]
 
+    async def test_whole_window_failure_reports_gracefully(self, monkeypatch, tmp_path):
+        """A failed GPU MODE SWITCH (generate_images itself raises) must degrade
+        to the friendly total-failure note — never kill the background task."""
+        _patch_pipeline(monkeypatch)
+
+        async def window_down(prompts, size=None, on_phase=None):
+            raise images.ImageGenError("gpu-switch helper unreachable")
+
+        monkeypatch.setattr(images, "generate_images", window_down)
+        chan, _p = _chan(monkeypatch)
+
+        await si.generate_session_highlights(_session(tmp_path), 123)
+
+        texts = [c.args[0] for c in chan.send.await_args_list if c.args]
+        assert any("None of the highlights" in t for t in texts)
+
     async def test_total_failure_posts_single_note(self, monkeypatch, tmp_path):
         calls = _patch_pipeline(monkeypatch)
 

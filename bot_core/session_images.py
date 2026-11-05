@@ -250,7 +250,15 @@ async def _paint_batch(
 
         return _edit()
 
-    results = await I.generate_images(prompts, on_phase=_on_phase)
+    results: list[bytes | Exception]
+    try:
+        results = await I.generate_images(prompts, on_phase=_on_phase)
+    except (I.ImageGenError, I.OpenAIError) as e:
+        # A failed MODE switch (or backend outage) kills the whole batch —
+        # report it per moment so delivery degrades to friendly lines instead
+        # of the background task dying.
+        log.error("highlight painting window failed: %s", e, exc_info=True)
+        results = [e] * len(prompts)
 
     if progress is not None:
         try:

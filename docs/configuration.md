@@ -179,7 +179,10 @@ gracefully: dense+BM25 retrieval, attach floor no-ops, nothing crashes. The
 embedder is only needed when indexing new chunks — plain search reads
 precomputed vectors. Manual CLI twin: `./scripts/gpu_switch.sh status|image|rag`
 (prefers the helper, falls back to raw `docker compose`); the rag restore cycle
-measures ~19 s end-to-end.
+measures ~19 s end-to-end. The helper DERIVES its mode from live container
+state (no stale state after a restart) and REFUSES an image-mode switch while
+the image backend is unreachable, so a failed switch can never leave the 4070
+with both RAG and the diffusion model down.
 
 ### Image generation (GPU-split backend, #42)
 
@@ -195,7 +198,7 @@ back to `rag` mode happens in a `finally` after every painting window.
 | `IMAGE_GPU_IDS` | GPU(s) the diffusion model loads onto (host Studio must be pinned to the same card) | `0` (4070) |
 | `GPU_SWITCH_URL` | gpu-switch helper API; empty = **manual mode** (run `scripts/gpu_switch.sh image` yourself; the bot refuses to paint otherwise) | *(empty)* |
 | `GPU_SWITCH_TIMEOUT_S` | Switch request timeout (covers stop + load + health) | `420` |
-| `IMAGE_MODE_HOLD_S` | Keep image mode this long after painting (deferred switch-back; back-to-back gens then skip switch+load) | `0` |
+| `IMAGE_MODE_HOLD_S` | Hold window after a generation the **bot** switched for: the rag switch-back is deferred, back-to-back generations skip switch+load (a manual-mode window earns no hold) | `0` |
 | `IMAGE_DEFAULT_SIZE` / `IMAGE_MAX_SIZE` | Painting square (working set grows with resolution) | `1024` / `2048` |
 | `IMAGE_GEN_TIMEOUT_S` / `IMAGE_LOAD_TIMEOUT_S` | Per-image request / model-load readiness deadlines | `180` / `300` |
 | `IMAGE_NEGATIVE_PROMPT` | What the model steers away from (user-requested text is NOT suppressed) | built-in default |

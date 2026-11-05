@@ -46,16 +46,12 @@ services:
     container_name: humbelchat-gpu-switch
     restart: unless-stopped
     command: ["python", "/app/scripts/gpu_switch_helper.py"]
+    # Same env_file as the bot — the helper reads the bot's own IMAGE_* /
+    # INFER_* variables (single source of truth; no duplicated compose env).
+    env_file: .env
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./scripts:/app/scripts:ro
-    environment:
-      - STUDIO_URL=http://host.docker.internal:8888
-      - STUDIO_API_KEY=${INFER_API_KEY:-}
-      - IMAGE_MODEL=${IMAGE_MODEL}
-      - IMAGE_GGUF_FILENAME=${IMAGE_GGUF_FILENAME:-}
-      - IMAGE_GPU_IDS=${IMAGE_GPU_IDS:-0}
-      - LOAD_TIMEOUT_S=${IMAGE_LOAD_TIMEOUT_S:-300}
     ports:
       - "127.0.0.1:8082:8080"
     healthcheck:

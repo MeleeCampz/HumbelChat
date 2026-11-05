@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+
+import httpx
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -67,7 +69,9 @@ def _resp_json(payload: dict, status: int = 200):
 def _reset_gen_state():
     images._gen_lock = type(images._gen_lock)()
     images._mode_switched_at = 0.0
+    images._last_bot_switch_at = 0.0
     images._hold_started_at = 0.0
+    images._bot_switched = False
     images._background_tasks.clear()
     yield
 
@@ -381,7 +385,13 @@ class TestGenerateImage:
         monkeypatch.setattr(images, "IMAGE_MODEL", "unsloth/x")
         monkeypatch.setattr(images, "GPU_SWITCH_URL", "http://gpu-switch:8080")
         monkeypatch.setattr(images, "IMAGE_MODE_HOLD_S", 0.2)
-        monkeypatch.setattr(images, "ensure_image_mode", AsyncMock())
+
+        # The real ensure_image_mode switches the card (that is what earns the
+        # hold) — the fake must do the same.
+        async def fake_ensure(on_phase=None):
+            images._bot_switched = True
+
+        monkeypatch.setattr(images, "ensure_image_mode", fake_ensure)
         sw = AsyncMock()
         monkeypatch.setattr(images, "_switch_gpu_mode", sw)
 
@@ -430,6 +440,8 @@ class TestGenerateImage:
 
         async def fake_switch(mode: str) -> None:
             order.append(f"switch:{mode}")
+            if mode == "image":
+                images._bot_switched = True
 
         async def fake_load() -> None:
             order.append("load")
@@ -477,3 +489,507 @@ class TestGenerateImage:
 
         out = await images.generate_image("a bird", on_phase=broken)
         assert out == _PNG
+
+
+class TestGenerateImagesBatch:
+    """generate_images (#69): every prompt painted in ONE painting window —
+    image mode ensured once, all paints, rag mode restored exactly once."""
+
+    def _patch(self, monkeypatch) -> tuple[MagicMock, list[str]]:
+        """Fake the whole mode pipeline; returns (image client, order log)."""
+        monkeypatch.setattr(images, "IMAGE_MODEL", "unsloth/x")
+        order: list[str] = []
+
+        async def fake_ensure(on_phase=None) -> None:
+            order.append("ensure")
+            # The real ensure_image_mode emits "loading" through the guarded
+            # _emit_phase — mirror that (a broken callback must not escape).
+            if on_phase is not None:
+                try:
+                    await on_phase("loading")
+                except Exception:
+                    pass
+
+        async def fake_restore() -> None:
+            order.append("restore")
+
+        monkeypatch.setattr(images, "ensure_image_mode", fake_ensure)
+        monkeypatch.setattr(images, "_restore_rag_after_painting", fake_restore)
+
+        client = MagicMock()
+        resp = MagicMock()
+        resp.data = [MagicMock(b64_json=_b64_png())]
+        client.images.generate = AsyncMock(return_value=resp)
+        monkeypatch.setattr(images, "_image_client", lambda: client)
+        return client, order
+
+    async def test_one_ensure_n_paints_one_restore(self, monkeypatch):
+        client, order = self._patch(monkeypatch)
+        out = await images.generate_images(["a", "b", "c"])
+        assert out == [_PNG, _PNG, _PNG]
+        # ONE window: ensure once before all paints, restore once after.
+        assert order.count("ensure") == 1
+        assert order.count("restore") == 1
+        assert order.index("ensure") < order.index("restore")
+        assert client.images.generate.call_count == 3
+
+    async def test_phases_loading_once_then_per_image(self, monkeypatch):
+        self._patch(monkeypatch)
+        phases: list[str] = []
+
+        async def on_phase(name: str) -> None:
+            phases.append(name)
+
+        await images.generate_images(["a", "b", "c"], on_phase=on_phase)
+        assert phases == ["loading", "painting 1/3", "painting 2/3", "painting 3/3"]
+
+    async def test_one_failure_does_not_abort_the_rest(self, monkeypatch):
+        client, _order = self._patch(monkeypatch)
+
+        class _Fake4xx(Exception):
+            status_code = 400
+
+        monkeypatch.setattr(images, "APIStatusError", _Fake4xx)
+        resp = MagicMock()
+        resp.data = [MagicMock(b64_json=_b64_png())]
+        client.images.generate = AsyncMock(
+            side_effect=[_Fake4xx("bad prompt"), resp, resp])
+
+        out = await images.generate_images(["a", "b", "c"])
+        # Moment 1 failed (4xx -> no retry), moments 2+3 still painted.
+        assert isinstance(out[0], _Fake4xx)
+        assert out[1] == _PNG
+        assert out[2] == _PNG
+
+    async def test_failed_batch_still_restores_rag(self, monkeypatch):
+        client, order = self._patch(monkeypatch)
+
+        class _Fake4xx(Exception):
+            status_code = 400
+
+        monkeypatch.setattr(images, "APIStatusError", _Fake4xx)
+        client.images.generate = AsyncMock(side_effect=_Fake4xx("down"))
+
+        out = await images.generate_images(["a", "b"])
+        assert all(isinstance(r, _Fake4xx) for r in out)
+        assert order == ["ensure", "restore"]  # rag mode restored no matter what
+
+    async def test_broken_phase_callback_never_fails_batch(self, monkeypatch):
+        self._patch(monkeypatch)
+
+        def broken(name: str) -> None:
+            raise RuntimeError("discord edit failed")
+
+        out = await images.generate_images(["a", "b"], on_phase=broken)
+        assert out == [_PNG, _PNG]
+
+    async def test_empty_batch_is_a_noop(self, monkeypatch):
+        client, order = self._patch(monkeypatch)
+        out = await images.generate_images([])
+        assert out == []
+        # No prompts -> no GPU mode cycle paid for nothing.
+        assert order == []
+        client.images.generate.assert_not_awaited()
+
+
+class TestPreparePrompt:
+    """prepare_prompt: shared final-prompt step (live path + dry run, #65b)."""
+
+    async def test_raw_passthrough(self):
+        assert await images.prepare_prompt("  verbatim bird ", raw=True) == "verbatim bird"
+
+    async def test_empty_returns_empty_without_model_call(self, monkeypatch):
+        called = False
+
+        async def fake_rewrite(text):
+            nonlocal called
+            called = True
+            return "x"
+
+        monkeypatch.setattr(images, "rewrite_prompt", fake_rewrite)
+        assert await images.prepare_prompt("   ") == ""
+        assert not called
+
+    async def test_rewrite_used_when_not_raw(self, monkeypatch):
+        monkeypatch.setattr(
+            images, "rewrite_prompt", AsyncMock(return_value="rich bird"))
+        assert await images.prepare_prompt("bird") == "rich bird"
+
+    async def test_rewrite_failure_falls_back_to_raw(self, monkeypatch):
+        monkeypatch.setattr(
+            images, "rewrite_prompt",
+            AsyncMock(side_effect=images.ImageGenError("backend down")))
+        assert await images.prepare_prompt("bird") == "bird"
+
+
+class TestRewriteSystemPolicy:
+    """Base-prompt policy strings (regression guards for user decisions)."""
+
+    def test_gogglies_only_column_bidae(self):
+        # 2026-10-27 correction: NOBODY has googly eyes except Column Bidae (he).
+        s = images._load_rewrite_system()
+        assert "Googly eyes are NOT a species trait" in s
+        assert "belong ONLY to Column Bidae" in s
+        assert "give EVERY one of them those" not in s
+
+    def test_fixed_template_with_length_budgets(self):
+        # 2026-10-28 optimization: fixed [STYLE][SCENE][CHARACTERS][LIGHTING]
+        # structure + verbatim visual anchors + hard character budget.
+        s = images._load_rewrite_system()
+        for part in ("[STYLE]", "[SCENE]", "[CHARACTERS]", "[LIGHTING]"):
+            assert part in s
+        assert "copy the ENTIRE anchor block VERBATIM" in s
+        assert "under 1300 characters" in s
+        assert "up to 2000 characters" in s
+        # species words must come from the sheet, never be invented (live: Seta
+        # kept coming out a mangled 'cochran')
+        assert "Never invent or mangle a species word" in s
+        # group scenes: one sheet read, and no silent character-dropping
+        # (live: 'the whole party' came back with 3 of 5 members)
+        assert "read the 'Player Characters' sheet ONCE" in s
+        assert "never silently drop any" in s
+        # negations stay OUT of the positive prompt (negative prompt handles them)
+        assert "Never write negations" in s
+
+    def test_character_style_lines_never_copied_into_prompt(self):
+        s = images._load_rewrite_system()
+        assert "do NOT copy them into the final prompt" in s
+
+    def test_no_painterly_style_prescribed(self):
+        # 'painterly' may only appear as a prohibition, never as the style itself.
+        assert "semi-realistic painterly" not in images._load_rewrite_system().lower()
+
+
+class TestRewritePolicyLoading:
+    """The policy is layered: repo file + vault character-rules note, both
+    re-read per generation; missing files degrade to built-in defaults."""
+
+    def test_vault_character_rules_are_injected(self, monkeypatch, tmp_path):
+        note = tmp_path / "note.md"
+        note.write_text("ZZZ_CUSTOM_RULE_MARKER applies.", encoding="utf-8")
+        monkeypatch.setattr(images, "_CHAR_RULES_FILE", note)
+        assert "ZZZ_CUSTOM_RULE_MARKER" in images._load_rewrite_system()
+
+    def test_missing_vault_note_falls_back_to_default(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(images, "_CHAR_RULES_FILE", tmp_path / "absent.md")
+        s = images._load_rewrite_system()
+        assert "Googly eyes are NOT a species trait" in s  # built-in default
+
+    def test_missing_repo_file_falls_back_to_builtin_policy(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(images, "_POLICY_FILE", tmp_path / "absent.md")
+        s = images._load_rewrite_system()
+        assert "[STYLE]" in s  # built-in fallback, not a crash
+
+    def test_human_header_and_placeholder_not_injected(self):
+        s = images._load_rewrite_system()
+        assert "Source of truth for" not in s  # human-facing header stripped
+        assert "{{CHARACTER_RULES}}" not in s  # placeholder fully replaced
+
+
+class TestBackendHardening:
+    """Review follow-ups: a retry re-ensures model residency; connection-level
+    failures surface as the user-safe ImageGenError instead of a raw httpx error."""
+
+    async def test_transient_failure_re_ensures_residency_before_retry(self, monkeypatch):
+        from openai import APIStatusError as RealAPIStatusError
+
+        monkeypatch.setattr(images, "IMAGE_MODEL", "unsloth/x")
+        # Mode entry is not what this test is about — patch it so the only
+        # status/load calls come from the retry re-ensure itself.
+        monkeypatch.setattr(images, "ensure_image_mode", AsyncMock())
+        monkeypatch.setattr(images, "_restore_rag_after_painting", AsyncMock())
+        client = MagicMock()
+        resp = MagicMock()
+        resp.data = [MagicMock(b64_json=_b64_png())]
+        request = httpx.Request("POST", "http://x/v1/images/generate")
+        http_resp = httpx.Response(500, request=request)
+        # openai 1.x: __init__(message, request=…, body=…, response=…)
+        # openai 3.x: __init__(message, response=…, body=…) — build only the
+        # kwargs this SDK version actually accepts.
+        import inspect
+        params = inspect.signature(RealAPIStatusError.__init__).parameters
+        kwargs = {k: v for k, v in
+                  (("request", request), ("body", None), ("response", http_resp))
+                  if k in params}
+        err = RealAPIStatusError("boom", **kwargs)
+        assert getattr(err, "status_code", 500) == 500
+        client.images.generate = AsyncMock(side_effect=[err, resp])
+        monkeypatch.setattr(images, "_image_client", lambda: client)
+
+        status = AsyncMock(return_value={"loaded": False})
+        load = AsyncMock()
+        monkeypatch.setattr(images, "_image_status", status)
+        monkeypatch.setattr(images, "_ensure_image_loaded", load)
+        # _reensure_before_retry opens a real httpx.AsyncClient — stand in with
+        # an async-context-manager double.
+        cm = MagicMock()
+        cm.__aenter__ = AsyncMock(return_value=MagicMock())
+        cm.__aexit__ = AsyncMock(return_value=False)
+        monkeypatch.setattr(images.httpx, "AsyncClient", lambda **kw: cm)
+        monkeypatch.setattr(images.asyncio, "sleep", AsyncMock())
+
+        out = await images.generate_image("a bird")
+        assert out == _PNG
+        status.assert_awaited_once()   # one residency check before the retry
+        load.assert_awaited_once()     # model had been dropped -> reload
+
+    async def test_unreachable_backend_raises_user_safe_error(self, monkeypatch):
+        client = MagicMock()
+        client.request = AsyncMock(
+            side_effect=images.httpx.ConnectError("connection refused"))
+        with pytest.raises(images.ImageGenError, match="unreachable"):
+            await images._image_status(client)
+
+
+class TestCommandHandler:
+    """commands/generate_image_command — mocked core, fake interaction."""
+
+    def _interaction(self):
+        inter = MagicMock()
+        inter.response.defer = AsyncMock()  # discord.py 2.7: no content kwarg
+        followups: list[dict] = []
+
+        async def capture(content=None, **kwargs):
+            msg = {"content": content, **kwargs}
+            followups.append(msg)
+
+            edits: list[str] = []
+
+            async def edit(**ekwargs):
+                if "content" in ekwargs:
+                    edits.append(str(ekwargs["content"]))
+                msg.update(ekwargs)  # latest state wins (single message)
+
+            async def delete():
+                msg["deleted"] = True
+
+            msg["edit"] = edit
+            msg["edits"] = edits
+            msg["deleted"] = False
+            return MagicMock(edit=edit, delete=delete)
+
+        inter.followup.send = capture
+        return inter, followups
+
+    async def test_not_configured(self, monkeypatch):
+        import commands.generate_image_command as cmd
+        monkeypatch.setattr(cmd, "image_gen_configured", lambda: False)
+        inter, followups = self._interaction()
+        await handle_generate_image_command(inter, prompt="a bird")
+        assert len(followups) == 1
+        assert "not configured" in followups[0]["content"]
+
+    async def test_empty_prompt(self, monkeypatch):
+        import commands.generate_image_command as cmd
+        monkeypatch.setattr(cmd, "image_gen_configured", lambda: True)
+        inter, followups = self._interaction()
+        await handle_generate_image_command(inter, prompt="   ")
+        assert "Nothing to paint" in followups[0]["content"]
+
+    async def test_raw_skips_rewrite(self, monkeypatch):
+        import commands.generate_image_command as cmd
+        monkeypatch.setattr(cmd, "image_gen_configured", lambda: True)
+        prepared = AsyncMock(side_effect=lambda text, raw=False: text)
+        monkeypatch.setattr(cmd, "prepare_prompt", prepared)
+        generated: list[str] = []
+
+        async def fake_gen(prompt, size=None, on_phase=None):
+            generated.append(prompt)
+            if on_phase is not None:
+                await on_phase("painting")
+            return _PNG
+
+        monkeypatch.setattr(cmd, "generate_image", fake_gen)
+        inter, followups = self._interaction()
+        await handle_generate_image_command(inter, prompt="verbatim bird", raw=True)
+        prepared.assert_awaited_once_with("verbatim bird", raw=True)
+        assert generated == ["verbatim bird"]
+        # ONE message: the final answer (text + image) landed in place on the
+        # progress message — no separate reply.
+        assert len(followups) == 1
+        assert followups[0]["content"].startswith("🎨")
+        assert "attachments" in followups[0]
+
+    async def test_prepare_prompt_used_when_not_raw(self, monkeypatch):
+        import commands.generate_image_command as cmd
+        monkeypatch.setattr(cmd, "image_gen_configured", lambda: True)
+        generated: list[str] = []
+
+        async def fake_gen(prompt, size=None, on_phase=None):
+            generated.append(prompt)
+            if on_phase is not None:
+                await on_phase("painting")  # simulate the real phase callback
+            return _PNG
+
+        monkeypatch.setattr(cmd, "generate_image", fake_gen)
+        inter, followups = self._interaction()
+
+        # prepare_prompt (rewrite inside) -> its output is what gets generated
+        monkeypatch.setattr(cmd, "prepare_prompt", AsyncMock(return_value="rich bird"))
+        await handle_generate_image_command(inter, prompt="bird")
+        assert generated == ["rich bird"]
+        # ONE message: live updates in place, final answer (text + image) on
+        # the same message — no separate reply, no leftover "✅".
+        assert len(followups) == 1
+        progress = followups[0]
+        assert progress["content"].startswith("🎨")
+        assert "attachments" in progress
+        assert progress["deleted"] is False
+
+    async def test_dry_run_returns_prompt_without_generating(self, monkeypatch):
+        import commands.generate_image_command as cmd
+        monkeypatch.setattr(cmd, "image_gen_configured", lambda: True)
+        monkeypatch.setattr(cmd, "prepare_prompt", AsyncMock(return_value="rich bird"))
+
+        def explode(prompt, size=None):  # must never be called in dry run
+            raise AssertionError("generate_image called during dry run")
+
+        monkeypatch.setattr(cmd, "generate_image", explode)
+        inter, followups = self._interaction()
+        await handle_generate_image_command(inter, prompt="bird", dry_run=True)
+        # progress message (deleted) + the dry-run reply (no image, no generation)
+        assert len(followups) == 2
+        reply = followups[1]
+        assert "Dry run" in reply["content"]
+        assert "rich bird" in reply["content"]
+        assert "file" not in reply
+        assert followups[0]["deleted"] is True
+
+    async def test_painting_update_shows_effective_size_not_none(self, monkeypatch):
+        """Regression: with no --size given, `side` is None and the update used
+        to read 'Painting…(None px)' — it must show the effective default."""
+        import commands.generate_image_command as cmd
+        monkeypatch.setattr(cmd, "image_gen_configured", lambda: True)
+        monkeypatch.setattr(cmd, "IMAGE_DEFAULT_SIZE", 1024)
+        monkeypatch.setattr(cmd, "prepare_prompt", AsyncMock(return_value="rich bird"))
+
+        async def fake_gen(prompt, size=None, on_phase=None):
+            if on_phase is not None:
+                await on_phase("painting")
+            return _PNG
+
+        monkeypatch.setattr(cmd, "generate_image", fake_gen)
+        inter, followups = self._interaction()
+        await handle_generate_image_command(inter, prompt="bird")  # no size
+        edits = followups[0]["edits"]
+        assert any("1024 px" in e for e in edits)
+        assert not any("None px" in e for e in edits)
+
+    async def test_in_place_edit_failure_falls_back_to_fresh_message(self, monkeypatch):
+        """If the final in-place edit can't carry the attachment (API edge),
+        degrade to a fresh follow-up — the image is never lost."""
+        import commands.generate_image_command as cmd
+        monkeypatch.setattr(cmd, "image_gen_configured", lambda: True)
+        monkeypatch.setattr(cmd, "prepare_prompt", AsyncMock(return_value="rich bird"))
+
+        async def fake_gen(prompt, size=None, on_phase=None):
+            return _PNG
+
+        monkeypatch.setattr(cmd, "generate_image", fake_gen)
+
+        inter = MagicMock()
+        inter.response.defer = AsyncMock()
+        followups: list[dict] = []
+
+        async def capture(content=None, **kwargs):
+            msg = {"content": content, **kwargs}
+            followups.append(msg)
+
+            async def edit(**ekwargs):
+                if "attachments" in ekwargs:
+                    raise RuntimeError("edit-with-attachment rejected")
+                msg.update(ekwargs)
+
+            msg["edit"] = edit
+            msg["deleted"] = False
+            return MagicMock(edit=edit, delete=AsyncMock())
+
+        inter.followup.send = capture
+
+        await handle_generate_image_command(inter, prompt="bird")
+        # progress message (kept) + fresh image message as the fallback
+        assert len(followups) == 2
+        assert followups[0]["deleted"] is False
+        assert "file" in followups[1]
+
+    async def test_generation_failure_replies_error(self, monkeypatch):
+        import commands.generate_image_command as cmd
+        monkeypatch.setattr(cmd, "image_gen_configured", lambda: True)
+        monkeypatch.setattr(cmd, "prepare_prompt", AsyncMock(return_value="rich"))
+
+        async def boom(prompt, size=None, on_phase=None):
+            raise images.ImageGenError("studio 500")
+
+        monkeypatch.setattr(cmd, "generate_image", boom)
+        inter, followups = self._interaction()
+        await handle_generate_image_command(inter, prompt="bird")
+        # [0] progress message (deleted), [1] the error reply
+        assert "failed" in followups[1]["content"].lower()
+        assert followups[0]["deleted"] is True
+
+    async def test_backend_connectivity_failure_replies_error_not_crash(self, monkeypatch):
+        """Review follow-up: a raw OpenAI connectivity error must degrade to the
+        same user-safe reply (the mode restore in generate_image still runs)."""
+        from openai import APIConnectionError
+
+        import commands.generate_image_command as cmd
+        monkeypatch.setattr(cmd, "image_gen_configured", lambda: True)
+        monkeypatch.setattr(cmd, "prepare_prompt", AsyncMock(return_value="rich"))
+
+        async def boom(prompt, size=None, on_phase=None):
+            raise APIConnectionError(request=MagicMock())
+
+        monkeypatch.setattr(cmd, "generate_image", boom)
+        inter, followups = self._interaction()
+        await handle_generate_image_command(inter, prompt="bird")
+        assert "failed" in followups[1]["content"].lower()
+        assert followups[0]["deleted"] is True
+
+    async def test_bad_size_replies_error(self, monkeypatch):
+        import commands.generate_image_command as cmd
+        monkeypatch.setattr(cmd, "image_gen_configured", lambda: True)
+        inter, followups = self._interaction()
+        await handle_generate_image_command(inter, prompt="bird", size="gigantic")
+        assert "invalid size" in followups[0]["content"]
+
+
+class TestHoldAndRefusalSemantics:
+    """Review follow-ups: the hold is earned only by windows where the BOT
+    switched the card, and a helper refusal is an error, not a silent success."""
+
+    async def test_hold_not_earned_when_card_was_already_in_image_mode(self, monkeypatch):
+        """Manual gpu_switch.sh window: the bot painted in a mode it did not
+        switch — it must restore rag IMMEDIATELY (no hold, no stamp), so a
+        manually-opened window never leaves the card image-side by hold logic."""
+        monkeypatch.setattr(images, "IMAGE_MODEL", "unsloth/x")
+        monkeypatch.setattr(images, "GPU_SWITCH_URL", "http://gpu-switch:8080")
+        monkeypatch.setattr(images, "IMAGE_MODE_HOLD_S", 300)
+        monkeypatch.setattr(images, "_image_status",
+                            AsyncMock(return_value={"loaded": True}))
+        monkeypatch.setattr(images.httpx, "AsyncClient",
+                            lambda **kw: _FakeClient([], [_resp_json({"mode": "image"})]))
+        sw = AsyncMock()
+        monkeypatch.setattr(images, "_switch_gpu_mode", sw)
+
+        client = MagicMock()
+        resp = MagicMock()
+        resp.data = [MagicMock(b64_json=_b64_png())]
+        client.images.generate = AsyncMock(return_value=resp)
+        monkeypatch.setattr(images, "_image_client", lambda: client)
+
+        await images.generate_image("a bird")
+        sw.assert_awaited_once_with("rag")      # immediate restore, not deferred
+        assert images._hold_started_at == 0.0   # hold never armed
+        assert images._last_bot_switch_at == 0.0  # no bot switch to earn a hold
+
+    async def test_helper_refusal_surfaces_as_error(self, monkeypatch):
+        """Helper 200-OK with detail "refused: ..." (Studio down) must NOT be
+        treated as a successful switch — painting would hit a card without the
+        diffusion slot."""
+        monkeypatch.setattr(images, "GPU_SWITCH_URL", "http://gpu-switch:8080")
+        monkeypatch.setattr(images.httpx, "AsyncClient",
+                            lambda **kw: _FakeClient([], [_resp_json(
+                                {"ok": True, "mode": "rag",
+                                 "detail": "refused: image backend unreachable"})]))
+        with pytest.raises(images.ImageGenError, match="refused"):
+            await images._switch_gpu_mode("image")

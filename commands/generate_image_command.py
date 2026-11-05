@@ -14,6 +14,7 @@ Flow (see bot_core/images.py for the why; GPU-split 2026-11):
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import time
@@ -23,6 +24,7 @@ import discord
 from bot_core.images import (
     IMAGE_DEFAULT_SIZE,
     ImageGenError,
+    OpenAIError,
     generate_image,
     image_gen_configured,
     prepare_prompt,
@@ -123,6 +125,15 @@ async def handle_generate_image_command(
     except ImageGenError as e:
         log.error("image generation failed: %s", e, exc_info=True)
         await interaction.followup.send(f"⚠️ Image generation failed ({e}). Try again in a moment.")
+        await _cleanup()
+        return
+    except (OpenAIError, asyncio.TimeoutError) as e:
+        # Backend connectivity / non-transient API errors / per-image timeout —
+        # user-safe reply instead of an unhandled slash-command exception.
+        log.error("image generation backend error: %s", e, exc_info=True)
+        await interaction.followup.send(
+            f"⚠️ Image generation failed ({type(e).__name__}: {str(e)[:120]}). "
+            "Try again in a moment.")
         await _cleanup()
         return
 

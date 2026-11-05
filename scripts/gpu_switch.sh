@@ -34,11 +34,15 @@ HELPER="http://127.0.0.1:${HOST_GPU_SWITCH_PORT:-8082}"
 RERANK_PORT=8090
 EMBED_PORT=8091
 
-helper_post() {  # $1 = rag|image ; returns 0 on ok, 1 on unreachable/failure
+helper_post() {  # $1 = rag|image
+  # returns: 0 = ok, 1 = helper unreachable, 2 = helper REFUSED the switch
   local res
   res=$(curl -sf --max-time 330 -X POST -H 'Content-Type: application/json' \
         -d "{\"mode\":\"$1\"}" "$HELPER/mode" 2>/dev/null) || return 1
   echo "  helper: $res"
+  if printf '%s' "$res" | grep -q '"refused'; then
+    return 2
+  fi
   return 0
 }
 
@@ -85,13 +89,24 @@ case "${1:-status}" in
     nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv,noheader | sed 's/^/  /'
     ;;
   image)
-    if helper_post image; then :; else
+    rc=0
+    helper_post image || rc=$?
+    if [[ $rc == 0 ]]; then
+      echo "Done: 4070 in IMAGE mode. Restore with: ./scripts/gpu_switch.sh rag"
+    elif [[ $rc == 2 ]]; then
+      # The helper refused deliberately (image backend unreachable — it
+      # refuses to tear RAG down). Do NOT raw-fallback: that is exactly the
+      # half-switched state the refusal exists to prevent.
+      echo "REFUSED: image backend unreachable — the 4070 stays in rag mode." >&2
+      echo "Fix Studio, then retry: ./scripts/gpu_switch.sh image" >&2
+      exit 2
+    else
       echo "helper unreachable — raw fallback: stopping RAG servers only" >&2
       echo "  (the diffusion model will NOT be loaded — trigger a generation" >&2
       echo "   or load it manually in Studio)" >&2
       docker compose stop reranker-llama embedder-llama
+      echo "Done: 4070 RAG servers stopped. Restore with: ./scripts/gpu_switch.sh rag"
     fi
-    echo "Done: 4070 in IMAGE mode. Restore with: ./scripts/gpu_switch.sh rag"
     ;;
   rag)
     if helper_post rag; then :; else

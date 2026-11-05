@@ -24,15 +24,19 @@ The bot (bot_core/images.py) calls this around every generation via
 GPU_SWITCH_URL. scripts/gpu_switch.sh is the manual CLI twin (it prefers this
 helper and falls back to raw docker compose if the helper is down).
 
-Env:
+Env (the compose service mounts the repo .env, so the bot's image variables
+are the single source of truth; a helper-only var can still override):
   RERANKER_CONTAINER / EMBEDDER_CONTAINER  names (default humbelchat-reranker-llama / humbelchat-embedder-llama)
-  STUDIO_URL          Studio base WITHOUT /v1 (default http://host.docker.internal:8888)
-  STUDIO_API_KEY      bearer key for Studio
-  IMAGE_MODEL         Studio model path  (e.g. unsloth/Qwen-Image-2.1-Turbo-GGUF)
-  IMAGE_GGUF_FILENAME GGUF file inside that repo
-  IMAGE_GPU_IDS       space/comma separated GPU ids for the load (default "0")
-  LOAD_TIMEOUT_S      image load readiness deadline (default 300)
-  HEALTH_TIMEOUT_S    rag container health deadline (default 120)
+  STUDIO_URL           explicit Studio base (wins over the chain below)
+  IMAGE_INFER_URL      Studio OpenAI base (…/v1) — management endpoints are
+                       derived by stripping the /v1 suffix
+  INFER_URL            fallback (chat backend) if IMAGE_INFER_URL is unset
+  IMAGE_INFER_API_KEY  bearer key (falls back to INFER_API_KEY)
+  IMAGE_MODEL          Studio model path  (e.g. unsloth/Qwen-Image-2.1-Turbo-GGUF)
+  IMAGE_GGUF_FILENAME  GGUF file inside that repo
+  IMAGE_GPU_IDS        space/comma separated GPU ids for the load (default "0")
+  IMAGE_LOAD_TIMEOUT_S image load readiness deadline (default 300)
+  HEALTH_TIMEOUT_S     rag container health deadline (default 120)
 """
 from __future__ import annotations
 
@@ -49,21 +53,41 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] gpu-switch: %(message)s")
 log = logging.getLogger("gpu-switch")
 
+def _env_url(name: str, fallback_name: str, default: str) -> str:
+    """URL env with fallback chain, mirroring config/settings.py's rule: the
+    image backend falls back to the chat backend, then to the host default.
+    Only the /v1 OpenAI suffix is stripped — never a trailing path segment."""
+    raw = (os.getenv(name) or os.getenv(fallback_name) or default).strip().rstrip("/")
+    if raw.endswith("/v1"):
+        raw = raw[:-3]
+    return raw.rstrip("/")
+
+
 RERANKER = os.getenv("RERANKER_CONTAINER", "humbelchat-reranker-llama")
 EMBEDDER = os.getenv("EMBEDDER_CONTAINER", "humbelchat-embedder-llama")
-STUDIO_URL = os.getenv("STUDIO_URL", "http://host.docker.internal:8888").rstrip("/")
-STUDIO_API_KEY = os.getenv("STUDIO_API_KEY", "")
+
+
+def _resolve_studio_url() -> str:
+    """STUDIO_URL (explicit helper override) wins, else the bot's image-backend
+    chain: IMAGE_INFER_URL → INFER_URL → host default."""
+    override = os.getenv("STUDIO_URL", "").strip().rstrip("/")
+    if override:
+        return override
+    return _env_url("IMAGE_INFER_URL", "INFER_URL", "http://host.docker.internal:8888")
+
+
+STUDIO_URL = _resolve_studio_url()
+STUDIO_API_KEY = os.getenv("IMAGE_INFER_API_KEY") or os.getenv("INFER_API_KEY", "")
 IMAGE_MODEL = os.getenv("IMAGE_MODEL", "")
 IMAGE_GGUF_FILENAME = os.getenv("IMAGE_GGUF_FILENAME", "")
 IMAGE_GPU_IDS = [int(p) for p in
                  os.getenv("IMAGE_GPU_IDS", "0").replace(",", " ").split()
                  if p.lstrip("-").isdigit()] or [0]
-LOAD_TIMEOUT_S = float(os.getenv("LOAD_TIMEOUT_S", "300"))
+LOAD_TIMEOUT_S = float(os.getenv("IMAGE_LOAD_TIMEOUT_S", "300"))
 HEALTH_TIMEOUT_S = float(os.getenv("HEALTH_TIMEOUT_S", "120"))
 DAEMON = os.getenv("DOCKER_HOST", "http://localhost").rstrip("/")
 
 _lock = threading.Lock()          # switches are serialized (one at a time)
-MODE = "rag"                      # assumed startup state (compose starts both)
 
 
 # ── tiny HTTP helpers ─────────────────────────────────────────────────────
@@ -135,10 +159,18 @@ def _studio(path: str, method: str = "GET", body: dict | None = None,
 
 
 def _image_status() -> dict:
-    return _studio("/api/inference/images/status")
+    """Studio images/status — RESILIENT: {} when the backend is unreachable
+    (callers decide; a down Studio must not crash GET /mode)."""
+    try:
+        return _studio("/api/inference/images/status")
+    except Exception as e:  # noqa: BLE001
+        log.warning("images/status failed: %s", e)
+        return {}
 
 
 def _load_image_model() -> None:
+    if not IMAGE_MODEL:
+        raise RuntimeError("IMAGE_MODEL not configured for the gpu-switch helper")
     if _image_status().get("loaded"):
         return
     if not IMAGE_MODEL:
@@ -170,17 +202,46 @@ def _unload_image_model() -> None:
 
 # ── mode switches ─────────────────────────────────────────────────────────
 
+def _current_mode() -> str:
+    """Mode is DERIVED from live container state, never remembered across
+    restarts: the helper restarting while the RAG containers are stopped must
+    not report a stale "rag" mode (which would make the bot no-op its own
+    switch and paint against a half-set card)."""
+    if _docker_running(RERANKER) or _docker_running(EMBEDDER):
+        return "rag"
+    return "image"
+
+
+def _backend_reachable() -> bool:
+    """Is the Studio image backend answering (or the model already resident)?
+    Used to refuse an image-mode switch BEFORE tearing RAG down."""
+    try:
+        _studio("/api/inference/images/status", timeout=15)
+        return True
+    except Exception as e:  # noqa: BLE001
+        log.warning("image backend unreachable: %s", e)
+        return False
+
+
 def switch(mode: str) -> str:
-    global MODE
     if mode not in ("rag", "image"):
         raise ValueError(f"unknown mode {mode!r}")
-    if MODE == mode:
+    current = _current_mode()
+    if current == mode:
         return f"already in {mode} mode"
     if mode == "image":
+        # Never enter the destructive part (stopping RAG) unless the image
+        # backend can actually take the card — otherwise the 4070 lands in a
+        # half-switched state with BOTH services down. Containers already
+        # stopped (manual gpu_switch.sh overlap) skip the precheck so a
+        # recovery attempt can still proceed.
+        rag_live = _docker_running(RERANKER) or _docker_running(EMBEDDER)
+        if rag_live and not _backend_reachable():
+            return ("refused: image backend unreachable — staying in rag mode "
+                    f"(check Studio at {STUDIO_URL})")
         _docker(RERANKER, "stop")
         _docker(EMBEDDER, "stop")
-        _load_image_model()
-        MODE = "image"
+        _load_image_model()      # raises -> HTTP 500 to the bot, stays image-side
         return "reranker+embedder stopped, image model resident on GPU 0"
     # -> rag
     _unload_image_model()
@@ -188,19 +249,22 @@ def switch(mode: str) -> str:
     _docker(EMBEDDER, "start")
     ok_r = _healthy(RERANKER)
     ok_e = _healthy(EMBEDDER)
-    MODE = "rag"
     if not (ok_r and ok_e):
         return "rag mode restored BUT health check failed (check docker logs)"
     return "reranker+embedder healthy on GPU 0"
 
 
 def state() -> dict:
-    return {
-        "mode": MODE,
+    st = _image_status()
+    out = {
+        "mode": _current_mode(),
         "rag": {"reranker_running": _docker_running(RERANKER),
                 "embedder_running": _docker_running(EMBEDDER)},
-        "image_loaded": bool(_image_status().get("loaded")),
+        "image_loaded": bool(st.get("loaded")),
     }
+    if not st:
+        out["image_status_error"] = True  # Studio down / unreachable
+    return out
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -232,7 +296,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             with _lock:
                 detail = switch(mode)
-            self._send(200, {"ok": True, "mode": MODE, "detail": detail})
+            self._send(200, {"ok": True, "mode": _current_mode(), "detail": detail})
         except Exception as e:  # noqa: BLE001
             log.error("switch to %s failed: %s", mode, e, exc_info=True)
             self._send(500, {"ok": False, "mode": MODE, "error": str(e)[:300]})
@@ -244,5 +308,5 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8080"))
     log.info("gpu-switch helper listening on :%d (mode=%s, studio=%s, image=%s)",
-             port, MODE, STUDIO_URL, IMAGE_MODEL or "-")
+             port, _current_mode(), STUDIO_URL, IMAGE_MODEL or "-")
     ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()

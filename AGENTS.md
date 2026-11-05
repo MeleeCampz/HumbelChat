@@ -15,8 +15,11 @@ Two physical cards, two backends — **never mix them up**:
   embedder-llama, default steady state — both pinned `CUDA_VISIBLE_DEVICES=0`)
   ⇄ `image` mode (those stopped, diffusion model loaded). The bot switches via
   `GPU_SWITCH_URL` around every painting window (`IMAGE_MODE_HOLD_S` defers the
-  switch-back) — see `bot_core/images.py`; manual CLI twin:
-  `./scripts/gpu_switch.sh status|image|rag`.
+  switch-back — only for windows the BOT switched; a manual-mode window restores
+  rag immediately) — see `bot_core/images.py`; manual CLI twin:
+  `./scripts/gpu_switch.sh status|image|rag`. The helper derives its mode from
+  live container state and REFUSES an image switch while Studio is unreachable
+  (no half-switched card).
 - **Prompt rewriting ALWAYS happens before the switch** (the rewrite's KB agent
   tools include the reranker, which the switch takes offline).
 - **Everything runs in Docker on the host**, not in this sandbox: the bot

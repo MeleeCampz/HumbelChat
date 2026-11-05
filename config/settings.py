@@ -142,7 +142,7 @@ IMAGE_GPU_IDS: list[int] = [
     int(part)
     for part in os.getenv("IMAGE_GPU_IDS", "0").replace(",", " ").split()
     if part.lstrip("-").isdigit()
-]
+] or [0]  # a garbage/empty value must never mean "no GPU"
 # Measured footprint (Q4_K_M, logs + published Q4 pipeline math): ~12.5 GiB
 # resident; the transient diffusion working set grows with resolution, so cap
 # the default size.
@@ -156,7 +156,7 @@ IMAGE_MAX_SIZE: int = _safe_int(os.getenv("IMAGE_MAX_SIZE"), 2048)
 # mode afterwards — chat completions on the other card are never affected.
 # Empty GPU_SWITCH_URL = no automatic switching (generation requires the
 # card to be switched manually via scripts/gpu_switch.sh).
-GPU_SWITCH_URL: str = os.getenv("GPU_SWITCH_URL", "")
+GPU_SWITCH_URL: str = os.getenv("GPU_SWITCH_URL", "").rstrip("/")
 # Keep "image" mode this long after a generation so back-to-back
 # /generate_image calls skip the double switch (0 = switch back immediately).
 IMAGE_MODE_HOLD_S: float = _safe_float(os.getenv("IMAGE_MODE_HOLD_S"), 0.0)

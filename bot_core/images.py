@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import httpx
-from openai import APIStatusError, AsyncOpenAI
+from openai import APIStatusError, AsyncOpenAI, OpenAIError
 
 from bot_core.agent_loop import looks_like_tool_call_fragment, run_agent_loop
 from bot_core.ai_client import _create_with_reasoning_fallback
@@ -71,7 +71,14 @@ _STUDIO_HEADERS = {"Authorization": f"Bearer {IMAGE_INFER_API_KEY}"}
 
 
 async def _studio(client: httpx.AsyncClient, method: str, path: str, **kwargs) -> dict:
-    resp = await client.request(method, f"{_STUDIO_BASE}{path}", headers=_STUDIO_HEADERS, **kwargs)
+    try:
+        resp = await client.request(method, f"{_STUDIO_BASE}{path}", headers=_STUDIO_HEADERS, **kwargs)
+    except (httpx.HTTPError, OSError) as e:
+        # Connection-level failure (refused/timeout/reset) must surface as the
+        # user-safe ImageGenError the command layer catches — not a raw httpx
+        # traceback (the image backend being down is an operational state,
+        # not a bug).
+        raise ImageGenError(f"image backend unreachable at {_STUDIO_BASE}: {e}")
     if resp.status_code >= 400:
         raise ImageGenError(f"Studio {path} -> HTTP {resp.status_code}: {resp.text[:200]}")
     return resp.json()
@@ -137,17 +144,37 @@ async def _ensure_image_loaded() -> None:
 # (scripts/gpu_switch_helper.py) wraps the compose stop/start + Studio
 # images/load|unload calls; scripts/gpu_switch.sh is its manual CLI twin.
 _mode_switched_at: float = 0.0   # end of the last painting window (mono time)
+_last_bot_switch_at: float = 0.0 # end of the last window where the BOT switched the card
 _hold_started_at: float = 0.0    # when the current deferred restore was scheduled
+_bot_switched = False            # the current window performed a mode switch
 
 
 def _switcher_enabled() -> bool:
     return bool(GPU_SWITCH_URL)
 
 
+def _hold_active() -> bool:
+    """Is an IMAGE_MODE_HOLD_S window currently open (armed by a bot switch and
+    not yet expired)?"""
+    return (_hold_started_at > 0.0
+            and (time.monotonic() - _hold_started_at) < IMAGE_MODE_HOLD_S)
+
+
 def _stamp_painting_window() -> None:
-    """Record the end of a painting window for the IMAGE_MODE_HOLD_S check."""
-    global _mode_switched_at
-    _mode_switched_at = time.monotonic()
+    """Record the end of a painting window for the IMAGE_MODE_HOLD_S check.
+
+    Always stamp the window end (the defer check in
+    :func:`ensure_image_still_needed_or_restore` uses it to spot generations
+    that painted during a hold). Separately stamp the last BOT-switched
+    window — only those earn an IMAGE_MODE_HOLD_S hold at all: a window where
+    someone else (manual gpu_switch.sh) had already put the card in image mode
+    gets no hold, so the bot switches straight back to rag after it.
+    """
+    global _mode_switched_at, _last_bot_switch_at
+    now = time.monotonic()
+    _mode_switched_at = now
+    if _bot_switched:
+        _last_bot_switch_at = now
 
 
 _background_tasks: set[asyncio.Task] = set()  # strong refs — the loop only
@@ -219,8 +246,16 @@ async def _switch_gpu_mode(mode: str) -> None:
     t0 = time.monotonic()
     async with httpx.AsyncClient(timeout=GPU_SWITCH_TIMEOUT_S) as client:
         out = await _helper(client, "POST", "/mode", json={"mode": mode})
-    log.info("gpu mode -> %s (%.1f s): %s", mode, time.monotonic() - t0,
-             str(out.get("detail", out))[:160])
+    detail = str(out.get("detail", out))
+    if "refused" in detail:
+        # The helper deliberately kept the card in rag mode because the image
+        # backend is unreachable — do NOT proceed to paint against a card
+        # that never got the diffusion slot.
+        raise ImageGenError(f"gpu-switch refused the switch to {mode}: {detail[:200]}")
+    global _bot_switched
+    if mode == "image":
+        _bot_switched = True
+    log.info("gpu mode -> %s (%.1f s): %s", mode, time.monotonic() - t0, detail[:160])
 
 
 # ── Prompt rewriting (chat model — MUST run BEFORE the mode switch) ───────
@@ -475,6 +510,25 @@ async def _generate_one(client: AsyncOpenAI, prompt: str, side: int) -> bytes:
             log.warning("image generation attempt 1 failed (%s: %s) — retrying",
                        e.__class__.__name__, str(e)[:120])
             await asyncio.sleep(5.0)
+            # A 500 is sometimes the backend having DROPPED the diffusion
+            # model (Studio crash / manual unload) — re-ensure residency so
+            # the retry does not just fail the same way. A status read is
+            # cheap; a reload only happens if actually needed.
+            await _reensure_before_retry()
+
+
+async def _reensure_before_retry() -> None:
+    """Best-effort re-load of the diffusion model before a retry (see
+    _generate_one). Never raises — a failure here must not mask the original
+    error; the rag-restore in the caller's finally still runs."""
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            if (await _image_status(client)).get("loaded"):
+                return
+        log.info("image model no longer resident before retry — reloading")
+        await _ensure_image_loaded()
+    except Exception as e:  # noqa: BLE001
+        log.warning("re-ensure before retry failed (continuing): %s", e)
 
 
 async def ensure_image_mode(on_phase: Callable[[str], Any] | None = None) -> None:
@@ -509,16 +563,24 @@ async def _restore_rag_after_painting() -> None:
     """Switch the 4070 back to rag mode after painting — ALWAYS attempted,
     even when painting failed, so the reranker/embedder are never left down.
 
-    IMAGE_MODE_HOLD_S: after a generation that SWITCHED into image mode the
-    switch-back is skipped while the hold window is open, so a back-to-back
-    generation finds image mode still live (GET /mode says "image", model
-    resident → no switch, no load). The window is measured from the END of
-    painting. Best-effort: never raises.
+    IMAGE_MODE_HOLD_S: after a generation where the BOT itself switched the
+    card into image mode, the switch-back is deferred by the hold window so a
+    back-to-back generation finds image mode still live (GET /mode says
+    "image", model resident → no switch, no load). The window is measured
+    from the END of painting. Windows where the card was ALREADY in image mode
+    (manual gpu_switch.sh overlap) are not held — the bot restores rag
+    immediately. Best-effort: never raises.
     """
     try:
-        if IMAGE_MODE_HOLD_S > 0 and _switcher_enabled():
-            global _hold_started_at
-            _hold_started_at = time.monotonic()
+        global _hold_started_at
+        if IMAGE_MODE_HOLD_S > 0 and _switcher_enabled() and _hold_active():
+            # A hold from an earlier bot switch is still open — extend it
+            # (back-to-back generations pay no switch) and let the deferred
+            # restore judge whether painting re-entered image mode.
+            _spawn_restore_after_hold()
+            return
+        if IMAGE_MODE_HOLD_S > 0 and _switcher_enabled() and _bot_switched:
+            _hold_started_at = max(time.monotonic(), _mode_switched_at)
             log.info("image mode held %.0f s after painting "
                      "(IMAGE_MODE_HOLD_S) — deferred switch-back scheduled",
                      IMAGE_MODE_HOLD_S)
@@ -561,7 +623,9 @@ async def generate_image(
     callback error is logged and never fails the generation.
     """
     side = size or IMAGE_DEFAULT_SIZE
+    global _bot_switched
     async with _gen_lock:
+        _bot_switched = False
         client = _image_client()
         try:
             await ensure_image_mode(on_phase)
@@ -590,11 +654,17 @@ async def generate_images(
     PNG bytes or the exception that killed it (:class:`ImageGenError` or a
     non-transient :class:`APIStatusError` — both are reported per image so
     ONE bad moment never aborts the rest of the batch).
+
+    An EMPTY batch is a true no-op — no mode switch is paid for nothing.
     """
     side = size or IMAGE_DEFAULT_SIZE
     total = len(prompts)
     results: list[bytes | Exception] = []
+    if not prompts:
+        return results
+    global _bot_switched
     async with _gen_lock:
+        _bot_switched = False
         client = _image_client()
         try:
             await ensure_image_mode(on_phase)
