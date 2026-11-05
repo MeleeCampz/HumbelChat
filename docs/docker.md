@@ -17,6 +17,28 @@ runtime state lives in bind-mounted host directories.
 └── hf-cache/                  # HuggingFace model cache (bge-m3)
 ```
 
+## Services (expected steady-state container set)
+
+After the 2026-11 GPU split a plain `docker compose up -d` runs exactly FIVE
+core containers:
+
+| Container | Role |
+|---|---|
+| `humbelchat-bot` | the bot |
+| `humbelchat-gpu-switch` | owns the 4070's rag⇄image mode switching (loopback `:8082`) |
+| `humbelchat-reranker-llama` | RAG reranker (GPU 0, loopback `:8090`) |
+| `humbelchat-embedder-llama` | RAG embedder (GPU 0, loopback `:8091`) |
+| `humbelchat-tts-ollama` | TTS sidecar (GPU 1, loopback `:11435`) |
+
+Retired services stay in the file but are **profile-gated** so they never
+start on a normal `up`: `reranker` (`--profile tei-rerank`, TEI),
+`reranker-qwen` (vLLM rollback — would steal ~5 GiB of GPU 1, Strata chat's
+card), `embedder-qwen` (removed). If you see MORE containers than the table
+above, they are leftovers from an older compose version; compose lists them
+under the "orphan containers" warning. Clean them with `docker compose up -d
+--remove-orphans` (or a one-time `docker compose down --remove-orphans`
+before the next deploy).
+
 ## Operations
 
 ```bash
@@ -28,10 +50,13 @@ docker compose down            # stop (data is untouched — it's all on the hos
 ```
 
 - `restart: unless-stopped` brings the container back after a crash or reboot.
-- There is no HTTP endpoint, so no healthcheck — judge health from logs
-  ("logged in as …", backend probe settling UP). Give ~10–20 s after a start
-  before judging; bge-m3 loads from `hf-cache/` in seconds and the first
-  backend-health probe can log a transient `DOWN (timeout)` that recovers.
+- The bot itself has no HTTP endpoint and no healthcheck — judge its health
+  from logs ("logged in as …", backend probe settling UP). Give ~10–20 s after
+  a start before judging; bge-m3 loads from `hf-cache/` in seconds and the
+  first backend-health probe can log a transient `DOWN (timeout)` that
+  recovers. The sidecars (reranker/embedder/gpu-switch/tts) DO have
+  healthchecks; gpu-switch may briefly read "unhealthy" *during* a long mode
+  switch (its status GET serializes behind the switch lock) — cosmetic.
 - The container needs no published ports: the Discord gateway is an outbound
   WebSocket.
 

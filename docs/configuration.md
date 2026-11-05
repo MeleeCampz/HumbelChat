@@ -165,7 +165,10 @@ nvidia runtime exposes both GPUs to the container regardless of the compose
 `device_ids` reservation (verified), and host-side `nvidia-smi dmon` SM
 attribution for guest processes is unreliable under WDDM — verify placement by
 VRAM delta, not SM%. The old vLLM container (`reranker-qwen`, `:8000`) stays
-in compose as the rollback path.
+in compose as the rollback path but is profile-gated (`--profile vllm-rerank
+up -d reranker-qwen`) — since the GPU split it must NOT run next to chat on
+GPU 1. An already-created container from before the gate is an orphan: remove
+it once with `docker compose down --remove-orphans`.
 
 **GPU-0 modes (rag ⇄ image, since the 2026-11 GPU split):** the 4070 hosts ONE
 mode at a time. **`rag` mode** (default steady state) = reranker + embedder
