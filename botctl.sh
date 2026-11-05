@@ -212,9 +212,9 @@ cmd_run() {
     export GPU_SWITCH_URL="${GPU_SWITCH_URL:-http://localhost:8082}"
 
     # Point sentence-transformers / HuggingFace at the repo's shared model cache so
-    # local runs reuse the bge-m3 model Docker already downloaded,
-    # instead of re-fetching ~2GB into the default ~/.cache/huggingface. Only matters
-    # when EMBED_BACKEND=local; harmless otherwise.
+    # local runs reuse whatever HF models were already downloaded into ./hf-cache
+    # instead of re-fetching into the default ~/.cache/huggingface. Only matters
+    # when EMBED_BACKEND=local (not the production default); harmless otherwise.
     export HF_HOME="${BOT_DEV_HF_HOME:-$SCRIPT_DIR/hf-cache}"
 
     exec "$vpy" -u "$SCRIPT_DIR/main.py"
