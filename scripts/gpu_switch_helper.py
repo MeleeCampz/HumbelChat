@@ -31,6 +31,9 @@ helper and falls back to raw docker compose if the helper is down).
 Env (the compose service mounts the repo .env, so the bot's image variables
 are the single source of truth; a helper-only var can still override):
   RERANKER_CONTAINER / EMBEDDER_CONTAINER  names (default humbelchat-reranker-llama / humbelchat-embedder-llama)
+  DOCKER_SOCKET        daemon unix socket path (default /var/run/docker.sock;
+                       DOCKER_HOST unix://... or http(s)://... also honoured,
+                       npipe:/tcp:// ignored with a warning)
   STUDIO_URL           explicit Studio base (wins over the chain below)
   IMAGE_INFER_URL      Studio OpenAI base (…/v1) — management endpoints are
                        derived by stripping the /v1 suffix
@@ -44,12 +47,15 @@ are the single source of truth; a helper-only var can still override):
 """
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import os
+import socket
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -89,21 +95,92 @@ IMAGE_GPU_IDS = [int(p) for p in
                  if p.lstrip("-").isdigit()] or [0]
 LOAD_TIMEOUT_S = float(os.getenv("IMAGE_LOAD_TIMEOUT_S", "300"))
 HEALTH_TIMEOUT_S = float(os.getenv("HEALTH_TIMEOUT_S", "120"))
-DAEMON_DEFAULT = "http://localhost"  # the MOUNTED socket (compose maps nothing)
+DOCKER_SOCK_PATH = os.getenv("DOCKER_SOCKET", "/var/run/docker.sock")
 
 
-def _resolve_daemon() -> str:
-    """Docker daemon base URL. The compose service mounts /var/run/docker.sock
-    and reaches it as http://localhost — an inherited DOCKER_HOST (a Windows
-    npipe: or a tcp:// from the host .env, both useless in here) must NOT
-    hijack that, so only a plain http(s) value is honoured."""
+class _UnixHTTPConnection(http.client.HTTPConnection):
+    """http.client over an AF_UNIX socket (the mounted /var/run/docker.sock).
+    urllib has NO unix transport: a plain urllib call to "http://localhost"
+    goes to TCP port 80 and fails with ECONNREFUSED. That was the 2026-11-05
+    live incident — every daemon call was refused, _docker_running silently
+    reported every container as stopped, and mode was misderived as "image"
+    while the RAG containers were actually running."""
+
+    def __init__(self, sock_path: str, timeout: float) -> None:
+        super().__init__("dockerd", timeout=timeout)
+        self._sock_path = sock_path
+
+    def connect(self) -> None:
+        # Explicit AF_UNIX (not socket.create_connection(str)) — that form
+        # only accepts path strings on some Python versions (3.14 unpacks the
+        # str as (host, port) and raises). Production is 3.12; keep it proof.
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(self.timeout)
+        try:
+            sock.connect(self._sock_path)
+        except BaseException:
+            sock.close()
+            raise
+        self.sock = sock
+
+
+def _resolve_daemon() -> tuple:
+    """Docker daemon endpoint as (kind, target). The compose service mounts
+    /var/run/docker.sock, so the DEFAULT is that unix socket. An inherited
+    DOCKER_HOST is honoured only when usable in here: unix://... -> that
+    socket, http(s)://... -> TCP. Windows npipe: and bare tcp:// are useless
+    from inside the container — warn and keep the mounted socket."""
     raw = (os.getenv("DOCKER_HOST") or "").strip().rstrip("/")
-    if raw.startswith("http"):
-        return raw
-    return DAEMON_DEFAULT
+    if raw.startswith("unix://"):
+        return ("unix", raw[len("unix://"):])
+    if raw.startswith("http://") or raw.startswith("https://"):
+        return ("tcp", urllib.parse.urlparse(raw))
+    if raw:
+        log.warning("DOCKER_HOST %r not usable from inside the helper "
+                    "(no npipe/raw-tcp support) — using the mounted socket %s",
+                    raw, DOCKER_SOCK_PATH)
+    return ("unix", DOCKER_SOCK_PATH)
 
 
 DAEMON = _resolve_daemon()
+
+
+class DockerAPIError(RuntimeError):
+    def __init__(self, status: int, body: str) -> None:
+        super().__init__(f"docker API HTTP {status}: {body}")
+        self.status = status
+        self.body = body
+
+
+def _docker_req(path: str, method: str = "GET", timeout: float = 30.0) -> dict:
+    """One Docker daemon API call over the resolved transport."""
+    kind, target = DAEMON
+    if kind == "unix":
+        conn: http.client.HTTPConnection = _UnixHTTPConnection(target, timeout)
+    else:
+        port = target.port or (443 if target.scheme == "https" else 2375)
+        conn = http.client.HTTPConnection(target.hostname, port, timeout=timeout)
+    try:
+        conn.request(method, path)
+        resp = conn.getresponse()
+        raw = resp.read()
+        if resp.status >= 400:
+            raise DockerAPIError(resp.status, raw.decode(errors="replace")[:200])
+        return json.loads(raw or b"{}")
+    finally:
+        conn.close()
+
+
+def _daemon_reachable() -> bool:
+    """Fail LOUD: with the daemon unreachable, container-state checks would
+    silently mean "everything stopped" and mode derivation would lie (the
+    exact 2026-11-05 failure). Switches refuse instead of acting on lies."""
+    try:
+        _docker_req("/_ping", timeout=10)
+        return True
+    except Exception as e:  # noqa: BLE001
+        log.error("docker daemon unreachable via %s: %s", DAEMON[1], e)
+        return False
 
 _lock = threading.Lock()          # switches are serialized (one at a time)
 
@@ -131,25 +208,32 @@ def _docker(name: str, action: str) -> None:
     """start|stop a sibling container. 409 'already started' / 404-on-stop
     are tolerated — switches must be idempotent."""
     try:
-        _req(f"{DAEMON}/containers/{name}/{action}", "POST", timeout=60)
+        _docker_req(f"/containers/{name}/{action}", "POST", timeout=60)
         log.info("docker %s %s", action, name)
-    except urllib.error.HTTPError as e:
-        body = ""
-        try:
-            body = e.read().decode()[:200]
-        except Exception:  # noqa: BLE001
-            pass
-        if e.code == 409 or (action == "stop" and e.code == 404):
-            log.info("docker %s %s: already in state (HTTP %d)", action, name, e.code)
+    except DockerAPIError as e:
+        if e.status == 409:
+            log.info("docker %s %s: already in state (HTTP 409)", action, name)
             return
-        raise RuntimeError(f"docker {action} {name} -> HTTP {e.code}: {body}")
+        if action == "stop" and e.status == 404:
+            log.info("docker stop %s: not running (HTTP 404)", name)
+            return
+        if action == "start" and e.status == 404:
+            # A missing container is NOT an idempotency state — it means a
+            # wrong container name or a compose service that was never
+            # created. Fail loudly instead of reporting a bogus rag mode.
+            raise RuntimeError(
+                "docker start " + name + ": container not found — check "
+                "RERANKER_CONTAINER/EMBEDDER_CONTAINER + compose project "
+                "prefix and whether the container exists: " + e.body)
+        raise
 
 
 def _docker_running(name: str) -> bool:
     try:
-        info = _req(f"{DAEMON}/containers/{name}/json", timeout=15)
+        info = _docker_req(f"/containers/{name}/json", timeout=15)
         return bool(info.get("State", {}).get("Running"))
-    except Exception:  # noqa: BLE001 — unreachable counts as "not running"
+    except Exception:  # noqa: BLE001 — unreachable counts as "not running";
+        # switch() pre-checks _daemon_reachable(), so a lying mode can't act.
         return False
 
 
@@ -242,6 +326,10 @@ def _backend_reachable() -> bool:
 def switch(mode: str) -> str:
     if mode not in ("rag", "image"):
         raise ValueError(f"unknown mode {mode!r}")
+    if not _daemon_reachable():
+        raise RuntimeError(
+            "docker daemon unreachable — refusing to switch (container state "
+            "would be unknowable; check the docker.sock mount on this service)")
     current = _current_mode()
     if current == mode:
         return f"already in {mode} mode"
@@ -274,6 +362,7 @@ def state() -> dict:
     st = _image_status()
     out = {
         "mode": _current_mode(),
+        "docker_ok": _daemon_reachable(),
         "rag": {"reranker_running": _docker_running(RERANKER),
                 "embedder_running": _docker_running(EMBEDDER)},
         "image_loaded": bool(st.get("loaded")),

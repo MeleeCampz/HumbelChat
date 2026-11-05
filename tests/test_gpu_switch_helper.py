@@ -19,6 +19,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import gpu_switch_helper as h  # noqa: E402
 
+_REAL_DOCKER = h._docker  # the autouse fixture monkeypatches h._docker
+
 
 @pytest.fixture(autouse=True)
 def _fake_env(monkeypatch):
@@ -48,6 +50,7 @@ def _fake_env(monkeypatch):
     monkeypatch.setattr(h, "_load_image_model", lambda: None)
     monkeypatch.setattr(h, "_unload_image_model", lambda: None)
     monkeypatch.setattr(h, "_backend_reachable", lambda: True)
+    monkeypatch.setattr(h, "_daemon_reachable", lambda: True)
     return state
 
 
@@ -110,6 +113,7 @@ class TestStateEndpoint:
     def test_state_reports_mode_and_containers(self, _fake_env):
         st = h.state()
         assert st["mode"] == "rag"
+        assert st["docker_ok"] is True
         assert st["rag"] == {"reranker_running": True, "embedder_running": True}
         assert st["image_loaded"] is False
         assert "image_status_error" not in st
@@ -122,6 +126,73 @@ class TestStateEndpoint:
         assert st["mode"] == "rag"
         assert st["image_loaded"] is False
         assert st["image_status_error"] is True
+
+
+class TestDaemonTransport:
+    """2026-11-05 live incident regression: the helper MUST speak to the
+    daemon over the mounted unix socket. The original urllib version hit
+    TCP :80, every call got ECONNREFUSED, _docker_running silently lied
+    "not running" for live containers, mode misderived as "image" — and
+    the rag heal 500'd with '<urlopen error [Errno 111] Connection refused>'."""
+
+    def test_switch_refuses_when_daemon_unreachable(self, _fake_env, monkeypatch):
+        monkeypatch.setattr(h, "_daemon_reachable", lambda: False)
+        with pytest.raises(RuntimeError, match="daemon unreachable"):
+            h.switch("rag")
+        assert _fake_env["docker"] == []          # nothing touched
+
+    def test_resolve_daemon_defaults_to_mounted_socket(self, monkeypatch):
+        monkeypatch.delenv("DOCKER_HOST", raising=False)
+        assert h._resolve_daemon() == ("unix", "/var/run/docker.sock")
+
+    def test_resolve_daemon_ignores_windows_npipe(self, monkeypatch):
+        monkeypatch.setenv("DOCKER_HOST", "npipe:////./pipe/docker_engine")
+        assert h._resolve_daemon() == ("unix", "/var/run/docker.sock")
+
+    def test_resolve_daemon_honours_unix_and_http(self, monkeypatch):
+        monkeypatch.setenv("DOCKER_HOST", "unix:///run/custom.sock")
+        assert h._resolve_daemon() == ("unix", "/run/custom.sock")
+        monkeypatch.setenv("DOCKER_HOST", "http://dhost:2375")
+        kind, target = h._resolve_daemon()
+        assert kind == "tcp" and (target.hostname, target.port) == ("dhost", 2375)
+
+    def test_docker_req_over_a_real_unix_socket(self, monkeypatch, tmp_path):
+        """End-to-end transport proof: real AF_UNIX listener + the helper's
+        _docker_req against it (no mocks)."""
+        import json as _json
+        import socket as _sock
+        import threading
+
+        path = str(tmp_path / "docker-test.sock")
+        srv = _sock.socket(_sock.AF_UNIX, _sock.SOCK_STREAM)
+        srv.bind(path)
+        srv.listen(1)
+
+        def serve():
+            conn, _ = srv.accept()
+            with conn:
+                conn.recv(4096)  # we only need the request bytes
+                body = b'{"APIVersion": "1.45"}'
+                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                             b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+        t = threading.Thread(target=serve, daemon=True)
+        t.start()
+        monkeypatch.setattr(h, "DAEMON", ("unix", path))
+        assert h._docker_req("/_ping") == {"APIVersion": "1.45"}
+        srv.close()
+
+    def test_docker_idempotency_codes(self, monkeypatch):
+        def raise_409(path, method="GET", timeout=30.0):
+            raise h.DockerAPIError(409, "already started")
+        monkeypatch.setattr(h, "_docker_req", raise_409)
+        _REAL_DOCKER("x", "start")  # 409 tolerated
+
+        def raise_404(path, method="GET", timeout=30.0):
+            raise h.DockerAPIError(404, "no such container")
+        monkeypatch.setattr(h, "_docker_req", raise_404)
+        _REAL_DOCKER("x", "stop")   # 404 on stop tolerated
+        with pytest.raises(RuntimeError, match="container not found"):
+            _REAL_DOCKER("x", "start")  # 404 on start = wrong name -> loud fail
 
 
 class TestStudioUrlDerivation:
