@@ -304,6 +304,14 @@ services:
       - --alias
       - qwen3-embedding-4b
       - --embeddings   # singular --embed was removed; plural flag in build 11870
+      # FA: faster attention + smaller transient compute buffers (same form as
+      # reranker-llama). NOTE: llama.cpp keeps the KV cache f16 by DEFAULT —
+      # FA is only the prerequisite for quantized KV. To shrink the measured
+      # 1152 MiB KV to ~576 add `-ctk q8_0 -ctv q8_0`, but that nudges the
+      # embedding vectors slightly (index-space consistency!) — validate on a
+      # sample reindex before enabling it here.
+      - --flash-attn
+      - on   # [on|off|auto] in build 11870 (same form as reranker-llama)
       - -c
       # Some KB chunks tokenize to ~2k tokens (code-heavy files); 2048 overflowed
       # the KV under concurrent slots (HTTP 500 "Context size has been exceeded"

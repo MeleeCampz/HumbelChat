@@ -72,6 +72,17 @@ WDDM shows lazily-retained freed VRAM as "used" and is useless for this):
 | embedder-llama (Q4_K_M, ctx 8192) | **3,612 MiB** (model 2375 + KV 1152 + compute 85) + 331 host |
 | chat Qwen3.8-27B NVFP4_50 (Studio; 16.1 GB file, `--tensor-split 50,16`) | **~3.9 GB weights** on GPU 1 + KV/compute ≈ 4–6 GB total (estimate — verify by reloading in Studio and running a probe) |
 
+> **Addendum 2026-11-05:** both KV figures are **f16** (the llama.cpp default
+> even with `--flash-attn on` — FA is only the *prerequisite* for quantized
+> KV; shrinking needs explicit `-ctk q8_0 -ctv q8_0`). `--flash-attn on` was
+> added to embedder-llama too (faster attention + smaller transient compute
+> buffers; KV size unchanged). Since the servers run pooling mode
+> effectively single-slot, the KV math is: reranker 288 MiB ≈ one 2048-token
+> window, embedder 1152 MiB ≈ one 8192-token window — both sane for what the
+> bot sends (≤1200-char truncated rerank pairs; ≤8-doc, ≤7500-char embed
+> batches). Quantized KV on the embedder would save ~576 MiB but nudges the
+> embedding vectors (index-space consistency — validate before enabling).
+
 → With ALL THREE resident: ~10.5–12.5 GB used, **only ~3.5–5.5 GB left** for
 an image model. Without the chat model: ~9.7–10 GB free (measured 8,086 MiB
 after the embedder loaded). Cold start is cheap: full stop→healthy compose
