@@ -16,8 +16,12 @@ install.
 
 HTTP API (loopback/docker-network only — no auth, never publish to the LAN):
 
-  GET  /mode              -> {"mode": "rag"|"image", "rag": {...}, "image": {...}}
-  POST /mode  {"mode": "rag"|"image"}   -> {"ok": true, "mode": ..., "detail": "..."}
+  GET  /mode   -> {"mode": "rag"|"image", "rag": {"reranker_running": bool,
+                 "embedder_running": bool}, "image_loaded": bool,
+                 "image_status_error": true  (only when Studio is unreachable)}
+  POST /mode   {"mode": "rag"|"image"} -> {"ok": true, "mode": ..., "detail": "..."}
+               refused switch -> 200 with detail starting "refused:"
+               hard failure  -> 500 {"ok": false, "mode": ..., "error": "..."}
 
 Both switches are IDEMPOTENT: asking for the mode you are already in no-ops.
 The bot (bot_core/images.py) calls this around every generation via
@@ -85,7 +89,21 @@ IMAGE_GPU_IDS = [int(p) for p in
                  if p.lstrip("-").isdigit()] or [0]
 LOAD_TIMEOUT_S = float(os.getenv("IMAGE_LOAD_TIMEOUT_S", "300"))
 HEALTH_TIMEOUT_S = float(os.getenv("HEALTH_TIMEOUT_S", "120"))
-DAEMON = os.getenv("DOCKER_HOST", "http://localhost").rstrip("/")
+DAEMON_DEFAULT = "http://localhost"  # the MOUNTED socket (compose maps nothing)
+
+
+def _resolve_daemon() -> str:
+    """Docker daemon base URL. The compose service mounts /var/run/docker.sock
+    and reaches it as http://localhost — an inherited DOCKER_HOST (a Windows
+    npipe: or a tcp:// from the host .env, both useless in here) must NOT
+    hijack that, so only a plain http(s) value is honoured."""
+    raw = (os.getenv("DOCKER_HOST") or "").strip().rstrip("/")
+    if raw.startswith("http"):
+        return raw
+    return DAEMON_DEFAULT
+
+
+DAEMON = _resolve_daemon()
 
 _lock = threading.Lock()          # switches are serialized (one at a time)
 
@@ -173,8 +191,6 @@ def _load_image_model() -> None:
         raise RuntimeError("IMAGE_MODEL not configured for the gpu-switch helper")
     if _image_status().get("loaded"):
         return
-    if not IMAGE_MODEL:
-        raise RuntimeError("IMAGE_MODEL not configured for the gpu-switch helper")
     payload = {"model_path": IMAGE_MODEL, "model_kind": "gguf",
                "gguf_filename": IMAGE_GGUF_FILENAME, "gpu_ids": IMAGE_GPU_IDS}
     log.info("loading image model %s on GPU %s", IMAGE_MODEL, IMAGE_GPU_IDS)
@@ -299,7 +315,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"ok": True, "mode": _current_mode(), "detail": detail})
         except Exception as e:  # noqa: BLE001
             log.error("switch to %s failed: %s", mode, e, exc_info=True)
-            self._send(500, {"ok": False, "mode": MODE, "error": str(e)[:300]})
+            self._send(500, {"ok": False, "mode": _current_mode(),
+                             "error": str(e)[:300]})
 
     def log_message(self, fmt, *args):  # quiet the default access log
         log.debug("http " + fmt, *args)

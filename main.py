@@ -692,6 +692,13 @@ async def on_ready() -> None:
     # periodic liveness probe (AI_HEALTH_CHECK_INTERVAL).
     start_backend_health_probe(bot)
 
+    # GPU-split startup heal: if the 4070 was left in image mode by a crash
+    # between switch and restore, put it back to rag mode (reranker/embedder
+    # up) — idempotent no-op when already rag. Tracked background task so a
+    # slow helper/docker start never delays the gateway.
+    from bot_core.images import heal_gpu_mode_on_start
+    spawn_tracked_task(heal_gpu_mode_on_start(), name="gpu-mode-heal")
+
     # #19: Obsidian vault sync — clone/pull (and for the campaign vault,
     # commit+push session notes) on a periodic background loop. No-op when
     # OBSIDIAN_VAULTS is empty; tracked task, cancelled on shutdown.

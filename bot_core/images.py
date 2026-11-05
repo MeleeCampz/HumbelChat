@@ -36,6 +36,7 @@ from bot_core.errors import extract_reply_text
 from config.settings import (
     DEFAULT_MODEL,
     GPU_SWITCH_TIMEOUT_S,
+    GPU_HEAL_ON_START,
     GPU_SWITCH_URL,
     IMAGE_DEFAULT_SIZE,
     IMAGE_GEN_TIMEOUT_S,
@@ -204,15 +205,43 @@ def _spawn_restore_after_hold() -> None:
     task.add_done_callback(_background_tasks.discard)
 
 
+async def heal_gpu_mode_on_start() -> None:
+    """Bot-startup heal: if the switcher is configured, make sure the 4070 is
+    in rag mode.
+
+    rag mode is the bot's steady state; image mode only ever exists around a
+    painting window. A crash / restart between switch and restore (or a hold
+    task killed with the loop) would otherwise leave the reranker/embedder
+    stopped for the whole session with no trigger to bring them back.
+    Idempotent and cheap when already rag (helper no-ops). Never raises.
+    """
+    if not (GPU_HEAL_ON_START and _switcher_enabled()):
+        return
+    try:
+        async with _gen_lock:  # serialize with painting windows like every
+            await _switch_gpu_mode("rag")  # other mode mutation
+    except Exception as e:  # noqa: BLE001 — startup must not fail on this
+        log.warning("startup GPU heal failed (continuing; run "
+                    "scripts/gpu_switch.sh rag if RAG stays degraded): %s", e)
+
+
 async def ensure_image_still_needed_or_restore() -> None:
     """After the hold window: if another painting window already re-entered
-    image mode more recently than the hold started, stay put; else restore."""
+    image mode more recently than the hold started, stay put; else restore.
+
+    On re-defer the hold anchor MOVES to now — without that, every later
+    painting window would always look "re-entered" (its stamp is newer than
+    the original arm time) and the restore would defer itself forever,
+    leaving image mode stuck on permanently.
+    """
     global _hold_started_at
     if _hold_started_at and _mode_switched_at > _hold_started_at:
         log.info("image mode re-entered during the hold window — deferring "
                  "the switch-back again")
+        _hold_started_at = time.monotonic()
         _spawn_restore_after_hold()
         return
+    _hold_started_at = 0.0
     await _switch_gpu_mode("rag")
 
 
@@ -222,7 +251,10 @@ async def _helper(client: httpx.AsyncClient, method: str, path: str,
     try:
         resp = await client.request(method, f"{GPU_SWITCH_URL}{path}", **kwargs)
     except (httpx.HTTPError, OSError) as e:
-        raise ImageGenError(f"gpu-switch helper unreachable at {GPU_SWITCH_URL}: {e}")
+        raise ImageGenError(
+            f"gpu-switch helper unreachable at {GPU_SWITCH_URL}: {e} "
+            "(start it with `docker compose up -d gpu-switch`, or unset "
+            "GPU_SWITCH_URL for manual mode via scripts/gpu_switch.sh)")
     if resp.status_code >= 400:
         raise ImageGenError(f"gpu-switch {path} -> HTTP {resp.status_code}: "
                                  f"{resp.text[:200]}")

@@ -204,6 +204,13 @@ cmd_run() {
     # set BOT_DEV_INFER_URL to point at a different backend.
     export INFER_URL="${BOT_DEV_INFER_URL:-http://127.0.0.1:8888/v1}"
 
+    # GPU split (2026-11): a native dev bot reaches the compose gpu-switch
+    # service through its loopback host mapping. If .env has no
+    # GPU_SWITCH_URL, point at localhost:8082 (run the helper once with
+    # `docker compose up -d gpu-switch`); without it image generation runs in
+    # manual mode (scripts/gpu_switch.sh image before, rag after).
+    export GPU_SWITCH_URL="${GPU_SWITCH_URL:-http://localhost:8082}"
+
     # Point sentence-transformers / HuggingFace at the repo's shared model cache so
     # local runs reuse the bge-m3 model Docker already downloaded,
     # instead of re-fetching ~2GB into the default ~/.cache/huggingface. Only matters

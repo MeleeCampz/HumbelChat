@@ -55,10 +55,13 @@ services:
     ports:
       - "127.0.0.1:8082:8080"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/mode',timeout=3)"]
+      # GET /mode serializes behind a live switch (helper lock), so during a
+      # long switch the probe can time out — 'unhealthy' mid-switch is
+      # cosmetic, not an error. Generous retries so it never stays unhealthy.
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/mode',timeout=8)"]
       interval: 30s
-      timeout: 5s
-      retries: 3
+      timeout: 10s
+      retries: 8
       start_period: 10s
 
 
@@ -124,6 +127,12 @@ services:
   # model scores everything with the wrong prompt format.
   # First start downloads the INT4 checkpoint (~2.6 GB) into hf-cache/.
   reranker-qwen:
+    # Kept as ROLLBACK only (replaced by reranker-llama on 2026-10-25) and
+    # profile-gated since the GPU split (2026-11): it reserves ~5 GiB of
+    # GPU 1, which is now Strata chat's private card — a plain
+    # `docker compose up -d` must NOT start it. Rollback: 
+    #   docker compose --profile vllm-rerank up -d reranker-qwen
+    profiles: ["vllm-rerank"]
     image: vllm/vllm-openai:v0.31.0
     container_name: humbelchat-reranker-qwen
     restart: unless-stopped

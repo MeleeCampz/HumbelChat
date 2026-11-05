@@ -198,6 +198,7 @@ back to `rag` mode happens in a `finally` after every painting window.
 | `IMAGE_GPU_IDS` | GPU(s) the diffusion model loads onto (host Studio must be pinned to the same card) | `0` (4070) |
 | `GPU_SWITCH_URL` | gpu-switch helper API; empty = **manual mode** (run `scripts/gpu_switch.sh image` yourself; the bot refuses to paint otherwise) | *(empty)* |
 | `GPU_SWITCH_TIMEOUT_S` | Switch request timeout (covers stop + load + health) | `420` |
+| `GPU_HEAL_ON_START` | Bot startup restores rag mode if a crash left the 4070 image-side (idempotent; `false` opts out) | `true` |
 | `IMAGE_MODE_HOLD_S` | Hold window after a generation the **bot** switched for: the rag switch-back is deferred, back-to-back generations skip switch+load (a manual-mode window earns no hold) | `0` |
 | `IMAGE_DEFAULT_SIZE` / `IMAGE_MAX_SIZE` | Painting square (working set grows with resolution) | `1024` / `2048` |
 | `IMAGE_GEN_TIMEOUT_S` / `IMAGE_LOAD_TIMEOUT_S` | Per-image request / model-load readiness deadlines | `180` / `300` |

@@ -157,6 +157,11 @@ IMAGE_MAX_SIZE: int = _safe_int(os.getenv("IMAGE_MAX_SIZE"), 2048)
 # Empty GPU_SWITCH_URL = no automatic switching (generation requires the
 # card to be switched manually via scripts/gpu_switch.sh).
 GPU_SWITCH_URL: str = os.getenv("GPU_SWITCH_URL", "").rstrip("/")
+# Bot startup heals a card left image-side by a crash / killed hold window:
+# rag mode is the bot's steady state (a startup restore is idempotent and
+# costs ~one GET when already rag). Set false if you intentionally keep the
+# 4070 in image mode while the bot is up.
+GPU_HEAL_ON_START: bool = _safe_bool(os.getenv("GPU_HEAL_ON_START"), True)
 # Keep "image" mode this long after a generation so back-to-back
 # /generate_image calls skip the double switch (0 = switch back immediately).
 IMAGE_MODE_HOLD_S: float = _safe_float(os.getenv("IMAGE_MODE_HOLD_S"), 0.0)

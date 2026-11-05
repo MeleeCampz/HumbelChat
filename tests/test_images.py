@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import time
 
 import httpx
 from unittest.mock import AsyncMock, MagicMock
@@ -993,3 +994,65 @@ class TestHoldAndRefusalSemantics:
                                  "detail": "refused: image backend unreachable"})]))
         with pytest.raises(images.ImageGenError, match="refused"):
             await images._switch_gpu_mode("image")
+
+
+class TestHoldEventuallyExpires:
+    """Regression: the re-entry deferral must ANCHOR to now, else every later
+    painting window looks 're-entered' and the restore defers forever."""
+
+    async def test_second_deferred_check_restores_when_no_new_painting(self, monkeypatch):
+        monkeypatch.setattr(images, "GPU_SWITCH_URL", "http://gpu-switch:8080")
+        monkeypatch.setattr(images, "IMAGE_MODE_HOLD_S", 0.05)
+        sw = AsyncMock()
+        monkeypatch.setattr(images, "_switch_gpu_mode", sw)
+        now = time.monotonic()
+        images._hold_started_at = now - 0.1
+        images._mode_switched_at = now          # painted during the hold -> defer
+        await images.ensure_image_still_needed_or_restore()
+        sw.assert_not_awaited()
+        for t in list(images._background_tasks):
+            t.cancel()
+        images._background_tasks.clear()
+        # New generation during the deferred window: paint, no new switch.
+        images._mode_switched_at = time.monotonic()
+        await images.ensure_image_still_needed_or_restore()   # defers again (anchored)
+        sw.assert_not_awaited()
+        for t in list(images._background_tasks):
+            t.cancel()
+        images._background_tasks.clear()
+        # No further painting -> the third check MUST restore rag.
+        await asyncio.sleep(0.06)
+        await images.ensure_image_still_needed_or_restore()
+        sw.assert_awaited_once_with("rag")
+        assert images._hold_started_at == 0.0   # hold fully discharged
+
+
+class TestStartupHeal:
+    """main.py on_ready → heal_gpu_mode_on_start(): a card left image-side by
+    a crash must not stay rag-degraded for the whole session."""
+
+    async def test_rag_switch_requested_when_switcher_enabled(self, monkeypatch):
+        monkeypatch.setattr(images, "GPU_SWITCH_URL", "http://gpu-switch:8080")
+        monkeypatch.setattr(images, "GPU_HEAL_ON_START", True)
+        sw = AsyncMock()
+        monkeypatch.setattr(images, "_switch_gpu_mode", sw)
+        await images.heal_gpu_mode_on_start()
+        sw.assert_awaited_once_with("rag")
+
+    async def test_noop_without_switcher_or_when_disabled(self, monkeypatch):
+        monkeypatch.setattr(images, "GPU_SWITCH_URL", "")
+        monkeypatch.setattr(images, "GPU_HEAL_ON_START", True)
+        sw = AsyncMock()
+        monkeypatch.setattr(images, "_switch_gpu_mode", sw)
+        await images.heal_gpu_mode_on_start()
+        monkeypatch.setattr(images, "GPU_SWITCH_URL", "http://gpu-switch:8080")
+        monkeypatch.setattr(images, "GPU_HEAL_ON_START", False)
+        await images.heal_gpu_mode_on_start()
+        sw.assert_not_awaited()
+
+    async def test_failure_never_raises_out_of_startup(self, monkeypatch):
+        monkeypatch.setattr(images, "GPU_SWITCH_URL", "http://gpu-switch:8080")
+        monkeypatch.setattr(images, "GPU_HEAL_ON_START", True)
+        monkeypatch.setattr(images, "_switch_gpu_mode",
+                            AsyncMock(side_effect=images.ImageGenError("helper down")))
+        await images.heal_gpu_mode_on_start()  # must not raise

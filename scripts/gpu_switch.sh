@@ -37,7 +37,7 @@ EMBED_PORT=8091
 helper_post() {  # $1 = rag|image
   # returns: 0 = ok, 1 = helper unreachable, 2 = helper REFUSED the switch
   local res
-  res=$(curl -sf --max-time 330 -X POST -H 'Content-Type: application/json' \
+  res=$(curl -sf --max-time 420 -X POST -H 'Content-Type: application/json' \
         -d "{\"mode\":\"$1\"}" "$HELPER/mode" 2>/dev/null) || return 1
   echo "  helper: $res"
   if printf '%s' "$res" | grep -q '"refused'; then
