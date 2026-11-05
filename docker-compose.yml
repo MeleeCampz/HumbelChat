@@ -268,7 +268,8 @@ services:
       - "2048"
       - --no-context-shift
       - --flash-attn
-      - on   # [on|off|auto] in build 11870 (boolean flag in the old b4738)
+      - "on"   # quoted: YAML would parse bare `on` as boolean true (build
+               # 11870 takes [on|off|auto]; the old b4738 took a boolean flag)
       - --host
       - 0.0.0.0
     deploy:
