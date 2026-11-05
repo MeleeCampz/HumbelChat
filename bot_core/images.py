@@ -136,11 +136,57 @@ async def _ensure_image_loaded() -> None:
 # The 5070 (chat/Strata) is NEVER touched by any of this. The helper service
 # (scripts/gpu_switch_helper.py) wraps the compose stop/start + Studio
 # images/load|unload calls; scripts/gpu_switch.sh is its manual CLI twin.
-_mode_switched_at: float = 0.0   # last successful switch INTO image mode
+_mode_switched_at: float = 0.0   # end of the last painting window (mono time)
+_hold_started_at: float = 0.0    # when the current deferred restore was scheduled
 
 
 def _switcher_enabled() -> bool:
     return bool(GPU_SWITCH_URL)
+
+
+def _stamp_painting_window() -> None:
+    """Record the end of a painting window for the IMAGE_MODE_HOLD_S check."""
+    global _mode_switched_at
+    _mode_switched_at = time.monotonic()
+
+
+_background_tasks: set[asyncio.Task] = set()  # strong refs — the loop only
+                                              # keeps weak refs to tasks
+
+
+def _spawn_restore_after_hold() -> None:
+    """Fire-and-forget: switch back to rag mode once IMAGE_MODE_HOLD_S expires.
+
+    Serialized on _gen_lock, so it can never interleave with a live painting
+    window — a new generation that arrives first either wins (the hold keeps
+    image mode for it) or queues behind this switch cleanly.
+    """
+    async def _later() -> None:
+        try:
+            await asyncio.sleep(IMAGE_MODE_HOLD_S)
+            async with _gen_lock:
+                await ensure_image_still_needed_or_restore()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — best-effort by design
+            log.error("deferred rag restore failed: %s — reranker/embedder "
+                      "may be down; run: scripts/gpu_switch.sh rag", e)
+
+    task = asyncio.create_task(_later())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+async def ensure_image_still_needed_or_restore() -> None:
+    """After the hold window: if another painting window already re-entered
+    image mode more recently than the hold started, stay put; else restore."""
+    global _hold_started_at
+    if _hold_started_at and _mode_switched_at > _hold_started_at:
+        log.info("image mode re-entered during the hold window — deferring "
+                 "the switch-back again")
+        _spawn_restore_after_hold()
+        return
+    await _switch_gpu_mode("rag")
 
 
 async def _helper(client: httpx.AsyncClient, method: str, path: str,
@@ -175,9 +221,6 @@ async def _switch_gpu_mode(mode: str) -> None:
         out = await _helper(client, "POST", "/mode", json={"mode": mode})
     log.info("gpu mode -> %s (%.1f s): %s", mode, time.monotonic() - t0,
              str(out.get("detail", out))[:160])
-    if mode == "image":
-        global _mode_switched_at
-        _mode_switched_at = time.monotonic()
 
 
 # ── Prompt rewriting (chat model — MUST run BEFORE the mode switch) ───────
@@ -464,13 +507,22 @@ async def ensure_image_mode(on_phase: Callable[[str], Any] | None = None) -> Non
 
 async def _restore_rag_after_painting() -> None:
     """Switch the 4070 back to rag mode after painting — ALWAYS attempted,
-    even when painting failed, so the reranker/embedder are never left down
-    (respecting IMAGE_MODE_HOLD_S). Best-effort: never raises."""
+    even when painting failed, so the reranker/embedder are never left down.
+
+    IMAGE_MODE_HOLD_S: after a generation that SWITCHED into image mode the
+    switch-back is skipped while the hold window is open, so a back-to-back
+    generation finds image mode still live (GET /mode says "image", model
+    resident → no switch, no load). The window is measured from the END of
+    painting. Best-effort: never raises.
+    """
     try:
-        if IMAGE_MODE_HOLD_S > 0 and _mode_switched_at and \
-                time.monotonic() - _mode_switched_at < IMAGE_MODE_HOLD_S:
-            log.info("image mode held %.0f s (IMAGE_MODE_HOLD_S) — skipping "
-                     "switch-back", IMAGE_MODE_HOLD_S)
+        if IMAGE_MODE_HOLD_S > 0 and _switcher_enabled():
+            global _hold_started_at
+            _hold_started_at = time.monotonic()
+            log.info("image mode held %.0f s after painting "
+                     "(IMAGE_MODE_HOLD_S) — deferred switch-back scheduled",
+                     IMAGE_MODE_HOLD_S)
+            _spawn_restore_after_hold()
             return
         await _switch_gpu_mode("rag")
     except Exception as e:  # noqa: BLE001 — best-effort by design
@@ -514,7 +566,9 @@ async def generate_image(
         try:
             await ensure_image_mode(on_phase)
             await _emit_phase(on_phase, "painting")
-            return await _generate_one(client, prompt, side)
+            png = await _generate_one(client, prompt, side)
+            _stamp_painting_window()
+            return png
         finally:
             await _restore_rag_after_painting()
 
@@ -551,6 +605,7 @@ async def generate_images(
                 except (ImageGenError, APIStatusError) as exc:
                     log.error("batch image %d/%d failed: %s", i, total, exc, exc_info=True)
                     results.append(exc)
+            _stamp_painting_window()
         finally:
             await _restore_rag_after_painting()
     return results
