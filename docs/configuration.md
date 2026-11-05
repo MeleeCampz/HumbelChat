@@ -110,8 +110,9 @@ empirical verification and the fast reindex flow.
 **Index-side serving (since 2026-10-25):** the GPU index embedder is the
 `embedder-llama` compose service — official digest-pinned `ggml-org/llama.cpp`
 server image, official `Qwen3-Embedding-4B-Q4_K_M.gguf`, OpenAI-compatible
-`/v1/embeddings`, pinned to GPU 1 via `CUDA_VISIBLE_DEVICES=1` (same image,
-pattern and pinning as `reranker-llama`; the old Ollama `embedder-qwen`
+`/v1/embeddings`, pinned to GPU 0 via `CUDA_VISIBLE_DEVICES=0` (same image,
+pattern and pinning as `reranker-llama`; GPU 0 = the 4070 Ti SUPER since the
+2026-11 GPU split — the 5070 is chat-only now; the old Ollama `embedder-qwen`
 container stays in compose, stopped, as rollback). `EMBED_URL` points at the
 compose service name; loopback `:8091` is host debug only. Renaming
 `EMBEDDING_MODEL`/`INDEX_EMBED_MODEL` invalidates the vector cache and triggers
@@ -148,7 +149,7 @@ order. The 0.50 attach floor is calibrated against these scores — do not
 shrink `RERANK_TOP_K` / `RERANK_MAX_CHARS` or the server's `-c` context
 without re-running `scripts/rag_floor_probe.py`.
 
-**Serving (since 2026-10-25):** pinned `llama.cpp` **container** on GPU 1
+**Serving (since 2026-10-25):** pinned `llama.cpp` **container** on GPU 0
 (`reranker-llama` service, official digest-pinned `ggml-org/llama.cpp` server
 image; `Qwen3-Reranker-4B-Q4_K_M.gguf` self-converted from official weights —
 community GGUFs had dropped the classifier head; see docs/internal/HANDOFF_RERANKER_LLAMA.md),
@@ -159,21 +160,45 @@ debug only (llama.cpp's server has no auth — never bind to the LAN).
 `RERANK_MODEL=reranker-4b` (the `model` field is required by llama.cpp,
 ignored harmlessly by vLLM). Score scale ≈ probability (strong ≈ 0.9+, weak
 ≈ 0.2–0.5, irrelevant ≈ 1e-4) — the 0.50 floor still separates cleanly.
-GPU pinning is `CUDA_VISIBLE_DEVICES=1` inside the container: the Windows
+GPU pinning is `CUDA_VISIBLE_DEVICES=0` inside the container: the Windows
 nvidia runtime exposes both GPUs to the container regardless of the compose
 `device_ids` reservation (verified), and host-side `nvidia-smi dmon` SM
 attribution for guest processes is unreliable under WDDM — verify placement by
 VRAM delta, not SM%. The old vLLM container (`reranker-qwen`, `:8000`) stays
 in compose as the rollback path.
 
-**Dynamic GPU-1 switching:** both RAG servers pin ~6.4 GB of GPU-1 VRAM
-(measured from the servers' own startup logs — nvidia-smi is unreliable under
-WDDM retention); the chat model keeps a further ~4–6 GB share on the same
-card. `./scripts/gpu_switch.sh image` stops both to free the room for an
-image model (the bot degrades gracefully: dense+BM25 retrieval, attach floor
-no-ops, nothing crashes); `./scripts/gpu_switch.sh rag` restores full quality
-in ~19 s; `status` shows what is resident. The embedder is only needed when
-indexing new chunks — plain search reads precomputed vectors.
+**GPU-0 modes (rag ⇄ image, since the 2026-11 GPU split):** the 4070 hosts ONE
+mode at a time. **`rag` mode** (default steady state) = reranker + embedder
+running (~6.4 GB combined — measured from the servers' own startup logs;
+nvidia-smi is unreliable under WDDM retention). **`image` mode** = both stopped
+and Studio's diffusion model loaded (~12.5 GiB). The `gpu-switch` compose
+service (`scripts/gpu_switch_helper.py`, `GET/POST /mode`) owns the mode and
+the bot drives it automatically around every painting window
+(`GPU_SWITCH_URL`, see `bot_core.images`); while in image mode the bot degrades
+gracefully: dense+BM25 retrieval, attach floor no-ops, nothing crashes. The
+embedder is only needed when indexing new chunks — plain search reads
+precomputed vectors. Manual CLI twin: `./scripts/gpu_switch.sh status|image|rag`
+(prefers the helper, falls back to raw `docker compose`); the rag restore cycle
+measures ~19 s end-to-end.
+
+### Image generation (GPU-split backend, #42)
+
+Chat and images live on **separate backends/cards** — the chat model is never
+(evicted) swapped for an image model anymore. Rewriting runs on the chat backend
+(Strata, full KB tools) **before** the 4070 switches into image mode; the switch
+back to `rag` mode happens in a `finally` after every painting window.
+
+| Variable | Description | Default |
+|---|---|---|
+| `IMAGE_MODEL` / `IMAGE_GGUF_FILENAME` | Studio diffusion repo + GGUF file (`""` = feature off) | *(empty)* |
+| `IMAGE_INFER_URL` / `IMAGE_INFER_API_KEY` | Image backend (Studio) OpenAI URL + key; empty falls back to `INFER_URL`/`INFER_API_KEY` | `INFER_URL` fallback |
+| `IMAGE_GPU_IDS` | GPU(s) the diffusion model loads onto (host Studio must be pinned to the same card) | `0` (4070) |
+| `GPU_SWITCH_URL` | gpu-switch helper API; empty = **manual mode** (run `scripts/gpu_switch.sh image` yourself; the bot refuses to paint otherwise) | *(empty)* |
+| `GPU_SWITCH_TIMEOUT_S` | Switch request timeout (covers stop + load + health) | `420` |
+| `IMAGE_MODE_HOLD_S` | Keep image mode this long after painting (deferred switch-back; back-to-back gens then skip switch+load) | `0` |
+| `IMAGE_DEFAULT_SIZE` / `IMAGE_MAX_SIZE` | Painting square (working set grows with resolution) | `1024` / `2048` |
+| `IMAGE_GEN_TIMEOUT_S` / `IMAGE_LOAD_TIMEOUT_S` | Per-image request / model-load readiness deadlines | `180` / `300` |
+| `IMAGE_NEGATIVE_PROMPT` | What the model steers away from (user-requested text is NOT suppressed) | built-in default |
 
 | Variable | Description | Default |
 |---|---|---|

@@ -1,13 +1,30 @@
-## LLM backend topology (read before touching models)
+## LLM backend topology (read before touching models — GPU split, 2026-11)
 
-- **The agent's own chat and the HumbelChat bot share the same backend** — Unsloth Studio
-  (`INFER_URL=http://host.docker.internal:8888/v1`, see `.env`), and both run on the same model
-  (`MODEL_NAME` in `.env`, currently `unsloth/Qwen3.8-27B-GGUF:NVFP4_50`). There is a single
-  resident model — anything that affects model residency or in-flight requests affects both.
-- **Everything runs in Docker on the host**, not in this sandbox: the bot container *and* the
-  Unsloth Studio container. The sandbox can only reach them over the network
-  (`host.docker.internal`) — it cannot `docker compose` anything itself. Ask the user to run
-  host-side commands (`docker compose up -d --build`, GPU exposure, …).
+Two physical cards, two backends — **never mix them up**:
+
+- **Chat (the bot AND this agent): Strata on the 5070 Ti (GPU 1)** — `INFER_URL`
+  in `.env`. The 5070 is chat-only: image gen and the RAG sidecars must never
+  load onto it. `tts-ollama` (phonon) also lives on this card.
+- **Image generation: Unsloth Studio on the 4070 Ti SUPER (GPU 0)** —
+  `IMAGE_INFER_URL` (default falls back to `INFER_URL`; production sets it to
+  `http://host.docker.internal:8888/v1`, Studio pinned to GPU 0 only).
+  Image model: `unsloth/Qwen-Image-2.1-Turbo-GGUF` Q4_K_M, measured resident
+  ~12.5 GiB (`resident_mib=12456` in dev.log).
+- **The 4070 runs ONE mode at a time**, owned by the `gpu-switch` compose
+  service (`scripts/gpu_switch_helper.py`): `rag` mode (reranker-llama +
+  embedder-llama, default steady state — both pinned `CUDA_VISIBLE_DEVICES=0`)
+  ⇄ `image` mode (those stopped, diffusion model loaded). The bot switches via
+  `GPU_SWITCH_URL` around every painting window (`IMAGE_MODE_HOLD_S` defers the
+  switch-back) — see `bot_core/images.py`; manual CLI twin:
+  `./scripts/gpu_switch.sh status|image|rag`.
+- **Prompt rewriting ALWAYS happens before the switch** (the rewrite's KB agent
+  tools include the reranker, which the switch takes offline).
+- **Everything runs in Docker on the host**, not in this sandbox: the bot
+  container, the RAG sidecars, the gpu-switch helper *and* the Unsloth Studio
+  container. The sandbox can only reach them over the network
+  (`host.docker.internal`) — it cannot `docker compose` anything itself. Ask
+  the user to run host-side commands (`docker compose up -d --build`, GPU
+  exposure, …).
 
 ## Backlog workflow
 

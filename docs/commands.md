@@ -115,26 +115,31 @@ prompt. The prompt is first
 expanded into a rich image prompt by the CHAT model (no extra model involved —
 `raw: true` skips the rewrite entirely, sending your text verbatim). `dry: true`
 does the prompt work and replies with the FINAL prompt that would be sent — no
-model swap, no generation (for iterating on prompts without burning images).
-Swap-based under the hood: loading the image model evicts
-the resident chat model (Studio design), generation runs inside a no-chat-calls
-window, and the chat model is swapped back automatically afterwards — expect
-tens of seconds per image. Size is capped (`IMAGE_MAX_SIZE`, default 2048)
-because the working set scales with resolution (10 GB+ at high res).
+GPU mode switch, no generation (for iterating on prompts without burning images).
+GPU-split under the hood (#42, 2026-11): the rewrite runs on the CHAT backend
+(Strata on the 5070) while the 4070 is still in `rag` mode; only then the bot
+switches the 4070 into `image` mode (stop reranker/embedder + load the diffusion
+model), paints, and switches back to `rag` mode in a `finally` — expect tens of
+seconds per image, dominated by the switch windows (~25–100 s load, ~19 s rag
+restore). Chat stays available throughout (different card). Size is capped
+(`IMAGE_MAX_SIZE`, default 2048) because the working set grows on top of the
+~12.5 GiB resident model.
 Config-gated: with `IMAGE_MODEL` empty the command replies with a "not
 configured" hint. See the image section in `.env` (`IMAGE_MODEL`,
-`IMAGE_GGUF_FILENAME`, `IMAGE_GPU_IDS`, `IMAGE_DEFAULT_SIZE`, `IMAGE_MAX_SIZE`).
+`IMAGE_GGUF_FILENAME`, `IMAGE_INFER_URL`, `IMAGE_GPU_IDS`, `GPU_SWITCH_URL`,
+`IMAGE_MODE_HOLD_S`, `IMAGE_DEFAULT_SIZE`, `IMAGE_MAX_SIZE`).
 Debug trail (#66): every phase logs to `logs/dev.log` (DEBUG) — the raw user
 request, rewrite iterations + tool calls + a 200-char preview of the result,
 the FULL final prompt and negative prompt actually sent to the backend, load
 attempts, generation timing + byte size. Progress: ONE message carries the
-whole run — edited per phase (Preparing prompt → loading the image model →
-Painting) so the GPU-idle swap windows read as visible progress instead of a
-frozen "bot is thinking", and the final answer (text + PNG) replaces the last
-update IN PLACE on that same message (edit() can add attachments); only if
-that edit fails does the image go out as a separate reply. The stalls
-themselves are inherent to sequential model swapping on one GPU (unload chat →
-load image → paint → swap back).
+whole run — edited per phase (Preparing prompt → switching the GPU to image
+mode / loading the image model → Painting) so the switch windows read as
+visible progress instead of a frozen "bot is thinking", and the final answer
+(text + PNG) replaces the last update IN PLACE on that same message (edit() can
+add attachments); only if that edit fails does the image go out as a separate
+reply. The stalls are the GPU-mode switch windows (stop RAG → load image →
+paint → unload → restart RAG); with `IMAGE_MODE_HOLD_S` > 0 the switch-back is
+deferred and back-to-back generations skip it entirely.
 
 ### `/roll_items`
 
