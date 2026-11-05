@@ -1,20 +1,21 @@
 """Image generation (#42) — Unsloth Studio diffusion via the OpenAI-compatible
-``/v1/images/generations`` endpoint (same host + key as chat), with swap
-orchestration.
+``/v1/images/generations`` endpoint on the IMAGE backend (``IMAGE_INFER_URL``,
+GPU-split 2026-11).
 
-Architecture constraints (verified 2026-10-26):
-- Co-residency is impossible by design: loading the image model EVICTS the
-  resident chat model (Studio swaps; context survives via keep-across-unload).
-- The working set scales with output resolution (10 GB+ at high res), so the
-  default size is capped (IMAGE_DEFAULT_SIZE / IMAGE_MAX_SIZE).
-- **No chat-model calls while the image model is resident** — any chat
-  completion re-residents the chat model and evicts the image mid-generation
-  (this is what made early API load attempts look like "silent failures").
-  Hence: prompt rewriting happens BEFORE the swap, and the whole
-  load→generate→unload window runs while holding the global AI slot so other
-  chat turns queue behind it instead of thrashing the swap.
-- The chat model is swapped back AFTER every generation (finally), including
-  failed ones — a background warm load makes the next chat turn fast.
+Architecture (GPU split, replaces the old swap orchestration):
+- The image backend (Studio, 4070 Ti SUPER / GPU 0) is a SEPARATE server from
+  chat (Strata on the 5070 / GPU 1). Chat never evicts the image model and
+  image work never evicts chat — the two cards are independent.
+- The 4070 hosts ONE mode at a time: "rag" (reranker-llama + embedder-llama,
+  the default steady state) or "image" (the diffusion model resident, measured
+  ~12.5 GiB at Q4_K_M). The bot switches to image mode right BEFORE painting
+  and back to rag afterwards (finally, even on failure) via the gpu-switch
+  helper (``GPU_SWITCH_URL``; scripts/gpu_switch_helper.py + gpu_switch.sh).
+- **Prompt rewriting always runs FIRST, while rag mode is live** — the
+  rewrite uses the KB agent tools (incl. the reranker), so it must not run
+  mid-switch.
+- ``IMAGE_MODE_HOLD_S`` briefly keeps image mode so back-to-back generations
+  skip the double switch; ``_gen_lock`` serialises every switch/paint window.
 """
 from __future__ import annotations
 
@@ -34,34 +35,39 @@ from bot_core.ai_client import _create_with_reasoning_fallback
 from bot_core.errors import extract_reply_text
 from config.settings import (
     DEFAULT_MODEL,
+    GPU_SWITCH_TIMEOUT_S,
+    GPU_SWITCH_URL,
     IMAGE_DEFAULT_SIZE,
     IMAGE_GEN_TIMEOUT_S,
-    IMAGE_NEGATIVE_PROMPT,
     IMAGE_GGUF_FILENAME,
     IMAGE_GPU_IDS,
+    IMAGE_INFER_API_KEY,
+    IMAGE_INFER_URL,
     IMAGE_LOAD_TIMEOUT_S,
     IMAGE_MAX_SIZE,
+    IMAGE_MODE_HOLD_S,
     IMAGE_MODEL,
+    IMAGE_NEGATIVE_PROMPT,
     INFER_API_KEY,
-    KB_PATH,
     INFER_URL,
+    KB_PATH,
 )
 
 log = logging.getLogger("bot.bot_core.images")
 
 
 class ImageGenError(Exception):
-    """Image generation / swap orchestration failure (user-safe message)."""
+    """Image generation / GPU-mode orchestration failure (user-safe message)."""
 
 
 def image_gen_configured() -> bool:
     return bool(IMAGE_MODEL)
 
 
-# ── Studio management API base (INFER_URL is .../v1; mgmt endpoints live on
-# the bare host) ────────────────────────────────────────────────────────────
-_STUDIO_BASE = INFER_URL.removesuffix("/v1").removesuffix("/")
-_STUDIO_HEADERS = {"Authorization": f"Bearer {INFER_API_KEY}"}
+# ── Studio management API base (IMAGE_INFER_URL is .../v1; mgmt endpoints
+# live on the bare image-backend host) ────────────────────────────────────────────────────────────
+_STUDIO_BASE = IMAGE_INFER_URL.removesuffix("/v1").removesuffix("/")
+_STUDIO_HEADERS = {"Authorization": f"Bearer {IMAGE_INFER_API_KEY}"}
 
 
 async def _studio(client: httpx.AsyncClient, method: str, path: str, **kwargs) -> dict:
@@ -75,12 +81,12 @@ async def _image_status(client: httpx.AsyncClient) -> dict:
     return await _studio(client, "GET", "/api/inference/images/status")
 
 
-async def ensure_image_loaded() -> None:
-    """Load the configured image model if not resident (evicts chat by design).
+async def _ensure_image_loaded() -> None:
+    """Load the diffusion model on the image backend unless already resident.
 
     Hardened 2026-10-27 after back-to-back generation runs: Studio's diffusion
     slot bookkeeping can be mid-load when we ask (409 'A diffusion load is
-    already in progress' — our own swap-back racing the next request) or a
+    already in progress') or a
     load can STALL without ever reaching ready. Both observed live. Handling:
     409 → just poll for ready; stalled attempt → unload to clear the stuck
     state and retry once (speed is not a concern — reliability is).
@@ -91,8 +97,7 @@ async def ensure_image_loaded() -> None:
             st = await _image_status(client)
             if st.get("loaded"):
                 return
-            log.info("loading image model %s (attempt %d, evicts chat model)",
-                     IMAGE_MODEL, attempt)
+            log.info("loading image model %s (attempt %d)", IMAGE_MODEL, attempt)
             try:
                 await _studio(client, "POST", "/api/inference/images/load", json={
                     "model_path": IMAGE_MODEL,
@@ -117,75 +122,65 @@ async def ensure_image_loaded() -> None:
             last_err = f"attempt {attempt}: not ready within {IMAGE_LOAD_TIMEOUT_S:.0f}s"
         # Not ready in time — clear whatever stuck state Studio holds and retry.
         log.warning("image load %s — unloading stuck state and retrying", last_err)
-        await _unload_image()
+        try:
+            await _studio(client, "POST", "/api/inference/images/unload")
+        except Exception as ue:  # noqa: BLE001 — best-effort state clear
+            log.warning("stuck-state unload failed (retrying anyway): %s", ue)
         await asyncio.sleep(15)
     raise ImageGenError(f"image model did not load ({last_err})")
 
 
-async def _unload_image() -> None:
-    """Swap back: unload the image model. Best-effort — never raises into the
-    caller's error path (a stuck unload still ends with chat re-loadable)."""
+# ── GPU mode switching (rag ⇄ image on the 4070) ──────────────────────
+# rag mode (default)  = reranker-llama + embedder-llama loaded on the 4070
+# image mode          = the diffusion model resident on the 4070 (~12.5 GiB)
+# The 5070 (chat/Strata) is NEVER touched by any of this. The helper service
+# (scripts/gpu_switch_helper.py) wraps the compose stop/start + Studio
+# images/load|unload calls; scripts/gpu_switch.sh is its manual CLI twin.
+_mode_switched_at: float = 0.0   # last successful switch INTO image mode
+
+
+def _switcher_enabled() -> bool:
+    return bool(GPU_SWITCH_URL)
+
+
+async def _helper(client: httpx.AsyncClient, method: str, path: str,
+                  **kwargs) -> dict:
+    """Call the gpu-switch helper; raise ImageGenError on any HTTP failure."""
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            await _studio(client, "POST", "/api/inference/images/unload")
-            log.info("image model unloaded — swapping chat back in")
-    except Exception as e:  # noqa: BLE001 — best-effort by design
-        log.warning("image unload failed (chat still re-loadable on demand): %s", e)
+        resp = await client.request(method, f"{GPU_SWITCH_URL}{path}", **kwargs)
+    except (httpx.HTTPError, OSError) as e:
+        raise ImageGenError(f"gpu-switch helper unreachable at {GPU_SWITCH_URL}: {e}")
+    if resp.status_code >= 400:
+        raise ImageGenError(f"gpu-switch {path} -> HTTP {resp.status_code}: "
+                                 f"{resp.text[:200]}")
+    return resp.json()
 
 
-async def _warm_chat_reload() -> None:
-    """Background: re-resident the chat model after an image generation so the
-    next chat turn doesn't pay a cold load. Failure is harmless — Studio
-    auto-loads the chat model on the bot's next completion request.
+async def _switch_gpu_mode(mode: str) -> None:
+    """Ask the helper to put the 4070 into "image" or "rag" mode.
 
-    Serialized on the generation lock (2026-10-27, observed live): a warm
-    chat-load running CONCURRENTLY with the next image load stalls both for
-    minutes — every back-to-back generation idled ~300 s on a stuck image
-    load while the previous generation's warm reload was still in flight.
-    Two concurrent Studio model loads are the trap; serialized, they're just
-    a no-op (chat already resident) or a clean sequential swap. If another
-    generation is queued this simply waits behind it — and by then the image
-    path has evicted chat again anyway, so skipping the redundant load is
-    correct.
+    Idempotent switch: the helper no-ops when already in the requested mode
+    (its own state check), so a failed previous restore is healed by the
+    next switch attempt. On failure into image mode: log loudly — the card
+    stays in rag mode and RAG keeps working (no half-switch state).
     """
-    if not DEFAULT_MODEL:
+    if not _switcher_enabled():
+        if mode == "image":
+            raise ImageGenError(
+                "GPU_SWITCH_URL not set — run scripts/gpu_switch.sh image "
+                "on the host before generating images")
         return
-    # Studio's /api/inference/load takes a plain HF repo id plus an optional
-    # gguf_variant — it does NOT accept the bot's "repo:quant" model slug.
-    # Sending the slug verbatim fails 100% (HF repo-id validation rejects the
-    # colon; observed live 2026-10-29: deferred 500 "Repo id must use
-    # alphanumeric chars...", chat left evicted until a completion request
-    # auto-loaded it). Split at the first ':' into repo + variant.
-    repo, _, variant = DEFAULT_MODEL.partition(":")
-    async with _gen_lock:
-        try:
-            # Cheap pre-check: don't even POST when chat is already resident
-            # (the common case right after a generation that failed before
-            # evicting, or a double-scheduled reload). Match on the repo id —
-            # Studio reports loaded models as "owner/repo" without the quant,
-            # and verify the quant too when one is requested.
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                loaded = (await _studio(client, "GET", "/api/inference/loaded-models")).get("data", [])
-            if any(
-                m.get("id") == repo
-                and (not variant or m.get("quant") in (variant, None))
-                for m in loaded
-            ):
-                log.debug("chat model already resident — skipping warm reload")
-                return
-            payload: dict[str, str] = {"model_path": repo}
-            if variant:
-                payload["gguf_variant"] = variant
-            t0 = time.monotonic()
-            async with httpx.AsyncClient(timeout=IMAGE_LOAD_TIMEOUT_S) as client:
-                await _studio(client, "POST", "/api/inference/load", json=payload)
-            log.info("chat model re-loaded in background (%.1f s): %s",
-                     time.monotonic() - t0, DEFAULT_MODEL)
-        except Exception as e:  # noqa: BLE001 — best-effort by design
-            log.warning("background chat re-load failed (harmless): %s", e)
+    t0 = time.monotonic()
+    async with httpx.AsyncClient(timeout=GPU_SWITCH_TIMEOUT_S) as client:
+        out = await _helper(client, "POST", "/mode", json={"mode": mode})
+    log.info("gpu mode -> %s (%.1f s): %s", mode, time.monotonic() - t0,
+             str(out.get("detail", out))[:160])
+    if mode == "image":
+        global _mode_switched_at
+        _mode_switched_at = time.monotonic()
 
 
-# ── Prompt rewriting (chat model — MUST run before the swap) ──────────────
+# ── Prompt rewriting (chat model — MUST run BEFORE the mode switch) ───────
 # ── Rewrite policy (layered: repo file + vault character rules) ────────────
 # The prompt-engineering policy is NOT hardcoded here — it lives in two
 # editable places so rule changes never need a code edit:
@@ -253,16 +248,27 @@ def _load_rewrite_system() -> str:
 
 
 
-def _rewrite_client() -> AsyncOpenAI:
-    # Same host/key as chat (bot_core.ai_client's singleton is private; a small
-    # dedicated client keeps this module independently testable).
+def _image_client() -> AsyncOpenAI:
+    """OpenAI client for the IMAGE backend (Studio; IMAGE_INFER_URL).
+
+    bot_core.ai_client's singleton is private; a small dedicated client
+    keeps this module independently testable.
+    """
+    return AsyncOpenAI(api_key=IMAGE_INFER_API_KEY,
+                       base_url=IMAGE_INFER_URL, max_retries=0)
+
+
+def _chat_client() -> AsyncOpenAI:
+    """OpenAI client for the CHAT backend (prompt rewriting; INFER_URL)."""
     return AsyncOpenAI(api_key=INFER_API_KEY, base_url=INFER_URL, max_retries=0)
 
 
 async def rewrite_prompt(text: str) -> str:
     """Expand a short user request into a rich image prompt via the chat model.
 
-    Runs on the resident chat model — call this BEFORE ensure_image_loaded().
+    Runs on the chat backend (its own card) while rag mode is live — call
+    this BEFORE ensure_image_mode(): the rewrite's KB tools include the
+    reranker, which a mode switch takes offline.
     The rewrite goes through the SAME bounded tool-calling loop as normal chat
     (bot_core.agent_loop) with the SAME knowledge-base tools, so campaign
     specifics in the request (characters, companions, places, items) are looked
@@ -271,7 +277,7 @@ async def rewrite_prompt(text: str) -> str:
     over whatever context was gathered.
     Raises ImageGenError on failure (caller falls back to the raw prompt).
     """
-    client = _rewrite_client()
+    client = _chat_client()
 
     async def _complete(
         messages: list[dict], model: str, *, thinking: bool,
@@ -337,10 +343,9 @@ async def rewrite_prompt(text: str) -> str:
         raise ImageGenError(f"prompt rewrite failed: {e.__class__.__name__}") from e
 
 
-# ── Generation (the no-chat-calls window) ─────────────────────────────────
-_gen_lock = asyncio.Lock()  # one generation at a time (swap is global state)
-_background_tasks: set[asyncio.Task] = set()  # strong refs — the loop only
-                                               # keeps weak refs to tasks
+# ── Generation (the image-mode window) ─────────────────────────────────────────
+_gen_lock = asyncio.Lock()  # one generation at a time (mode switches +
+                          # diffusion jobs are card-global state)
 
 
 def resolve_size(raw: str | None) -> int | None:
@@ -429,18 +434,48 @@ async def _generate_one(client: AsyncOpenAI, prompt: str, side: int) -> bytes:
             await asyncio.sleep(5.0)
 
 
-async def _swap_back() -> None:
-    """Swap the chat model back in — ALWAYS, even when a generation failed.
+async def ensure_image_mode(on_phase: Callable[[str], Any] | None = None) -> None:
+    """Put the 4070 into image mode with the diffusion model ready to paint.
 
-    Never leave the image model resident (it would keep evicting the chat
-    model).  The warm reload runs as a background task with a strong
-    reference: an unreferenced task can be GC'd before/while it runs
-    (observed live 2026-10-29: zero warm-reload log lines across every
-    generation despite the code path existing in all deployed builds).
+    Cheap when already in image mode with the model loaded (status 200-OK:
+    no switch, no load, no phase emitted — the back-to-back generation
+    case). Otherwise: switch via the helper (stops reranker/embedder), then
+    ensure the model is resident. Raises ImageGenError on failure — the
+    card may still be mid-switch; the next generation's rag restore heals it.
     """
-    await _unload_image()
-    task = asyncio.get_running_loop().create_task(_warm_chat_reload())
-    _background_tasks.add(task)
+    need_load = True
+    if _switcher_enabled():
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                mode = (await _helper(client, "GET", "/mode")).get("mode", "")
+            except ImageGenError:
+                mode = ""  # helper state unknown — ask for the switch anyway
+        if mode == "image":
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                need_load = not (await _image_status(client)).get("loaded")
+        else:
+            await _switch_gpu_mode("image")
+    if need_load:
+        await _emit_phase(on_phase, "loading")
+        await _ensure_image_loaded()
+    else:
+        log.debug("image mode already live — no switch, no load")
+
+
+async def _restore_rag_after_painting() -> None:
+    """Switch the 4070 back to rag mode after painting — ALWAYS attempted,
+    even when painting failed, so the reranker/embedder are never left down
+    (respecting IMAGE_MODE_HOLD_S). Best-effort: never raises."""
+    try:
+        if IMAGE_MODE_HOLD_S > 0 and _mode_switched_at and \
+                time.monotonic() - _mode_switched_at < IMAGE_MODE_HOLD_S:
+            log.info("image mode held %.0f s (IMAGE_MODE_HOLD_S) — skipping "
+                     "switch-back", IMAGE_MODE_HOLD_S)
+            return
+        await _switch_gpu_mode("rag")
+    except Exception as e:  # noqa: BLE001 — best-effort by design
+        log.error("switch back to rag mode FAILED: %s — reranker/embedder "
+                  "may be down; run: scripts/gpu_switch.sh rag", e)
 
 
 async def _emit_phase(on_phase: Callable[[str], Any] | None, name: str) -> None:
@@ -463,25 +498,25 @@ async def generate_image(
 ) -> bytes:
     """Generate one image and return PNG bytes.
 
-    Holds the generation lock for the whole load→generate→unload window; the
-    CALLER is responsible for holding the global AI slot around this call so
-    no other chat turn can re-resident the chat model mid-swap.
+    Holds the generation lock for the whole switch→paint→restore window.
+    The CALLER must have prepared the prompt BEFORE this call (prompt
+    rewriting needs rag mode live — its KB tools include the reranker).
+    Chat is unaffected: it runs on a different backend/card throughout.
 
     ``on_phase`` (optional, #stall-visibility): awaited with ``"loading"``
-    before the image-model load and ``"painting"`` once it is resident — so a
-    caller can update the user while the GPU sits idle during the swap. A
+    only when the mode switch / model load actually happens (a back-to-back
+    generation in held image mode emits nothing until ``"painting"``). A
     callback error is logged and never fails the generation.
     """
     side = size or IMAGE_DEFAULT_SIZE
     async with _gen_lock:
-        client = _rewrite_client()  # reused for images.generate (same host)
+        client = _image_client()
         try:
-            await _emit_phase(on_phase, "loading")
-            await ensure_image_loaded()
+            await ensure_image_mode(on_phase)
             await _emit_phase(on_phase, "painting")
             return await _generate_one(client, prompt, side)
         finally:
-            await _swap_back()
+            await _restore_rag_after_painting()
 
 
 async def generate_images(
@@ -490,25 +525,25 @@ async def generate_images(
     on_phase: Callable[[str], Any] | None = None,
 ) -> list[bytes | ImageGenError]:
     """Batch variant of :func:`generate_image` (#69): paint every prompt in
-    ONE model-swap window — load once, paint all while the image model is
-    resident (a single failure does NOT abort the rest), unload + warm-
-    reload the chat model exactly once.
+    ONE image-mode window — switch + load once, paint all while the image
+    model is resident (a single failure does NOT abort the rest), switch
+    back to rag mode exactly once.
 
-    The caller holds the global AI slot around the whole call (same contract
-    as :func:`generate_image`).  ``on_phase`` is awaited with ``"loading"``
-    once, then ``"painting i/n"`` per image.  Returns one entry per prompt,
-    in order: PNG bytes or the exception that killed it (:class:`ImageGenError`
-    or a non-transient :class:`APIStatusError` — both are reported per image
-    so ONE bad moment never aborts the rest of the batch).
+    The caller must have PREPARED ALL PROMPTS before this call (moment
+    selection + rewriting need rag mode live).  ``on_phase`` is awaited with
+    ``"loading"`` only when an actual switch/load happens, then
+    ``"painting i/n"`` per image.  Returns one entry per prompt, in order:
+    PNG bytes or the exception that killed it (:class:`ImageGenError` or a
+    non-transient :class:`APIStatusError` — both are reported per image so
+    ONE bad moment never aborts the rest of the batch).
     """
     side = size or IMAGE_DEFAULT_SIZE
     total = len(prompts)
     results: list[bytes | Exception] = []
     async with _gen_lock:
-        client = _rewrite_client()
+        client = _image_client()
         try:
-            await _emit_phase(on_phase, "loading")
-            await ensure_image_loaded()
+            await ensure_image_mode(on_phase)
             for i, prompt in enumerate(prompts, 1):
                 await _emit_phase(on_phase, f"painting {i}/{total}")
                 try:
@@ -517,5 +552,5 @@ async def generate_images(
                     log.error("batch image %d/%d failed: %s", i, total, exc, exc_info=True)
                     results.append(exc)
         finally:
-            await _swap_back()
+            await _restore_rag_after_painting()
     return results

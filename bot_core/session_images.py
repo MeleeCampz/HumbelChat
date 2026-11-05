@@ -4,14 +4,15 @@ Spawned as a tracked background task from ``commands.session_commands``
 (``spawn_tracked_task``).  Flow:
 
 1. select up to ``SESSION_IMAGE_MAX_MOMENTS`` key moments from the session's
-   record (resident chat model — BEFORE any swap);
+   record (chat backend — WHILE the 4070 is still in rag mode);
 2. prepare ALL prompts first, through the existing rewrite pipeline
    (:func:`bot_core.images.prepare_prompt` — KB tools ground campaign
-   specifics, Visual Anchors verbatim) — still on the resident chat model;
-3. paint the whole batch in ONE model-swap window
-   (:func:`bot_core.images.generate_images`: load once → paint ×N → unload +
-   one warm chat reload), holding the global AI slot so no chat turn can
-   re-resident the chat model mid-batch;
+   specifics, Visual Anchors verbatim) — still in rag mode: the rewrite's
+   KB tools include the reranker, which the mode switch takes offline;
+3. paint the whole batch in ONE image-mode window
+   (:func:`bot_core.images.generate_images`: switch once → paint ×N → switch
+   back to rag mode once); chat runs on its own card throughout — no AI-slot
+   hold is needed;
 4. post each painted moment to the ending channel as a captioned PNG and
    archive it under the session folder's hidden ``.images/`` directory.
 
@@ -30,7 +31,7 @@ from typing import Any
 import discord
 
 from bot_core import images as I
-from bot_core.ai_client import _ai_slot, _make_client, _validate_model, complete_text
+from bot_core.ai_client import _make_client, _validate_model, complete_text
 from bot_core.channel_delivery import (
     ChannelNotDeliverableError,
     get_bot,
@@ -210,10 +211,11 @@ async def _paint_batch(
     chan: Any,
     name: str,
 ) -> list[bytes | Exception]:
-    """Paint every prepared prompt in ONE swap window, with live progress.
+    """Paint every prepared prompt in ONE image-mode window, with live progress.
 
     Posts a progress message to the channel (when reachable), edits it per
-    phase, then deletes it.  Holds the global AI slot for the whole batch.
+    phase, then deletes it.  generate_images switches the 4070 into image
+    mode once and back to rag mode once around the whole batch.
     Returns one entry per prompt: PNG bytes or the ImageGenError that killed
     it (a single failure never aborts the rest).
     """
@@ -224,7 +226,7 @@ async def _paint_batch(
         try:
             progress = await chan.send(
                 f"🎨 Painting highlights of **{name}** — {len(prompts)} moment(s). "
-                "Loading the image model (up to a minute)…"
+                "Switching the GPU to image mode…"
             )
         except Exception as e:  # noqa: BLE001
             log.warning("highlight progress message failed: %s", e)
@@ -248,8 +250,7 @@ async def _paint_batch(
 
         return _edit()
 
-    async with _ai_slot():
-        results = await I.generate_images(prompts, on_phase=_on_phase)
+    results = await I.generate_images(prompts, on_phase=_on_phase)
 
     if progress is not None:
         try:
@@ -267,13 +268,13 @@ async def _run_highlights(
 ) -> None:
     name = session.get("name") or "(untitled)"
 
-    # 1) Select key moments — resident chat model, BEFORE any swap.
+    # 1) Select key moments — chat backend, rag mode still live.
     moments = await _select_moments(session, guild_id, channel_id)
     if not moments:
         await _safe_send(chan, f"🎨 No clear key moments to paint for **{name}** — nothing generated.")
         return
 
-    # 2) Prepare ALL prompts first — resident chat model, before the swap.
+    # 2) Prepare ALL prompts first — rag mode still live (KB tools + rerank).
     prompts: list[str] = []
     for moment in moments:
         text = (f"{moment['title']}\n{moment['scene']}" if moment["title"] else moment["scene"]).strip()
@@ -284,7 +285,7 @@ async def _run_highlights(
         await _safe_send(chan, f"🎨 The selected moments for **{name}** came out empty — nothing generated.")
         return
 
-    # 3) Paint the whole batch in ONE model-swap window.
+    # 3) Paint the whole batch in ONE image-mode window (switch back follows).
     results = await _paint_batch(prompts, chan, name)
 
     # 4) Deliver: one captioned PNG per success; a line for each failure.

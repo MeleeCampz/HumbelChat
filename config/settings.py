@@ -121,21 +121,46 @@ TTS_GPU_IDS: list[int] = [
 
 # ── Image generation (/generate_image, #42) ────────────────────────
 # Unsloth Studio diffusion via the OpenAI-compatible /v1/images/generations
-# endpoint (SAME host as chat). Swap-based: loading the image model evicts
-# the resident chat model (Studio design), so the bot generates inside a
-# no-chat-calls window and swaps the chat back afterwards.
+# endpoint. GPU-split (2026-11, feat/image-gpu-split): the image backend is a
+# SEPARATE server from chat — Studio lives on the 4070 (GPU 0) and the chat
+# backend (Strata) on the 5070 (GPU 1). The swap era (image load evicting the
+# resident chat model) is over; the 4070 instead alternates between
+# "image" mode (image model loaded) and "rag" mode (reranker + embedder
+# loaded), switched by the gpu-switch helper around each generation.
+# Defaults fall back to the chat backend, so behaviour is unchanged until
+# IMAGE_INFER_URL is set in .env.
 # Empty IMAGE_MODEL = feature disabled (command replies "not configured").
 IMAGE_MODEL: str = os.getenv("IMAGE_MODEL", "")
+# Dedicated image-backend host + key (Studio); empty = INFER_URL/INFER_API_KEY.
+IMAGE_INFER_URL: str = os.getenv("IMAGE_INFER_URL", "") or INFER_URL
+IMAGE_INFER_API_KEY: str = os.getenv("IMAGE_INFER_API_KEY", "") or INFER_API_KEY
 # Load params for single-file GGUF image repos (Studio images/load):
 IMAGE_GGUF_FILENAME: str = os.getenv("IMAGE_GGUF_FILENAME", "qwen-image-2.1-turbo-Q4_K_M.gguf")
+# GPU id(s) the image model loads onto — 4070 Ti SUPER (GPU 0) since the
+# GPU split; the 5070 belongs to chat alone.
 IMAGE_GPU_IDS: list[int] = [
     int(part)
-    for part in os.getenv("IMAGE_GPU_IDS", "1").replace(",", " ").split()
+    for part in os.getenv("IMAGE_GPU_IDS", "0").replace(",", " ").split()
     if part.lstrip("-").isdigit()
 ]
-# Working set scales with resolution (10 GB+ at high res) — cap the default.
+# Measured footprint (Q4_K_M, logs + published Q4 pipeline math): ~12.5 GiB
+# resident; the transient diffusion working set grows with resolution, so cap
+# the default size.
 IMAGE_DEFAULT_SIZE: int = _safe_int(os.getenv("IMAGE_DEFAULT_SIZE"), 1024)
 IMAGE_MAX_SIZE: int = _safe_int(os.getenv("IMAGE_MAX_SIZE"), 2048)
+# ── GPU mode switching (rag ⇄ image on the 4070) ───────────────────
+# The gpu-switch helper service (scripts/gpu_switch_helper.py, compose service
+# "gpu-switch") wraps: compose stop/start of reranker-llama + embedder-llama
+# and Studio images/load|unload. The bot asks for "image" mode right BEFORE
+# painting (prompt rewrite always runs first, with RAG live) and for "rag"
+# mode afterwards — chat completions on the other card are never affected.
+# Empty GPU_SWITCH_URL = no automatic switching (generation requires the
+# card to be switched manually via scripts/gpu_switch.sh).
+GPU_SWITCH_URL: str = os.getenv("GPU_SWITCH_URL", "")
+# Keep "image" mode this long after a generation so back-to-back
+# /generate_image calls skip the double switch (0 = switch back immediately).
+IMAGE_MODE_HOLD_S: float = _safe_float(os.getenv("IMAGE_MODE_HOLD_S"), 0.0)
+GPU_SWITCH_TIMEOUT_S: float = _safe_float(os.getenv("GPU_SWITCH_TIMEOUT_S"), 420.0)
 # Negative prompt for the diffusion model (what to steer AWAY from). Mirrors
 # the hard rules of the rewrite system prompt (no humans / no modern objects)
 # plus standard quality guards — as negative conditioning, which Qwen-Image
@@ -152,6 +177,8 @@ _DEFAULT_IMAGE_NEGATIVE_PROMPT = (
 IMAGE_NEGATIVE_PROMPT: str = os.getenv("IMAGE_NEGATIVE_PROMPT", _DEFAULT_IMAGE_NEGATIVE_PROMPT).strip()
 IMAGE_GEN_TIMEOUT_S: float = _safe_float(os.getenv("IMAGE_GEN_TIMEOUT_S"), 600.0)
 IMAGE_LOAD_TIMEOUT_S: float = _safe_float(os.getenv("IMAGE_LOAD_TIMEOUT_S"), 300.0)
+# (Image-backend base WITHOUT the /v1 suffix — Studio's management API
+# (/api/inference/...) lives on the bare host; derived in bot_core/images.py.)
 
 # ════════════════════════════════════
 #  CHARACTER defaults (per-char in characters.json)

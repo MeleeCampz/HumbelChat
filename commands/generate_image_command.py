@@ -1,11 +1,13 @@
 """/generate_image (#42) — generate an image via the Studio diffusion model.
 
-Flow (see bot_core/images.py for the why):
+Flow (see bot_core/images.py for the why; GPU-split 2026-11):
 1. defer with a placeholder ("Generating…")
-2. prompt rewrite via the CHAT model (before any swap — no image resident yet)
-   unless ``--raw``
-3. hold the global AI slot across the whole load→generate→unload window so no
-   other chat turn can re-resident the chat model and evict the image mid-run
+2. prompt rewrite on the CHAT backend (INFER_URL / Strata on its own card)
+   while the 4070 is in rag mode — the rewrite's KB tools need the reranker,
+   so it ALWAYS runs before the mode switch — unless ``--raw``
+3. bot_core.images.generate_image switches the 4070 into image mode, paints,
+   and switches back to rag mode in a finally. NO AI-slot hold: chat runs on
+   a different backend/card and is unaffected by painting.
 4. deliver the final text + PNG IN PLACE on the progress message (edit() can
    add attachments — Discord API + discord.py 2.7); only if that edit fails
    does it degrade to a fresh follow-up message
@@ -18,7 +20,6 @@ import time
 
 import discord
 
-from bot_core.ai_client import _ai_slot
 from bot_core.images import (
     IMAGE_DEFAULT_SIZE,
     ImageGenError,
@@ -89,10 +90,11 @@ async def handle_generate_image_command(
         except Exception as exc:  # noqa: BLE001 — cosmetic only
             log.debug("progress cleanup failed: %s", exc)
 
-    # 1) Rewrite FIRST, on the resident chat model (no image loaded yet).
+    # 1) Rewrite FIRST, on the chat backend while rag mode is live (its KB
+    #    tools include the reranker — a mode switch would take it offline).
     final_prompt = await prepare_prompt(prompt, raw=raw)
 
-    # Dry run (#65b): show exactly what would be sent — no swap, no image.
+    # Dry run (#65b): show exactly what would be sent — no mode switch, no image.
     if dry_run:
         log.info("dry-run: returning final prompt without generating (%d chars)",
                  len(final_prompt))
@@ -103,19 +105,21 @@ async def handle_generate_image_command(
         await _cleanup()
         return
 
-    # 2) The no-chat-calls window: hold the AI slot for load→generate→unload.
-    await _progress("📖 Prompt ready — loading the image model (up to a minute)…")
+    # 2) The image-mode window: switch to image mode (only when needed),
+    #    paint, switch back to rag afterwards (inside generate_image).
+    await _progress("📖 Prompt ready — switching the GPU to image mode…")
 
     def _phase(name: str):
+        if name == "loading":
+            return _progress("📖 Prompt ready — loading the image model (up to a minute)…")
         if name == "painting":
             # `side` is None when the user gave no size — the effective
             # default is applied inside generate_image; show that, not "None".
             return _progress(f"🖌️ Painting… ({side or IMAGE_DEFAULT_SIZE} px)")
-        return None  # "loading" already announced above
+        return None
 
     try:
-        async with _ai_slot():
-            png = await generate_image(final_prompt, size=side, on_phase=_phase)
+        png = await generate_image(final_prompt, size=side, on_phase=_phase)
     except ImageGenError as e:
         log.error("image generation failed: %s", e, exc_info=True)
         await interaction.followup.send(f"⚠️ Image generation failed ({e}). Try again in a moment.")

@@ -27,6 +27,43 @@ services:
       - ./hf-cache:/models/hf   # bge-m3 embedding model (downloaded once)
     # No depends_on for the rerankers: both are optional accelerators — the
     # bot health-checks them at startup and fails open to pre-rerank order.
+    # Image generation needs GPU_SWITCH_URL (the gpu-switch service below);
+    # if it is unreachable the bot degrades to "manual mode" (you flip the
+    # 4070 yourself with scripts/gpu_switch.sh image|rag) — see bot_core/images.py.
+
+
+  # GPU mode switcher (GPU-split 2026-11) — owns the mode of the 4070 Ti
+  # SUPER (GPU 0): "rag" (reranker+embedder running) ⇄ "image" (they are
+  # stopped, Studio's diffusion model loaded). Chat (Strata) lives on GPU 1
+  # and is NEVER touched. The bot drives this over the compose network
+  # (GPU_SWITCH_URL=http://gpu-switch:8080); scripts/gpu_switch.sh is the
+  # manual CLI twin. Talks to Docker via the mounted socket (sibling
+  # start/stop) and to Unsloth Studio's management API on the host.
+  # Loopback-only host publish for debugging — the endpoint has NO auth and
+  # controls the GPU, so never bind it to 0.0.0.0 / the LAN.
+  gpu-switch:
+    image: python:3.12-slim
+    container_name: humbelchat-gpu-switch
+    restart: unless-stopped
+    command: ["python", "/app/scripts/gpu_switch_helper.py"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./scripts:/app/scripts:ro
+    environment:
+      - STUDIO_URL=http://host.docker.internal:8888
+      - STUDIO_API_KEY=${INFER_API_KEY:-}
+      - IMAGE_MODEL=${IMAGE_MODEL}
+      - IMAGE_GGUF_FILENAME=${IMAGE_GGUF_FILENAME:-}
+      - IMAGE_GPU_IDS=${IMAGE_GPU_IDS:-0}
+      - LOAD_TIMEOUT_S=${IMAGE_LOAD_TIMEOUT_S:-300}
+    ports:
+      - "127.0.0.1:8082:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/mode',timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
 
   # GPU cross-encoder reranker for RAG (see docs/internal/Todo_Reranker.md).
@@ -192,9 +229,13 @@ services:
   # Pinned llama.cpp reranker (2026-10-25, replaces the vLLM container above —
   # kept as rollback). Self-converted Q4_K_M GGUF with the classifier head
   # intact (every community build had dropped it; see HANDOFF_RERANKER_LLAMA.md).
-  # ~2.4 GB flat on GPU 1, 150-pair batch ~4 s. The bot reaches it on the
+  # ~2.4 GB flat, 150-pair batch ~4 s. The bot reaches it on the
   # compose network via the service name; loopback publish is debug-only
   # (llama-server has NO auth — never bind to the LAN).
+  #
+  # GPU 0 since 2026-11 (GPU split): the 4070 runs "rag mode" by default and
+  # the gpu-switch service stops this container when the diffusion model needs
+  # the card; the 5070 (GPU 1) is chat-only now and must stay free.
   reranker-llama:
     image: ghcr.io/ggml-org/llama.cpp@sha256:2fe406b2bcc86647e3b17638504c04802a4514f774a1395f303e66b0bc5f650e   # build 11870 (floating :server-cuda as of 2026-10-25; numbered tags stopped at b4738, pre-qwen3)
     container_name: humbelchat-reranker-llama
@@ -204,8 +245,8 @@ services:
       # The Windows nvidia runtime exposes BOTH GPUs to the container despite
       # the device_ids reservation below (verified 2026-10-25: inference ran
       # on GPU 0 with zero GPU-1 activity), and llama.cpp defaults to device 0.
-      # This is what actually pins it to the 5070 Ti.
-      - CUDA_VISIBLE_DEVICES=1
+      # This is what actually pins it to the 4070 Ti SUPER (GPU 0).
+      - CUDA_VISIBLE_DEVICES=0
     ports:
       - "127.0.0.1:8090:8080"
     volumes:
@@ -230,14 +271,15 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["1"]
+              device_ids: ["0"]
               capabilities: [gpu]
 
   # Pinned llama.cpp embedder (2026-10-25, replaces the Ollama container above
   # — kept as rollback). Official Qwen3-Embedding-4B Q4_K_M GGUF (~2.5 GB,
   # quality ≈ Q8_0 per docs/internal/EVAL_QWEN3_EMBEDDING.md); OpenAI-compatible
   # /v1/embeddings, so the bot only swaps EMBED_URL + model name (the one-time
-  # auto-reindex keeps all vectors in one space). Shares GPU 1 with the reranker.
+  # auto-reindex keeps all vectors in one space). Shares GPU 0 with the
+  # reranker (rag mode; gpu-switch stops both for image mode).
   embedder-llama:
     image: ghcr.io/ggml-org/llama.cpp@sha256:2fe406b2bcc86647e3b17638504c04802a4514f774a1395f303e66b0bc5f650e   # build 11870 (floating :server-cuda as of 2026-10-25; numbered tags stopped at b4738, pre-qwen3)
     container_name: humbelchat-embedder-llama
@@ -245,8 +287,8 @@ services:
     environment:
       - CUDA_DEVICE_ORDER=PCI_BUS_ID
       # Same pinning rationale as reranker-llama (device_ids is ignored by the
-      # Windows nvidia runtime; see that service's comment).
-      - CUDA_VISIBLE_DEVICES=1
+      # Windows nvidia runtime; see that service's comment) — 4070 / GPU 0.
+      - CUDA_VISIBLE_DEVICES=0
     ports:
       - "127.0.0.1:8091:8080"
     volumes:
@@ -269,5 +311,5 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["1"]
+              device_ids: ["0"]
               capabilities: [gpu]
