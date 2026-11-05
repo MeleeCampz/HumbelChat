@@ -16,6 +16,7 @@ __pycache__/
 data/
 logs/
 hf-cache/
+ollama-models/
 .env
 .env.*
 !.env.example
