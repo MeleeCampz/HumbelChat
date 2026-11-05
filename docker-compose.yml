@@ -268,8 +268,9 @@ services:
       - "2048"
       - --no-context-shift
       - --flash-attn
-      - "on"   # quoted: YAML would parse bare `on` as boolean true (build
-               # 11870 takes [on|off|auto]; the old b4738 took a boolean flag)
+      # quoted: YAML parses bare `on` as boolean true; build 11870 takes the
+      # [on|off|auto] enum (the old b4738 took a boolean flag)
+      - "on"
       - --host
       - 0.0.0.0
     deploy:
@@ -312,7 +313,8 @@ services:
       # embedding vectors slightly (index-space consistency!) — validate on a
       # sample reindex before enabling it here.
       - --flash-attn
-      - on   # [on|off|auto] in build 11870 (same form as reranker-llama)
+      # quoted: YAML parses bare `on` as boolean true
+      - "on"
       - -c
       # Some KB chunks tokenize to ~2k tokens (code-heavy files); 2048 overflowed
       # the KV under concurrent slots (HTTP 500 "Context size has been exceeded"
