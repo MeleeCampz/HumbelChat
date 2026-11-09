@@ -166,7 +166,15 @@ def _docker_req(path: str, method: str = "GET", timeout: float = 30.0) -> dict:
         raw = resp.read()
         if resp.status >= 400:
             raise DockerAPIError(resp.status, raw.decode(errors="replace")[:200])
-        return json.loads(raw or b"{}")
+        try:
+            return json.loads(raw or b"{}")
+        except json.JSONDecodeError:
+            # Docker's /_ping answers text/plain "OK", NOT JSON. A JSON-only
+            # reader turned a perfectly healthy daemon into "unreachable" and
+            # refused EVERY switch (live 2026-11-09: docker_ok false while the
+            # container lookups — which really are JSON — read fine).
+            # A 2xx/3xx body is a success regardless of its content type.
+            return {"raw": raw.decode(errors="replace")[:200]}
     finally:
         conn.close()
 
@@ -176,6 +184,7 @@ def _daemon_reachable() -> bool:
     silently mean "everything stopped" and mode derivation would lie (the
     exact 2026-11-05 failure). Switches refuse instead of acting on lies."""
     try:
+        # Non-JSON body is fine (see _docker_req): "OK" text is a good daemon.
         _docker_req("/_ping", timeout=10)
         return True
     except Exception as e:  # noqa: BLE001

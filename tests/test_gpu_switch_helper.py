@@ -19,7 +19,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import gpu_switch_helper as h  # noqa: E402
 
-_REAL_DOCKER = h._docker  # the autouse fixture monkeypatches h._docker
+_REAL_DOCKER = h._docker                  # the autouse fixture monkeypatches h._docker
+_REAL_DAEMON_REACHABLE = h._daemon_reachable  # ... and so does it
 
 
 @pytest.fixture(autouse=True)
@@ -179,6 +180,40 @@ class TestDaemonTransport:
         t.start()
         monkeypatch.setattr(h, "DAEMON", ("unix", path))
         assert h._docker_req("/_ping") == {"APIVersion": "1.45"}
+        srv.close()
+
+    def test_plain_text_ping_body_is_not_a_failure(self, monkeypatch, tmp_path):
+        """Live 2026-11-09 regression: the real daemon answers /_ping with
+        text/plain 'OK'. The JSON-only reader raised JSONDecodeError, so
+        _daemon_reachable() reported a HEALTHY daemon as unreachable and switch()
+        refused everything — docker_ok:false while container lookups worked.
+        A 2xx body must count as reachable whatever its content type."""
+        import socket as _sock
+        import threading
+
+        path = str(tmp_path / "ping-text.sock")
+        srv = _sock.socket(_sock.AF_UNIX, _sock.SOCK_STREAM)
+        srv.bind(path)
+        srv.listen(3)
+        srv.settimeout(5)
+
+        def serve():
+            while True:
+                try:
+                    conn, _ = srv.accept()
+                except OSError:
+                    return
+                with conn:
+                    conn.recv(4096)
+                    body = b"OK"
+                    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+                                 b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+
+        threading.Thread(target=serve, daemon=True).start()
+        monkeypatch.setattr(h, "DAEMON", ("unix", path))
+        monkeypatch.setattr(h, "_daemon_reachable", _REAL_DAEMON_REACHABLE)
+        assert h._docker_req("/_ping") == {"raw": "OK"}
+        assert h._daemon_reachable() is True
         srv.close()
 
     def test_docker_idempotency_codes(self, monkeypatch):
