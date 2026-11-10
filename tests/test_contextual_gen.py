@@ -203,7 +203,6 @@ class TestReembedWiring:
 
     @pytest.mark.asyncio
     async def test_partial_failure_retries_only_the_missing_hashes(self, tmp_path):
-        from kb.vector_db import _content_hash
         store = _fake_store(tmp_path, n_chunks=3)
         seq = [0, 1]   # first batch refreshed nothing, second batch succeeded
 
@@ -249,7 +248,9 @@ class TestStoreSidecarMethods:
         store._context_lines = {}
         store.save_context_lines({"abc": "line one"})
         raw = (tmp_path / "context_lines.json").read_text(encoding="utf-8")
-        assert json.loads(raw) == {"abc": "line one"}
+        # __v2__ marks a stamp-aware file: without it, a reader would treat this
+        # sidecar as pre-stamp and stamp every line as "already embedded".
+        assert json.loads(raw) == {"abc": "line one", "__v2__": 1}
         assert store.reload_context_lines() == {"abc": "line one"}
 
     def test_save_is_atomic_no_partial_readers(self, tmp_path):
@@ -261,7 +262,7 @@ class TestStoreSidecarMethods:
         store.save_context_lines({"new": "v"})
         # no leftover tmp file; the live file is the new one
         assert not (tmp_path / "context_lines.json.tmp").exists()
-        assert json.loads((tmp_path / "context_lines.json").read_text(encoding="utf-8")) == {"new": "v"}
+        assert json.loads((tmp_path / "context_lines.json").read_text(encoding="utf-8")) == {"new": "v", "__v2__": 1}
 
     def test_coverage_counts(self):
         from kb.index import KBIndexStore

@@ -12,6 +12,8 @@ and the never-corrupt failure paths.
 from __future__ import annotations
 
 import hashlib
+import json
+import pathlib
 import sqlite3
 
 import pytest
@@ -308,7 +310,6 @@ class TestFailurePaths:
             kb, {"# Alpha\n\nalpha body text here": ALPHA_LINE,
                  "# Beta\n\nbeta body text here": BETA_LINE})
         beta = next(d for d in store._index._docs if d.source() == "two.md")
-        alpha_hash = _h(next(d for d in store._index._docs if d.source() == "one.md").content)
 
         class HalfBroken:
             """Second passage in the batch fails individually."""
@@ -329,3 +330,76 @@ class TestFailurePaths:
         assert docs["one.md"].embedding == _vec(docs["one.md"].passage_text())
         assert docs["two.md"].embedding == _vec(beta.content)  # kept its old (raw) vector
         assert _rows(store.db_path)["one.md"][2] == _vec(docs["one.md"].passage_text())
+
+
+class TestLegacyStampMigration:
+    """The sidecar's re-embed stamp (#80) must survive the load that creates it."""
+
+    async def _contents(self, kb) -> dict[str, str]:
+        """source -> CHUNK content, exactly as the index sees it (sidecar keys
+        hash over this, not over the file bytes)."""
+        store = _store(kb)
+        await store.load()
+        return {d.source(): d.content for d in store._index._docs}
+
+    def _write_sidecar(self, store, by_source: dict[str, str], *, stamped=None) -> pathlib.Path:
+        payload = {_h(c): by_source[c] for c in by_source}
+        if stamped is not None:
+            payload["__v2__"] = 1
+            payload["__v__"] = sorted(stamped)
+        path = store.persist_dir / "context_lines.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    async def test_pre_stamp_sidecar_is_stamped_once_and_persisted(self, kb, caplog):
+        """Lines older than the stamp must not read as 'vector missing' forever."""
+        import logging
+        contents = await self._contents(kb)
+        lines = {contents["one.md"]: ALPHA_LINE, contents["two.md"]: BETA_LINE}
+        store = _store(kb)
+        await store.load()                       # vectors built from RAW text
+        self._write_sidecar(store, lines)
+
+        caplog.set_level(logging.INFO, logger="kb.index")
+        store2 = _store(kb)
+        await store2.load()
+        assert store2.contextual_coverage() == (2, 2)
+        assert store2.contextual_vector_lag() == 0, "a stamped load leaves no lag"
+        data = json.loads((store2.persist_dir / "context_lines.json").read_text(encoding="utf-8"))
+        assert data["__v2__"] == 1
+        assert sorted(data["__v__"]) == sorted([_h(contents["one.md"]), _h(contents["two.md"])])
+        assert any("predate the re-embed stamp" in r.getMessage() for r in caplog.records)
+
+        # It stays resolved: a second start re-stamps nothing and re-embeds nothing.
+        before = (store2.persist_dir / "context_lines.json").read_bytes()
+        store3 = _store(kb)
+        await store3.load()
+        assert store3.contextual_vector_lag() == 0
+        assert (store3.persist_dir / "context_lines.json").read_bytes() == before
+        assert await store3.reembed_contextualized(None) == 0
+
+    async def test_stamp_format_sidecar_is_never_blanket_stamped(self, kb):
+        """Marker present + partial stamp = the #77 state: it must stay lagging."""
+        contents = await self._contents(kb)
+        lines = {contents["one.md"]: ALPHA_LINE, contents["two.md"]: BETA_LINE}
+        store = _store(kb)
+        await store.load()
+        path = self._write_sidecar(store, lines, stamped={_h(contents["one.md"])})
+        before = path.read_bytes()
+
+        store2 = _store(kb)
+        await store2.load()
+        assert store2.contextual_coverage() == (2, 2)
+        assert store2.contextual_vector_lag() == 1
+        assert _h(contents["two.md"]) not in store2._context_vec
+        assert path.read_bytes() == before, "a load must not invent a stamp it was given"
+
+    async def test_reembed_records_the_stamp_so_a_second_run_is_a_no_op(self, kb):
+        contents = await self._contents(kb)
+        store = await _built_store_with_lines(kb, {contents["one.md"]: ALPHA_LINE})
+        assert store.contextual_vector_lag() == 1
+        n = await store.reembed_contextualized(None)
+        assert n == 1
+        data = json.loads((store.persist_dir / "context_lines.json").read_text(encoding="utf-8"))
+        assert data["__v__"] == [_h(contents["one.md"])]
+        assert await store.reembed_contextualized(None) == 0

@@ -152,6 +152,41 @@ async def close_client() -> None:
     _shared_client = None
 
 
+# ── Liveness probe (#80) ────────────────────────────────────────────────
+# "Is the embedding backend up?" used to be answerable only by trying to embed
+# something, which (a) costs a real /embeddings call and (b) can force the
+# resident model into VRAM. The contextual fill loop asks this every 30 minutes
+# and must NOT do either, so the probe is a plain GET on the model-list route.
+#
+# A *response of any kind* (even 404) means the container is reachable — a
+# stopped compose service fails at DNS/connect instead. That makes the check
+# independent of whether the server implements /models.
+PROBE_TIMEOUT_S: float = 4.0
+
+
+async def probe_remote(timeout: float = PROBE_TIMEOUT_S) -> bool:
+    """Reachability of the configured ``EMBED_URL`` without embedding anything.
+
+    Returns True on any HTTP response, False on connect/DNS/timeout failure.
+    Deliberately does not inspect the body and does not retry — an unreachable
+    sidecar should cost one short attempt, not the encode retry ladder.
+    """
+    from config.settings import EMBED_URL
+
+    base = EMBED_URL.rstrip("/")
+    candidates = [base + "/models"] if base.endswith(("/api/v1", "/v1")) else [
+        base + "/v1/models", base + "/models",
+    ]
+    client = await _get_client()
+    for url in candidates:
+        try:
+            await client.get(url, timeout=timeout)
+            return True  # any HTTP answer = the service is up
+        except Exception as exc:  # noqa: BLE001 — reachability, not correctness
+            logger.debug("embedder probe failed for %s: %s", url, exc)
+    return False
+
+
 class Embedder:
     """Async embedding provider wrapping an OpenAI-compatible /embeddings endpoint.
 

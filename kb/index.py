@@ -75,6 +75,13 @@ if TYPE_CHECKING:  # only for the _rechunk return annotation
 
 logger = logging.getLogger("kb.index")
 
+# The cache dir name, and the default one for the configured knowledge base.
+# Single source of truth: KBIndexStore derives it from its kb_path, and the bot's
+# fill loop / scripts/contextual_reindex.py use these to find the heartbeat file
+# without re-deriving the path in three places.
+CACHE_DIRNAME = ".vector_index_cache"
+DEFAULT_PERSIST_DIR = pathlib.Path(__file__).resolve().parent.parent / "data" / "knowledge" / CACHE_DIRNAME
+
 # ──────────────────────────── Constants ────────────────────────────────
 
 # File extensions eligible for KB indexing (must match vector_db.py).
@@ -259,7 +266,7 @@ class KBIndexStore:
         # CWD-relative "kb/.index_cache" default broke when the bot was
         # started from anywhere other than the repo root.
         if persist_dir is None:
-            self.persist_dir = self.kb_path / ".vector_index_cache"
+            self.persist_dir = self.kb_path / CACHE_DIRNAME
         else:
             self.persist_dir = pathlib.Path(persist_dir)
             if not self.persist_dir.is_absolute():
@@ -284,6 +291,12 @@ class KBIndexStore:
         # one-line chunk context. Empty when the file is absent, which keeps
         # every code path at its legacy behaviour.
         self._context_lines = self._load_context_lines()
+        # #80: the sidecar also carries a reserved ``__v__`` list — the hashes
+        # whose DENSE vector is known to have been built from context_line +
+        # content. A line without a stamp means "BM25/prompt see the framing but
+        # the vector still describes the raw chunk", which is what the automatic
+        # fill loop repairs (main.py::_contextual_sidecar_worker).
+        self._context_vec: set[str] = set(self._ctx_stamp)
         # Index WRITES (build / update / sync) use a dedicated embedder that can run
         # on the GPU backend for speed while QUERIES stay on local CPU. Both must be
         # the same model (bge-m3) so their vectors are interchangeable.
@@ -296,22 +309,61 @@ class KBIndexStore:
         # exclude each other.  Python ≥3.10 locks carry no loop binding.)
         self._mut_lock: asyncio.Lock | None = None
 
+    # Reserved key in the sidecar JSON holding the re-embed stamp (#80). A
+    # leading-underscore key can never collide with a content hash.
+    _CTX_STAMP_KEY = "__v__"
+
     def _load_context_lines(self) -> dict[str, str]:
         """Read the Contextual Retrieval sidecar (``context_lines.json``).
 
         Maps a chunk's ORIGINAL content hash to its one-line context. Lives
         next to the vector DB in *persist_dir*; absent or unreadable → empty
         map = legacy behaviour (no framing, no re-embedding needed).
+
+        The file may also hold the reserved ``__v__`` key: the list of hashes
+        whose dense vector was built WITH their context line. It is split out
+        here into ``self._context_vec`` and never returned as a "line".
         """
         path = self.persist_dir / "context_lines.json"
+        self._ctx_stamp: set[str] = set()
         if not path.exists():
             return {}
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
                 return {}
-            return {k: v for k, v in data.items()
-                    if isinstance(k, str) and isinstance(v, str) and v}
+            stamp = data.get(self._CTX_STAMP_KEY)
+            if isinstance(stamp, list):
+                self._ctx_stamp = {h for h in stamp if isinstance(h, str)}
+            modern = bool(data.get("__v2__"))
+            lines = {k: v for k, v in data.items()
+                     if isinstance(k, str) and isinstance(v, str) and v
+                     and not k.startswith("__")}
+            if lines and not self._ctx_stamp and not modern:
+                # Legacy sidecar (written before the stamp existed, e.g. the whole
+                # pre-#77 fill). Those lines were embedded through the same
+                # build/update path as everything else, so stamping them once is
+                # the honest reading of the historical invariant — and it MUST
+                # reach the disk with the ``__v2__`` marker: if only memory were
+                # stamped, every later start would re-detect "legacy", report
+                # every line as un-embedded, and the fill loop would re-embed the
+                # whole index over and over. A file that HAS the marker but an
+                # empty/partial stamp is deliberately NOT trusted — that is the
+                # exact "lines written, vectors not refreshed" state #77 exists
+                # to catch, and the fill loop repairs it chunk by chunk.
+                self._ctx_stamp = set(lines)
+                # Explicit stamped= : __init__ snapshots _context_vec from the
+                # stamp AFTER this method returns, so the attribute is still the
+                # pre-load value here.
+                self.save_context_lines(lines, stamped=self._ctx_stamp)
+                logger.info(
+                    "Contextual sidecar: %d entr(y/ies) predate the re-embed stamp and "
+                    "are recorded as vectorized; the stamp format is now written to '%s'. "
+                    "Chunks embedded after this point are stamped by the path that "
+                    "embeds them, and any un-stamped line stays lagging for the fill loop.",
+                    len(lines), path,
+                )
+            return lines
         except (OSError, json.JSONDecodeError) as exc:
             logger.warning("Could not read contextual sidecar '%s': %s", path, exc)
             return {}
@@ -321,18 +373,62 @@ class KBIndexStore:
         self._context_lines = self._load_context_lines()
         return self._context_lines
 
-    def save_context_lines(self, lines: dict[str, str]) -> None:
+    def save_context_lines(
+        self, lines: dict[str, str], *, stamped: set[str] | None = None
+    ) -> None:
         """Persist the sidecar atomically (write tmp + rename) — #52.
 
         Used by the generation paths (background fill / offline script) after
         every batch so an interrupted run never loses finished work and never
         leaves readers a partial file.
+
+        *stamped* (#80) replaces the ``__v__`` re-embed stamp; omitted means
+        "keep the stamp this store last read/wrote", so a plain line-save never
+        silently drops the bookkeeping.
         """
+        if stamped is not None:
+            self._context_vec = set(stamped)
+        payload: dict[str, Any] = {k: v for k, v in lines.items() if not k.startswith("__")}
+        payload["__v2__"] = 1  # stamp-aware format marker (see _load_context_lines)
+        # Defensive getattr: tests build stores with __new__ and no stamp state.
+        stamp = getattr(self, "_context_vec", None)
+        if stamp:
+            payload[self._CTX_STAMP_KEY] = sorted(self._context_vec)
         self.persist_dir.mkdir(parents=True, exist_ok=True)
         path = self.persist_dir / "context_lines.json"
         tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(lines, ensure_ascii=False, indent=0), encoding="utf-8")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=0), encoding="utf-8")
         tmp.replace(path)  # atomic: readers never see a partial file
+
+    def stamp_context_vectors(self, hashes: set[str]) -> None:
+        """Record that *hashes* now have a dense vector built WITH their line.
+
+        In-memory only — cheap enough to call per batch; callers persist via
+        :meth:`save_context_lines` / :meth:`save_stamp`.
+        """
+        if not hashes:
+            return
+        self._context_vec |= set(hashes)
+
+    def save_stamp(self) -> None:
+        """Persist the re-embed stamp (call once after stamping, not per chunk)."""
+        self.save_context_lines(self._context_lines)
+
+    def contextual_vector_lag(self) -> int:
+        """How many chunks have a context line but an un-stamped (raw) vector.
+
+        The self-healing signal for the fill loop: >0 means dense retrieval is
+        still ranking those chunks on their raw text while BM25 and the attached
+        passage carry the framing. Chunks with no line are NOT lag — they are
+        reported by :meth:`contextual_coverage` and need generation first.
+        """
+        inner = self._index
+        if inner is None:
+            return 0
+        return sum(
+            1 for d in inner._docs
+            if d.context_line and _content_hash(d.content) not in self._context_vec
+        )
 
     def contextual_coverage(self) -> tuple[int, int]:
         """(chunks with a context line, total chunks) — for the #52 warning."""
@@ -583,6 +679,11 @@ class KBIndexStore:
                 if doc.context_line
                 and doc.content.strip()
                 and (content_hashes is None or _content_hash(doc.content) in content_hashes)
+                # Idempotence (#80): a chunk already stamped as vectorized is not
+                # a candidate, so a periodic repair can never re-embed the whole
+                # KB in a loop.
+                and (content_hashes is not None
+                     or _content_hash(doc.content) not in self._context_vec)
             ]
             if not targets:
                 return 0
@@ -619,6 +720,13 @@ class KBIndexStore:
             self._index._mat_cache = None  # belt-and-braces (identity already changed)
             # P2 #20: only the files holding refreshed chunks are upserted.
             await self._save_to_disk_from(self._index, changed=changed_keys)
+            # #80: only REFRESHED chunks get stamped. A failed one stays un-stamped
+            # so the fill loop reports and repairs it on the next check instead of
+            # hiding a mixed-space index behind a "covered" sidecar.
+            self.stamp_context_vectors(
+                {_content_hash(d.content) for (i, d), vec in zip(targets, vectors) if vec}
+            )
+            self.save_stamp()
             logger.info(
                 "Contextual re-embed: %d chunk(s) re-embedded with their context "
                 "line (%d file(s) upserted%s)",

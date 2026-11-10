@@ -133,12 +133,42 @@ raw content. Generated once per chunk by the background fill (#52,
 — existing hashes are skipped); the A/B benchmark showed +2 hits with zero
 regressions on the golden set.
 
-**Coverage watch + background fill (#52):** new chunks are indexed *without*
-a context line (safe legacy fallback), so after ingesting new data the
-sidecar no longer covers the index. At startup the bot checks coverage and
-logs a warning when it's partial; with `CONTEXTUAL_BACKGROUND_FILL=1` it also
-generates the missing lines in the background (shared core:
-`kb/contextual_gen.py`; offline alternative: `scripts/contextual_reindex.py`).
+**Coverage watch + background fill (#52, self-healing #80):** new chunks are
+indexed *without* a context line (safe legacy fallback), so after ingesting new
+data the sidecar no longer covers the index. `CONTEXTUAL_BACKGROUND_FILL=1` turns
+the fill into a **standing maintenance loop** rather than a boot-time job:
+every `CONTEXTUAL_FILL_RECHECK_S` it reads sidecar coverage plus the re-embed
+stamp (below) and repairs what is missing. A fully contextualized index leaves
+the round immediately — one index read, no LLM call, no embedding, no log line —
+so it is free to run forever. Before a round can run it must pass two gates:
+the embedding backend must answer `probe_remote()` (a 4 s GET on `/models`), and
+the chat model it will use must actually be hosted (`kb.contextual_gen
+.resolve_fill_model`) — generating lines while their vectors cannot be re-embedded
+is exactly the half-done state this loop exists to remove. While
+`scripts/contextual_reindex.py` is writing it refreshes a `fill_heartbeat` file
+in the cache dir and the loop stands down (staleness is read from the timestamp
+the script *wrote*, so a killed script's leftover file does not freeze the fill
+for 20 minutes). A failed round logs the exception type and retries after
+`CONTEXTUAL_FILL_RETRY_S`×5; it never propagates to the bot. The partial-coverage
+warning is logged once per run even when the fill is off.
+
+**The re-embed stamp (`__v__` in `context_lines.json`, #80):** coverage alone
+cannot tell you whether a chunk's *vector* was built from `context + content` or
+from raw content. `KBIndexStore` therefore keeps a reserved `__v__` array — the
+content hashes whose dense vector is known to carry their line — and
+`contextual_vector_lag()` reports lines whose vector still doesn't. A lag-only
+round costs no chat calls: it just re-embeds the un-stamped chunks. The stamp is
+younger than the index, so a sidecar **with neither `__v__` nor the `__v2__`
+marker** is taken at its word: every line in it was written by a build/update
+path that embeds `context_line + content`, so those entries are stamped once and
+the file is re-saved in the stamped format (otherwise every start would re-detect
+"legacy" and re-embed the whole KB forever). A file that **has** the marker but an
+empty or partial stamp is deliberately *not* trusted — that is precisely the
+"lines written, vectors never refreshed" state #77 exists to catch, so those
+chunks stay lagging until the fill (or the script) re-embeds them;
+`scripts/contextual_reindex.py --status` reports line coverage,
+vector coverage, lag and orphans, and `--stamp-all` declares the historical
+invariant by hand if you would rather skip the re-embed pass.
 
 **Vector refresh (#77):** a line only helps dense retrieval if the *embedding*
 was built from `context_line + "\n\n" + content`. The fill writes the line, so
@@ -149,12 +179,13 @@ the contextual passage and nothing else (untouched chunks keep their exact
 vectors, `content_hash`/`file_hash` stay byte-stable so the P2 #19 hash fast
 path and the incremental save stay correct, numpy + BM25 caches are rebuilt,
 `metadata` is rewritten). The fill calls it per batch, so a filled chunk is
-vector-searchable immediately; if the embedding backend is down the lines still
-land and the vectors lag, which the finish log warns about. Repair an
-already-filled index offline with `scripts/contextual_reindex.py
---reembed-contextualized [--path-substring FEAT] [--reembed-only]` — **stop the
-bot first**: a live bot rewrites the cache on shutdown from its stale in-memory
-copy and can re-add lines the run pruned.
+vector-searchable immediately, and only chunks it actually wrote are stamped —
+if the embedding backend is down the lines still land, the vectors stay
+un-stamped, and the next fill round repairs them (#80). Repair an already-filled
+index offline with `scripts/contextual_reindex.py --reembed-contextualized
+[--path-substring FEAT] [--reembed-only]` — **stop the bot first**: a live bot
+rewrites the cache on shutdown from its stale in-memory copy and can re-add
+lines the run pruned.
 
 
 ## Low-confidence query rewriting (vector path)

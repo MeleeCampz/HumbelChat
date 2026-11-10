@@ -147,6 +147,27 @@ def _clear_model_list_cache() -> None:
     _model_list_cache.clear()
 
 
+async def _backend_model_ids(client: AsyncOpenAI) -> set[str] | None:
+    """Model ids the inference backend hosts, cache-backed (#80).
+
+    Returns ``None`` when the list could not be fetched — "unknown" and "empty"
+    are different answers: a caller must not defer work because a listing call
+    failed, and must not pretend a model is hosted when it never checked.
+    """
+    now = time.monotonic()
+    cached = _model_list_cache.get(INFER_URL)
+    if cached is not None and now - cached[0] < _MODEL_LIST_TTL_SEC:
+        return cached[1]
+    try:
+        models_resp = await client.models.list()
+        available = {m.id for m in models_resp.data if isinstance(m.id, str)}
+        _model_list_cache[INFER_URL] = (now, available)
+        return available
+    except Exception as e:
+        log.warning("Could not list backend models at %s: %s", INFER_URL, e)
+        return None
+
+
 async def _validate_model(client: AsyncOpenAI, effective_model: str) -> str:
     """Guard against stale character models: fall back to the .env default.
 
@@ -155,18 +176,7 @@ async def _validate_model(client: AsyncOpenAI, effective_model: str) -> str:
     """
     if not effective_model:
         return DEFAULT_MODEL or ""
-    now = time.monotonic()
-    available: set[str] | None = None
-    cached = _model_list_cache.get(INFER_URL)
-    if cached is not None and now - cached[0] < _MODEL_LIST_TTL_SEC:
-        available = cached[1]
-    else:
-        try:
-            models_resp = await client.models.list()
-            available = {m.id for m in models_resp.data}
-            _model_list_cache[INFER_URL] = (now, available)
-        except Exception as e:
-            log.warning("Could not list backend models at %s: %s", INFER_URL, e)
+    available = await _backend_model_ids(client)
     if available and effective_model not in available and effective_model != DEFAULT_MODEL:
         log.warning("Model '%s' not found on backend; falling back to '%s'", effective_model, DEFAULT_MODEL)
         return DEFAULT_MODEL or ""

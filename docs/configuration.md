@@ -268,25 +268,45 @@ description + inline fields); long structured replies become multiple embed
 messages, and tiny/unstructured replies fall back to plain text. See
 [Embeds](./embeds.md) for details.
 
-## Contextual sidecar background fill (#52)
+## Contextual sidecar maintenance loop (#52, #80)
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `CONTEXTUAL_BACKGROUND_FILL` | `0` | After startup, generate missing contextual-retrieval lines for newly ingested chunks in the background (idle-delayed, batch-paused so live `/ai` keeps working, resumable, reloaded per batch). |
-| `CONTEXTUAL_FILL_INITIAL_DELAY_S` | `300` | Seconds after startup before the fill begins. |
+| `CONTEXTUAL_BACKGROUND_FILL` | `0` | Run the contextual-retrieval fill as a standing maintenance loop (idle-delayed start, batch-paused so live `/ai` keeps working, resumable, re-embeds what it generates). With it off, only the one-shot coverage warning runs. |
+| `CONTEXTUAL_FILL_INITIAL_DELAY_S` | `300` | Seconds after startup before the first round. |
 | `CONTEXTUAL_FILL_BATCH_PAUSE_S` | `60` | Pause between fill batches. Each batch's fresh lines are re-embedded as they land (#77), so a small value makes the fill one continuous burst — set `5` when nothing else is embedding (the bot only embeds on `/kb add`, which the fill queue-jumps). |
+| `CONTEXTUAL_FILL_RECHECK_S` | `1800` | How often the loop re-reads sidecar coverage + the re-embed stamp and repairs what is missing. A complete index costs one index read per interval (no LLM call, no embedding, no log line). `0` runs rounds back to back. |
+| `CONTEXTUAL_FILL_RETRY_S` | `60` | Short wait when a round could not run (embedder unreachable, offline script holding the cache, no index store). A failed round waits `×5`. |
+| `CONTEXTUAL_FILL_MAX_ROUNDS` | `1000` | Hard cap on rounds per process, so a mis-set interval can never become a hot loop (`0` = unbounded). At the default interval the cap is ~17 days of uptime. |
+| `CONTEXTUAL_FILL_LLM_TIMEOUT_S` | `90` | Bound on every chat call the fill makes (and on the model listing). The shared OpenAI client sets no timeout of its own — without this, one hung request looks exactly like a fill that never started. |
+| `CONTEXTUAL_FILL_MODEL` | *(empty)* | Chat model used for generation, independent of `MODEL_NAME`. Generation needs *a* hosted model, not the campaign persona model. |
+| `CONTEXTUAL_FILL_ALLOW_MODEL_FALLBACK` | `1` | If the configured model is not hosted by the backend, pick a hosted one (shortest id) instead of deferring the round. With `0`, or when `CONTEXTUAL_FILL_MODEL` names a model the backend does not serve, the round is deferred and the mismatch is logged. |
 
-The coverage **warning** is always on: if the sidecar doesn't cover every
-indexed chunk (e.g. after new data was ingested), startup logs a warning with
-the coverage and both fill options. Offline alternative:
-`scripts/contextual_reindex.py`.
+The coverage **warning** is always on, with or without the fill: if the sidecar
+doesn't cover every indexed chunk (e.g. after new data was ingested) it is
+logged — once per run, not once per interval — with the coverage and the fill
+options. Offline twin: `scripts/contextual_reindex.py` (`--status` is a read-only
+report of line coverage, vector coverage, lag and orphans; it is safe to run
+while the bot is up).
+
+**A round only runs when it can finish:** the loop first checks that the
+embedding backend answers (`kb.embedder.probe_remote`, one 4 s GET on `/models`)
+and that the chat model it intends to use is actually hosted (`CONTEXTUAL_FILL_MODEL`
+or `MODEL_NAME`; `resolve_fill_model` lists the backend's models through the same
+cache the `/ai` path uses). Lines without their re-embed are the half-done state
+the fill exists to remove, so an unreachable embedder defers the whole round and
+says why. GPU in `image` mode is the ordinary reason for that log line.
 
 **Vectors follow the lines (#77):** the fill re-embeds each batch it generates
 (`KBIndexStore.reembed_contextualized`), so a newly contextualized chunk is
 vector-searchable with its framing instead of keeping a vector built from the
-raw text. To repair an index that was already filled (lines present, vectors
-from before them): `scripts/contextual_reindex.py --reembed-contextualized
-[--path-substring FEAT] [--reembed-only] [--prune-orphans]` — with the **bot
-stopped**, because a live bot rewrites the cache from its stale in-memory copy
-on shutdown.
+raw text. Successful refreshes are recorded in the sidecar's `__v__` stamp, which
+is what tells the loop a chunk still needs repair — including a file that was
+re-synced and got fresh raw vectors. To repair an index that was already filled
+(lines present, vectors from before them): `scripts/contextual_reindex.py
+--reembed-contextualized [--path-substring FEAT] [--reembed-only] [--prune-orphans]`
+— with the **bot stopped**, because a live bot rewrites the cache from its stale
+in-memory copy on shutdown (the loop meanwhile defers while the script's
+`fill_heartbeat` is fresh, which keeps the two from writing the sidecar over
+each other).
 

@@ -66,6 +66,107 @@ def parse_json_array(text: str, expected: int) -> list[str] | None:
     return None
 
 
+def make_fill_client():
+    """The chat client the fill talks to (same endpoint/credentials as /ai).
+
+    A thin indirection over ``bot_core.ai_client._make_client`` so the readiness
+    check in main.py and the generation loop below share one construction site —
+    and so tests can substitute a stub client without patching a private name.
+    """
+    from bot_core.ai_client import _make_client
+    return _make_client()
+
+
+# How many deferral notices this process has logged (see _defer_log).
+_defer_notices = 0
+
+
+def _defer_log(msg: str, *args) -> None:
+    """Loud the first time, quiet afterwards.
+
+    Both deferral reasons (embedder offline because the GPU is painting, a model
+    id that does not match the backend) are steady states, not incidents: at
+    CONTEXTUAL_FILL_RECHECK_S=1800 an unthrottled WARNING would be 48 lines a day
+    saying the same thing until somebody fixes the cause.
+    """
+    global _defer_notices
+    _defer_notices += 1
+    if _defer_notices <= 2 or _defer_notices % 10 == 0:
+        log.warning(msg, *args)
+    else:
+        log.info(msg + " (notice #%d)", *args, _defer_notices)
+
+
+async def resolve_fill_model(client: Any, timeout: float | None = None) -> tuple[bool, str | None]:
+    """Decide which chat model the fill may use, before spending a whole run on it.
+
+    Returns ``(usable, model)``: ``(True, None)`` = use ``DEFAULT_MODEL``;
+    ``(True, name)`` = a hosted model was picked instead; ``(False, None)`` =
+    don't run this round.
+
+    Why this exists: the generation prompt does NOT need the campaign's persona
+    model, but it does need *a* model the backend actually hosts. Asking for an
+    id the backend does not serve fails every batch with an opaque 400 — and a
+    fill that hangs on the first batch is worse than one that defers.
+    ``timeout`` bounds the ``models.list`` call (the shared OpenAI client has no
+    timeout override, so an unreachable backend would otherwise sit on its
+    default for minutes).
+    """
+    from bot_core.ai_client import DEFAULT_MODEL
+    from config.settings import (
+        CONTEXTUAL_FILL_ALLOW_MODEL_FALLBACK,
+        CONTEXTUAL_FILL_MODEL,
+        CONTEXTUAL_FILL_LLM_TIMEOUT_S,
+    )
+
+    want = CONTEXTUAL_FILL_MODEL or DEFAULT_MODEL or ""
+    if not want:
+        return True, None  # nothing configured — let the backend decide
+    from bot_core.ai_client import _backend_model_ids
+    ids: list[str] = []
+    try:
+        # Cache-backed (300 s TTL, shared with every /ai request) and bounded: the
+        # OpenAI client sets no timeout of its own, so an unreachable backend
+        # would otherwise sit on its library default for minutes.
+        avail = await asyncio.wait_for(
+            _backend_model_ids(client), timeout=timeout or CONTEXTUAL_FILL_LLM_TIMEOUT_S
+        )
+    except Exception as exc:  # noqa: BLE001 — reachability, not correctness
+        log.warning(
+            "Contextual fill: could not list backend models (%s: %s) — proceeding with '%s'",
+            type(exc).__name__, exc, want,
+        )
+        return True, None
+    if avail is None:
+        # The listing FAILED (endpoint unsupported, stub client, network error):
+        # we know nothing, so we must not defer a round on guesswork.
+        return True, None
+    ids = sorted(avail)
+    if not ids:
+        return True, None
+    if want in ids:
+        return True, None
+    if CONTEXTUAL_FILL_MODEL:
+        # The operator pinned a model that the backend does not host — that is a
+        # config error, not something to paper over with an arbitrary pick.
+        _defer_log(
+            "Contextual fill: CONTEXTUAL_FILL_MODEL '%s' is not hosted by this "
+            "backend (serving: %s) — round deferred.", want, ", ".join(ids[:5]),
+        )
+        return False, None
+    if not CONTEXTUAL_FILL_ALLOW_MODEL_FALLBACK:
+        _defer_log(
+            "Contextual fill: DEFAULT_MODEL '%s' is not hosted by this backend "
+            "(serving: %s) — round deferred. Point MODEL_NAME at a hosted model, "
+            "set CONTEXTUAL_FILL_MODEL, or CONTEXTUAL_FILL_ALLOW_MODEL_FALLBACK=1.",
+            want, ", ".join(ids[:5]),
+        )
+        return False, None
+    # Fallback: a real hosted id beats a guessed one. Prefer the shortest name —
+    # long ids are usually quantization variants of the same deployment.
+    return True, ids[0]
+
+
 async def generate_missing_context_lines(
     index: Any,
     *,
@@ -74,6 +175,8 @@ async def generate_missing_context_lines(
     max_chars: int = 1500,
     should_stop: Callable[[], bool] | None = None,
     reembed: bool = True,
+    timeout: float | None = None,
+    model: str | None = None,
 ) -> int:
     """Fill missing context lines for *index*'s chunks; return lines generated.
 
@@ -92,8 +195,13 @@ async def generate_missing_context_lines(
     failure never aborts the fill (the lines are useful on their own); failed
     hashes are retried once after the last batch, and any that remain are named
     in a warning pointing at the repair flag.
+
+    #80 — ``timeout`` bounds every chat call (the shared OpenAI client sets no
+    timeout of its own, so an unreachable backend would otherwise block the fill
+    on its library default). ``model`` lets a caller that already resolved a
+    hosted model (:func:`resolve_fill_model`) pass it in instead of re-listing.
     """
-    from bot_core.ai_client import _make_client, _validate_model, complete_text
+    from bot_core.ai_client import _validate_model, complete_text
     from config.settings import DEFAULT_MODEL
 
     inner = index._index
@@ -124,8 +232,13 @@ async def generate_missing_context_lines(
     log.info("Contextual fill: %d chunk(s) missing lines in %d batch(es) of up to %d.",
              len(missing), len(batches), batch_size)
 
-    client = _make_client()
-    model = await _validate_model(client, DEFAULT_MODEL)
+    client = make_fill_client()
+    if model is None:
+        ok, resolved = await resolve_fill_model(client)
+        if not ok:
+            return 0
+        model = resolved or DEFAULT_MODEL
+    model = await _validate_model(client, model)
     generated = 0
     # #77: per-batch re-embed of exactly the chunks just contextualized. Looked
     # up dynamically so duck-typed stores without the method (tests, third-party
@@ -167,6 +280,7 @@ async def generate_missing_context_lines(
                     client, model=model,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.2, max_tokens=900, reasoning_effort="none",
+                    timeout=timeout,
                 )
                 lines = parse_json_array(reply, expected=len(batch))
                 if lines is not None and len(lines) == len(batch):
@@ -177,6 +291,11 @@ async def generate_missing_context_lines(
                             index._context_lines[h] = line[:300]
                             c.context_line = line[:300]
                             batch_hashes.add(h)
+                    # Plain single-arg save: stamp-aware stores carry their own
+                    # re-embed stamp through the write (KBIndexStore does), and
+                    # duck-typed stores (tests, embedder-free runners) stay valid
+                    # call sites. Generation never stamps — only a successful
+                    # re-embed does (stamp_context_vectors).
                     index.save_context_lines(index._context_lines)
                     index.reload_context_lines()
                     if reembed_fn is not None and batch_hashes:

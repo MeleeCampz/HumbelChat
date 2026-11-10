@@ -68,6 +68,79 @@ def cache(tmp_path):
     return paths["persist"], kb
 
 
+class TestStampAndStatus:
+    """The #80 re-embed stamp (\`__v__\`) as seen from the CLI."""
+
+    def test_status_reports_lines_vectors_and_orphans(self, cache):
+        persist, kb = cache
+        r = _run(persist, kb, "--status")
+        assert r.returncode == 0
+        assert "chunks=2  lines=1  missing=1" in r.stdout
+        # A pre-stamp sidecar is migrated on a read-only status run: the lines
+        # that predate the stamp are recorded as already embedded, in the file.
+        assert "recorded as already embedded" in r.stdout
+        assert "(stamp: present)" in r.stdout
+        assert "lagging=0" in r.stdout
+        assert "orphan sidecar entries=0" in r.stdout
+        data = json.loads((persist / "context_lines.json").read_text(encoding="utf-8"))
+        assert data["__v2__"] == 1 and len(data["__v__"]) == 1
+
+    def test_status_does_not_rewrite_a_stamp_aware_sidecar(self, cache):
+        persist, kb = cache
+        _run(persist, kb, "--stamp-all")
+        sidecar = persist / "context_lines.json"
+        before = sidecar.read_bytes()
+        r = _run(persist, kb, "--status")
+        assert "recorded as already embedded" not in r.stdout
+        assert sidecar.read_bytes() == before
+
+    def test_stamp_all_declares_the_historical_invariant_without_touching_vectors(
+        self, cache
+    ):
+        import hashlib
+        persist, kb = cache
+        content = "| Feat | Book |\n|-|-|\n| Polearm | PHB |"
+        r = _run(persist, kb, "--stamp-all")
+        assert r.returncode == 0
+        assert "recorded as already embedded" in r.stdout
+        data = json.loads((persist / "context_lines.json").read_text(encoding="utf-8"))
+        assert data["__v__"] == [hashlib.sha256(content.encode("utf-8")).hexdigest()]
+        assert data["__v2__"] == 1
+        # Vectors untouched: the DB file is byte-identical to before the run.
+        db = persist / "vector_index.db"
+        before = db.read_bytes()
+        r2 = _run(persist, kb, "--status")
+        assert "lagging=0" in r2.stdout
+        assert db.read_bytes() == before
+
+    def test_pruning_keeps_the_stamp_and_drops_orphan_hashes(self, cache):
+        persist, kb = cache
+        sidecar_path = persist / "context_lines.json"
+        _run(persist, kb, "--stamp-all")
+        data = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        data["deadbeef"] = "orphan line"
+        data["__v__"].append("deadbeef")
+        sidecar_path.write_text(json.dumps(data), encoding="utf-8")
+        r = _run(persist, kb, "--prune-orphans", "--reembed-missing", "--limit", "0")
+        assert r.returncode == 0
+        left = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        assert "deadbeef" not in left
+        assert "deadbeef" not in left["__v__"], "orphan hashes must leave the stamp too"
+        assert len(left["__v__"]) == 1
+
+    def test_generation_preserves_an_existing_stamp(self, cache):
+        """A generated LINE is not an embedded VECTOR — the stamp must survive
+        generation unchanged, or the lag detector would call fresh chunks clean."""
+        persist, kb = cache
+        sidecar_path = persist / "context_lines.json"
+        _run(persist, kb, "--stamp-all")
+        stamped_before = json.loads(sidecar_path.read_text(encoding="utf-8"))["__v__"]
+        r = _run(persist, kb, "--limit", "0")  # generates nothing
+        assert r.returncode == 0
+        data = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        assert data["__v__"] == stamped_before
+
+
 class TestDryRun:
 
     def test_dry_run_previews_the_reembed_scope(self, cache):
@@ -115,4 +188,4 @@ class TestOrphanPruning:
         assert "removed 1 stale sidecar entry" in r.stdout
         left = json.loads(sidecar_path.read_text(encoding="utf-8"))
         assert "deadbeef" not in left
-        assert len(left) == 1
+        assert len([k for k in left if not k.startswith("__")]) == 1

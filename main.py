@@ -10,6 +10,7 @@ import logging
 import os
 import pathlib
 import sys
+import time
 from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
 
@@ -24,6 +25,9 @@ from config.settings import (
     CONTEXTUAL_BACKGROUND_FILL,
     CONTEXTUAL_FILL_BATCH_PAUSE_S,
     CONTEXTUAL_FILL_INITIAL_DELAY_S,
+    CONTEXTUAL_FILL_MAX_ROUNDS,
+    CONTEXTUAL_FILL_RECHECK_S,
+    CONTEXTUAL_FILL_RETRY_S,
     KB_PATH,
     CHARACTERS_FILE,
     INFER_URL,
@@ -634,65 +638,228 @@ async def session_file_command(
 #  #52: contextual-sidecar coverage watch + optional background fill
 # ════════════════════════════════════════════════════════════════════
 
+def _fill_heartbeat_path(persist_dir=None) -> pathlib.Path:
+    """The sidecar-lock heartbeat shared with scripts/contextual_reindex.py (#80).
+
+    The offline script refreshes it while it is writing the cache; the fill loop
+    defers while it is fresh. Without it a script run and the loop overwrite
+    each other's rows, which is how a "the script said it re-embedded 5 944
+    chunks" cache ends up holding pre-context vectors again.
+    """
+    if persist_dir is None:
+        from kb.index import DEFAULT_PERSIST_DIR
+        persist_dir = DEFAULT_PERSIST_DIR
+    return pathlib.Path(persist_dir) / "fill_heartbeat"
+
+
+def _offline_fill_active(persist_dir=None, *, max_age_s: float = 120.0) -> bool:
+    """True when an offline contextual_reindex run claims to be writing the cache now.
+
+    Freshness comes from the timestamp the script WROTE, not the file's mtime —
+    a heartbeat left behind by a killed script has a recent mtime and would
+    otherwise hold the fill hostage for 20 minutes.
+
+    * claimed fresh            → defer the round (the script is mid-write).
+    * claimed very old         → ignore it: either the script died mid-run or it
+      was never cleaned up. Say so, once per occurrence.
+    * unreadable               → ignore it, but loudly.
+    """
+    path = _fill_heartbeat_path(persist_dir)
+    try:
+        claimed = float(path.read_text(encoding="utf-8").split()[0])
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError, IndexError) as exc:
+        log.info(
+            "Contextual fill: heartbeat '%s' is unreadable (%s: %s) — ignoring it "
+            "and proceeding.", path.name, type(exc).__name__, exc,
+        )
+        return False  # a heartbeat we cannot parse is not a reason to freeze the fill
+    age = time.time() - claimed
+    if 0.0 <= age < max_age_s:
+        log.info(
+            "Contextual fill: deferring this round — scripts/contextual_reindex.py "
+            "beat %.0fs ago (%s).", age, path.name,
+        )
+        return True
+    log.info(
+        "Contextual fill: heartbeat %s claims a beat %.0f min ago — stale (the "
+        "script exited without clearing it, or died mid-run); proceeding.",
+        path.name, age / 60.0,
+    )
+    return False
+
+
+async def _fill_round_readiness(store) -> tuple[bool, int, int]:
+    """Can a fill round actually RUN right now? → (go, chunks_without_line, vector_lag).
+
+    Three gates, each one a real failure mode seen in production:
+
+    1. **Embedder down** (GPU in ``image`` mode, or the container stopped).
+       Generating lines without re-embedding them is exactly the half-done state
+       #77 was opened to remove, so the whole round defers — cheaply, with a
+       visible reason — instead of churning chat calls + a cache mutation every
+       interval that the next round will undo.
+    2. **Chat model not hosted** by the backend (``MODEL_NAME`` ≠ what the backend
+       serves). Without this check every batch dies on an opaque 400. Only asked
+       when lines must be GENERATED — a vector-refresh round needs no chat call.
+    3. Nothing to do → ``(False, 0, 0)``, silently. A healthy index costs one
+       index read per interval.
+    """
+    from kb import contextual_gen as gen
+    from kb.embedder import probe_remote
+
+    inner = getattr(store, "_index", None)
+    if inner is None:
+        return False, 0, 0
+    covered, total = store.contextual_coverage()
+    lag = store.contextual_vector_lag()
+    pending = max(0, total - covered)
+    if not pending and not lag:
+        return False, 0, 0
+    if not await probe_remote():
+        # Throttled by gen._defer_log: a GPU that is busy painting (or a stopped
+        # embedder container) is a steady state, not an incident, and must not
+        # become a WARNING every recheck interval for a whole weekend.
+        gen._defer_log(
+            "Contextual fill: round deferred — embedding backend unreachable "
+            "(%d chunk(s) still uncontextualized, %d waiting on a vector refresh). "
+            "No lines are generated without a re-embed: half-contextualized chunks "
+            "are the state this fill exists to remove.", pending, lag,
+        )
+        return False, pending, lag
+    if pending:
+        client = gen.make_fill_client()
+        ok, _model = await gen.resolve_fill_model(client)
+        if not ok:
+            return False, pending, lag
+    return True, pending, lag
+
+
 async def _contextual_sidecar_worker(bot: discord.Client) -> None:
-    """Warn when the Contextual Retrieval sidecar doesn't cover all chunks.
+    """Standing Contextual Retrieval maintenance loop.
 
-    Always-on part (cheap, one index read): after a startup delay, check
-    coverage and log a warning pointing at the fill options — this is what
-    tells the user that newly ingested data is running uncontextualized.
+    Every ``CONTEXTUAL_FILL_RECHECK_S`` seconds it reads sidecar coverage and the
+    re-embed stamp and repairs what is missing: generate the missing lines, then
+    re-embed exactly those chunks so their dense vectors carry the framing too
+    (#77). A complete index exits the round after one index read — no LLM call,
+    no embedding, no log line — so the loop is free to run forever.
 
-    Optional part (``CONTEXTUAL_BACKGROUND_FILL=1``): generate the missing
-    lines in the background — batch-paused so live /ai traffic keeps working,
-    resumable, sidecar reloaded per batch — and (#77) re-embed exactly those
-    chunks so their dense vectors carry the context line as well. One retry
-    15 min after a failure; generation errors are logged, never fatal.
+    Deliberate properties (all of them were failure modes in production):
+
+    * **Never half-fills**: a round only starts when the embedding backend is
+      reachable and the chat model it will use is actually hosted.
+    * **Every HTTP call is bounded** (``CONTEXTUAL_FILL_LLM_TIMEOUT_S``) — the
+      shared OpenAI client has no timeout of its own, and an unbounded first
+      batch is indistinguishable in the logs from a fill that never started.
+    * **Yields to the offline script** via the ``fill_heartbeat`` file.
+    * **Idempotent**: re-embeds are stamp-tracked, so a repair pass touches only
+      chunks whose vector really still describes the raw chunk.
+    * Data problems are logged, never fatal to the bot.
     """
     # discord.py's stubs declare is_closed as a method while it is a property
     # at runtime — read defensively so both type-check and run.
     def _closed() -> bool:
         return bool(getattr(bot, "is_closed", False))
 
+    def _wait(prev: float) -> float:
+        # prev<=0 means "nothing left to do": wait a full recheck interval.
+        # CONTEXTUAL_FILL_RECHECK_S=0 runs rounds back to back (tests, or a
+        # watched fill) — useful, but never below 1 s for a real retry path.
+        return float(prev) if prev > 0 else max(1.0, CONTEXTUAL_FILL_RECHECK_S or 0.0)
+
+    def _nap(next_wait: float) -> float:
+        # A nap is only ever scheduled with an explicit retry value; clamp negatives
+        # (a mis-set CONTEXTUAL_FILL_RETRY_S must not spin the loop).
+        return max(0.0, next_wait)
+
     await asyncio.sleep(CONTEXTUAL_FILL_INITIAL_DELAY_S)
-    try:
-        from kb.retrievers import _ensure_index_store
-        store = await _ensure_index_store(KB_PATH)
-        if store is None:
+    warned = 0
+    # Bounded rather than `while not closed`, so a bad interval setting can never
+    # become a hot loop. At the default 1800 s the cap is ~17 days of uptime.
+    for _round in range(CONTEXTUAL_FILL_MAX_ROUNDS or 1 << 30):
+        if _closed():
             return
-        covered, total = store.contextual_coverage()
-        if total and covered < total:
-            log.warning(
-                "Contextual sidecar covers %d/%d indexed chunks — new data is "
-                "retrieving uncontextualized. Fill it with scripts/contextual_reindex.py "
-                "or set CONTEXTUAL_BACKGROUND_FILL=1 for an automatic background pass "
-                "(it re-embeds what it generates; repair lagging vectors with "
-                "--reembed-contextualized).",
-                covered, total,
-            )
-        if not CONTEXTUAL_BACKGROUND_FILL:
-            return
-        from kb.contextual_gen import generate_missing_context_lines
-        for attempt in (1, 2):
-            if _closed():
+        try:
+            from kb.retrievers import _ensure_index_store
+            store = await _ensure_index_store(KB_PATH)
+            if store is None:
+                await asyncio.sleep(_nap(CONTEXTUAL_FILL_RETRY_S))
+                continue
+            covered, total = store.contextual_coverage()
+            if total and covered < total and warned == 0:
+                # Once per run: the operator-facing "new data is retrieving
+                # uncontextualized" warning. The loop will fix it; this says so.
+                log.warning(
+                    "Contextual sidecar covers %d/%d indexed chunks — new data is "
+                    "retrieving uncontextualized. Background fill is %s; it re-embeds "
+                    "what it generates. Repair lagging vectors with "
+                    "scripts/contextual_reindex.py --reembed-contextualized.",
+                    covered, total,
+                    "on" if CONTEXTUAL_BACKGROUND_FILL else "OFF",
+                )
+                warned += 1
+            if not CONTEXTUAL_BACKGROUND_FILL:
                 return
-            try:
+            if _offline_fill_active():
+                await asyncio.sleep(_nap(CONTEXTUAL_FILL_RETRY_S))
+                continue
+            go, pending, lag = await _fill_round_readiness(store)
+            if not go:
+                warned = 0  # coverage may have changed since the last warning
+                # Work is waiting on a backend, not on us: retry soon-ish.
+                await asyncio.sleep(_nap(CONTEXTUAL_FILL_RETRY_S if (pending or lag) else 0.0))
+                continue
+            from kb.contextual_gen import generate_missing_context_lines
+            repaired = 0
+            if pending:
                 n = await generate_missing_context_lines(
                     store,
                     should_stop=_closed,
                     batch_pause=CONTEXTUAL_FILL_BATCH_PAUSE_S,
                     reembed=True,
                 )
-                covered, total = store.contextual_coverage()
-                log.info("Contextual fill finished: %d new line(s); coverage now %d/%d.",
-                         n, covered, total)
-                return
-            except Exception as exc:  # noqa: BLE001 — data, never fatal
-                log.warning("Contextual fill attempt %d failed: %r%s",
-                            attempt, exc,
-                            " — retrying in 15 min" if attempt == 1 else "")
-                if attempt == 1 and not _closed():
-                    await asyncio.sleep(900)
-    except Exception as exc:  # noqa: BLE001 — the watch must never take the bot down
-        log.warning("Contextual sidecar worker failed: %r", exc)
+            else:
+                # Vector-lag-only round (e.g. a file was re-synced: its chunks got
+                # lines from the sidecar but fresh raw-content vectors). No chat
+                # call needed — re-embed every un-stamped chunk. Stamps make this
+                # idempotent: a repaired chunk is never re-embedded again.
+                n = 0
+                repaired = await store.reembed_contextualized(None)
+                if not repaired:
+                    log.warning(
+                        "Contextual fill: vector repair refreshed nothing this round "
+                        "(%d chunk(s) still lag) — retrying on the next check.", lag,
+                    )
+            covered, total = store.contextual_coverage()
+            lag_left = store.contextual_vector_lag()
+            log.info(
+                "Contextual fill round: %d line(s) generated, %d chunk(s) "
+                "vector-repaired; %d lagging left; coverage now %d/%d.",
+                n, repaired, lag_left, covered, total,
+            )
+            warned = 0
+            remaining = max(0, total - covered) + lag_left
+            # Fast retry only when this round actually moved something forward AND
+            # work is left. A round that produced nothing while work remains is a
+            # backend problem, not a queue problem — hammering it every RETRY_S
+            # would spend chat completions and embedder calls on a dead backend
+            # (and, mid image-GPU window, fight the switch).
+            progress = bool(n or repaired)
+            if remaining and progress:
+                await asyncio.sleep(_nap(CONTEXTUAL_FILL_RETRY_S))
+            elif remaining:
+                log.info(
+                    "Contextual fill: %d chunk(s) still outstanding but this round "
+                    "made no progress — backing off to the next recheck instead of "
+                    "retrying fast.", remaining,
+                )
+                await asyncio.sleep(_wait(0.0))
+            else:
+                await asyncio.sleep(_wait(0.0))
+        except Exception as exc:  # noqa: BLE001 — data problems must not kill the loop
+            log.warning("Contextual sidecar worker failed: %s: %r", type(exc).__name__, exc)
+            await asyncio.sleep(_nap(CONTEXTUAL_FILL_RETRY_S * 5))
 
 
 #  Event handlers

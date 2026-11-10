@@ -728,6 +728,37 @@ CONTEXTUAL_FILL_INITIAL_DELAY_S: int = int(os.getenv("CONTEXTUAL_FILL_INITIAL_DE
 # live /ai traffic (60 s default); a catch-up run over a few hundred chunks can
 # safely drop it to ~5 s. 0 = no pause (not recommended on the chat GPU).
 CONTEXTUAL_FILL_BATCH_PAUSE_S: float = _safe_float(os.getenv("CONTEXTUAL_FILL_BATCH_PAUSE_S"), 60.0)
+# #80: the fill is a standing self-healing loop, not a one-shot boot task: every
+# interval it re-reads sidecar coverage and the re-embed stamp, repairs what
+# lags, and a complete index costs one index read (no LLM, no embedding, no
+# log spam). Raise it to reduce load on the chat GPU, or set 0 for a single
+# boot pass.
+CONTEXTUAL_FILL_RECHECK_S: float = _safe_float(os.getenv("CONTEXTUAL_FILL_RECHECK_S"), 1800.0)
+# Safety bound on the loop above (0 = unbounded). It exists so a mis-set interval
+# can never turn a maintenance task into a hot loop; raise it only if you truly
+# want a never-ending watch in one process.
+CONTEXTUAL_FILL_MAX_ROUNDS: int = _safe_int(os.getenv("CONTEXTUAL_FILL_MAX_ROUNDS"), 1000)
+# Short wait used when a round could not run (backend unreachable, the offline
+# script holding the cache, a failed round). Separate from the recheck interval so
+# a deferred round retries sooner than a healthy watch cycle.
+CONTEXTUAL_FILL_RETRY_S: float = _safe_float(os.getenv("CONTEXTUAL_FILL_RETRY_S"), 60.0)
+# Chat model used for line generation. "" = DEFAULT_MODEL. Set it when the chat
+# backend serves a different model id than MODEL_NAME (the common case after a
+# persona-model switch).
+CONTEXTUAL_FILL_MODEL: str = os.getenv("CONTEXTUAL_FILL_MODEL", "")
+# When the configured model is not hosted, use one the backend does serve instead
+# of failing every batch with an opaque error. Generation is a utility task — it
+# does not need the campaign's persona model.
+CONTEXTUAL_FILL_ALLOW_MODEL_FALLBACK: bool = _safe_bool(
+    os.getenv("CONTEXTUAL_FILL_ALLOW_MODEL_FALLBACK"), True
+)
+# #80: hard ceiling on ONE fill chat call (batch generation + model listing).
+# The shared OpenAI client carries no timeout override, so an unreachable backend
+# would otherwise block the fill on the library default (~10 min) with NOTHING
+# logged — which is exactly how a "the flag is on but nothing happens" run looks.
+CONTEXTUAL_FILL_LLM_TIMEOUT_S: float = _safe_float(
+    os.getenv("CONTEXTUAL_FILL_LLM_TIMEOUT_S"), 90.0
+)
 
 # ── Per-turn AI records for offline debugging (bot_core/turn_logger) ───────
 # Every ask_ai / ask_ai_stream turn writes ONE self-contained JSON file to

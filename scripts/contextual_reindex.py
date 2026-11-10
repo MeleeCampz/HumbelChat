@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tier 2 (#39 item 7): generate Contextual Retrieval lines for every KB chunk.
+r"""Tier 2 (#39 item 7): generate Contextual Retrieval lines for every KB chunk.
 
 One-time offline LLM job (research doc §2.2): each chunk gets a one-line,
 chunk-specific context description that is PREPENDED to the text both when it
@@ -26,8 +26,15 @@ before (passage_text() == content). Run with --dry-run to see the plan first.
 the BOT STOPPED: a live bot holds the pre-context vectors in memory and re-
 persists them on its next incremental save or shutdown, overwriting this script's
 work. ``docker compose stop bot`` → run → ``docker compose start bot``.
+While the script runs it refreshes ``fill_heartbeat`` in the cache dir, so the
+bot's own fill loop defers instead of racing it — that protects the sidecar and
+the loop's rounds, not the bot's in-memory copy. Stopping the bot is still the
+correct thing to do.
 
-Usage (from the repo root, real backends):
+Usage (from the repo root, real backends — on Windows use .venv\Scripts\python.exe,
+a bare invocation picks up a system Python that has none of this project's deps):
+  # read-only state report (safe with the bot running):
+  .venv/bin/python scripts/contextual_reindex.py --status
   EMBED_URL=http://host.docker.internal:11435/v1 \
   .venv/bin/python scripts/contextual_reindex.py --batch-size 12 --reembed-missing
   # repair vectors that lag their context line, without generating anything:
@@ -41,15 +48,19 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import pathlib
 import sqlite3
 import sys
 import time
+from typing import Callable
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 DEFAULT_KB_PATH = REPO_ROOT / "data" / "knowledge"
+# Mirrors kb.index.DEFAULT_PERSIST_DIR / CACHE_DIRNAME (kept as a literal here
+# because this script sets sys.path before importing kb).*
 DEFAULT_PERSIST_DIR = DEFAULT_KB_PATH / ".vector_index_cache"
 
 # Prompt + reply parsing live in kb.contextual_gen (shared with the #52
@@ -86,16 +97,52 @@ def _load_sidecar(persist_dir: pathlib.Path) -> dict[str, str]:
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
     except (OSError, json.JSONDecodeError) as exc:
         sys.exit(f"existing sidecar unreadable ({path}): {exc}")
+    if not isinstance(data, dict):
+        return {}
+    lines = {k: v for k, v in data.items()
+             if isinstance(k, str) and isinstance(v, str) and v and not k.startswith("__")}
+    # A pre-stamp file (no __v__, no __v2__ marker) is migrated here exactly like
+    # KBIndexStore does at load: every existing line is recorded as already
+    # embedded. If the script instead wrote the marker with an EMPTY stamp, the
+    # bot would later treat all those historical lines as un-embedded and re-embed
+    # the entire index once "for free".
+    if lines and not data.get("__v__") and not data.get("__v2__"):
+        _save_sidecar(persist_dir, lines, stamped=set(lines))
+        print(f"sidecar: {len(lines)} pre-stamp entr(ies) recorded as already embedded "
+              "(stamp format written)")
+    return lines
 
 
-def _save_sidecar(persist_dir: pathlib.Path, lines: dict[str, str]) -> None:
+def _load_stamp(persist_dir: pathlib.Path) -> set[str]:
+    """The ``__v__`` re-embed stamp recorded in the sidecar (#80)."""
+    path = persist_dir / "context_lines.json"
+    if not path.exists():
+        return set()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    stamp = data.get("__v__") if isinstance(data, dict) else None
+    return {h for h in stamp if isinstance(h, str)} if isinstance(stamp, list) else set()
+
+
+def _save_sidecar(
+    persist_dir: pathlib.Path, lines: dict[str, str], *, stamped: set[str] | None = None
+) -> None:
     persist_dir.mkdir(parents=True, exist_ok=True)
     path = persist_dir / "context_lines.json"
+    payload: dict[str, object] = dict(lines)
+    # "__v2__" marks a stamp-aware file: a file WITHOUT it predates the stamp and the
+    # store migrates it (stamp everything once). Without the marker, a file written
+    # mid-generation would be migrated too — silently claiming fresh lines were
+    # already embedded.
+    payload["__v2__"] = 1
+    if stamped is not None:
+        payload["__v__"] = sorted(stamped)
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(lines, ensure_ascii=False, indent=0), encoding="utf-8")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=0), encoding="utf-8")
     tmp.replace(path)  # atomic: readers never see a partial file
 
 
@@ -132,6 +179,7 @@ async def _generate(
     priority_substring: str = "",
     path_substring: str = "",
     reference_block: str = "",
+    beat: Callable[[], None] | None = None,
 ) -> tuple[int, set[str]]:
     """Generate missing lines → (failed_chunk_count, generated_hashes)."""
     import httpx
@@ -197,7 +245,9 @@ async def _generate(
                             if line:
                                 sidecar[c["hash"]] = line[:300]
                                 generated_hashes.add(c["hash"])
-                        _save_sidecar(persist_dir, sidecar)
+                        # Stamp is carried through untouched — a generated line is
+                        # not an embedded vector; _reembed does the stamping.
+                        _save_sidecar(persist_dir, sidecar, stamped=_load_stamp(persist_dir))
                         done += len(batch)
                         ok = True
                         break
@@ -213,6 +263,8 @@ async def _generate(
                 rate = done / elapsed if elapsed else 0
                 print(f"progress: batch {bi}/{len(batches)}  chunks ok={done} failed={failed}  "
                       f"{rate:.1f} chunk/s  sidecar size={len(sidecar)}")
+            if beat is not None:
+                beat()
     return failed, generated_hashes
 
 
@@ -240,9 +292,13 @@ async def _reembed(kb_path: pathlib.Path, persist_dir: pathlib.Path,
     manager = KBIndexStore(kb_path, persist_dir=persist_dir)
     try:
         n = await manager.reembed_contextualized(hashes)
-        scope = ("every contextualized chunk" if hashes is None
+        scope = ("every un-embedded contextualized chunk" if hashes is None
                  else f"{len(hashes)} chunk(s) generated this run")
         print(f"re-embed ({scope}): {n} chunk(s) now embedded as context + content → {manager.db_path}")
+        lag = manager.contextual_vector_lag()
+        if lag:
+            print(f"still lagging: {lag} chunk(s) — their vectors still describe the raw "
+                  "chunk (backend failures). Re-run to resume.")
     except Exception as exc:  # noqa: BLE001 — data job: report, never traceback
         print(f"re-embed failed: {exc!r}")
     finally:
@@ -258,9 +314,33 @@ def _prune_orphans(persist_dir: pathlib.Path, chunks: list[dict], sidecar: dict[
         return 0
     for h in orphans:
         sidecar.pop(h)
-    _save_sidecar(persist_dir, sidecar)
+    # The re-embed stamp is pruned with them — an orphan hash in __v__ is pure
+    # cruft and a growing stamp slows every stamp write.
+    _save_sidecar(persist_dir, sidecar, stamped={h for h in _load_stamp(persist_dir) if h in known})
     print(f"orphans: removed {len(orphans)} stale sidecar entry(ies); {len(sidecar)} remain")
     return len(orphans)
+
+
+_HEARTBEAT_HITS = 0
+
+
+def _beat(persist_dir: pathlib.Path) -> None:
+    """Heartbeat for the fill loop (main.py::_contextual_sidecar_worker).
+
+    The bot defers its own fill round while this file is fresh, which is what
+    makes "the bot and the script both wrote the cache" a race we do not have.
+    Refreshed while generating; removed on exit. A crash leaves a file that ages
+    out after 120 s and is ignored (and reported) by the loop.
+    """
+    global _HEARTBEAT_HITS
+    try:
+        persist_dir.mkdir(parents=True, exist_ok=True)
+        (persist_dir / "fill_heartbeat").write_text(
+            f"{time.time()} pid={os.getpid()} hits={_HEARTBEAT_HITS}\n", encoding="utf-8"
+        )
+        _HEARTBEAT_HITS += 1
+    except OSError:
+        pass
 
 
 def main() -> None:
@@ -298,6 +378,11 @@ def main() -> None:
                          "(shorthand for --reembed-contextualized)")
     ap.add_argument("--prune-orphans", action="store_true",
                     help="remove sidecar entries whose chunk no longer exists")
+    ap.add_argument("--status", action="store_true",
+                    help="read-only report: line coverage, re-embed coverage, orphans")
+    ap.add_argument("--stamp-all", action="store_true",
+                    help="declare every existing context line as already embedded "
+                         "(trust the historical invariant; skips the re-embed pass)")
     args = ap.parse_args()
 
     persist_dir = pathlib.Path(args.persist_dir)
@@ -305,6 +390,29 @@ def main() -> None:
     reembed_all = args.reembed_contextualized or args.reembed_only
     chunks = _load_chunks(persist_dir / "vector_index.db")
     sidecar = _load_sidecar(persist_dir)
+
+    if args.stamp_all:
+        _save_sidecar(persist_dir, sidecar, stamped=set(sidecar))
+        print(f"stamp: {len(sidecar)} context line(s) recorded as already embedded — "
+              "no vectors touched. New or re-synced chunks will still be refreshed "
+              "by the bot's fill loop.")
+        return
+
+    if args.status:
+        stamped = _load_stamp(persist_dir)
+        with_line = [c for c in chunks if c["hash"] in sidecar]
+        lag = [c for c in with_line if c["hash"] not in stamped]
+        known = {c["hash"] for c in chunks}
+        print(f"chunks={len(chunks)}  lines={len(with_line)}  missing={len(chunks) - len(with_line)}")
+        print(f"vectors built WITH their line={len(with_line) - len(lag)}  "
+              f"lagging={len(lag)}  "
+              f"(stamp: {'present' if stamped else 'written before the stamp existed'})")
+        print(f"orphan sidecar entries={sum(1 for h in sidecar if h not in known)}")
+        if lag:
+            print("next: the bot's fill loop repairs these on its next round, or run "
+                  "--reembed-contextualized with the bot stopped (it rewrites the cache "
+                  "in place); --stamp-all declares them embedded without touching vectors.")
+        return
 
     if args.dry_run:
         if not args.reembed_only:
@@ -328,30 +436,38 @@ def main() -> None:
         print("WARNING: writing the live vector cache/sidecar. Stop the bot first "
               "(a running bot keeps the pre-context vectors in memory and re-persists "
               "them on its next save/shutdown, overwriting this run).")
-
-    if args.reembed_only:
-        failed, generated = 0, set()
-    else:
-        failed, generated = asyncio.run(_generate(
-            chunks, sidecar, persist_dir, args.model, args.base_url.rstrip("/"),
-            INFER_API_KEY, args.batch_size, args.max_chars, args.limit, False,
-            args.priority,
-            args.path_substring,
-            open(args.reference_file, encoding="utf-8").read() if args.reference_file else "",
-        ))
-
-    if args.prune_orphans:
-        _prune_orphans(persist_dir, chunks, sidecar)
-    if args.rebuild:
-        asyncio.run(_rebuild(kb_path, persist_dir))
-    elif reembed_all:
-        asyncio.run(_reembed(kb_path, persist_dir, None))
-    elif args.reembed_missing:
-        if generated:
-            asyncio.run(_reembed(kb_path, persist_dir, generated))
+    # Heartbeat while we work: the bot's fill loop defers while this is fresh.
+    _beat(persist_dir)
+    try:
+        if args.reembed_only:
+            failed, generated = 0, set()
         else:
-            print("--reembed-missing: nothing was generated this run — nothing to re-embed. "
-                  "To refresh context lines that already exist: --reembed-contextualized.")
+            failed, generated = asyncio.run(_generate(
+                chunks, sidecar, persist_dir, args.model, args.base_url.rstrip("/"),
+                INFER_API_KEY, args.batch_size, args.max_chars, args.limit, False,
+                args.priority,
+                args.path_substring,
+                open(args.reference_file, encoding="utf-8").read() if args.reference_file else "",
+                beat=lambda: _beat(persist_dir),
+            ))
+
+        if args.prune_orphans:
+            _prune_orphans(persist_dir, chunks, sidecar)
+        if args.rebuild:
+            asyncio.run(_rebuild(kb_path, persist_dir))
+        elif reembed_all:
+            asyncio.run(_reembed(kb_path, persist_dir, None))
+        elif args.reembed_missing:
+            if generated:
+                asyncio.run(_reembed(kb_path, persist_dir, generated))
+            else:
+                print("--reembed-missing: nothing was generated this run — nothing to re-embed. "
+                      "To refresh context lines that already exist: --reembed-contextualized.")
+    finally:
+        try:
+            (persist_dir / "fill_heartbeat").unlink()
+        except OSError:
+            pass
 
     if failed and not args.rebuild:
         print(f"done with {failed} uncontextualized chunk(s) — re-run to resume.")
