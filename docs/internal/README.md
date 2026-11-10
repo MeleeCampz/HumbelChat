@@ -9,3 +9,5 @@ the [user documentation](../README.md) is one level up. Keep them here (not in
 - [`RAG_ANALYSIS_2026-09-27.md`](./RAG_ANALYSIS_2026-09-27.md) — German-query retrieval incident: root causes, probe data, fixes. Cited from `kb/` comments as the rationale for specific tuning choices.
 - [`RAG_POSTMORTEM_2026-10-15_TQ.md`](./RAG_POSTMORTEM_2026-10-15_TQ.md) — German Trickster's-Quiver failure: measured stage-by-stage ranking (rerank window + cross-lingual rerank blindness), fixes incl. `RERANK_USE_EXPANSION`.
 - [`CODE_ANALYSIS_2026-09-27.md`](./CODE_ANALYSIS_2026-09-27.md) — one-time code audit (bugs B1–B4, backlog improvements I1–I3). The actionable items from it were all completed; the live task list lives outside the repo (`.pi/backlog.md`).
+- [`RAG_PIPELINE_REVIEW_2026-10.md`](./RAG_PIPELINE_REVIEW_2026-10.md) — #74 end-to-end RAG pipeline review (findings F1–F10; F1/F2/F5 since fixed).
+- [`RAG_CODE_REVIEW_2026-11.md`](./RAG_CODE_REVIEW_2026-11.md) — follow-up review: agent tools, cache invalidation, contextual sidecar keys, production log evidence, #77 self-review (findings R1–R14; §16 tracks F1–F10 status).
