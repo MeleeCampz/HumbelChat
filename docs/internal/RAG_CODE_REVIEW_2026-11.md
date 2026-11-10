@@ -81,10 +81,13 @@ Why it matters beyond "one arg is dead": the model is *told* about `dir` in
 `tool_prompt_block()` ("List … the files + sections under a directory"), and the only
 paths it has ever seen came from `search_kb`. When it uses `dir` as designed it gets
 `Nothing found`, which reads as "the KB has no such area" and pushes it to answer from
-memory — the exact failure class as §2.5 of the October code review. Current `dev.log`
-shows the model reaching for `search_kb` / `read_section` / `find_in_kb` (14 rewrite turns)
-and **never** `list_sections` — so this is latent, not yet observed. It will fire on the
-first enumeration question that goes the `dir` route.
+memory — the exact failure class as §2.5 of the October code review. The model *has*
+reached for `list_sections` twice in the recorded traffic (`2026-10-23 17:53` agent mode,
+`2026-11-03 18:37` inside an image-prompt rewrite), and `Nothing found` appears nowhere in
+the current window — but tool **arguments** are never logged (`AgentTurnMeta.tool_calls`
+stores names only, and the turn record inherits that), so there is no way to tell whether
+either call used `file=` (which works) or `dir=` (which cannot). Treat "not yet observed"
+as "not observable", not as "not happening".
 
 Fix (either, ~15 lines): iterate `retrieval_name()` instead of `display_name` in
 `_tool_list_sections`, or match `dir` against `source_file` (available on `_DocEntry`)
@@ -542,7 +545,7 @@ refactoring is most likely to break:
 
 | # | Action | Effort | Risk |
 |---|--------|--------|------|
-| 1 | R1: `list_sections` matches `source_file`; fix `iter_chunks` docstring; regression test with a *path* arg | ~20 min + test | none |
+| 1 | R1: `list_sections` matches `source_file`; fix `iter_chunks` docstring; log tool **args** (name-only telemetry makes this class of failure undiagnosable); regression test with a *path* arg | ~30 min + test | none |
 | 2 | R10: `type(exc).__name__` in the rewrite-failure log | 2 min | none |
 | 3 | R2a: embedder/reranker circuit breaker (~10 s unreachable cache) + skip dense leg instead of retrying a dead host | ~45 min | low — strictly less latency, same fallbacks |
 | 4 | R2b: expose the gpu-switch mode to `kb.retrievers` (and log "image window: lexical-only retrieval") | ~30 min | low |
