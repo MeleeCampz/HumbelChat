@@ -419,7 +419,7 @@ Familiar`; "vampires" matches 20 chunks, "black dragons" 12, "fungi" 10) — so 
 *markers* are dropped, header *content* is retrievable. Only 10 non-header lines are
 genuinely absent: 6 stripped Notes bullets, 1 `(no notes)` placeholder, 3 short lines in
 `CampainLogs/03_11_2026 Nach dem Kampf.md` (`LEVEL UP: 6`, `Marvin Upgraden`, one narrative
-line — 94 chars total).
+line — 87 chars, and that file's total disk→indexed delta is 94).
 
 The stripped bullets do **not** lose facts, but they do lose *spellings*: the raw bullet
 `500G Kopfgeld auf Cowurm names "Lucky"` is superseded by the Overview's version spelled
