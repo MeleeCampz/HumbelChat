@@ -535,6 +535,22 @@ async def sync_command(interaction: discord.Interaction) -> None:
     await handle_sync_command(interaction)
 
 
+@bot.tree.command(
+    name="botperms",
+    description="Diagnose channel permissions: why background posts (highlights, reminders) fail.",
+)
+@app_commands.describe(
+    channel="Channel id, <#mention> or name — defaults to the channel this ran in"
+)
+async def botperms_command(
+    interaction: discord.Interaction,
+    channel: str | None = None,
+) -> None:
+    """Permission diagnostic — delegated to commands/perms_command.py."""
+    from commands.perms_command import handle_botperms_command
+    await handle_botperms_command(interaction, channel=channel)
+
+
 @bot.tree.command(name="help", description="Show all available commands, or details for one command.")
 @app_commands.describe(command="Optional command name to show detailed usage for")
 async def help_command(interaction: discord.Interaction, command: str | None = None) -> None:

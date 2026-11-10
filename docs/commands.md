@@ -294,6 +294,23 @@ The bot used to sync commands on every startup/reconnect, which caused duplicate
 
 If you want to force a fresh sync on the next startup (e.g., after adding new commands), delete the `.commands_synced` file in the project root and restart the bot.
 
+### `/botperms`
+
+```
+/botperms [channel: <id | <#mention> | name>]
+```
+
+Diagnoses **why the bot can answer in a channel but cannot post there on its own** — the exact failure behind highlights being archived to disk only, next-session reminders never arriving, and saved roll views not being re-attached.
+
+Without an argument it inspects the channel the command ran in; with one it inspects a channel by id, mention, or name. It reports:
+
+- whether the channel is in the bot's gateway cache (`bot.get_channel`) and whether the REST fallback (`GET /channels/<id>`) succeeds — the two-step resolution every background sender uses;
+- the bot's actual permission bits in that channel (`View Channel`, `Send Messages`, `Read Message History`, `Attach Files`, plus the thread/forum ones);
+- the channel type and parent, flagging forum channels and threads (a forum parent is not directly messageable);
+- a one-line verdict: what will fail, and which permission to change.
+
+The report ends with the caveat that makes this command necessary: slash-command replies ride the interaction webhook and keep working even when every listed permission is denied. See [permissions.md](./permissions.md).
+
 ## Prefix command
 
 ```

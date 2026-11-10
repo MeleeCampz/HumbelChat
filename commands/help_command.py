@@ -56,6 +56,7 @@ _CATEGORIES: dict[str, str] = {
     "speak": "Utility",
     "generate_image": "Utility",
     "sync": "Maintenance",
+    "botperms": "Maintenance",
 }
 
 #: fixed display order for the known categories
