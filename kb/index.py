@@ -55,6 +55,7 @@ Usage
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import json
 import logging
@@ -541,6 +542,126 @@ class KBIndexStore:
             await self._save_to_disk(changed={key})  # P2 #20: incremental
             logger.info("Updated index with '%s' (%d chunk(s))", key, len(entries))
             return True
+
+    async def reembed_contextualized(self, content_hashes: set[str] | None = None) -> int:
+        """#77: rebuild the vectors of chunks whose context line postdates them.
+
+        Contextual Retrieval prepends a one-line context to a chunk at BOTH
+        embed time and passage-assembly time (``passage_text()``).  A chunk that
+        received its line AFTER it was embedded therefore keeps a vector of the
+        RAW content: BM25 and the attached passage see the framing, the dense
+        leg does not — exactly the gap the fill left open (#52, backlog #77).
+        This rebuilds precisely those vectors from ``context_line + content``.
+
+        *content_hashes* selects the chunks to rebuild; they are sidecar keys,
+        i.e. hashes of the chunk's ORIGINAL content.  ``None`` means "every chunk
+        that has a context line" — the repair path for lines generated before
+        this method existed.  Chunks without a line are never touched, so a run
+        can never make an uncontextualized chunk behave differently.
+
+        Vectors come from ``self._embedder`` — the index-WRITE embedder
+        ``_embed_files`` uses — so refreshed rows stay in the same vector space
+        as the rest of the cache (query-time embedding is untouched).
+
+        Never corrupts: an embedding failure leaves the in-memory index and the
+        on-disk cache exactly as they were and returns 0.  The sidecar lines
+        already written still help, and the call is safely re-runnable.
+        """
+        # P0 #3: read → embed → swap → persist is one mutation; serialize it
+        # against /upload_kb, /sync_kb and a concurrent fill batch.
+        async with self._mutation_lock():
+            if self._index is None:
+                # Already holding the lock — call the lock-free core (load()
+                # would deadlock on the non-reentrant lock).
+                self._index = await self._load_inner()
+            if self._index.is_empty():
+                return 0
+
+            docs = list(self._index._docs)
+            targets = [
+                (i, doc) for i, doc in enumerate(docs)
+                if doc.context_line
+                and doc.content.strip()
+                and (content_hashes is None or _content_hash(doc.content) in content_hashes)
+            ]
+            if not targets:
+                return 0
+
+            dim = next((len(d.embedding) for d in docs if d.embedding), 0)
+            vectors = await self._encode_contextual_passages(
+                [doc.passage_text() for _i, doc in targets], expected_dim=dim
+            )
+
+            new_docs = list(docs)
+            changed_keys: set[str] = set()
+            done = 0
+            failed = 0
+            for (i, doc), vec in zip(targets, vectors):
+                if not vec:
+                    failed += 1
+                    continue
+                new_docs[i] = dataclasses.replace(doc, embedding=vec)
+                changed_keys.add(doc.source())
+                done += 1
+            if not done:
+                logger.warning(
+                    "Contextual re-embed: no vector could be refreshed for %d "
+                    "candidate chunk(s) — index and cache left unchanged",
+                    len(targets),
+                )
+                return 0
+
+            # Replace the DOC LIST OBJECT, don't mutate entries in place: both
+            # KBVectorIndex._ensure_matrix (P2 #17) and kb.retrievers._get_bm25
+            # cache by list IDENTITY + length, so an in-place embedding swap
+            # would keep serving the stale matrix and the stale BM25 corpus.
+            self._index._docs = new_docs
+            self._index._mat_cache = None  # belt-and-braces (identity already changed)
+            # P2 #20: only the files holding refreshed chunks are upserted.
+            await self._save_to_disk_from(self._index, changed=changed_keys)
+            logger.info(
+                "Contextual re-embed: %d chunk(s) re-embedded with their context "
+                "line (%d file(s) upserted%s)",
+                done, len(changed_keys),
+                f", {failed} left unrefreshed" if failed else "",
+            )
+            return done
+
+    async def _encode_contextual_passages(
+        self, passages: list[str], *, expected_dim: int
+    ) -> list[list[float] | None]:
+        """Encode passages; fall back to one call per chunk when a batch fails.
+
+        The write embedder has a fixed context window and some KB chunks tokenize
+        close to it — a context line can push one chunk over.  One oversized
+        chunk must not take its batch siblings down: on a batch failure every
+        passage is retried alone and the unencodable ones come back as ``None``
+        (the caller keeps their old vectors).
+        """
+        try:
+            batch = await self._embedder.encode(list(passages))
+            if len(batch) == len(passages):
+                return [v if len(v) == expected_dim else None for v in batch]
+            logger.warning(
+                "Contextual re-embed: backend returned %d vector(s) for %d passage(s) "
+                "— retrying chunk by chunk", len(batch), len(passages),
+            )
+        except Exception as exc:  # EmbeddingError / transport — handled per chunk below
+            logger.warning(
+                "Contextual re-embed batch of %d failed (%s) — retrying chunk by chunk",
+                len(passages), exc,
+            )
+        out: list[list[float] | None] = []
+        for doc_text in passages:
+            try:
+                vecs = await self._embedder.encode([doc_text])
+            except Exception as exc:  # noqa: BLE001 — this chunk keeps its old vector
+                logger.warning("Contextual re-embed: chunk failed individually (%s)", exc)
+                out.append(None)
+                continue
+            vec = vecs[0] if vecs else None
+            out.append(vec if vec and len(vec) == expected_dim else None)
+        return out
 
     async def remove_document(self, file_path: str | pathlib.Path) -> bool:
         """Remove a document from the index. Returns True if something was removed."""

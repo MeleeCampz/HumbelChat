@@ -22,6 +22,7 @@ import discord.app_commands as app_commands
 from config.settings import (
     BOT_PREFIX,
     CONTEXTUAL_BACKGROUND_FILL,
+    CONTEXTUAL_FILL_BATCH_PAUSE_S,
     CONTEXTUAL_FILL_INITIAL_DELAY_S,
     KB_PATH,
     CHARACTERS_FILE,
@@ -642,8 +643,9 @@ async def _contextual_sidecar_worker(bot: discord.Client) -> None:
 
     Optional part (``CONTEXTUAL_BACKGROUND_FILL=1``): generate the missing
     lines in the background — batch-paused so live /ai traffic keeps working,
-    resumable, sidecar reloaded per batch. One retry 15 min after a failure;
-    generation errors are logged, never fatal.
+    resumable, sidecar reloaded per batch — and (#77) re-embed exactly those
+    chunks so their dense vectors carry the context line as well. One retry
+    15 min after a failure; generation errors are logged, never fatal.
     """
     # discord.py's stubs declare is_closed as a method while it is a property
     # at runtime — read defensively so both type-check and run.
@@ -661,7 +663,9 @@ async def _contextual_sidecar_worker(bot: discord.Client) -> None:
             log.warning(
                 "Contextual sidecar covers %d/%d indexed chunks — new data is "
                 "retrieving uncontextualized. Fill it with scripts/contextual_reindex.py "
-                "or set CONTEXTUAL_BACKGROUND_FILL=1 for an automatic background pass.",
+                "or set CONTEXTUAL_BACKGROUND_FILL=1 for an automatic background pass "
+                "(it re-embeds what it generates; repair lagging vectors with "
+                "--reembed-contextualized).",
                 covered, total,
             )
         if not CONTEXTUAL_BACKGROUND_FILL:
@@ -672,7 +676,11 @@ async def _contextual_sidecar_worker(bot: discord.Client) -> None:
                 return
             try:
                 n = await generate_missing_context_lines(
-                    store, should_stop=_closed)
+                    store,
+                    should_stop=_closed,
+                    batch_pause=CONTEXTUAL_FILL_BATCH_PAUSE_S,
+                    reembed=True,
+                )
                 covered, total = store.contextual_coverage()
                 log.info("Contextual fill finished: %d new line(s); coverage now %d/%d.",
                          n, covered, total)

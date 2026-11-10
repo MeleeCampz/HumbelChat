@@ -39,8 +39,13 @@ class TestParseJsonArray:
 
 # ── generation core ──────────────────────────────────────────────────────────
 
-def _fake_store(tmp_path, n_chunks=3, with_lines=0):
-    """A duck-typed KBIndexStore: _index._docs + sidecar on disk."""
+def _fake_store(tmp_path, n_chunks=3, with_lines=0, reembed_fails=False):
+    """A duck-typed KBIndexStore: _index._docs + sidecar on disk.
+
+    ``reembed_calls`` records every #77 re-embed call (the set of content
+    hashes asked for); ``reembed_fails=True`` makes it raise, like a downed
+    embedding backend.
+    """
     from kb.vector_db import _DocEntry, _content_hash
 
     docs = []
@@ -56,10 +61,20 @@ def _fake_store(tmp_path, n_chunks=3, with_lines=0):
         docs.append(d)
     inner = SimpleNamespace(_docs=docs)
     lines = {_content_hash(d.content): d.context_line for d in docs if d.context_line}
+    reembed_calls: list[set[str]] = []
+
+    def _reembed(hashes):
+        reembed_calls.append(set(hashes))
+        if reembed_fails:
+            raise RuntimeError("embedding backend down")
+        return len(hashes)
+
     store = SimpleNamespace(
         _index=inner,
         _context_lines=dict(lines),
         persist_dir=tmp_path,
+        reembed_contextualized=_reembed,
+        reembed_calls=reembed_calls,
         save_context_lines=lambda ls: (
             (tmp_path / "context_lines.json").write_text(
                 json.dumps(ls, ensure_ascii=False), encoding="utf-8")),
@@ -152,6 +167,77 @@ class TestGenerateMissing:
         with p1, p2, p3:
             n = await generate_missing_context_lines(store, batch_pause=0)
         assert n == 0 and not calls
+
+
+class TestReembedWiring:
+    """#77: the fill hands each batch's fresh hashes to reembed_contextualized."""
+
+    @pytest.mark.asyncio
+    async def test_reembed_runs_once_per_batch_with_that_batches_hashes(self, tmp_path):
+        from kb.vector_db import _content_hash
+        store = _fake_store(tmp_path, n_chunks=3)   # 2 files → batches of 2 and 1
+        p1, p2, p3, _calls = _fake_ai(['["line A0", "line A1"]', '"line B"'])
+        with p1, p2, p3:
+            n = await generate_missing_context_lines(store, batch_pause=0)
+        assert n == 3
+        assert [len(s) for s in store.reembed_calls] == [2, 1]
+        all_hashes = {_content_hash(d.content) for d in store._index._docs}
+        assert set.union(*store.reembed_calls) == all_hashes
+        # No end-of-run retry was needed.
+        assert len(store.reembed_calls) == 2
+
+    @pytest.mark.asyncio
+    async def test_reembed_failure_never_aborts_the_fill_and_is_retried_once(self, tmp_path):
+        from kb.vector_db import _content_hash
+        store = _fake_store(tmp_path, n_chunks=3, reembed_fails=True)
+        p1, p2, p3, calls = _fake_ai(['["a0", "a1"]', '"b"'])
+        with p1, p2, p3:
+            n = await generate_missing_context_lines(store, batch_pause=0)
+        assert n == 3                       # lines still generated + persisted
+        sidecar = json.loads((tmp_path / "context_lines.json").read_text(encoding="utf-8"))
+        assert len(sidecar) == 3
+        assert [len(s) for s in store.reembed_calls] == [2, 1, 3]   # 2 batches + 1 retry
+        assert store.reembed_calls[-1] == {  # the retry covers exactly the failed ones
+            _content_hash(d.content) for d in store._index._docs
+        }
+
+    @pytest.mark.asyncio
+    async def test_partial_failure_retries_only_the_missing_hashes(self, tmp_path):
+        from kb.vector_db import _content_hash
+        store = _fake_store(tmp_path, n_chunks=3)
+        seq = [0, 1]   # first batch refreshed nothing, second batch succeeded
+
+        def flaky(hashes):
+            store.reembed_calls.append(set(hashes))
+            return seq.pop(0) if seq else len(hashes)
+
+        store.reembed_contextualized = flaky
+        p1, p2, p3, _calls = _fake_ai(['["a0", "a1"]', '"b"'])
+        with p1, p2, p3:
+            n = await generate_missing_context_lines(store, batch_pause=0)
+        assert n == 3
+        assert [len(s) for s in store.reembed_calls] == [2, 1, 2]
+        assert store.reembed_calls[-1] == store.reembed_calls[0]
+
+    @pytest.mark.asyncio
+    async def test_reembed_false_skips_the_vector_refresh(self, tmp_path):
+        store = _fake_store(tmp_path, n_chunks=3)
+        p1, p2, p3, _calls = _fake_ai(['["a0", "a1"]', '"b"'])
+        with p1, p2, p3:
+            n = await generate_missing_context_lines(store, batch_pause=0, reembed=False)
+        assert n == 3
+        assert store.reembed_calls == []
+
+    @pytest.mark.asyncio
+    async def test_store_without_the_method_still_fills(self, tmp_path):
+        """Duck-typed callers (older stores, third-party) keep working."""
+        store = _fake_store(tmp_path, n_chunks=2)
+        del store.reembed_contextualized
+        p1, p2, p3, _calls = _fake_ai(['["a0", "a1"]'])
+        with p1, p2, p3:
+            n = await generate_missing_context_lines(store, batch_pause=0)
+        assert n == 2
+        assert store.reembed_calls == []
 
 
 class TestStoreSidecarMethods:

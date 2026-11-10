@@ -41,18 +41,27 @@ class TestContextualSidecarWorker:
         import main
         from kb import retrievers
         store = SimpleNamespace(contextual_coverage=lambda: (0, 4))
+        captured: dict = {}
         monkeypatch.setattr(main, "CONTEXTUAL_FILL_INITIAL_DELAY_S", 0)
         monkeypatch.setattr(main, "CONTEXTUAL_BACKGROUND_FILL", True)
         monkeypatch.setattr(retrievers, "_ensure_index_store",
                             AsyncMock(return_value=store))
 
         async def fake_gen(store_, **kw):
+            captured["pause"] = kw.get("batch_pause")
+            captured["reembed"] = kw.get("reembed")
+            captured["should_stop"] = kw.get("should_stop") is not None
             return 4
 
         monkeypatch.setattr("kb.contextual_gen.generate_missing_context_lines", fake_gen)
+        monkeypatch.setattr(main, "CONTEXTUAL_FILL_BATCH_PAUSE_S", 5.0)
         caplog.set_level(logging.INFO, logger="bot")
         await main._contextual_sidecar_worker(SimpleNamespace(is_closed=False))
         assert any("Contextual fill finished" in r.message for r in caplog.records)
+        # #77: the batch pause is configurable and the vectors follow the lines.
+        assert captured["pause"] == 5.0
+        assert captured["reembed"] is True
+        assert captured["should_stop"] is True
 
     @pytest.mark.asyncio
     async def test_no_store_is_a_noop(self, monkeypatch):

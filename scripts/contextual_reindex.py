@@ -13,17 +13,26 @@ Pipeline:
      array of one-line context descriptions, keyed to the chunk order.
   3. Persist ``<persist_dir>/context_lines.json`` (content_hash → line) after
      every batch — resumable: hashes already present are skipped.
-  4. Optionally re-embed the whole index with the contextual passages
-     (``--rebuild``): forces a full rebuild via the normal atomic-swap path,
-     so an interrupted run never leaves the bot without its old cache.
+  4. Re-embed the chunks just contextualized (``--reembed-missing``): a chunk that
+     got its line AFTER being embedded still carries a vector of the RAW text, so
+     the dense leg never sees the framing (#77). Targeted, seconds. The bot's own
+     startup fill does generate + re-embed in one process; this script is the
+     offline/repair twin.
 
 Safe by default: without the sidecar file every code path behaves exactly as
 before (passage_text() == content). Run with --dry-run to see the plan first.
 
+⚠ Anything that writes the vector cache (--reembed-*, --rebuild) must run with
+the BOT STOPPED: a live bot holds the pre-context vectors in memory and re-
+persists them on its next incremental save or shutdown, overwriting this script's
+work. ``docker compose stop bot`` → run → ``docker compose start bot``.
+
 Usage (from the repo root, real backends):
   EMBED_URL=http://host.docker.internal:11435/v1 \
-  .venv/bin/python scripts/contextual_reindex.py --batch-size 12
-  # then, once the sidecar looks good:
+  .venv/bin/python scripts/contextual_reindex.py --batch-size 12 --reembed-missing
+  # repair vectors that lag their context line, without generating anything:
+  .venv/bin/python scripts/contextual_reindex.py --reembed-only
+  # full re-embed of everything (model or schema change):
   .venv/bin/python scripts/contextual_reindex.py --rebuild
 """
 
@@ -123,7 +132,8 @@ async def _generate(
     priority_substring: str = "",
     path_substring: str = "",
     reference_block: str = "",
-) -> int:
+) -> tuple[int, set[str]]:
+    """Generate missing lines → (failed_chunk_count, generated_hashes)."""
     import httpx
 
     todo = [c for c in chunks if c["hash"] not in sidecar]
@@ -160,6 +170,7 @@ async def _generate(
 
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     done = failed = 0
+    generated_hashes: set[str] = set()
     t0 = time.time()
     # trust_env=False: bypass the sandbox proxy env entirely — the inference
     # backend is a direct host connection (host.docker.internal), not egress.
@@ -185,6 +196,7 @@ async def _generate(
                         for c, line in zip(batch, lines):
                             if line:
                                 sidecar[c["hash"]] = line[:300]
+                                generated_hashes.add(c["hash"])
                         _save_sidecar(persist_dir, sidecar)
                         done += len(batch)
                         ok = True
@@ -201,18 +213,54 @@ async def _generate(
                 rate = done / elapsed if elapsed else 0
                 print(f"progress: batch {bi}/{len(batches)}  chunks ok={done} failed={failed}  "
                       f"{rate:.1f} chunk/s  sidecar size={len(sidecar)}")
-    return failed
+    return failed, generated_hashes
 
 
-async def _rebuild(persist_dir: pathlib.Path) -> None:
+async def _rebuild(kb_path: pathlib.Path, persist_dir: pathlib.Path) -> None:
     from kb.index import KBIndexStore
 
-    manager = KBIndexStore(DEFAULT_KB_PATH, persist_dir=persist_dir)
+    manager = KBIndexStore(kb_path, persist_dir=persist_dir)
     n_ctx = manager.reload_context_lines()
     print(f"sidecar loaded: {len(n_ctx)} context line(s); forcing full re-embed ...")
     idx = await manager.rebuild()
     print(f"index rebuilt: {idx.count()} chunk(s) → {manager.db_path}")
     await manager.shutdown()
+
+
+async def _reembed(kb_path: pathlib.Path, persist_dir: pathlib.Path,
+                   hashes: set[str] | None) -> None:
+    """#77: re-embed chunks whose vector predates their context line.
+
+    *hashes*: chunks to refresh (original-content hashes); ``None`` = every chunk
+    that HAS a context line (the repair path). Runs through the same store code
+    the bot uses: contextual passage → index embedder → incremental upsert.
+    """
+    from kb.index import KBIndexStore
+
+    manager = KBIndexStore(kb_path, persist_dir=persist_dir)
+    try:
+        n = await manager.reembed_contextualized(hashes)
+        scope = ("every contextualized chunk" if hashes is None
+                 else f"{len(hashes)} chunk(s) generated this run")
+        print(f"re-embed ({scope}): {n} chunk(s) now embedded as context + content → {manager.db_path}")
+    except Exception as exc:  # noqa: BLE001 — data job: report, never traceback
+        print(f"re-embed failed: {exc!r}")
+    finally:
+        await manager.shutdown()
+
+
+def _prune_orphans(persist_dir: pathlib.Path, chunks: list[dict], sidecar: dict[str, str]) -> int:
+    """Drop sidecar entries whose chunk no longer exists (tidiness, #77 item 3)."""
+    known = {c["hash"] for c in chunks}
+    orphans = [h for h in sidecar if h not in known]
+    if not orphans:
+        print("orphans: none — every sidecar entry matches a live chunk")
+        return 0
+    for h in orphans:
+        sidecar.pop(h)
+    _save_sidecar(persist_dir, sidecar)
+    print(f"orphans: removed {len(orphans)} stale sidecar entry(ies); {len(sidecar)} remain")
+    return len(orphans)
 
 
 def main() -> None:
@@ -240,21 +288,71 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=None, help="only process this many chunks (testing)")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--rebuild", action="store_true",
-                    help="after generation: force a full re-embed with contextual passages")
+                    help="force a FULL index rebuild with contextual passages (atomic cache swap)")
+    ap.add_argument("--reembed-missing", action="store_true",
+                    help="#77: after generation, re-embed exactly the chunks generated in this run")
+    ap.add_argument("--reembed-contextualized", action="store_true",
+                    help="#77 repair: re-embed EVERY chunk that has a context line (no cache drop)")
+    ap.add_argument("--reembed-only", action="store_true",
+                    help="skip generation and re-embed every contextualized chunk "
+                         "(shorthand for --reembed-contextualized)")
+    ap.add_argument("--prune-orphans", action="store_true",
+                    help="remove sidecar entries whose chunk no longer exists")
     args = ap.parse_args()
 
     persist_dir = pathlib.Path(args.persist_dir)
+    kb_path = pathlib.Path(args.kb_path)
+    reembed_all = args.reembed_contextualized or args.reembed_only
     chunks = _load_chunks(persist_dir / "vector_index.db")
     sidecar = _load_sidecar(persist_dir)
-    failed = asyncio.run(_generate(
-        chunks, sidecar, persist_dir, args.model, args.base_url.rstrip("/"),
-        INFER_API_KEY, args.batch_size, args.max_chars, args.limit, args.dry_run,
-        args.priority,
-        args.path_substring,
-        open(args.reference_file, encoding="utf-8").read() if args.reference_file else "",
-    ))
-    if args.rebuild and not args.dry_run:
-        asyncio.run(_rebuild(persist_dir))
+
+    if args.dry_run:
+        if not args.reembed_only:
+            asyncio.run(_generate(
+                chunks, sidecar, persist_dir, args.model, args.base_url.rstrip("/"),
+                INFER_API_KEY, args.batch_size, args.max_chars, args.limit, True,
+                args.priority,
+                args.path_substring,
+                open(args.reference_file, encoding="utf-8").read() if args.reference_file else "",
+            ))
+        if reembed_all:
+            print(f"dry-run: would re-embed "
+                  f"{sum(1 for c in chunks if c['hash'] in sidecar)} contextualized chunk(s).")
+        if args.prune_orphans:
+            known = {c["hash"] for c in chunks}
+            print(f"dry-run: would prune {sum(1 for h in sidecar if h not in known)} "
+                  f"orphan sidecar entry(ies).")
+        return
+
+    if args.reembed_missing or reembed_all or args.rebuild or args.prune_orphans:
+        print("WARNING: writing the live vector cache/sidecar. Stop the bot first "
+              "(a running bot keeps the pre-context vectors in memory and re-persists "
+              "them on its next save/shutdown, overwriting this run).")
+
+    if args.reembed_only:
+        failed, generated = 0, set()
+    else:
+        failed, generated = asyncio.run(_generate(
+            chunks, sidecar, persist_dir, args.model, args.base_url.rstrip("/"),
+            INFER_API_KEY, args.batch_size, args.max_chars, args.limit, False,
+            args.priority,
+            args.path_substring,
+            open(args.reference_file, encoding="utf-8").read() if args.reference_file else "",
+        ))
+
+    if args.prune_orphans:
+        _prune_orphans(persist_dir, chunks, sidecar)
+    if args.rebuild:
+        asyncio.run(_rebuild(kb_path, persist_dir))
+    elif reembed_all:
+        asyncio.run(_reembed(kb_path, persist_dir, None))
+    elif args.reembed_missing:
+        if generated:
+            asyncio.run(_reembed(kb_path, persist_dir, generated))
+        else:
+            print("--reembed-missing: nothing was generated this run — nothing to re-embed. "
+                  "To refresh context lines that already exist: --reembed-contextualized.")
+
     if failed and not args.rebuild:
         print(f"done with {failed} uncontextualized chunk(s) — re-run to resume.")
 

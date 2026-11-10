@@ -274,9 +274,19 @@ messages, and tiny/unstructured replies fall back to plain text. See
 |---|---|---|
 | `CONTEXTUAL_BACKGROUND_FILL` | `0` | After startup, generate missing contextual-retrieval lines for newly ingested chunks in the background (idle-delayed, batch-paused so live `/ai` keeps working, resumable, reloaded per batch). |
 | `CONTEXTUAL_FILL_INITIAL_DELAY_S` | `300` | Seconds after startup before the fill begins. |
+| `CONTEXTUAL_FILL_BATCH_PAUSE_S` | `60` | Pause between fill batches. Each batch's fresh lines are re-embedded as they land (#77), so a small value makes the fill one continuous burst — set `5` when nothing else is embedding (the bot only embeds on `/kb add`, which the fill queue-jumps). |
 
 The coverage **warning** is always on: if the sidecar doesn't cover every
 indexed chunk (e.g. after new data was ingested), startup logs a warning with
 the coverage and both fill options. Offline alternative:
 `scripts/contextual_reindex.py`.
+
+**Vectors follow the lines (#77):** the fill re-embeds each batch it generates
+(`KBIndexStore.reembed_contextualized`), so a newly contextualized chunk is
+vector-searchable with its framing instead of keeping a vector built from the
+raw text. To repair an index that was already filled (lines present, vectors
+from before them): `scripts/contextual_reindex.py --reembed-contextualized
+[--path-substring FEAT] [--reembed-only] [--prune-orphans]` — with the **bot
+stopped**, because a live bot rewrites the cache from its stale in-memory copy
+on shutdown.
 

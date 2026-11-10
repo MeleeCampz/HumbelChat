@@ -117,16 +117,21 @@ Two knobs control how much of each matched file actually reaches the prompt:
 
 ## Contextual retrieval sidecar
 
-Each chunk's embedding input is optionally prefixed with one generated line —
+Each chunk's retrieval input is optionally prefixed with one generated line —
 "{file title} / {header chain}: {chunk content}" — so chunks that are
-indistinguishable on their own (session notes, per-entry book sections) embed
-with their location baked in. The sidecar lives in a `chunk_contexts` table
-keyed by the chunk's ORIGINAL content hash: adding one is a cache hit (no
-re-embedding), and removing it yields byte-identical legacy behavior. Chunks
-without a sidecar fall back to raw content. Generated once per chunk by
-`scripts/contextual_reindex.py` (cached in `chunk_contexts.generated`,
-resumable); the A/B benchmark showed +2 hits with zero regressions on the
-golden set.
+indistinguishable on their own (session notes, per-entry book sections) carry
+their location into both retrieval legs. The sidecar is a JSON map,
+`context_lines.json` beside `vector_index.db`, keyed by the chunk's **original
+content hash** (the hash never changes when a line is added, so adding one is
+always a lookup hit and never invalidates the chunk), and deleting every line
+yields byte-identical legacy behavior. `KBIndexStore` attaches the lines to the
+chunks on **every** load path — disk cache, fresh build, `add_docs` — and
+`_DocEntry.passage_text()` composes `context_line + "\n\n" + content` for the
+dense embedding input and the BM25 corpus. Chunks without a line fall back to
+raw content. Generated once per chunk by the background fill (#52,
+`kb/contextual_gen.py`) or offline by `scripts/contextual_reindex.py` (resumable
+— existing hashes are skipped); the A/B benchmark showed +2 hits with zero
+regressions on the golden set.
 
 **Coverage watch + background fill (#52):** new chunks are indexed *without*
 a context line (safe legacy fallback), so after ingesting new data the
@@ -134,6 +139,22 @@ sidecar no longer covers the index. At startup the bot checks coverage and
 logs a warning when it's partial; with `CONTEXTUAL_BACKGROUND_FILL=1` it also
 generates the missing lines in the background (shared core:
 `kb/contextual_gen.py`; offline alternative: `scripts/contextual_reindex.py`).
+
+**Vector refresh (#77):** a line only helps dense retrieval if the *embedding*
+was built from `context_line + "\n\n" + content`. The fill writes the line, so
+without a refresh the stored vector still describes the raw chunk — BM25 sees
+the framing, the vector leg does not. `KBIndexStore.reembed_contextualized
+(content_hashes)` is the shared core fix: a targeted `document_index` upsert of
+the contextual passage and nothing else (untouched chunks keep their exact
+vectors, `content_hash`/`file_hash` stay byte-stable so the P2 #19 hash fast
+path and the incremental save stay correct, numpy + BM25 caches are rebuilt,
+`metadata` is rewritten). The fill calls it per batch, so a filled chunk is
+vector-searchable immediately; if the embedding backend is down the lines still
+land and the vectors lag, which the finish log warns about. Repair an
+already-filled index offline with `scripts/contextual_reindex.py
+--reembed-contextualized [--path-substring FEAT] [--reembed-only]` — **stop the
+bot first**: a live bot rewrites the cache on shutdown from its stale in-memory
+copy and can re-add lines the run pruned.
 
 
 ## Low-confidence query rewriting (vector path)

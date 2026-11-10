@@ -724,6 +724,10 @@ LAST_SESSION_MAX_CHARS: int = _safe_int(os.getenv("LAST_SESSION_MAX_CHARS"), 400
 CONTEXTUAL_BACKGROUND_FILL: bool = _safe_bool(os.getenv("CONTEXTUAL_BACKGROUND_FILL"), False)
 # Seconds after startup before the fill begins (let the bot settle first).
 CONTEXTUAL_FILL_INITIAL_DELAY_S: int = int(os.getenv("CONTEXTUAL_FILL_INITIAL_DELAY_S", "300"))
+# #77: seconds to wait between fill batches. Keeps the shared chat model free for
+# live /ai traffic (60 s default); a catch-up run over a few hundred chunks can
+# safely drop it to ~5 s. 0 = no pause (not recommended on the chat GPU).
+CONTEXTUAL_FILL_BATCH_PAUSE_S: float = _safe_float(os.getenv("CONTEXTUAL_FILL_BATCH_PAUSE_S"), 60.0)
 
 # ── Per-turn AI records for offline debugging (bot_core/turn_logger) ───────
 # Every ask_ai / ask_ai_stream turn writes ONE self-contained JSON file to

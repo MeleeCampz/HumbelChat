@@ -19,10 +19,15 @@ Design constraints:
   boundary via *should_stop* (e.g. bot shutdown).
 * **Live-safe** — after each batch the sidecar is reloaded into the index,
   so in-flight retrieval immediately benefits from the new lines.
+* **Vector-consistent (#77)** — each batch is followed by a targeted
+  ``index.reembed_contextualized(hashes)`` so the chunk's dense vector is built
+  from the contextual passage, not just the raw content. Generation without it
+  leaves half-contextualized chunks (BM25 framed, dense leg blind).
 """
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import re
@@ -68,6 +73,7 @@ async def generate_missing_context_lines(
     batch_pause: float = 60.0,
     max_chars: int = 1500,
     should_stop: Callable[[], bool] | None = None,
+    reembed: bool = True,
 ) -> int:
     """Fill missing context lines for *index*'s chunks; return lines generated.
 
@@ -78,6 +84,14 @@ async def generate_missing_context_lines(
     so live retrieval sees new lines immediately. A batch that fails three
     times is skipped (resumable on a later run) — generation errors are data,
     never fatal to the bot.
+
+    #77 — ``reembed`` (default ON): every batch's freshly-lined chunks are handed
+    to ``index.reembed_contextualized(hashes)`` so their VECTORS are rebuilt from
+    ``context_line + content`` too. Without that step a chunk gains BM25/prompt
+    framing only, while its dense vector still describes the raw text. A re-embed
+    failure never aborts the fill (the lines are useful on their own); failed
+    hashes are retried once after the last batch, and any that remain are named
+    in a warning pointing at the repair flag.
     """
     from bot_core.ai_client import _make_client, _validate_model, complete_text
     from config.settings import DEFAULT_MODEL
@@ -113,6 +127,26 @@ async def generate_missing_context_lines(
     client = _make_client()
     model = await _validate_model(client, DEFAULT_MODEL)
     generated = 0
+    # #77: per-batch re-embed of exactly the chunks just contextualized. Looked
+    # up dynamically so duck-typed stores without the method (tests, third-party
+    # callers) keep working — they just skip the vector refresh.
+    reembed_fn = getattr(index, "reembed_contextualized", None) if reembed else None
+    if reembed and reembed_fn is None:
+        log.debug("Contextual fill: store has no reembed_contextualized(); vectors left unchanged")
+    reembedded = 0
+    pending_reembed: set[str] = set()
+
+    async def _reembed(hashes: set[str]) -> int:
+        """Call the store's targeted re-embed (sync or async); never raises."""
+        try:
+            result = reembed_fn(hashes)
+            if inspect.isawaitable(result):
+                result = await result
+            return int(result or 0)
+        except Exception as exc:  # noqa: BLE001 — vectors lag, the fill continues
+            log.warning("Contextual fill re-embed failed for %d chunk(s): %r", len(hashes), exc)
+            return 0
+
     for bi, batch in enumerate(batches, 1):
         if should_stop is not None and should_stop():
             log.info("Contextual fill stopped by caller after %d line(s).", generated)
@@ -136,12 +170,22 @@ async def generate_missing_context_lines(
                 )
                 lines = parse_json_array(reply, expected=len(batch))
                 if lines is not None and len(lines) == len(batch):
+                    batch_hashes: set[str] = set()
                     for c, line in zip(batch, lines):
                         if line:
-                            index._context_lines[_content_hash_of(c)] = line[:300]
+                            h = _content_hash_of(c)
+                            index._context_lines[h] = line[:300]
                             c.context_line = line[:300]
+                            batch_hashes.add(h)
                     index.save_context_lines(index._context_lines)
                     index.reload_context_lines()
+                    if reembed_fn is not None and batch_hashes:
+                        n_re = await _reembed(batch_hashes)
+                        reembedded += n_re
+                        if n_re < len(batch_hashes):
+                            # Retry these once after the loop (downed embedder,
+                            # GPU flipped to image mode mid-fill, …).
+                            pending_reembed |= batch_hashes
                     generated += len(batch)
                     ok = True
                     break
@@ -159,6 +203,17 @@ async def generate_missing_context_lines(
                      bi, len(batches), generated, len(index._context_lines))
         if bi < len(batches) and batch_pause > 0:
             await asyncio.sleep(batch_pause)
+    if reembed_fn is not None and pending_reembed:
+        n_retry = await _reembed(set(pending_reembed))
+        reembedded += n_retry
+        if n_retry < len(pending_reembed):
+            log.warning(
+                "Contextual fill: %d of %d chunk(s) still carry pre-context vectors — "
+                "repair with scripts/contextual_reindex.py --reembed-contextualized",
+                len(pending_reembed) - n_retry, len(pending_reembed),
+            )
+    if reembed_fn is not None:
+        log.info("Contextual fill: %d chunk(s) re-embedded with their new context line.", reembedded)
     return generated
 
 
