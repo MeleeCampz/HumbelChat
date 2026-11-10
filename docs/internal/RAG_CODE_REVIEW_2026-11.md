@@ -18,20 +18,20 @@ not estimated; the scripts in §7 reproduce them.
 
 | ID | Sev | One-liner | Status (2026-11-11) |
 |----|-----|-----------|--------------------------|
-| R1 | HIGH | `list_sections(dir=…)` cannot match *any* file in the live index — latent dead tool  OPEN |
-| R2 | HIGH | The GPU image switch kills retrieval *inside* an in-flight agent rewrite (log-proved)  OPEN (decision) |
-| R3 | MED | When the reranker is offline, `RAG_ATTACH_FLOOR=0.50` silently changes unit (probability → cosine)  OPEN |
-| R4 | MED | Cache-identity guard validates the **query** model, not the model that **wrote** the vectors  OPEN |
-| R5 | MED | Contextual sidecar is keyed by content hash alone → cross-file duplicate chunks share one context line  OPEN |
-| R6 | MED | Every index mutation invalidates the numpy matrix *and* BM25: measured **0.91 s** added to the next query  OPEN |
-| R7 | LOW | Context lines measurably reshuffle the lexical leg (~1 in 5 of the lexical top-96 changes) — never A/B'd  OPEN (probe) |
-| R8 | LOW | The CRAG agent gate is blind exactly when retrieval quality is worst  OPEN |
-| R9 | LOW | `MAX_CHARS_PER_FILE` (24 000, a module constant) is out of scale with `RAG_MAX_DOCS × RAG_MAX_CHARS`  OPEN |
-| R10 | LOW | Rewriter failure is logged as `Query rewrite failed ()` — 12 occurrences, reason unrecoverable  OPEN |
-| R11 | INFO | Corpus coverage audit: the chunker loses ≤1.2 % of bytes everywhere except 3 merged session files (by design)  audit closed |
-| R12 | INFO | Framing overhead measured: 19 % of indexed text is breadcrumb + context line; ~7 % of the prompt budget  closed |
-| R13 | INFO | Config-hygiene inventory (dead vars, doc/example drift) with exact counts  OPEN |
-| R14 | INFO | #77 self-review: the per-chunk fallback can leave a *mixed-space* index, and the offline script can be shot in the foot by the live bot  CLOSED (#81) |
+| R1 | HIGH | `list_sections(dir=…)` cannot match *any* file in the live index — latent dead tool | OPEN |
+| R2 | HIGH | The GPU image switch kills retrieval *inside* an in-flight agent rewrite (log-proved) | OPEN (decision) |
+| R3 | MED | When the reranker is offline, `RAG_ATTACH_FLOOR=0.50` silently changes unit (probability → cosine) | OPEN |
+| R4 | MED | Cache-identity guard validates the **query** model, not the model that **wrote** the vectors | OPEN |
+| R5 | MED | Contextual sidecar is keyed by content hash alone → cross-file duplicate chunks share one context line | OPEN |
+| R6 | MED | Every index mutation invalidates the numpy matrix *and* BM25: measured **0.91 s** added to the next query | OPEN |
+| R7 | LOW | Context lines measurably reshuffle the lexical leg (~1 in 5 of the lexical top-96 changes) — never A/B'd | OPEN (probe) |
+| R8 | LOW | The CRAG agent gate is blind exactly when retrieval quality is worst | OPEN |
+| R9 | LOW | `MAX_CHARS_PER_FILE` (24 000, a module constant) is out of scale with `RAG_MAX_DOCS × RAG_MAX_CHARS` | OPEN |
+| R10 | LOW | Rewriter failure is logged as `Query rewrite failed ()` — 12 occurrences, reason unrecoverable | OPEN |
+| R11 | INFO | Corpus coverage audit: the chunker loses ≤1.2 % of bytes everywhere except 3 merged session files (by design) | audit closed |
+| R12 | INFO | Framing overhead measured: 19 % of indexed text is breadcrumb + context line; ~7 % of the prompt budget | closed |
+| R13 | INFO | Config-hygiene inventory (dead vars, doc/example drift) with exact counts | OPEN |
+| R14 | INFO | #77 self-review: the per-chunk fallback can leave a *mixed-space* index, and the offline script can be shot in the foot by the live bot | CLOSED (#81) |
 
 ---
 
@@ -101,7 +101,7 @@ prefix match is otherwise indistinguishable from a typo.
 
 ## 2. R2 — HIGH: the image-mode GPU switch overtakes an in-flight agent rewrite
 
-**Status 2026-11-11: OPEN — awaiting a user decision (serialize image windows vs. mode-aware retrieval). See §19.**
+**Status 2026-11-11: OPEN — awaiting a user decision (serialize image windows vs. mode-aware retrieval). See §18.**
 
 `AGENTS.md` states "Prompt rewriting ALWAYS happens before the switch". That holds for a
 *single* sequential image request. It does not hold for two requests in flight, and the
@@ -595,7 +595,7 @@ agent turns, and both are visible in the logs I quoted.
 
 ---
 
-## 19. Status as of 2026-11-11 (handoff for the fix series)
+## 18. Status as of 2026-11-11 (handoff for the fix series)
 
 **Closed since the review landed**, all on `feat/contextual-reembed`, all verified by the
 pytest suite (1 400 passing):
@@ -655,7 +655,7 @@ tested with mocks and verified live by the user. Chat model id is now aligned wi
 
 ---
 
-## 18. Reproduction scripts
+## 19. Reproduction scripts
 
 Three throwaway scripts were used for the measurements; kept here as recipes rather than
 files in the repo (they read the live cache read-only):
