@@ -16,26 +16,28 @@ not estimated; the scripts in §7 reproduce them.
 
 **Findings index**
 
-| ID | Sev | One-liner |
-|----|-----|-----------|
-| R1 | HIGH | `list_sections(dir=…)` cannot match *any* file in the live index — latent dead tool |
-| R2 | HIGH | The GPU image switch kills retrieval *inside* an in-flight agent rewrite (log-proved) |
-| R3 | MED | When the reranker is offline, `RAG_ATTACH_FLOOR=0.50` silently changes unit (probability → cosine) |
-| R4 | MED | Cache-identity guard validates the **query** model, not the model that **wrote** the vectors |
-| R5 | MED | Contextual sidecar is keyed by content hash alone → cross-file duplicate chunks share one context line |
-| R6 | MED | Every index mutation invalidates the numpy matrix *and* BM25: measured **0.91 s** added to the next query |
-| R7 | LOW | Context lines measurably reshuffle the lexical leg (~1 in 5 of the lexical top-96 changes) — never A/B'd |
-| R8 | LOW | The CRAG agent gate is blind exactly when retrieval quality is worst |
-| R9 | LOW | `MAX_CHARS_PER_FILE` (24 000, a module constant) is out of scale with `RAG_MAX_DOCS × RAG_MAX_CHARS` |
-| R10 | LOW | Rewriter failure is logged as `Query rewrite failed ()` — 12 occurrences, reason unrecoverable |
-| R11 | INFO | Corpus coverage audit: the chunker loses ≤1.2 % of bytes everywhere except 3 merged session files (by design) |
-| R12 | INFO | Framing overhead measured: 19 % of indexed text is breadcrumb + context line; ~7 % of the prompt budget |
-| R13 | INFO | Config-hygiene inventory (dead vars, doc/example drift) with exact counts |
-| R14 | INFO | #77 self-review: the per-chunk fallback can leave a *mixed-space* index, and the offline script can be shot in the foot by the live bot |
+| ID | Sev | One-liner | Status (2026-11-11) |
+|----|-----|-----------|--------------------------|
+| R1 | HIGH | `list_sections(dir=…)` cannot match *any* file in the live index — latent dead tool  OPEN |
+| R2 | HIGH | The GPU image switch kills retrieval *inside* an in-flight agent rewrite (log-proved)  OPEN (decision) |
+| R3 | MED | When the reranker is offline, `RAG_ATTACH_FLOOR=0.50` silently changes unit (probability → cosine)  OPEN |
+| R4 | MED | Cache-identity guard validates the **query** model, not the model that **wrote** the vectors  OPEN |
+| R5 | MED | Contextual sidecar is keyed by content hash alone → cross-file duplicate chunks share one context line  OPEN |
+| R6 | MED | Every index mutation invalidates the numpy matrix *and* BM25: measured **0.91 s** added to the next query  OPEN |
+| R7 | LOW | Context lines measurably reshuffle the lexical leg (~1 in 5 of the lexical top-96 changes) — never A/B'd  OPEN (probe) |
+| R8 | LOW | The CRAG agent gate is blind exactly when retrieval quality is worst  OPEN |
+| R9 | LOW | `MAX_CHARS_PER_FILE` (24 000, a module constant) is out of scale with `RAG_MAX_DOCS × RAG_MAX_CHARS`  OPEN |
+| R10 | LOW | Rewriter failure is logged as `Query rewrite failed ()` — 12 occurrences, reason unrecoverable  OPEN |
+| R11 | INFO | Corpus coverage audit: the chunker loses ≤1.2 % of bytes everywhere except 3 merged session files (by design)  audit closed |
+| R12 | INFO | Framing overhead measured: 19 % of indexed text is breadcrumb + context line; ~7 % of the prompt budget  closed |
+| R13 | INFO | Config-hygiene inventory (dead vars, doc/example drift) with exact counts  OPEN |
+| R14 | INFO | #77 self-review: the per-chunk fallback can leave a *mixed-space* index, and the offline script can be shot in the foot by the live bot  CLOSED (#81) |
 
 ---
 
 ## 1. R1 — HIGH: `list_sections(dir=…)` is unreachable in practice
+
+**Status 2026-11-11: OPEN (re-verified 2026-11-11) — `kb/tools.py:673` still tests `dir` against the bare-basename file part.**
 
 `kb/tools.py:658` matches the `dir` argument against the **file part of the chunk display
 name**:
@@ -99,6 +101,8 @@ prefix match is otherwise indistinguishable from a typo.
 
 ## 2. R2 — HIGH: the image-mode GPU switch overtakes an in-flight agent rewrite
 
+**Status 2026-11-11: OPEN — awaiting a user decision (serialize image windows vs. mode-aware retrieval). See §19.**
+
 `AGENTS.md` states "Prompt rewriting ALWAYS happens before the switch". That holds for a
 *single* sequential image request. It does not hold for two requests in flight, and the
 logs show it happening on 2026-11-09:
@@ -152,6 +156,8 @@ would burn the full 60 s. Worth remembering before changing the compose network 
 
 ## 3. R3 — MED: the attach floor changes unit when the reranker is unavailable
 
+**Status 2026-11-11: OPEN — re-verified: `rerank_gate is None` when the reranker is unreachable → `score_map` falls back to `dense_scores`, so the calibrated 0.50 rerank threshold compares against cosine.**
+
 `kb/retrievers.py` (#43) gates attachment on **rerank** scores:
 
 ```python
@@ -188,6 +194,8 @@ someone flips the mode back to `local`.
 ---
 
 ## 4. R4 — MED: the cache-identity guard checks the wrong model name
+
+**Status 2026-11-11: OPEN — no startup assertion exists yet; `_cache_identity_ok` still validates the query-side model.**
 
 `KBIndexStore` records and validates `self.model_name`, which comes from
 `effective_embedding_model()` (= `EMBEDDING_MODEL` when `EMBED_BACKEND=remote`,
@@ -232,6 +240,8 @@ into a 90 s "extend the budget for the weight load" path instead of a 10 s fail 
 
 ## 5. R5 — MED: one context line, three files (sidecar key design)
 
+**Status 2026-11-11: OPEN — sidecar still keyed by content hash only. Deferred deliberately: the fill had to land first (#81).**
+
 The sidecar key is the hash of the chunk's **content** only — `kb/contextual_gen.py:220`:
 
 ```python
@@ -263,6 +273,8 @@ minimum refuse to reuse a stored line whose leading path token doesn't match the
 ---
 
 ## 6. R6 — MED: mutation → full cache rebuild (measured 0.91 s of next-query latency)
+
+**Status 2026-11-11: OPEN — caches are still identity-keyed and `_bm25_cache` is still an unlocked global. Mitigated in one direction: re-embed now publishes per window (256), not per batch, so the #77 fill triggers ~23 rebuilds instead of ~35 and they no longer interleave with generation.**
 
 Nothing mutates `_docs` in place: `sync_changes`, `update_single_document`, `_build_fresh`
 and the new `reembed_contextualized` all publish a **new** `KBVectorIndex`
@@ -302,6 +314,8 @@ inside `KBVectorIndex`. Incremental BM25 is the bigger win but not worth the com
 
 ## 7. R7 — LOW: contextual framing measurably moves the lexical leg
 
+**Status 2026-11-11: OPEN (measurement task, not a defect).**
+
 BM25 is built over `passage_text()`, so context lines are in the lexical corpus by design
 (the dense and lexical legs "see the same text"). Nobody has measured the side effect. It
 is not negligible:
@@ -337,6 +351,8 @@ chunk before truncating — measured 1 124 tuples / 1.62 MB of transient passage
 
 ## 8. R8 — LOW: the agent quality gate is blind when retrieval is weakest
 
+**Status 2026-11-11: OPEN — re-verified: no tool circuit breaker, `AgentTurnMeta.tool_calls` still stores names only, gate still `None`-when-blind.**
+
 `bot_core/ai_client.py:960`:
 
 ```python
@@ -356,6 +372,8 @@ post-hoc analysis can tell "no reranker" from "no answer".
 ---
 
 ## 9. R9 — LOW: the per-file char cap is a constant out of scale with the prompt budget
+
+**Status 2026-11-11: OPEN — `kb/retrievers.py:212` is still a module constant.**
 
 `kb/retrievers.py:212`: `MAX_CHARS_PER_FILE = 24_000` is a **module constant** — not a
 setting, unlike its neighbours `RAG_MAX_CHUNKS_PER_FILE` and `RAG_ATTACH_FLOOR`. Production
@@ -380,6 +398,8 @@ fraction of `RAG_MAX_CHARS`, or the whole thing gets one budget split top-down.
 
 ## 10. R10 — LOW: failure logging loses the reason
 
+**Status 2026-11-11: OPEN — `kb/retrievers.py:475` still logs `%s` of a bare `TimeoutError`.**
+
 ```
 12 × Query rewrite failed ()
 ```
@@ -394,6 +414,8 @@ tuning decision will be made from.
 ---
 
 ## 11. R11 — INFO: chunker coverage audit (nothing is being dropped)
+
+**Status 2026-11-11: CLOSED as an audit (nothing to fix). The alias/glossary follow-up is OPEN as a **data** task.**
 
 Worth recording because "does the chunker lose data?" is the question this review was
 expected to answer, and the answer is measured and mostly clean.
@@ -433,6 +455,8 @@ now the concrete fix, not just an idea.
 
 ## 12. R12 — INFO: what framing costs
 
+**Status 2026-11-11: CLOSED (informational).**
+
 | Quantity | Measured |
 |---|---|
 | Indexed corpus | 5 944 chunks, 5 912 248 chars, p50 769, p95 2 452, max 7 616 |
@@ -452,6 +476,8 @@ parent chain), whereas context lines reach both.
 ---
 
 ## 13. R13 — INFO: config and cache hygiene, counted
+
+**Status 2026-11-11: OPEN — re-verified 2026-11-11: 15 `STT_*`/`RECORDINGS_DIR`-class vars still in live `.env`, `.env.example` still missing the whole `RERANK_*` family, and the `--prune-orphans` pass has not been run yet. New drift since the review: the #81 fill knobs (`CONTEXTUAL_FILL_RECHECK_S`, `…_RETRY_S`, `…_MAX_ROUNDS`, `…_LLM_TIMEOUT_S`, `CONTEXTUAL_REEMBED_WINDOW`, `CONTEXTUAL_FILL_MODEL`) are in `docs/configuration.md` but not yet in `.env.example`.**
 
 - Live `.env` carries **17 variables nothing reads**: 15 `STT_*` + `RECORDINGS_DIR` +
   `SESSION_SUMMARY_PROMPT`. The voice/STT pipeline was deleted in `669b36a`
@@ -477,6 +503,8 @@ parent chain), whereas context lines reach both.
 ---
 
 ## 14. R14 — INFO: reviewing the #77 change itself
+
+**Status 2026-11-11: CLOSED — fixed by the #81 fill work: standing self-healing loop, `__v__` re-embed stamp (mixed-space state is now *counted* by `contextual_vector_lag()` and repaired, not just logged), windowed repair, `--status`/`--stamp-all`, script-vs-bot heartbeat.**
 
 `feat/contextual-reembed` (`6d910f9`) — three things a future reader should know that the
 commit message does not say:
@@ -543,6 +571,10 @@ refactoring is most likely to break:
 
 ## 17. Suggested order
 
+**Revised 2026-11-11** — the full outstanding queue, in the order I would take it, is
+now in **§19**. This table is kept as the original recommendation; item 1 (R1) and the
+two-minute `type(exc).__name__` in item 2 are still the first two moves.
+
 | # | Action | Effort | Risk |
 |---|--------|--------|------|
 | 1 | R1: `list_sections` matches `source_file`; fix `iter_chunks` docstring; log tool **args** (name-only telemetry makes this class of failure undiagnosable); regression test with a *path* arg | ~30 min + test | none |
@@ -560,6 +592,66 @@ refactoring is most likely to break:
 R1 and R2 are the two I would do before anything else: one is a documented tool that
 provably cannot work, the other is already costing the campaign degraded image prompts and
 agent turns, and both are visible in the logs I quoted.
+
+---
+
+## 19. Status as of 2026-11-11 (handoff for the fix series)
+
+**Closed since the review landed**, all on `feat/contextual-reembed`, all verified by the
+pytest suite (1 400 passing):
+
+- **#77 live half + R14 → backlog #81**: the contextual fill is a *standing self-healing
+  loop* (`main.py`), not a boot one-shot — readiness gates (embedder probe → chat model
+  hosted → vector lag), a `__v__` re-embed **stamp** in `context_lines.json` so "line
+  written" and "vector built from the line" are separately knowable, `contextual_vector_lag()`
+  to *count* the mixed-space state, windowed repair (`CONTEXTUAL_REEMBED_WINDOW`, 256 chunks
+  per mutation window, resumable via the stamp, stops when the GPU flips to `image` mode or
+  the bot closes), a `fill_heartbeat` file so the offline script and the bot never race, and
+  `scripts/contextual_reindex.py --status` / `--stamp-all`. Live index at handoff:
+  `chunks=5944 lines=5698 missing=246 lagging=5698 orphans=53` — the loop is expected to
+  close all of it after `docker compose up -d --build`.
+- **Live model-id mismatch** (flagged in R4): `.env MODEL_NAME` now matches what Strata
+  serves (`qwen3.8-flash-next-iq3_xxs-SingleGPU`).
+
+**Outstanding findings, ordered** (effort is honest, not optimistic):
+
+| Step | Finding | What to do | Effort | Risk |
+|------|---------|-----------|--------|------|
+| 1 | **R1** | `_tool_list_sections` matches `dir` (and `file`) against `retrieval_name()`/`source_file` instead of the bare-basename display name; fix `iter_chunks()`'s docstring; log tool **args** in `AgentTurnMeta`; regression test that passes a real *path* | ~30 min + test | none — the tool provably cannot work today |
+| 2 | **R10** | `type(exc).__name__` + budget in the `Query rewrite failed` log | 2 min | none |
+| 3 | **R2 + R8a** | Embedder/reranker **circuit breaker** (~10 s unreachable cache, skip the leg instead of retrying a dead host) — this is also what makes image windows survivable | ~45 min | low |
+| 4 | **R2b** | Expose gpu-switch mode to `kb.retrievers` and log "image window: lexical-only retrieval" | ~30 min | low |
+| 5 | **R3** | Split `RAG_ATTACH_FLOOR_RERANK` / `_DENSE`, **or** don't gate when the gate source is gone (and log it) | ~20 min | medium — changes attachments |
+| 6 | **R4** | Startup assertion `INDEX_EMBED_MODEL == effective_embedding_model()`; record the **write-side** model in cache metadata | ~15 min | none (fails loudly) |
+| 7 | **R6** | Rebuild matrix + BM25 **inside** the mutation; lock `_get_bm25` (or move it into `KBVectorIndex`) | ~30 min | low |
+| 8 | **R8b/c** | Log tool arguments; add `retrieval_legs: dense|lexical|both` to agent meta so "no reranker" ≠ "no answer" | ~30 min | none |
+| 9 | **R9** | Make `MAX_CHARS_PER_FILE` a setting scaled to `RAG_MAX_DOCS × RAG_MAX_CHARS`; consider truncating instead of skipping | ~20 min | medium |
+| 10 | **R5** | Sidecar key = `source_file\0content_hash` with a one-time migration (now that the fill has landed) | ~1 h | medium — sidecar format |
+| 11 | **R13** | Drop the dead `STT_*` vars from live `.env`, backfill `.env.example` (reranker family **and** the new #81 fill knobs), run `--prune-orphans` once | ~30 min | none |
+| 12 | **R11 glossary** | Alias glossary at the vault layer (`Cowurm`/`Corwurm`, `Column`/`Colum`) — data task, no code | data work | none |
+| 13 | **R7** | A/B the lexical leg with/without context lines via `scripts/rag_probe*.py` | ~1 h | measurement only |
+
+**Two decisions the user owns** (do not implement blind):
+
+1. **R2 policy** — (a) serialize image windows (defer a `gpu_switch image` while an agent
+   rewrite/answer is in flight), (b) let retrieval go lexical-only during image windows and
+   *say so* in the logs, or (c) both. (c) is what the numbers favour: the retries cost ~25 s
+   inside a 45 s agent budget and achieve nothing.
+2. **R5 migration timing** — re-key the sidecar now (cheap while it is small and the stamp
+   already exists) or leave content-hash keys and just *refuse to reuse* a stored line whose
+   leading path token disagrees with the chunk's `source_file`.
+
+**Verification state** — `1400 passed, 5 warnings` (`python -m pytest -q`); ruff clean on
+every file touched by #81 (9 pre-existing ruff hits in `tests/test_botperms.py` remain, out
+of scope). Live-side verification of #81 is **not yet done** — it needs the host rebuild
+(`docker compose up -d --build`, then `docker compose logs --since 30m bot | Select-String
+"Contextual"`, then `scripts/contextual_reindex.py --status` shows lagging → 0).
+
+**Environment gotchas for the next session**: the reranker is currently offline (the user has
+no spare VRAM), so R3's condition is live *now* — expect `Rerank failed … using original order`
+in every log window. The embedder/reranker/gpu-switch are published on `127.0.0.1` only and are
+**not reachable from the sandbox** — only `INFER_URL` (`:8890`) is, so RAG-side fixes must be
+tested with mocks and verified live by the user. Chat model id is now aligned with Strata.
 
 ---
 
