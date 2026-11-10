@@ -305,6 +305,13 @@ async def _tool_search_kb(query: str, scope: str | None = None) -> str:
     # embedding call and the CPU BM25 pass overlap; saves one full leg of
     # latency per search). A lexical failure degrades to dense-only.
     async def _dense_leg() -> list[tuple[str, str, float]]:
+        from kb.retrievers import _dense_leg_state
+        off, reason = _dense_leg_state()
+        if off:
+            # Circuit open / image window: the embed call can only fail —
+            # answer from the lexical leg instead of burning a ladder.
+            log.debug("search_kb dense leg skipped (%s): lexical-only", reason)
+            return []
         ranked, _q_emb = await idx.query_with_embeddings(
             query, top_n=RAG_DENSE_TOP_K)
         return [t for t in ranked if keep(t[0])] if keep else list(ranked)
@@ -330,7 +337,8 @@ async def _tool_search_kb(query: str, scope: str | None = None) -> str:
 
     # Rerank the head of the list when the cross-encoder is up; on any
     # failure keep the merged order (degrades exactly like the fast path).
-    if _rerank_ok() and merged:
+    from kb.reranker import reranker_circuit_open as _rerank_circuit_open
+    if _rerank_ok() and not _rerank_circuit_open() and merged:
         cands = merged[: max(top_k * 3, 24)]
         try:
             scored = await rerank(query, [c for _, c, _ in cands])
@@ -424,6 +432,69 @@ def _single_file_on_disk(file_part: str) -> bool:
     return len(hits) == 1
 
 
+def _retrieval_chunks(idx) -> list[tuple[str, str]]:
+    """(name, content) for every chunk, in the name space tools should use.
+
+    Prefers ``iter_retrieval_chunks`` (path-shaped ``retrieval_name`` —
+    what ``search_kb`` hits show the model, and the only shape a *directory*
+    argument can match). Falls back to ``iter_chunks`` for duck-typed test
+    indexes. R1, RAG code review 2026-11.
+    """
+    it = getattr(idx, "iter_retrieval_chunks", None)
+    if it is not None:
+        return list(it())
+    return list(idx.iter_chunks())
+
+
+def _dir_matches(file_part: str, dir: str, fuzzy: bool = False) -> bool:
+    """Match a chunk's file part against the model's directory argument.
+
+    Accepts a path or path fragment (``HumbleWood``, ``DnDRules/books``,
+    ``HumbleWood/SessionLogs``) matched as a CONTIGUOUS run of path
+    segments — so a fragment matches where it sits in the hierarchy
+    ('DnDRules/books' is satisfied by 'DnDRules/books/Warlock.md' but not
+    'DnDRules/equipment.md'), and the whole KB subtree under the fragment
+    matches too. The strict pass compares segments case-sensitively (the
+    names come straight out of search_kb output); only when strict finds
+    NOTHING does list_sections retry with ``fuzzy=True``: case-insensitive
+    stem comparison, so 'dnd_rules' → 'DnDRules'. A single-segment fuzzy
+    match never lands on the KB root folder name — every real path sits
+    under it, so it would silently mean 'the whole KB'. R1, review 2026-11.
+    """
+    want = [s for s in (dir or "").replace("\\", "/").strip("/").split("/") if s]
+    if not want:
+        return False
+    segs = [s for s in file_part.replace("\\", "/").split("/")[:-1] if s]
+    n, m = len(segs), len(want)
+    if not fuzzy:
+        for i in range(n - m + 1):
+            if all(segs[i + k] == want[k] for k in range(m)):
+                return True
+        return False
+    norm = lambda s: s.lower().replace("_", "").replace(" ", "")
+    low, wlow = [norm(s) for s in segs], [norm(s) for s in want]
+    if m == 1 and wlow[0] == _kb_root_name():
+        return False
+    for i in range(n - m + 1):
+        if all(low[i + k] == wlow[k] for k in range(m)):
+            return True
+    return False
+
+
+_ROOT_NAME: str | None = None
+
+
+def _kb_root_name() -> str:
+    """Name of the KB root directory (cached; prefix of every real path)."""
+    global _ROOT_NAME
+    if _ROOT_NAME is None:
+        try:
+            _ROOT_NAME = _kb_path().resolve().name.lower()
+        except OSError:
+            _ROOT_NAME = ""
+    return _ROOT_NAME
+
+
 async def _tool_read_section(file: str, section: str | None = None) -> str:
     """Full chunk text for (file[, section fragment]).
 
@@ -442,7 +513,7 @@ async def _tool_read_section(file: str, section: str | None = None) -> str:
         return "The knowledge base index is unavailable right now."
 
     matches: list[tuple[str, str]] = []
-    for name, content in idx.iter_chunks():
+    for name, content in _retrieval_chunks(idx):
         file_part = name.split(" [")[0] if " [" in name else name
         if not _file_matches(file_part, file):
             continue
@@ -528,7 +599,10 @@ async def _tool_find_in_kb(term: str) -> str:
 
     def _scan() -> dict[str, int]:
         counts: dict[str, int] = {}
-        for name, content in idx.iter_chunks():
+        # retrieval_name is path-shaped and UNIQUE per chunk — the bare
+        # display_name collides across session folders (every folder has a
+        # notes.md), merging distinct locations into one bogus line (R1).
+        for name, content in _retrieval_chunks(idx):
             n = content.lower().count(needle)
             if n:
                 counts[name] = counts.get(name, 0) + n
@@ -666,20 +740,30 @@ async def _tool_list_sections(file: str | None = None, dir: str | None = None) -
     if idx is None or idx.is_empty():
         return "The knowledge base index is unavailable right now."
 
+    chunks = _retrieval_chunks(idx)
+    fuzzy = False
     by_file: dict[str, list[str]] = {}
-    for name, _content in idx.iter_chunks():
-        file_part = name.split(" [")[0] if " [" in name else name
-        if file and not _file_matches(file_part, file):
-            continue
-        if dir and dir not in file_part:
-            continue
-        sec = name[len(file_part):].strip(" []") if " [" in name else "(full document)"
-        bucket = by_file.setdefault(file_part, [])
-        if sec not in bucket:
-            bucket.append(sec)
-
+    for _round in range(2):
+        fuzzy = _round == 1  # retry dir matching case-insensitively only
+        #                    when the strict pass found nothing
+        for name, _content in chunks:
+            file_part = name.split(" [")[0] if " [" in name else name
+            if file and not _file_matches(file_part, file):
+                continue
+            if dir and not _dir_matches(file_part, dir, fuzzy=fuzzy):
+                continue
+            sec = name[len(file_part):].strip(" []") if " [" in name else "(full document)"
+            bucket = by_file.setdefault(file_part, [])
+            if sec not in bucket:
+                bucket.append(sec)
+        if by_file:
+            break
     if not by_file:
-        return f"Nothing found for {file or dir!r}"
+        hint = ""
+        if dir and not file:
+            hint = (" — 'dir' must name a folder as search_kb paths show it "
+                    "(e.g. 'DnDRules/books')")
+        return f"Nothing found for {file or dir!r}{hint}"
     lines: list[str] = []
     for f, secs in sorted(by_file.items()):
         lines.append(f"{f} ({len(secs)} section(s))")

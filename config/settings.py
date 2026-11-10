@@ -540,11 +540,16 @@ EMBED_QUERY_INSTRUCT: str = os.getenv("EMBED_QUERY_INSTRUCT", "")
 # If the backend is unreachable during a build, indexing falls back to local CPU
 # automatically so a reindex never hard-fails.
 INDEX_EMBED_BACKEND: str = os.getenv("INDEX_EMBED_BACKEND", "backend").strip().lower()
-# Model slug sent to the backend when INDEX_EMBED_BACKEND == "backend". It must
-# be the SAME model as the query embedder (LOCAL_EMBED_MODEL) or similarity
-# breaks; it defaults to that so the two stay in lockstep. Override only if your
-# backend names the loaded bge-m3 differently.
-INDEX_EMBED_MODEL: str = os.getenv("INDEX_EMBED_MODEL", LOCAL_EMBED_MODEL)
+# Model slug sent to the backend when INDEX_EMBED_BACKEND == "backend". It MUST
+# name the SAME model the query side embeds with (effective_embedding_model())
+# or index vectors and query vectors live in incompatible spaces and similarity
+# silently degrades (R4, review 2026-11). The default tracks the query model:
+# EMBED_BACKEND=local → LOCAL_EMBED_MODEL, otherwise EMBEDDING_MODEL. kb.index
+# loudly errors at startup on a mismatch and stamps the WRITE-side model name
+# into the cache metadata so identity checks validate the truth.
+INDEX_EMBED_MODEL: str = (os.getenv("INDEX_EMBED_MODEL")
+                          or (LOCAL_EMBED_MODEL if EMBED_BACKEND == "local"
+                              else EMBEDDING_MODEL))
 # Whether index builds may fall back to in-process CPU embedding when the
 # backend is unreachable mid-build. "auto" (default) enables it only when
 # INDEX_EMBED_MODEL == LOCAL_EMBED_MODEL — with different models a fallback
@@ -835,6 +840,13 @@ RAG_MIN_ATTACH_SCORE: float = _safe_float(os.getenv("RAG_MIN_ATTACH_SCORE"), 0.0
 # (they're joined into one per-file entry). Lower = tighter context, less
 # "whole file" bloat; higher = more surrounding sections. Default 3.
 RAG_MAX_CHUNKS_PER_FILE: int = _safe_int(os.getenv("RAG_MAX_CHUNKS_PER_FILE"), 3)
+# Per-FILE character budget used by the chunk-selection stage (kb.retrievers
+# .select_ranked_chunks): one file's joined chunks are capped at this before
+# the GLOBAL RAG_MAX_CHARS attach budget applies. Scales with the corpus —
+# distinct from RAG_MAX_CHARS (total attached context across all files).
+# Review 2026-11 R9: the old hardcoded 24_000 was ~30x RAG_MAX_DOCS=4's
+# typical whole-file allowance; tune deliberately per corpus size.
+RAG_MAX_CHARS_PER_FILE: int = _safe_int(os.getenv("RAG_MAX_CHARS_PER_FILE"), 24000)
 # RAG_ATTACH_FLOOR is a per-chunk relevance gate applied at ATTACH time (after
 # hybrid fusion / rerank). A ranked chunk whose DENSE cosine similarity is below
 # this floor is skipped, so only genuinely relevant sections are attached. This
@@ -854,6 +866,41 @@ RAG_ATTACH_FLOOR: float = _safe_float(os.getenv("RAG_ATTACH_FLOOR"), 0.50)
 #              Qwen's distribution (see scripts/rag_floor_probe.py).
 # Default "dense" = current production behavior until calibration is reviewed.
 RAG_ATTACH_FLOOR_SOURCE: str = os.getenv("RAG_ATTACH_FLOOR_SOURCE", "dense").strip().lower()
+# Per-SOURCE floor values (R3, review 2026-11): the floor is compared against
+# WHATEVER score map the gate ran on — a rerank-calibrated number is NOT a
+# valid cosine threshold and vice versa (measured: rerank-offline junk queries
+# hit 0.576 cosine in the top-96 while genuinely relevant chunks sit at 0.45,
+# so a 0.50 rerank floor applied to dense scores keeps the junk and drops the
+# answer). Set the floor for each scale explicitly:
+#   RAG_ATTACH_FLOOR_RERANK — gates on rerank_gate scores (Qwen sigmoid).
+#   RAG_ATTACH_FLOOR_DENSE  — gates on dense cosine scores (used when
+#                             SOURCE=dense OR SOURCE=rerank but the reranker
+#                             didn't score — the unit-correct fallback).
+# UNSET (default) each one follows the legacy RAG_ATTACH_FLOOR value AT CALL
+# TIME — one knob keeps working for both scales; set them only once each
+# scale is calibrated (0.50 rerank / 0.35 dense measured values).
+RAG_ATTACH_FLOOR_RERANK: float | None = (
+    _safe_float(os.getenv("RAG_ATTACH_FLOOR_RERANK"), RAG_ATTACH_FLOOR)
+    if os.getenv("RAG_ATTACH_FLOOR_RERANK", "").strip() else None)
+RAG_ATTACH_FLOOR_DENSE: float | None = (
+    _safe_float(os.getenv("RAG_ATTACH_FLOOR_DENSE"), RAG_ATTACH_FLOOR)
+    if os.getenv("RAG_ATTACH_FLOOR_DENSE", "").strip() else None)
+
+# ── Sidecar circuit breakers + image-window retrieval policy (R2, 2026-11) ──
+# Connect-class failures (DNS gone / connection refused — a STOPPED compose
+# sidecar, e.g. the 4070 image window taking reranker-llama + embedder-llama
+# down) open a per-endpoint circuit for this cooldown: further calls fail
+# instantly instead of burning retry ladders per turn (kb.embedder,
+# kb.reranker). 0 disables the breakers (old always-retry behavior).
+RAG_SIDECAR_CIRCUIT_COOLDOWN_S: float = _safe_float(
+    os.getenv("RAG_SIDECAR_CIRCUIT_COOLDOWN_S"), 10.0)
+# While the gpu-switch helper reports the 4070 in "image" mode the RAG
+# sidecars are provably down — skip the dense leg BEFORE the first failed
+# attempt and answer from lexical-only retrieval (with the leg recorded in
+# turn logs). Set 0 if your EMBED_URL is NOT on the switched card (e.g. the
+# embedder lives on the chat GPU) and dense stays live during image windows.
+RAG_IMAGE_MODE_LEXICAL_ONLY: bool = _safe_bool(
+    os.getenv("RAG_IMAGE_MODE_LEXICAL_ONLY"), True)
 
 # ── Selection-time near-duplicate dedup (Tier 1 item 4, #39 plan / FM2) ────
 # A ranked chunk whose embedding sits within cosine RAG_DEDUP_COSINE_TAU of an

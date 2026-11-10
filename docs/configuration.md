@@ -139,7 +139,12 @@ the new one is built).
 | `RAG_QUERY_MAX_EXPANSIONS` / `RAG_REWRITE_BUDGET_SECONDS` | Rewriter shape / wall-clock cap | `2` / `45` |
 | `RAG_MIN_ATTACH_SCORE` | Opt-in dense-similarity floor before fusion (`0` = off) | `0` |
 | `RAG_MAX_CHUNKS_PER_FILE` | Max chunks attached per file | `3` |
-| `RAG_ATTACH_FLOOR` | Per-chunk dense-score gate at attach time; lexical-only chunks always kept; safety net never yields empty context (`0` = off) | `0.50` |
+| `RAG_ATTACH_FLOOR` | Per-chunk score gate at attach time; lexical-only chunks always kept; safety net never yields empty context (`0` = off) | `0.50` |
+| `RAG_ATTACH_FLOOR_SOURCE` | Which score the floor gates on: `dense` (cosine) or `rerank` (Qwen3 scores); when `rerank` but the reranker never scored, the gate falls back to dense cosine — with the DENSE-scale floor, not this one | `dense` |
+| `RAG_ATTACH_FLOOR_RERANK` / `RAG_ATTACH_FLOOR_DENSE` | Per-SCALE floor values (2026-11 review R3): the value applied follows whichever score map actually ran. Unset = both follow `RAG_ATTACH_FLOOR` at call time. Measured scales: rerank ≈0.50 separates cleanly; qwen3-embedding-4b cosine does NOT (junk top 0.576 > relevant 0.45) — production sets `RAG_ATTACH_FLOOR_DENSE=0` (no gate without rerank scores) | *(follows `RAG_ATTACH_FLOOR`)* |
+| `RAG_MAX_CHARS_PER_FILE` | Per-file char cap at chunk-selection time — distinct from the global `RAG_MAX_CHARS` attach budget (2026-11 review R9) | `24000` |
+| `RAG_SIDECAR_CIRCUIT_COOLDOWN_S` | Circuit-breaker cooldown for connect-class failures (DNS gone / refused = stopped sidecar) on the embeddings and rerank endpoints: further calls fail instantly, retrieval answers lexical-only; HTTP 5xx keeps the normal retry ladder (2026-11 review R2a) | `10` |
+| `RAG_IMAGE_MODE_LEXICAL_ONLY` | While the GPU-switch card is in `image` mode (sidecars stopped) skip the dense leg entirely instead of discovering the outage per call; the skipped leg is recorded as `retrieval_legs` in turn logs. `0` = keep attempting dense | `1` |
 
 ### Cross-encoder reranking (opt-in sidecar)
 

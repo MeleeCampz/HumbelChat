@@ -114,6 +114,32 @@ Two knobs control how much of each matched file actually reaches the prompt:
   no dense score) are always kept. A safety net guarantees an over-aggressive floor
   can never produce an empty context: if it would drop everything, selection falls
   back to the unfiltered ranking.
+- **Per-scale floors** (`RAG_ATTACH_FLOOR_RERANK` / `RAG_ATTACH_FLOOR_DENSE`,
+  2026-11 review R3): the floor value applied follows the scale that actually
+  gated — rerank probability when the reranker scored, dense cosine when it fell
+  back. The scales are not interchangeable (rerank: junk 0.24–0.36 vs answers
+  ≥0.65; qwen3 cosine: junk tops *above* relevant — 0.576 vs 0.45), so the
+  production `.env` sets `RAG_ATTACH_FLOOR_RERANK=0.50` and `RAG_ATTACH_FLOOR_DENSE=0`
+  (no gate without rerank scores). Unset knobs follow `RAG_ATTACH_FLOOR` at call
+  time (legacy single-knob behavior).
+
+### Degraded retrieval legs (sidecar outages, image windows)
+
+The dense and rerank legs live on the GPU card. Two 2026-11 additions keep turns
+fast when they are away (review R2):
+
+- **Circuit breakers** (`RAG_SIDECAR_CIRCUIT_COOLDOWN_S`, default 10 s): a
+  connect-class failure (DNS gone / refused — a *stopped* sidecar, e.g. during a
+  gpu-switch image window) marks that endpoint unreachable for the cooldown; every
+  further call fails instantly instead of burning the retry ladder per embed pass.
+  HTTP 5xx on a *reachable* server keeps the normal ladder. Breakers reset on the
+  first success and every successful gpu-mode switch.
+- **Mode awareness** (`RAG_IMAGE_MODE_LEXICAL_ONLY`, default on): when the
+  gpu-switch helper moves the card to `image` mode the bot tells the retrievers
+  directly, so image-window queries skip the dense leg up front instead of
+  discovering the outage mid-turn. A turn logs which legs ran as
+  `retrieval_legs=…` (`dense+lexical+rerank` / `lexical` / `keyword` / `none`), and
+  agent turns log tool **args** + result sizes — the blind spots review R8 flagged.
 
 ## Contextual retrieval sidecar
 

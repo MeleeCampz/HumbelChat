@@ -278,6 +278,13 @@ class KBIndexStore:
         if not model_name:
             from config.settings import effective_embedding_model
             model_name = effective_embedding_model()
+            # R4 (review 2026-11): the INDEX_EMBED_MODEL vs query-model
+            # mismatch check below only makes sense for a store configured
+            # purely from settings (the production path). Callers that pass
+            # an explicit model_name (tests, tooling) bypass it.
+            self._model_from_settings = True
+        else:
+            self._model_from_settings = False
         self.model_name = model_name
 
         self._db_path = self.persist_dir / "vector_index.db"
@@ -500,6 +507,23 @@ class KBIndexStore:
                     "differs from LOCAL_EMBED_MODEL (%s).",
                     INDEX_EMBED_MODEL, LOCAL_EMBED_MODEL,
                 )
+            # R4 (RAG code review 2026-11): the index is WRITTEN with this
+            # model but queries embed with self.model_name — if the names
+            # differ the two vector spaces are incompatible and similarity
+            # degrades silently (same width, nonsense distances). Fail
+            # LOUDLY in the logs; the writer name is also stamped into the
+            # cache metadata so identity checks validate the truth, not the
+            # query-side assumption.
+            if (INDEX_EMBED_MODEL != self.model_name
+                    and getattr(self, "_model_from_settings", False)):
+                logger.warning(
+                    "Index WRITE model INDEX_EMBED_MODEL=%r differs from the query "
+                    "embedding model %r: new index vectors would NOT be comparable "
+                    "with query vectors (silent retrieval degradation). Set "
+                    "INDEX_EMBED_MODEL=%r — or make it name the model the backend "
+                    "actually serves on BOTH sides.",
+                    INDEX_EMBED_MODEL, self.model_name, self.model_name,
+                )
             return Embedder(
                 model_name=INDEX_EMBED_MODEL,
                 backend="remote",
@@ -599,6 +623,31 @@ class KBIndexStore:
             if self._index is not None and not self._index.is_empty():
                 await self._save_to_disk()
 
+    async def _warm_retrieval_caches(self, idx: KBVectorIndex) -> None:
+        """Pre-build the numpy rank matrix + BM25 corpus right after a mutation.
+
+        Every mutation replaces the doc-list object, which INVALIDATES both
+        retrieval caches (KBVectorIndex._mat_cache by identity, the BM25 corpus
+        by identity+length) — without a warm-up the next real query pays both
+        rebuilds (~0.9 s of CPU for 5.9k chunks: 457 ms matrix + 456 ms BM25,
+        R6 in the 2026-11 review) on the critical reply path. Building them
+        here, off the event loop in a worker thread, moves the cost to the
+        mutation. Non-fatal: the lazy path in _ensure_matrix/_get_bm25 still
+        works if this fails.
+        """
+        if idx.is_empty():
+            return
+
+        def _warm() -> None:
+            idx._ensure_matrix()
+            import kb.retrievers as R
+            R._get_bm25(idx)
+
+        try:
+            await asyncio.to_thread(_warm)
+        except Exception as exc:  # noqa: BLE001 — warm caches are an optimization
+            logger.debug("Retrieval cache warm-up failed (%s); first query rebuilds lazily", exc)
+
     # ── Public updates ──────────────────────────────────────────────────
 
     async def update_single_document(self, file_path: str | pathlib.Path) -> bool:
@@ -636,6 +685,7 @@ class KBIndexStore:
             )
 
             await self._save_to_disk(changed={key})  # P2 #20: incremental
+            await self._warm_retrieval_caches(self._index)
             logger.info("Updated index with '%s' (%d chunk(s))", key, len(entries))
             return True
 
@@ -797,6 +847,7 @@ class KBIndexStore:
             self._index._mat_cache = None  # belt-and-braces (identity already changed)
             # P2 #20: only the files holding refreshed chunks are upserted.
             await self._save_to_disk_from(self._index, changed=changed_keys)
+            await self._warm_retrieval_caches(self._index)
             # #80: only REFRESHED chunks get stamped. A failed one stays un-stamped
             # so the fill loop reports and repairs it on the next check instead of
             # hiding a mixed-space index behind a "covered" sidecar.
@@ -866,6 +917,7 @@ class KBIndexStore:
                 # P2 #20: incremental persist — the file's rows are gone from the
                 # index, so the upsert path deletes them from the cache.
                 await self._save_to_disk(changed=set())
+                await self._warm_retrieval_caches(self._index)
                 logger.info("Removed %d chunk(s) for '%s'", removed, target)
                 return True
 
@@ -994,6 +1046,7 @@ class KBIndexStore:
                     # P2 #20: incremental persist — only the embedded files changed;
                     # removed files' rows are pruned by the upsert path.
                     await self._save_to_disk(changed={_rel_key(self.kb_path, p) for p in to_embed})
+                    await self._warm_retrieval_caches(self._index)
 
             added_keys = [_rel_key(self.kb_path, p) for p in still_added]
             changed_keys = [
@@ -1101,6 +1154,7 @@ class KBIndexStore:
         idx = KBVectorIndex.from_entries(entries, embeddings, aligned_hashes,
                                          context_lines=self._context_lines)
         await self._save_to_disk_from(idx)
+        await self._warm_retrieval_caches(idx)
         logger.info("Index ready: %d chunk(s) from %d file(s), persisted to %s",
                     idx.count(), len(files), self._db_path)
         return idx
@@ -1172,6 +1226,7 @@ class KBIndexStore:
         if idx is not None:
             changed = {_rel_key(self.kb_path, p) for p in to_embed_files} | purged_keys
             await self._save_to_disk_from(idx, changed=changed)
+            await self._warm_retrieval_caches(idx)
         return idx
 
     # ── Embedding helpers ───────────────────────────────────────────────
@@ -1490,6 +1545,13 @@ class KBIndexStore:
             "schema_version": _SCHEMA_VERSION,
             "updated_at": str(now),
             "embedding_model": self.model_name,
+            # R4 (review 2026-11): stamp the model that ACTUALLY wrote the
+            # vectors (the store's write-side embedder), not just the
+            # query-side model name the identity check previously assumed
+            # equaled it. _cache_identity_ok validates both. getattr guard:
+            # tests swap in duck-typed fake embedders without a model_name.
+            "index_embedding_model": getattr(self._embedder, "model_name",
+                                             self.model_name),
             "embedding_dim": self._embedding_dim(idx),
         }
         conn.executemany(
@@ -1514,6 +1576,15 @@ class KBIndexStore:
         if meta.get("schema_version") != _SCHEMA_VERSION:
             return False
         if meta.get("embedding_model") != self.model_name:
+            return False
+        # R4 (review 2026-11): legacy caches carry only the query-side stamp
+        # (which historically equaled the writer); newer ones also stamp the
+        # WRITE-side model — if present it must match the current writer, or
+        # the on-disk vectors were embedded by a different model than this
+        # store would use.
+        stamped_writer = meta.get("index_embedding_model")
+        if stamped_writer is not None and stamped_writer != getattr(
+                self._embedder, "model_name", self.model_name):
             return False
         return True
 

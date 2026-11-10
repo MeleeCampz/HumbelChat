@@ -202,6 +202,10 @@ def preload_reranker() -> None:
                 "Reranker endpoint %s unreachable at startup (%s); will retry per request",
                 RERANK_API_BASE, exc,
             )
+            if _is_connect_failure(exc):
+                # Circuit opens immediately: the first real query won't waste
+                # an attempt ladder on a sidecar that is provably down.
+                _breaker_trip(RERANK_API_BASE.rstrip("/"), exc)
         return
     try:
         _get_model()
@@ -218,6 +222,65 @@ def is_available() -> bool:
     if _mode() == "http":
         return bool(RERANK_API_BASE)
     return importlib.util.find_spec("sentence_transformers") is not None
+
+
+# ── Circuit breaker (RAG code review 2026-11, R2a) ────────────────────
+# Mirror of kb.embedder's breaker: a stopped reranker sidecar (4070 image
+# window) fails at the socket level instantly, but retrieval asks for TWO
+# rerank passes per query plus one per agent tool call — dozens of fresh
+# attempts per turn against a service that cannot answer until the GPU
+# switches back. A connect-class failure opens the breaker for a cooldown:
+# rerank() degrades to original order instantly (no attempt) and retrieval
+# skips the rerank stage outright. Cooldown knob: RAG_SIDECAR_CIRCUIT_COOLDOWN_S.
+_circuit_open_until: dict[str, float] = {}   # base_url -> monotonic open-until
+
+
+def _circuit_cooldown_s() -> float:
+    from config.settings import RAG_SIDECAR_CIRCUIT_COOLDOWN_S
+    return RAG_SIDECAR_CIRCUIT_COOLDOWN_S
+
+
+def _breaker_open(base_url: str) -> bool:
+    until = _circuit_open_until.get(base_url)
+    return until is not None and time.monotonic() < until
+
+
+def _breaker_trip(base_url: str, exc: BaseException) -> None:
+    _circuit_open_until[base_url] = time.monotonic() + _circuit_cooldown_s()
+    logger.warning(
+        "Rerank endpoint %s marked unreachable for %.0fs (circuit breaker; "
+        "connect error: %s) — reranking skipped until it answers again",
+        base_url, _circuit_cooldown_s(), exc,
+    )
+
+
+def _breaker_close(base_url: str) -> None:
+    _circuit_open_until.pop(base_url, None)
+
+
+def reranker_circuit_open() -> bool:
+    """True while the HTTP rerank endpoint is in breaker cooldown."""
+    from config.settings import RERANK_API_BASE
+    return bool(RERANK_API_BASE) and _breaker_open(RERANK_API_BASE.rstrip("/"))
+
+
+def reset_reranker_circuit_breaker() -> None:
+    """Clear all breaker state (tests / manual re-probe after repair)."""
+    _circuit_open_until.clear()
+
+
+def reset_circuit_breaker() -> None:
+    """Clear all breaker state (tests / manual re-probe after repair)."""
+    _circuit_open_until.clear()
+
+
+def _is_connect_failure(exc: BaseException) -> bool:
+    """Socket-level failure (DNS gone / refused) — endpoint is DOWN, unlike a
+    5xx or a slow-answer timeout on a reachable server."""
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
+        return True
+    cause = exc.__cause__ or exc.__context__
+    return isinstance(cause, (ConnectionError, OSError))
 
 
 def reset_model() -> None:
@@ -246,6 +309,10 @@ async def rerank(
         return [(c, 0.0) for c in chunks]
 
     from config.settings import RERANK_TIMEOUT_SECONDS, RERANK_API_BASE, RERANK_MAX_CHARS
+    if _mode() == "http" and reranker_circuit_open():
+        # Circuit open — degrade instantly, don't hammer the downed sidecar.
+        logger.debug("Rerank circuit open — returning original order")
+        return [(c, 0.0) for c in chunks]
     # Score truncated copies when configured: entry chunks lead with title + type +
     # core mechanics, so the head carries the answer signal. Originals are zipped
     # back with the scores below — callers must receive full chunk text untouched.
@@ -266,8 +333,13 @@ async def rerank(
         logger.warning("Rerank timed out after %ss — using original order", RERANK_TIMEOUT_SECONDS)
         return [(c, 0.0) for c in chunks]
     except Exception as exc:  # noqa: BLE001 — any failure degrades to original order
+        if _mode() == "http" and _is_connect_failure(exc):
+            _breaker_trip(RERANK_API_BASE.rstrip("/"), exc)
         logger.warning("Rerank failed (%s); using original order", _failure_detail(exc))
         return [(c, 0.0) for c in chunks]
+
+    if _mode() == "http":
+        _breaker_close(RERANK_API_BASE.rstrip("/"))
 
     if len(scores) != len(chunks):  # defensive: malformed output → don't trust it
         logger.warning(

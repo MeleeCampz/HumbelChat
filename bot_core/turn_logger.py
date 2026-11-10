@@ -135,6 +135,9 @@ def set_agent(record: dict[str, Any] | None, *, trigger: str | None, meta: Any =
             "trigger": trigger,
             "iterations": getattr(meta, "iterations", 0),
             "tool_calls": list(getattr(meta, "tool_calls", [])),
+            # R8 (review 2026-11): the args each call used — without them a
+            # log full of "list_sections" says nothing about WHAT was asked.
+            "tool_calls_detail": list(getattr(meta, "tool_calls_detail", [])),
             "fallback": bool(getattr(meta, "fallback", False)),
             "fallback_reason": getattr(meta, "fallback_reason", ""),
             # Every "[tool args]" line + its result — the loop's transcript.

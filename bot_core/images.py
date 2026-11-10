@@ -261,6 +261,21 @@ async def _helper(client: httpx.AsyncClient, method: str, path: str,
     return resp.json()
 
 
+def _notify_retrievers_gpu_mode(mode: str) -> None:
+    """Tell kb.retrievers which mode the switched RAG card is in.
+
+    Review 2026-11 (R2b): during an image window the reranker/embedder
+    sidecars are STOPPED — retrieval should skip the dense leg outright
+    (lexical-only) instead of discovering that via failing ladders every
+    turn. Best-effort: a notification failure never affects generation.
+    """
+    try:
+        from kb.retrievers import set_gpu_mode
+        set_gpu_mode(mode)
+    except Exception as e:  # noqa: BLE001 — notification must never break the switch
+        log.debug("could not notify retrievers of gpu mode %r: %s", mode, e)
+
+
 async def _switch_gpu_mode(mode: str) -> None:
     """Ask the helper to put the 4070 into "image" or "rag" mode.
 
@@ -288,6 +303,7 @@ async def _switch_gpu_mode(mode: str) -> None:
     if mode == "image":
         _bot_switched = True
     log.info("gpu mode -> %s (%.1f s): %s", mode, time.monotonic() - t0, detail[:160])
+    _notify_retrievers_gpu_mode(mode)
 
 
 # ── Prompt rewriting (chat model — MUST run BEFORE the mode switch) ───────
@@ -580,6 +596,10 @@ async def ensure_image_mode(on_phase: Callable[[str], Any] | None = None) -> Non
             except ImageGenError:
                 mode = ""  # helper state unknown — ask for the switch anyway
         if mode == "image":
+            # A MANUAL image window (gpu_switch.sh / helper already in image
+            # mode without the bot switching it): the sidecars are down just
+            # the same — retrieval must know (R2b).
+            _notify_retrievers_gpu_mode("image")
             async with httpx.AsyncClient(timeout=30.0) as client:
                 need_load = not (await _image_status(client)).get("loaded")
         else:

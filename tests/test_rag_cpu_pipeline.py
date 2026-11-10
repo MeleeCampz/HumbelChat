@@ -611,6 +611,10 @@ async def test_attach_floor_drops_weak_keeps_strong(monkeypatch):
     import kb.retrievers as R
     monkeypatch.setattr("config.settings.RAG_MIN_ATTACH_SCORE", 0.0)  # pre-fusion off
     monkeypatch.setattr("config.settings.RAG_ATTACH_FLOOR", 0.5)
+    # Per-scale knobs (review 2026-11 R3) unset → this test exercises the
+    # legacy single-knob path regardless of operator env.
+    monkeypatch.setattr("config.settings.RAG_ATTACH_FLOOR_RERANK", None)
+    monkeypatch.setattr("config.settings.RAG_ATTACH_FLOOR_DENSE", None)
     monkeypatch.setattr("config.settings.RAG_ATTACH_FLOOR_SOURCE", "dense")
     monkeypatch.setattr("config.settings.RAG_HYBRID_ENABLED", False)
     monkeypatch.setattr("config.settings.RAG_REWRITE_MIN_SCORE", 0.0)

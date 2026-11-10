@@ -143,6 +143,10 @@ class CompletionFn(Protocol):
 class AgentTurnMeta:
     iterations: int = 0
     tool_calls: list[str] = field(default_factory=list)
+    # R8 (review 2026-11): tool_calls alone is only "search_kb x3" — which
+    # directory/scope/section each call asked for is exactly what debugging a
+    # miss needs. Parallel to tool_calls; written to the JSONL turn record.
+    tool_calls_detail: list[dict[str, Any]] = field(default_factory=list)
     fallback: bool = False
     fallback_reason: str = ""
     gathered_context: str = ""   # best-so-far context (search + reads)
@@ -368,6 +372,12 @@ async def run_agent_loop(
             results = await asyncio.gather(*(_run_one(c) for c in batch))
             for (cname, cargs), result in zip(batch, results):
                 meta.tool_calls.append(cname)
+                meta.tool_calls_detail.append({
+                    "tool": cname,
+                    "args": cargs,
+                    "result_chars": len(result),
+                    "tool_error": result.startswith("Tool error:"),
+                })
                 _note_gathered(
                     f"[{cname} {json.dumps(cargs, ensure_ascii=False)}]",
                     result)

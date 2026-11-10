@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import threading
 import time
 import logging
 import os
@@ -209,6 +210,9 @@ async def _keyword_fallback(
 # capping how much any single file may dominate the prompt.
 MAX_CHUNKS_PER_FILE = 5
 # Per-file char cap so one large file cannot consume the whole RAG budget.
+# R9 (review 2026-11): now a SETTING (RAG_MAX_CHARS_PER_FILE) — this stage's
+# per-FILE budget is distinct from the global RAG_MAX_CHARS attach cap and
+# must be scaled deliberately per corpus. The constant is the settings default.
 MAX_CHARS_PER_FILE = 24_000
 
 
@@ -216,7 +220,7 @@ def select_ranked_chunks(
     ranked: list[tuple[str, str, float]],
     top_n: int = 5,
     max_chunks_per_file: int = MAX_CHUNKS_PER_FILE,
-    max_chars_per_file: int = MAX_CHARS_PER_FILE,
+    max_chars_per_file: int | None = None,
     attach_min_score: float = 0.0,
     dense_scores: dict[str, float] | None = None,
     gate_scores: dict[str, float] | None = None,
@@ -224,6 +228,9 @@ def select_ranked_chunks(
     embeddings_by_name: dict[str, list[float]] | None = None,
 ) -> list[tuple[str, str]]:
     """Collapse ranked index chunks into per-file document entries.
+
+    *max_chars_per_file* None → ``config.settings.RAG_MAX_CHARS_PER_FILE``
+    (read per call so runtime overrides and test monkeypatching apply).
 
     ``ranked`` is ``(display_name, content, similarity)`` sorted by relevance
     descending, where *display_name* is ``"<file> [<section path>]"``.  Each
@@ -254,6 +261,10 @@ def select_ranked_chunks(
     """
     if not ranked:
         return []
+
+    if max_chars_per_file is None:
+        from config.settings import RAG_MAX_CHARS_PER_FILE
+        max_chars_per_file = RAG_MAX_CHARS_PER_FILE
 
     from config.settings import RAG_DEDUP_COSINE_TAU, RAG_DEDUP_ENABLED
     dedup = RAG_DEDUP_ENABLED and bool(embeddings_by_name)
@@ -472,7 +483,15 @@ async def _llm_expansions(query: str, rewrite_model: str = "") -> list[str]:
         # expand() returns [original, *expansions] — drop the original.
         return [e for e in expanded[1:] if e and e.strip()]
     except Exception as exc:  # noqa: BLE001 — rewrite is a pure enhancement
-        logger.warning("Query rewrite failed (%s); using original ranking only", exc)
+        # R10 (review 2026-11): bare "%s" of an asyncio.TimeoutError renders as
+        # an EMPTY string — the log read "Query rewrite failed (; ...)" with no
+        # clue whether it was a timeout, a connect error or a crash. Name the
+        # type and the budget that expired.
+        reason = f"{type(exc).__name__}: {exc}".rstrip(": ")
+        logger.warning(
+            "Query rewrite failed (%s; budget was %ds); using original ranking only",
+            reason, budget if "budget" in dir() else RAG_REWRITE_BUDGET_SECONDS,
+        )
         return []
 
 
@@ -544,25 +563,82 @@ async def _retrieve_keyword(
     return chunks
 
 
+# ── Dense-leg availability (review 2026-11, R2a/R2b) ─────────────────
+# The GPU switch (bot_core/images.py) stops the RAG sidecars during image
+# windows; kb.embedder's circuit breaker marks a connect-dead endpoint. Both
+# mean the SAME thing for retrieval: the dense leg cannot produce anything
+# right now. Rather than every call path (dense query, expansion embeds,
+# agent tool searches) discovering that the hard way per turn, retrieval asks
+# ONCE per query and answers lexical-only, with the skipped leg recorded in
+# turn logs (meta["retrieval_legs"]).
+_gpu_mode: str = "rag"
+
+
+def set_gpu_mode(mode: str) -> None:
+    """Record which mode the gpu-switch helper put the RAG card in.
+
+    Called by bot_core/images.py after every successful switch (and by the
+    startup heal). Unknown/off-switcher setups stay "rag" — then only the
+    circuit breaker gates the dense leg.
+    """
+    global _gpu_mode
+    mode = mode.strip().lower() if mode else "rag"
+    if mode not in ("rag", "image"):
+        mode = "rag"
+    if mode != _gpu_mode:
+        logger.info("Retrieval GPU mode: %s → %s (%s)", _gpu_mode, mode,
+                    "dense leg skipped while image" if mode == "image"
+                    else "dense leg live")
+    _gpu_mode = mode
+
+
+def get_gpu_mode() -> str:
+    return _gpu_mode
+
+
+def _dense_leg_state() -> tuple[bool, str]:
+    """(off, reason): whether the dense leg is currently hopeless."""
+    from kb.embedder import remote_circuit_open
+    if remote_circuit_open():
+        return True, "embedder circuit open (sidecar recently unreachable)"
+    from config.settings import RAG_IMAGE_MODE_LEXICAL_ONLY
+    if RAG_IMAGE_MODE_LEXICAL_ONLY and _gpu_mode == "image":
+        return True, "GPU card in image mode — RAG sidecars stopped by the switch"
+    return False, ""
+
+
 # ── Hybrid lexical (BM25) leg ─────────────────────────────────────────────
 # A BM25 index over every chunk's content, cached by identity of ``idx._docs`` so it is
 # built once and reused across queries (rebuilt automatically when the doc list object is
 # replaced). Provides an exact-term signal to fuse with dense vectors via RRF.
 _bm25_cache: tuple["BM25", Any, int] | None = None  # (BM25, docs_ref, count)
+_bm25_build_lock = threading.Lock()
 
 
 def _get_bm25(idx: "KBVectorIndex") -> "BM25":
-    """Return a cached BM25 index for *idx*, building it on first use."""
+    """Return a cached BM25 index for *idx*, building it on first use.
+
+    The build is guarded by a lock (review 2026-11, R6b): concurrent first
+    queries used to each build a full corpus (BM25 over 5.9k passages ≈
+    0.5 s) on the shared thread pool — now one builds, the rest wait and
+    reuse. Callers reach it via asyncio.to_thread, so a threading.Lock (not
+    an asyncio one) is the right guard.
+    """
     global _bm25_cache
     docs = idx._docs
-    if _bm25_cache is not None and _bm25_cache[1] is docs and _bm25_cache[2] == len(docs):
-        return _bm25_cache[0]
-    from kb.lexical import BM25
-    # Contextual passages: the lexical leg sees the same framed text as the
-    # dense leg, so a context line (e.g. "Session 7 of …") is matchable here too.
-    bm25 = BM25([d.passage_text() for d in docs])
-    _bm25_cache = (bm25, docs, len(docs))
-    return bm25
+    cache = _bm25_cache
+    if cache is not None and cache[1] is docs and cache[2] == len(docs):
+        return cache[0]
+    with _bm25_build_lock:
+        cache = _bm25_cache
+        if cache is not None and cache[1] is docs and cache[2] == len(docs):
+            return cache[0]
+        from kb.lexical import BM25
+        # Contextual passages: the lexical leg sees the same framed text as the
+        # dense leg, so a context line (e.g. "Session 7 of …") is matchable here too.
+        bm25 = BM25([d.passage_text() for d in docs])
+        _bm25_cache = (bm25, docs, len(docs))
+        return bm25
 
 
 def _lexical_ranking(idx: "KBVectorIndex", query: str, limit: int) -> list[tuple[str, str, float]]:
@@ -604,6 +680,8 @@ async def _retrieve_vector(
     idx = store.get_index() if store is not None else None
     if idx is None or idx.is_empty():
         logger.warning("Vector index unavailable or empty for '%s'; falling back to keyword", kb_path)
+        if meta is not None:
+            meta["retrieval_legs"] = "keyword"
         return await _keyword_fallback(query, kb_path, top_n, window_lines)
 
     from config.settings import (
@@ -626,32 +704,46 @@ async def _retrieve_vector(
     # One embedding call: rank the in-memory chunks AND keep the query vector.
     # Pool size is tunable (RAG_DENSE_TOP_K) — a larger candidate set improves
     # recall for hard lookups at negligible cost while the reranker is off.
-    ranked, _q_emb = await idx.query_with_embeddings(query, top_n=RAG_DENSE_TOP_K)
-    if not ranked:
-        if _rewrite_task is not None:
-            _rewrite_task.cancel()  # keyword fallback needs no expansions
-        logger.warning("Vector query returned no hits for '%s'; falling back to keyword", kb_path)
-        return await _keyword_fallback(query, kb_path, top_n, window_lines)
+    # Dense-leg gate (review 2026-11, R2): a downed embedder (circuit open or
+    # the card switched to image mode) yields NOTHING here after burning a
+    # retry ladder — check the live state first and run lexical-only instead.
+    dense_off, dense_off_reason = _dense_leg_state()
+    legs: list[str] = []
+    if dense_off:
+        logger.info(
+            "Dense leg skipped (%s) for %r: lexical-only retrieval", dense_off_reason, query)
+        ranked: list[tuple[str, str, float]] = []
+        dense_scores: dict[str, float] = {}
+    else:
+        ranked, _q_emb = await idx.query_with_embeddings(query, top_n=RAG_DENSE_TOP_K)
+        if not ranked:
+            if _rewrite_task is not None:
+                _rewrite_task.cancel()  # keyword fallback needs no expansions
+            logger.warning("Vector query returned no hits for '%s'; falling back to keyword", kb_path)
+            if meta is not None:
+                meta["retrieval_legs"] = "keyword"
+            return await _keyword_fallback(query, kb_path, top_n, window_lines)
+        legs.append("dense")
 
-    # Snapshot the original DENSE cosine score per chunk NOW. After hybrid RRF
-    # fusion / rerank the scores become rank-based (~0.03), so the attach-time
-    # relevance floor (RAG_ATTACH_FLOOR) must gate on these raw cosine values.
-    dense_scores: dict[str, float] = {name: float(s) for name, _c, s in ranked}
+        # Snapshot the original DENSE cosine score per chunk NOW. After hybrid RRF
+        # fusion / rerank the scores become rank-based (~0.03), so the attach-time
+        # relevance floor must gate on these raw cosine values.
+        dense_scores = {name: float(s) for name, _c, s in ranked}
 
-    # Log the score distribution so RAG_REWRITE_MIN_SCORE can be tuned from
-    # real traffic (option A: rewrite only when the index is "guessing").
-    top_scores = [s for _, _, s in ranked[:8]]
-    logger.info(
-        "Vector scores for %r: top=%.3f median=%.3f min=%.3f (%d chunks)",
-        query, top_scores[0], top_scores[len(top_scores) // 2], top_scores[-1], len(ranked),
-    )
+        # Log the score distribution so RAG_REWRITE_MIN_SCORE can be tuned from
+        # real traffic (option A: rewrite only when the index is "guessing").
+        top_scores = [s for _, _, s in ranked[:8]]
+        logger.info(
+            "Vector scores for %r: top=%.3f median=%.3f min=%.3f (%d chunks)",
+            query, top_scores[0], top_scores[len(top_scores) // 2], top_scores[-1], len(ranked),
+        )
 
     # ── Min-attachment relevance floor (opt-in) ───────────────────────
     # When RAG_MIN_ATTACH_SCORE > 0, drop dense chunks scoring below the floor
     # BEFORE hybrid fusion so low-relevance dense hits don't crowd out good BM25
     # matches. Default 0 = off (keep all). Only the dense leg is filtered here,
     # so lexical-only matches still survive via the hybrid step below.
-    if RAG_MIN_ATTACH_SCORE > 0:
+    if RAG_MIN_ATTACH_SCORE > 0 and ranked:
         kept = [t for t in ranked if t[2] >= RAG_MIN_ATTACH_SCORE]
         dropped = len(ranked) - len(kept)
         if dropped:
@@ -674,7 +766,12 @@ async def _retrieve_vector(
             t0 = time.monotonic()
             expansion_texts = await _rewrite_task
             expansion_rankings: list[list[tuple[str, str, float]]] = []
-            if expansion_texts:
+            if expansion_texts and dense_off:
+                # Embedding the expansions needs the same dead endpoint — skip
+                # the embed+rank, but KEEP expansion_texts: they still feed the
+                # lexical variants and (live) rerank queries.
+                logger.debug("Expansion embed+rank skipped (%s)", dense_off_reason)
+            elif expansion_texts:
                 try:
                     all_ranked = await idx.rank_texts(
                         expansion_texts, top_n=RAG_DENSE_TOP_K
@@ -723,6 +820,7 @@ async def _retrieve_vector(
                 if lr:
                     lex_lists.append(lr)
             if lex_lists:
+                legs.append("lexical")
                 lex_merged = (
                     reciprocal_rank_fusion(lex_lists) if len(lex_lists) > 1 else lex_lists[0]
                 )
@@ -734,11 +832,25 @@ async def _retrieve_vector(
         except Exception as exc:  # noqa: BLE001 — the lexical leg is a pure enhancement
             logger.warning("Hybrid lexical leg failed (%s); using dense ranking only", exc)
 
+    if dense_off and not hybrid_ranked:
+        # Both legs dead: dense skipped AND nothing matched lexically — the
+        # old keyword-window fallback is the only thing left to answer with.
+        if meta is not None:
+            meta["retrieval_legs"] = "keyword"
+        logger.warning("Dense leg skipped and no lexical hits for '%s'; falling back to keyword", query)
+        return await _keyword_fallback(query, kb_path, top_n, window_lines)
+
     # ── Cross-encoder rerank of the top candidates (quality boost) ─────────
-    from kb.reranker import rerank, is_available as _rerank_available
+    from kb.reranker import (
+        rerank,
+        is_available as _rerank_available,
+        reranker_circuit_open as _rerank_circuit_open,
+    )
     final_ranked = hybrid_ranked
     rerank_gate: dict[str, float] | None = None  # #43: set when rerank runs
-    if _rerank_available():
+    if _rerank_available() and _rerank_circuit_open():
+        logger.info("Rerank stage skipped (endpoint circuit open) — using pre-rerank order")
+    elif _rerank_available():
         from config.settings import RERANK_TOP_K, RERANK_USE_EXPANSION
         cands = hybrid_ranked[:RERANK_TOP_K]  # (name, content, score)
         contents = [c for _, c, _ in cands]
@@ -776,16 +888,37 @@ async def _retrieve_vector(
         rerank_gate = {
             name: s for name, _, s in final_ranked if s > 0.0
         } or None
+        if rerank_gate:
+            legs.append("rerank")
 
     from config.settings import (
         RAG_MAX_CHUNKS_PER_FILE,
         RAG_ATTACH_FLOOR,
+        RAG_ATTACH_FLOOR_RERANK,
+        RAG_ATTACH_FLOOR_DENSE,
         RAG_ATTACH_FLOOR_SOURCE,
         RAG_DEDUP_ENABLED,
     )
-    # #43: gate the attach floor on Qwen rerank scores when opted in; the
-    # dense-source default keeps the historical behavior untouched.
-    gate = rerank_gate if RAG_ATTACH_FLOOR_SOURCE == "rerank" else None
+    # #43 + R3 (review 2026-11): gate on Qwen rerank scores when the reranker
+    # ACTUALLY scored; otherwise gate on dense cosine — with the floor value
+    # for that score's SCALE (RAG_ATTACH_FLOOR_RERANK / _DENSE). Silently
+    # comparing a rerank-calibrated floor against cosine scores was the bug:
+    # the gate flipped units exactly when the reranker went offline.
+    gate = rerank_gate if (RAG_ATTACH_FLOOR_SOURCE == "rerank" and rerank_gate) else None
+    attach_floor = (RAG_ATTACH_FLOOR_RERANK if gate is not None
+                    else RAG_ATTACH_FLOOR_DENSE)
+    if attach_floor is None:
+        # Legacy single-knob behavior (RAG_ATTACH_FLOOR applies to whichever
+        # score map the gate ran on) — preserved for operators who never set
+        # the split knobs, and for monkeypatched-settings tests.
+        attach_floor = RAG_ATTACH_FLOOR
+    if RAG_ATTACH_FLOOR_SOURCE == "rerank" and gate is None:
+        logger.info(
+            "Attach floor: RAG_ATTACH_FLOOR_SOURCE=rerank but no rerank scores "
+            "(reranker offline or both passes failed) — gating on DENSE cosine "
+            "(floor %.2f) instead of the rerank-scale floor",
+            attach_floor,
+        )
     # Tier 1 item 4: near-duplicate dedup over the selection (see
     # select_ranked_chunks). The map is built per call (~ms for 5K chunks).
     emb_map = idx.embedding_map() if RAG_DEDUP_ENABLED else None
@@ -793,7 +926,7 @@ async def _retrieve_vector(
     docs = select_ranked_chunks(
         final_ranked, top_n=top_n,
         max_chunks_per_file=RAG_MAX_CHUNKS_PER_FILE,
-        attach_min_score=RAG_ATTACH_FLOOR, dense_scores=dense_scores,
+        attach_min_score=attach_floor, dense_scores=dense_scores,
         gate_scores=gate, selected_names=selected,
         embeddings_by_name=emb_map,
     )
@@ -804,8 +937,8 @@ async def _retrieve_vector(
         )
         if docs:
             logger.info(
-                "Attach floor %.2f dropped every chunk; fell back to unfiltered selection",
-                RAG_ATTACH_FLOOR,
+                "Attach floor %.2f (%s scale) dropped every chunk; fell back to unfiltered selection",
+                attach_floor, "rerank" if gate is not None else "dense",
             )
 
     logger.info(
@@ -824,6 +957,11 @@ async def _retrieve_vector(
         meta["rerank_top"] = max(rerank_gate.values()) if rerank_gate else None
         meta["dense_top"] = dense_scores.get(
             final_ranked[0][0]) if final_ranked else None
+        # R8 (review 2026-11): which legs ACTUALLY produced the attached set —
+        # without this, a rerank_top of None ("no gate") is indistinguishable
+        # from "rerank ran", and a dense-off lexical answer looks identical to
+        # a normal hybrid one in the turn logs.
+        meta["retrieval_legs"] = "+".join(legs) or "none"
     return docs
 
 

@@ -223,13 +223,31 @@ class KBVectorIndex:
     def iter_chunks(self) -> Iterator[tuple[str, str]]:
         """Yield ``(display_name, passage_text)`` for every indexed chunk.
 
-        Used by the agent-mode tools (kb/tools.py) for name-based lookups
-        (read_section / list_sections). Display names look like
-        ``"humblewood/DnDRules/…/equipment.md [Equipment -> Armor]"``.
+        Name-space note (RAG code review 2026-11, R1): the stored display
+        name is what the chunker wrote — for files in subfolders that is a
+        BARE basename (``Warlock.md [Warlock -> Class Features]``); only a
+        root-level KB has a path-shaped display name. The name space every
+        RETRIEVAL output uses (search_kb hits, turn records) is
+        :meth:`_DocEntry.retrieval_name` — the KB-relative path + section.
+        Name-based lookups that must match *directory* arguments should use
+        :meth:`iter_retrieval_chunks`; basename-style matching tolerates
+        either shape (``kb.tools._file_matches``).
+
         The passage carries the contextual line when one exists, so
         read_section output matches what the main retrieval path attaches.
         """
         return ((d.display_name, d.passage_text()) for d in self._docs)
+
+    def iter_retrieval_chunks(self) -> Iterator[tuple[str, str]]:
+        """Yield ``(retrieval_name, passage_text)`` for every indexed chunk.
+
+        ``retrieval_name`` is always path-shaped
+        (``humblewood/DnDRules/books/Warlock.md [A -> B]``) — the name space
+        ``search_kb`` hits and ranked-tuple selection use. Agent tools that
+        accept a *directory* argument can only match against this shape
+        (R1: matching the bare display name made ``dir=`` unreachable).
+        """
+        return ((d.retrieval_name(), d.passage_text()) for d in self._docs)
 
     def embedding_map(self) -> dict[str, list[float]]:
         """retrieval_name → embedding for every chunk that has one.

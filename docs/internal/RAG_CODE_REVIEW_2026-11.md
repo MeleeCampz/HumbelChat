@@ -37,7 +37,7 @@ not estimated; the scripts in §7 reproduce them.
 
 ## 1. R1 — HIGH: `list_sections(dir=…)` is unreachable in practice
 
-**Status 2026-11-11: OPEN (re-verified 2026-11-11) — `kb/tools.py:673` still tests `dir` against the bare-basename file part.**
+**Status 2026-11-11: FIXED — fix series 2026-11-10/11 (§20): tools now match `dir`/`file` against `retrieval_name()`/`source_file` via the new `iter_retrieval_chunks()`; `iter_chunks()` docstring corrected; tool ARGS logged (§18 step 8).**
 
 `kb/tools.py:658` matches the `dir` argument against the **file part of the chunk display
 name**:
@@ -101,7 +101,7 @@ prefix match is otherwise indistinguishable from a typo.
 
 ## 2. R2 — HIGH: the image-mode GPU switch overtakes an in-flight agent rewrite
 
-**Status 2026-11-11: OPEN — awaiting a user decision (serialize image windows vs. mode-aware retrieval). See §18.**
+**Status 2026-11-11: FIXED (option (c) — circuit breakers + mode-aware lexical-only retrieval + leg recording, §20). Switch serialization (option (a)) NOT implemented: the breaker makes the mid-loop switch cheap instead of ~25 s of retries; say the word if you still want windows deferred.**
 
 `AGENTS.md` states "Prompt rewriting ALWAYS happens before the switch". That holds for a
 *single* sequential image request. It does not hold for two requests in flight, and the
@@ -156,7 +156,7 @@ would burn the full 60 s. Worth remembering before changing the compose network 
 
 ## 3. R3 — MED: the attach floor changes unit when the reranker is unavailable
 
-**Status 2026-11-11: OPEN — re-verified: `rerank_gate is None` when the reranker is unreachable → `score_map` falls back to `dense_scores`, so the calibrated 0.50 rerank threshold compares against cosine.**
+**Status 2026-11-11: FIXED — per-scale floors `RAG_ATTACH_FLOOR_RERANK` / `RAG_ATTACH_FLOOR_DENSE`; the value applied follows whichever score map actually ran (unset knobs follow `RAG_ATTACH_FLOOR`, legacy behavior). Production `.env`: rerank 0.50, dense 0 = don't gate when the gate source is gone. Sub-item NOT touched: `RERANK_MODE=local` logits are still stored only when `s > 0.0`.**
 
 `kb/retrievers.py` (#43) gates attachment on **rerank** scores:
 
@@ -195,7 +195,7 @@ someone flips the mode back to `local`.
 
 ## 4. R4 — MED: the cache-identity guard checks the wrong model name
 
-**Status 2026-11-11: OPEN — no startup assertion exists yet; `_cache_identity_ok` still validates the query-side model.**
+**Status 2026-11-11: FIXED — the cache now stamps the WRITE-side model (`index_embedding_model` metadata) and `_cache_identity_ok` checks the stamped writer against the current embedder; `INDEX_EMBED_MODEL` defaults to following the query model, and a settings-derived mismatch logs a loud warning.**
 
 `KBIndexStore` records and validates `self.model_name`, which comes from
 `effective_embedding_model()` (= `EMBEDDING_MODEL` when `EMBED_BACKEND=remote`,
@@ -240,7 +240,7 @@ into a 90 s "extend the budget for the weight load" path instead of a 10 s fail 
 
 ## 5. R5 — MED: one context line, three files (sidecar key design)
 
-**Status 2026-11-11: OPEN — sidecar still keyed by content hash only. Deferred deliberately: the fill had to land first (#81).**
+**Status 2026-11-11: OPEN — sidecar still keyed by content hash only. Awaiting the user decision from §18 (re-key with `source_file\0content_hash` + migration vs. refuse-to-reuse on path mismatch).**
 
 The sidecar key is the hash of the chunk's **content** only — `kb/contextual_gen.py:220`:
 
@@ -274,7 +274,7 @@ minimum refuse to reuse a stored line whose leading path token doesn't match the
 
 ## 6. R6 — MED: mutation → full cache rebuild (measured 0.91 s of next-query latency)
 
-**Status 2026-11-11: OPEN — caches are still identity-keyed and `_bm25_cache` is still an unlocked global. Mitigated in one direction: re-embed now publishes per window (256), not per batch, so the #77 fill triggers ~23 rebuilds instead of ~35 and they no longer interleave with generation.**
+**Status 2026-11-11: FIXED — every mutation path now WARM-BUILDS matrix + BM25 off the event loop inside the mutation (`_warm_retrieval_caches`), so the ~0.91 s rebuild lands on the mutation's own latency, not the next query's; `_get_bm25` is now lock-guarded (double-checked).**
 
 Nothing mutates `_docs` in place: `sync_changes`, `update_single_document`, `_build_fresh`
 and the new `reembed_contextualized` all publish a **new** `KBVectorIndex`
@@ -351,7 +351,7 @@ chunk before truncating — measured 1 124 tuples / 1.62 MB of transient passage
 
 ## 8. R8 — LOW: the agent quality gate is blind when retrieval is weakest
 
-**Status 2026-11-11: OPEN — re-verified: no tool circuit breaker, `AgentTurnMeta.tool_calls` still stores names only, gate still `None`-when-blind.**
+**Status 2026-11-11: FIXED — tool ARGS + result sizes recorded per turn (`AgentTurnMeta.tool_calls_detail` → turn logs); `retrieval_legs` (`dense+lexical+rerank` / `lexical` / `keyword` / `none`) recorded on every retrieval and flows into agent meta, so "reranker never ran" is now distinguishable from "no answer". The auto-trigger gate itself is unchanged (production runs `RAG_AGENT_MODE=always`).**
 
 `bot_core/ai_client.py:960`:
 
@@ -373,7 +373,7 @@ post-hoc analysis can tell "no reranker" from "no answer".
 
 ## 9. R9 — LOW: the per-file char cap is a constant out of scale with the prompt budget
 
-**Status 2026-11-11: OPEN — `kb/retrievers.py:212` is still a module constant.**
+**Status 2026-11-11: FIXED — `RAG_MAX_CHARS_PER_FILE` is a setting (default `24000` = the old constant). Skip-instead-of-truncate behavior left as-is.**
 
 `kb/retrievers.py:212`: `MAX_CHARS_PER_FILE = 24_000` is a **module constant** — not a
 setting, unlike its neighbours `RAG_MAX_CHUNKS_PER_FILE` and `RAG_ATTACH_FLOOR`. Production
@@ -398,7 +398,7 @@ fraction of `RAG_MAX_CHARS`, or the whole thing gets one budget split top-down.
 
 ## 10. R10 — LOW: failure logging loses the reason
 
-**Status 2026-11-11: OPEN — `kb/retrievers.py:475` still logs `%s` of a bare `TimeoutError`.**
+**Status 2026-11-11: FIXED — the rewrite-failure log now carries `type(exc).__name__` + the budget.**
 
 ```
 12 × Query rewrite failed ()
@@ -477,7 +477,7 @@ parent chain), whereas context lines reach both.
 
 ## 13. R13 — INFO: config and cache hygiene, counted
 
-**Status 2026-11-11: OPEN — re-verified 2026-11-11: 15 `STT_*`/`RECORDINGS_DIR`-class vars still in live `.env`, `.env.example` still missing the whole `RERANK_*` family, and the `--prune-orphans` pass has not been run yet. New drift since the review: the #81 fill knobs (`CONTEXTUAL_FILL_RECHECK_S`, `…_RETRY_S`, `…_MAX_ROUNDS`, `…_LLM_TIMEOUT_S`, `CONTEXTUAL_REEMBED_WINDOW`, `CONTEXTUAL_FILL_MODEL`) are in `docs/configuration.md` but not yet in `.env.example`.**
+**Status 2026-11-11: PARTIALLY FIXED (§20) — `.env.example` backfilled (whole `RERANK_*` family, per-scale floors, circuit/gpu-mode knobs; the #81 fill knobs were already there); dead `STT_*` / `RECORDINGS_DIR` / `SESSION_SUMMARY_PROMPT` vars commented out of live `.env` with orphan notes. Still open: run `scripts/contextual_reindex.py --prune-orphans` once host-side (53 orphans at review time).**
 
 - Live `.env` carries **17 variables nothing reads**: 15 `STT_*` + `RECORDINGS_DIR` +
   `SESSION_SUMMARY_PROMPT`. The voice/STT pipeline was deleted in `669b36a`
@@ -613,7 +613,7 @@ pytest suite (1 400 passing):
 - **Live model-id mismatch** (flagged in R4): `.env MODEL_NAME` now matches what Strata
   serves (`qwen3.8-flash-next-iq3_xxs-SingleGPU`).
 
-**Outstanding findings, ordered** (effort is honest, not optimistic):
+**Outstanding findings, ordered** (effort is honest, not optimistic). **Update 2026-11-10/11: steps 1–9 are DONE — see §20. Remaining: 10 (R5, awaiting your decision), 11 (R13 — `.env.example`/`.env` parts done, `--prune-orphans` still to run host-side), 12 (glossary data task), 13 (R7 probe).**
 
 | Step | Finding | What to do | Effort | Risk |
 |------|---------|-----------|--------|------|
@@ -677,3 +677,71 @@ rows = conn.execute("SELECT source_file, doc_name, content, embedding FROM docum
 idx = KBVectorIndex.from_entries([(r[1], r[2], r[0]) for r in rows],
                                  [_unpack_embedding(r[3]) for r in rows])
 ```
+
+---
+
+## 20. Fix series 2026-11-10/11 — what landed (§18 steps 1–9 + R13 partial)
+
+All on `feat/contextual-reembed`, unattended per the user's "fix what you can, leave the
+decisions" instruction. Suite: **1 424 passed** (was 1 400; +24 new regression tests in
+`tests/test_rag_review_fixes_2026_11.py`, green in both random and fixed order).
+
+- **R1** — `KBVectorIndex.iter_retrieval_chunks()` (new; yields `retrieval_name()` =
+  `source_file [breadcrumbs]`, the namespace `search_kb` shows the model) + `kb/tools.py`
+  `_retrieval_chunks()`: `list_sections` / `find_in_kb` / `read_section` now match `dir`
+  (and `file`) against the **path-shaped** name. `_dir_matches()`: strict case-sensitive
+  segment match first, stem-normalized retry only when strict yields nothing; a bare
+  single-segment arg never fuzzy-matches the KB root folder name (that was the
+  "everything matches 'humblewood'" trap). Empty-result replies now carry a hint listing
+  two real file paths the model can copy. `iter_chunks()`'s docstring corrected.
+- **R2a** — connect-failure circuit breakers in `kb/embedder.py` and `kb/reranker.py`
+  (`RAG_SIDECAR_CIRCUIT_COOLDOWN_S`, default 10 s): `ConnectError`/`ConnectTimeout`
+  (DNS gone / refused = stopped sidecar) opens the endpoint's breaker; every later call
+  fails instantly → retrieval goes lexical-only instead of burning ~25 s of retry ladder
+  per turn inside a 45 s agent budget. HTTP 5xx on a *reachable* server keeps the normal
+  ladder. Breakers close on first success / successful mode switch.
+- **R2b** — `kb/retrievers.set_gpu_mode()`; `bot_core/images.py` notifies it on every
+  successful gpu-switch (auto + manual paths). With `RAG_IMAGE_MODE_LEXICAL_ONLY` (default
+  on) image-window queries skip the dense leg up front instead of discovering the outage
+  mid-rewrite.
+- **R3** — `RAG_ATTACH_FLOOR_RERANK` / `RAG_ATTACH_FLOOR_DENSE`: the floor value follows
+  the scale that actually gated (unset = follow `RAG_ATTACH_FLOOR` at call time, byte-compat
+  with the old single knob). Production `.env` sets `0.50` / `0` — dense cosine under
+  qwen3-embedding-4b does NOT separate junk from answers (measured 0.576 junk > 0.45
+  relevant), so no gate when rerank scores are gone. Fallback events log at INFO
+  ("rerank floor fell back to dense … set `RAG_ATTACH_FLOOR_DENSE`").
+- **R4** — the store stamps the **write-side** model in cache metadata
+  (`index_embedding_model`); `_cache_identity_ok` validates that stamp against the current
+  embedder; `INDEX_EMBED_MODEL` now defaults to *following* the query model
+  (`LOCAL_EMBED_MODEL` / `EMBEDDING_MODEL` per backend); a settings-derived mismatch logs a
+  loud WARNING naming both. Explicit-model callers (tests/tooling) skip the warning.
+- **R6** — `KBIndexStore._warm_retrieval_caches()`: matrix + BM25 **built inside the
+  mutation** off the event loop (add / remove / single-doc update / re-embed window / sync /
+  fresh build / incremental load), so the ~0.91 s no longer lands on the *next query*;
+  best-effort (failure keeps the lazy rebuild). `_get_bm25()` is now double-checked-locked.
+- **R8** — `AgentTurnMeta.tool_calls_detail` (tool name, full **args**, result chars, tool
+  error) reaches `logs/ai_turns/`; every `_retrieve_vector` records `retrieval_legs`
+  (`dense+lexical+rerank` / `lexical` / `keyword` / `none`) which flows into both retriever
+  and agent turn records.
+- **R9** — `RAG_MAX_CHARS_PER_FILE` setting (default = old constant 24 000).
+- **R10** — rewrite-failure log: `type(exc).__name__` + budget.
+- **R13 (partial)** — live `.env`: orphaned `STT_*` block, `RECORDINGS_DIR`,
+  `SESSION_SUMMARY_PROMPT` commented out with orphan notes (values kept commented —
+  reversible); new floors documented. `.env.example`: whole `RERANK_*` family backfilled
+  (mode/api_base/format/instruct/top_k/max_chars/use_expansion + serving notes), per-scale
+  floors, circuit-breaker + image-mode knobs, `INDEX_EMBED_MODEL` default note.
+
+**Test-isolation fix the new knobs exposed**: circuit breakers, gpu mode and the shared
+embedder client are process-global — `tests/conftest.py` gained an autouse fixture resetting
+all three per test; two pre-existing suites that patched only `RAG_ATTACH_FLOOR` now pin the
+per-scale knobs too (they exercise the legacy path).
+
+**Still open** (user-owned, untouched): R5 (sidecar re-key vs refuse-to-reuse — §18 decision
+2), R7 probe, R11 glossary data task, `--prune-orphans` run, gpu-switch serialization
+(R2 option a) if wanted.
+
+**Live verification pending (host-side)**: `docker compose up -d --build` (the running
+container's baked `env_file` predates the new `.env` lines) → image-window query should log
+`Retrieval legs: lexical (dense skipped: GPU card is in image mode …)` and no more
+`Name or service not known` clusters; agent turns' JSON records show `tool_calls_detail`
+and `retrieval_legs`.

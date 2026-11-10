@@ -21,6 +21,7 @@ import importlib.util
 import inspect
 import logging
 import threading
+import time
 from typing import Any, Callable
 
 import httpx
@@ -152,6 +153,70 @@ async def close_client() -> None:
     _shared_client = None
 
 
+# ── Circuit breaker (RAG code review 2026-11, R2a) ─────────────────────
+# A stopped compose sidecar (the 4070 image window takes embedder-llama down)
+# fails at the socket level INSTANTLY — but the retry ladder turns that into
+# ~4.5 s of backoff per call path (dense query + expansion embeds), hammered
+# on every turn while the card is away. On a connect-class failure the
+# endpoint is marked unreachable for a cooldown: further calls fail
+# immediately with zero attempts, so callers degrade to lexical-only
+# retrieval right away. A successful call (encode or probe) closes the
+# breaker. Cooldown knob: RAG_SIDECAR_CIRCUIT_COOLDOWN_S.
+_circuit_open_until: dict[str, float] = {}   # base_url -> monotonic open-until
+
+
+def _circuit_cooldown_s() -> float:
+    from config.settings import RAG_SIDECAR_CIRCUIT_COOLDOWN_S
+    return RAG_SIDECAR_CIRCUIT_COOLDOWN_S
+
+
+def _breaker_open(base_url: str) -> bool:
+    until = _circuit_open_until.get(base_url)
+    return until is not None and time.monotonic() < until
+
+
+def _breaker_trip(base_url: str, exc: BaseException) -> None:
+    _circuit_open_until[base_url] = time.monotonic() + _circuit_cooldown_s()
+    logger.warning(
+        "Embeddings endpoint %s marked unreachable for %.0fs "
+        "(circuit breaker; connect error: %s) — retrieval degrades to "
+        "lexical-only until the endpoint answers again",
+        base_url, _circuit_cooldown_s(), exc,
+    )
+
+
+def _breaker_close(base_url: str) -> None:
+    _circuit_open_until.pop(base_url, None)
+
+
+def remote_circuit_open() -> bool:
+    """True while the configured EMBED_URL is in breaker cooldown.
+
+    kb.retrievers consults this BEFORE launching the dense leg, so a downed
+    sidecar costs one failed attempt total — not one ladder per call path.
+    """
+    from config.settings import EMBED_URL
+    return _breaker_open(EMBED_URL.rstrip("/"))
+
+
+def reset_circuit_breaker() -> None:
+    """Clear all breaker state (tests / manual re-probe after repair)."""
+    _circuit_open_until.clear()
+
+
+def _is_connect_failure(exc: BaseException) -> bool:
+    """Socket-level failure: DNS gone / connection refused — endpoint is DOWN.
+
+    Distinct from HTTP 5xx or timeouts on a REACHABLE server: those stay on
+    the normal retry ladder. httpx wraps DNS/refused errors in ConnectError
+    (and connect-phase timeouts in ConnectTimeout).
+    """
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
+        return True
+    cause = exc.__cause__ or exc.__context__
+    return isinstance(cause, (ConnectionError, OSError))
+
+
 # ── Liveness probe (#80) ────────────────────────────────────────────────
 # "Is the embedding backend up?" used to be answerable only by trying to embed
 # something, which (a) costs a real /embeddings call and (b) can force the
@@ -178,12 +243,17 @@ async def probe_remote(timeout: float = PROBE_TIMEOUT_S) -> bool:
         base + "/v1/models", base + "/models",
     ]
     client = await _get_client()
+    last_exc: Exception | None = None
     for url in candidates:
         try:
             await client.get(url, timeout=timeout)
+            _breaker_close(base)  # any HTTP answer = up AND breaker-cleared
             return True  # any HTTP answer = the service is up
         except Exception as exc:  # noqa: BLE001 — reachability, not correctness
+            last_exc = exc
             logger.debug("embedder probe failed for %s: %s", url, exc)
+    if last_exc is not None and _is_connect_failure(last_exc):
+        _breaker_trip(base, last_exc)
     return False
 
 
@@ -348,6 +418,14 @@ class Embedder:
 
         base_url = EMBED_URL.rstrip("/")
 
+        if _breaker_open(base_url):
+            # Circuit open — fail instantly (0 attempts, 0 sleeps) so the
+            # caller's degraded path (lexical-only) answers this turn.
+            raise EmbeddingError(
+                f"Embedding endpoint {base_url} is in circuit-breaker "
+                "cooldown (endpoint was unreachable moments ago)"
+            )
+
         # Determine what suffix to append so the /embeddings endpoint is correct.
         # Users may set INFER_URL already ending in /api/v1 or /v1, or none of those.
         if base_url.endswith(("/api/v1", "/v1")):
@@ -370,13 +448,17 @@ class Embedder:
         client = await _get_client()
 
         last_exc: Exception | None = None
+        circuit_tripped = False
         for suffix in endpoints_to_try:
+            if circuit_tripped:
+                break
             url = base_url + suffix
             for attempt in range(1, _RETRY_ATTEMPTS + 1):
                 try:
                     resp = await client.post(url, json=payload, headers=headers)
                     resp.raise_for_status()
                     data = resp.json()
+                    _breaker_close(base_url)
 
                     # OpenAI-compatible response format: {"data": [...], "model": ...}
                     if isinstance(data, dict) and "data" in data:
@@ -408,6 +490,12 @@ class Embedder:
                     )
                 except Exception as exc:
                     last_exc = exc
+                    if _is_connect_failure(exc):
+                        # The service is DOWN (DNS/connect refused): the retry
+                        # ladder only burns seconds. Open the breaker and bail.
+                        _breaker_trip(base_url, exc)
+                        circuit_tripped = True
+                        break
                     logger.warning(
                         "Embeddings endpoint %s attempt %d/%d error: %s",
                         url, attempt, _RETRY_ATTEMPTS, exc,

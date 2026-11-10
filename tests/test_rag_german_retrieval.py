@@ -214,6 +214,10 @@ class TestParallelRewrite:
         monkeypatch.setattr("config.settings.RERANK_ENABLED", False)
         monkeypatch.setattr("config.settings.RAG_MIN_ATTACH_SCORE", 0.0)
         monkeypatch.setattr("config.settings.RAG_ATTACH_FLOOR", 0.0)
+        # Per-scale knobs (review 2026-11 R3) pinned hermetically: these
+        # tests exercise the LEGACY single-knob path (knobs unset).
+        monkeypatch.setattr("config.settings.RAG_ATTACH_FLOOR_RERANK", None)
+        monkeypatch.setattr("config.settings.RAG_ATTACH_FLOOR_DENSE", None)
 
         events: dict[str, bool] = {"expand_called": False}
 
@@ -274,6 +278,10 @@ class TestParallelRewrite:
         monkeypatch.setattr("config.settings.RERANK_ENABLED", False)
         monkeypatch.setattr("config.settings.RAG_MIN_ATTACH_SCORE", 0.0)
         monkeypatch.setattr("config.settings.RAG_ATTACH_FLOOR", 0.0)
+        # Per-scale knobs (review 2026-11 R3) pinned hermetically: these
+        # tests exercise the LEGACY single-knob path (knobs unset).
+        monkeypatch.setattr("config.settings.RAG_ATTACH_FLOOR_RERANK", None)
+        monkeypatch.setattr("config.settings.RAG_ATTACH_FLOOR_DENSE", None)
 
         calls: list[str] = []
 
@@ -330,6 +338,10 @@ class TestRerankExpansionMaxFusion:
         monkeypatch.setattr("config.settings.RERANK_TOP_K", 10)
         monkeypatch.setattr("config.settings.RAG_MIN_ATTACH_SCORE", 0.0)
         monkeypatch.setattr("config.settings.RAG_ATTACH_FLOOR", 0.0)
+        # Per-scale knobs (review 2026-11 R3) pinned hermetically: these
+        # tests exercise the LEGACY single-knob path (knobs unset).
+        monkeypatch.setattr("config.settings.RAG_ATTACH_FLOOR_RERANK", None)
+        monkeypatch.setattr("config.settings.RAG_ATTACH_FLOOR_DENSE", None)
 
         class FakeIdx:
             def is_empty(self):

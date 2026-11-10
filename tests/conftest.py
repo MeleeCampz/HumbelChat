@@ -89,6 +89,38 @@ for _var in ("AI_REASONING_EFFORT", "SUMMARY_REASONING_EFFORT",
 
 
 @pytest.fixture(autouse=True)
+def _reset_sidecar_circuits():
+    """Circuit breakers (kb.embedder / kb.reranker) are process-global state.
+
+    Tests that simulate connect failures deliberately TRIP them; without a
+    reset the trip leaks into every later test and silently disables the
+    dense leg / rerank stage there (review 2026-11 R2 added the breakers).
+    """
+    def _reset() -> None:
+        try:
+            from kb.embedder import reset_circuit_breaker
+            reset_circuit_breaker()
+        except Exception:
+            pass
+        try:
+            from kb.reranker import reset_reranker_circuit_breaker
+            reset_reranker_circuit_breaker()
+        except Exception:
+            pass
+        try:
+            # kb.retrievers' GPU-mode flag is global too — an images test that
+            # enters an image window would otherwise disable the dense leg
+            # for every later test.
+            from kb.retrievers import set_gpu_mode
+            set_gpu_mode("rag")
+        except Exception:
+            pass
+    _reset()
+    yield
+    _reset()
+
+
+@pytest.fixture(autouse=True)
 def _quiet_file_loggers():
     """Extra safety net: strip any file handlers the main import may have added."""
     import logging
