@@ -728,6 +728,12 @@ CONTEXTUAL_FILL_INITIAL_DELAY_S: int = int(os.getenv("CONTEXTUAL_FILL_INITIAL_DE
 # live /ai traffic (60 s default); a catch-up run over a few hundred chunks can
 # safely drop it to ~5 s. 0 = no pause (not recommended on the chat GPU).
 CONTEXTUAL_FILL_BATCH_PAUSE_S: float = _safe_float(os.getenv("CONTEXTUAL_FILL_BATCH_PAUSE_S"), 60.0)
+# Chunks per mutation in a contextual re-embed (#80). A whole-KB lag repair is
+# ~5700 chunks = minutes of embedding; windowing keeps the mutation lock, the
+# SQLite upsert and the sidecar stamp bounded, so /upload_kb and /sync_kb keep
+# working while a repair is in flight and a restart resumes mid-run (completed
+# windows are stamped). 0/negative is clamped to 1.
+CONTEXTUAL_REEMBED_WINDOW: int = max(1, int(_safe_float(os.getenv("CONTEXTUAL_REEMBED_WINDOW"), 256)))
 # #80: the fill is a standing self-healing loop, not a one-shot boot task: every
 # interval it re-reads sidecar coverage and the re-embed stamp, repairs what
 # lags, and a complete index costs one index read (no LLM, no embedding, no

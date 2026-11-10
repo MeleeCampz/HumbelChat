@@ -68,7 +68,7 @@ import time
 from typing import TYPE_CHECKING, Any, Callable, TypedDict
 
 from kb.vector_db import KBVectorIndex, _DocEntry
-from kb.embedder import Embedder
+from kb.embedder import Embedder, probe_remote
 
 if TYPE_CHECKING:  # only for the _rechunk return annotation
     from kb.chunker import ChunkInfo
@@ -639,7 +639,12 @@ class KBIndexStore:
             logger.info("Updated index with '%s' (%d chunk(s))", key, len(entries))
             return True
 
-    async def reembed_contextualized(self, content_hashes: set[str] | None = None) -> int:
+    async def reembed_contextualized(
+        self,
+        content_hashes: set[str] | None = None,
+        *,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> int:
         """#77: rebuild the vectors of chunks whose context line postdates them.
 
         Contextual Retrieval prepends a one-line context to a chunk at BOTH
@@ -662,31 +667,103 @@ class KBIndexStore:
         Never corrupts: an embedding failure leaves the in-memory index and the
         on-disk cache exactly as they were and returns 0.  The sidecar lines
         already written still help, and the call is safely re-runnable.
+
+        Windows (#80): a lag-only repair of a whole KB is ~5700 chunks, which is
+        minutes of embedding, not a mutation. It therefore runs in windows of
+        ``CONTEXTUAL_REEMBED_WINDOW`` chunks — each window is its own
+        lock/persist/stamp cycle (so ``/upload_kb`` and ``/sync_kb`` are not
+        frozen for minutes), completed windows survive a restart via the stamp,
+        and the run stops early when *should_stop* fires or the embedding backend
+        goes away (the GPU switching into ``image`` mode is the ordinary case).
+        The next fill round picks up where it stopped.
         """
-        # P0 #3: read → embed → swap → persist is one mutation; serialize it
-        # against /upload_kb, /sync_kb and a concurrent fill batch.
+        from config.settings import (
+            CONTEXTUAL_FILL_BATCH_PAUSE_S,
+            CONTEXTUAL_REEMBED_WINDOW,
+        )
+
+        window = max(1, CONTEXTUAL_REEMBED_WINDOW)
+        planned = self._reembed_candidates(content_hashes)
+        if not planned:
+            return 0
+        hashes = [h for h, _src in planned]
+        total_done = 0
+        total_failed = 0
+        windows = (len(hashes) + window - 1) // window
+        for w in range(windows):
+            chunk = set(hashes[w * window:(w + 1) * window])
+            if should_stop is not None and should_stop():
+                logger.info(
+                    "Contextual re-embed: stopping after %d/%d window(s) (%d chunk(s) "
+                    "refreshed) — the rest stays un-stamped for the next round.",
+                    w, windows, total_done,
+                )
+                break
+            if w and not await probe_remote():
+                logger.info(
+                    "Contextual re-embed: embedding backend went away at window %d/%d "
+                    "(%d chunk(s) refreshed so far) — resuming on the next fill round.",
+                    w + 1, windows, total_done,
+                )
+                break
+            done, failed = await self._reembed_window(chunk)
+            total_done += done
+            total_failed += failed
+            if windows > 1:
+                logger.info(
+                    "Contextual re-embed window %d/%d: %d chunk(s) refreshed "
+                    "(%d/%d of the backlog)",
+                    w + 1, windows, done, total_done, len(hashes),
+                )
+            if windows > 1 and total_done:
+                # Give the embedder a beat between windows and let other mutations
+                # in (the mutation lock is released inside _reembed_window).
+                await asyncio.sleep(CONTEXTUAL_FILL_BATCH_PAUSE_S * 0.2)
+        return total_done
+
+    def _reembed_candidates(
+        self, content_hashes: set[str] | None
+    ) -> list[tuple[str, str]]:
+        """(content_hash, source_file) of chunks whose vector lags their line.
+
+        Idempotence (#80): already-stamped chunks are only included when the
+        caller named them explicitly — a periodic repair can never re-embed the
+        whole KB in a loop. Chunks without a line are never candidates.
+        """
+        inner = self._index
+        if inner is None:
+            return []
+        return [
+            (_content_hash(doc.content), doc.source())
+            for doc in inner._docs
+            if doc.context_line
+            and doc.content.strip()
+            and (content_hashes is None or _content_hash(doc.content) in content_hashes)
+            and (content_hashes is not None
+                 or _content_hash(doc.content) not in self._context_vec)
+        ]
+
+    async def _reembed_window(self, content_hashes: set[str]) -> tuple[int, int]:
+        """One window of :meth:`reembed_contextualized` → (refreshed, failed).
+
+        Holds the P0 #3 mutation lock for exactly this window: read → embed →
+        swap → persist → stamp. Returns (0, 0) for an empty/unchanged window.
+        """
         async with self._mutation_lock():
             if self._index is None:
                 # Already holding the lock — call the lock-free core (load()
                 # would deadlock on the non-reentrant lock).
                 self._index = await self._load_inner()
             if self._index.is_empty():
-                return 0
+                return 0, 0
 
             docs = list(self._index._docs)
             targets = [
                 (i, doc) for i, doc in enumerate(docs)
-                if doc.context_line
-                and doc.content.strip()
-                and (content_hashes is None or _content_hash(doc.content) in content_hashes)
-                # Idempotence (#80): a chunk already stamped as vectorized is not
-                # a candidate, so a periodic repair can never re-embed the whole
-                # KB in a loop.
-                and (content_hashes is not None
-                     or _content_hash(doc.content) not in self._context_vec)
+                if _content_hash(doc.content) in content_hashes
             ]
             if not targets:
-                return 0
+                return 0, 0
 
             dim = next((len(d.embedding) for d in docs if d.embedding), 0)
             vectors = await self._encode_contextual_passages(
@@ -710,7 +787,7 @@ class KBIndexStore:
                     "candidate chunk(s) — index and cache left unchanged",
                     len(targets),
                 )
-                return 0
+                return 0, len(targets)
 
             # Replace the DOC LIST OBJECT, don't mutate entries in place: both
             # KBVectorIndex._ensure_matrix (P2 #17) and kb.retrievers._get_bm25
@@ -733,7 +810,7 @@ class KBIndexStore:
                 done, len(changed_keys),
                 f", {failed} left unrefreshed" if failed else "",
             )
-            return done
+            return done, failed
 
     async def _encode_contextual_passages(
         self, passages: list[str], *, expected_dim: int

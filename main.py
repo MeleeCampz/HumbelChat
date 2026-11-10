@@ -825,7 +825,7 @@ async def _contextual_sidecar_worker(bot: discord.Client) -> None:
                 # call needed — re-embed every un-stamped chunk. Stamps make this
                 # idempotent: a repaired chunk is never re-embedded again.
                 n = 0
-                repaired = await store.reembed_contextualized(None)
+                repaired = await store.reembed_contextualized(None, should_stop=_closed)
                 if not repaired:
                     log.warning(
                         "Contextual fill: vector repair refreshed nothing this round "
@@ -833,11 +833,18 @@ async def _contextual_sidecar_worker(bot: discord.Client) -> None:
                     )
             covered, total = store.contextual_coverage()
             lag_left = store.contextual_vector_lag()
-            log.info(
-                "Contextual fill round: %d line(s) generated, %d chunk(s) "
-                "vector-repaired; %d lagging left; coverage now %d/%d.",
-                n, repaired, lag_left, covered, total,
-            )
+            if n:
+                log.info(
+                    "Contextual fill round: %d line(s) generated, %d chunk(s) "
+                    "vector-repaired; %d lagging left; coverage now %d/%d.",
+                    n, repaired, lag_left, covered, total,
+                )
+            else:
+                log.info(
+                    "Contextual fill round: %d chunk(s) vector-repaired, no lines "
+                    "needed; %d lagging left; coverage %d/%d.",
+                    repaired, lag_left, covered, total,
+                )
             warned = 0
             remaining = max(0, total - covered) + lag_left
             # Fast retry only when this round actually moved something forward AND

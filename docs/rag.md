@@ -170,6 +170,14 @@ chunks stay lagging until the fill (or the script) re-embeds them;
 vector coverage, lag and orphans, and `--stamp-all` declares the historical
 invariant by hand if you would rather skip the re-embed pass.
 
+**Repair windows (#80):** a whole-KB lag pass is thousands of chunks — minutes of
+embedding, not a mutation. `reembed_contextualized()` therefore runs in windows of
+`CONTEXTUAL_REEMBED_WINDOW` chunks (default 256): each window is its own
+lock → persist → stamp cycle, so `/upload_kb` and `/sync_kb` stay responsive and
+finished windows survive a restart. Before each window it re-checks that the
+embedding backend is reachable and that the bot is still closing-clean, and stops
+early if either fails — the remaining chunks stay un-stamped for the next round.
+
 **Vector refresh (#77):** a line only helps dense retrieval if the *embedding*
 was built from `context_line + "\n\n" + content`. The fill writes the line, so
 without a refresh the stored vector still describes the raw chunk — BM25 sees

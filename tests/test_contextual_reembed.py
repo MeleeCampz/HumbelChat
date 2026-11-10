@@ -11,6 +11,7 @@ and the never-corrupt failure paths.
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import pathlib
@@ -403,3 +404,110 @@ class TestLegacyStampMigration:
         data = json.loads((store.persist_dir / "context_lines.json").read_text(encoding="utf-8"))
         assert data["__v__"] == [_h(contents["one.md"])]
         assert await store.reembed_contextualized(None) == 0
+
+
+class TestReembedWindows:
+    """A whole-KB lag repair is minutes of embedding — it must be interruptible."""
+
+    LAGGERS = 7  # extra chunks beyond the fixture's two
+
+    @pytest.fixture(autouse=True)
+    def _no_window_pause(self, monkeypatch):
+        """Windows sleep between rounds and re-probe the backend: neutralize both
+        unless a test is specifically about the backend disappearing."""
+        import config.settings as S
+        monkeypatch.setattr(S, "CONTEXTUAL_FILL_BATCH_PAUSE_S", 0.0)
+
+        async def alive():
+            return True
+
+        monkeypatch.setattr(I, "probe_remote", alive)
+
+    async def _lagging_store(self, kb, n_extra: int = LAGGERS):
+        """Store whose index has N chunks with lines but raw-content vectors."""
+        from kb.vector_db import _DocEntry
+        store = _store(kb)
+        await store.load()
+        first, second = (d for d in store._index._docs)   # real CHUNK contents
+        store._index._docs = [
+            dataclasses.replace(d, context_line=line)
+            for d, line in ((first, ALPHA_LINE), (second, BETA_LINE))
+        ]
+        store._context_lines = {_h(d.content): d.context_line for d in store._index._docs}
+        inner = store._index
+        extra = []
+        for i in range(n_extra):
+            content = f"synthetic lagging chunk number {i} with some body text"
+            extra.append(_DocEntry(
+                display_name=f"extra{i}.md [Full Document]",
+                content=content,
+                embedding=_vec(content),          # raw-content vector: the #77 state
+                source_file=f"extra{i}.md",
+                file_hash=f"fh{i}",
+                context_line=f"extra{i}.md: filler chunk {i}.",
+            ))
+        inner._docs = list(inner._docs) + extra
+        store._context_lines = {
+            **store._context_lines,
+            **{_h(d.content): d.context_line for d in extra},
+        }
+        store.save_context_lines(store._context_lines)
+        return store
+
+    async def test_backlog_is_processed_in_windows_and_stamped_as_it_goes(
+        self, kb, monkeypatch
+    ):
+        import config.settings as S
+        monkeypatch.setattr(S, "CONTEXTUAL_REEMBED_WINDOW", 4)
+        store = await self._lagging_store(kb)
+        total = 2 + self.LAGGERS
+        assert store.contextual_vector_lag() == total
+
+        n = await store.reembed_contextualized(None)
+        assert n == total
+        assert store.contextual_vector_lag() == 0
+        # One encode call per window (4+4+1), not one for the whole backlog: a
+        # single 5700-passage request is what a mid-run failure would have to redo.
+        windows = store._embedder.calls[1:]   # [0] is the index build itself
+        assert [len(c) for c in windows] == [4, 4, 1]
+        data = json.loads((store.persist_dir / "context_lines.json").read_text(encoding="utf-8"))
+        assert len(data["__v__"]) == total, "windows persist the stamp as they finish"
+
+    async def test_should_stop_leaves_the_rest_lagging_for_the_next_round(
+        self, kb, monkeypatch, caplog
+    ):
+        import logging
+        import config.settings as S
+        monkeypatch.setattr(S, "CONTEXTUAL_REEMBED_WINDOW", 4)
+        store = await self._lagging_store(kb)
+        calls = {"n": 0}
+
+        def stopping():
+            calls["n"] += 1
+            return calls["n"] > 2  # stop before the third window
+
+        caplog.set_level(logging.INFO, logger="kb.index")
+        n = await store.reembed_contextualized(None, should_stop=stopping)
+        assert n == 8, "two windows finished"
+        assert store.contextual_vector_lag() == 2 + self.LAGGERS - 8, "window 3 not attempted"
+        assert any("stopping after 2/3 window" in r.getMessage() for r in caplog.records)
+
+    async def test_backend_going_away_mid_run_resumes_next_time(self, kb, monkeypatch, caplog):
+        import logging
+        import config.settings as S
+        monkeypatch.setattr(S, "CONTEXTUAL_REEMBED_WINDOW", 4)
+        store = await self._lagging_store(kb)
+        probes = iter([True, False])  # alive for window 2, gone for window 3
+
+        async def probe():
+            return next(probes)
+
+        monkeypatch.setattr(I, "probe_remote", probe)
+        caplog.set_level(logging.INFO, logger="kb.index")
+        n = await store.reembed_contextualized(None)
+        assert n == 8, "two windows finished, the third was never attempted"
+        assert store.contextual_vector_lag() == 1
+        assert any("backend went away at window 3/3" in r.getMessage() for r in caplog.records)
+        # The stamp records what actually finished, so a restart continues there.
+        data = json.loads((store.persist_dir / "context_lines.json").read_text(encoding="utf-8"))
+        assert len(data["__v__"]) == 8
