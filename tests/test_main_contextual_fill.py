@@ -60,6 +60,28 @@ class TestContextualSidecarWorker:
         assert any("--reembed-contextualized" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
+    async def test_method_style_is_closed_does_not_kill_the_worker(self, monkeypatch, caplog):
+        """Production regression 2026-11-10: discord.py 2.7.1's is_closed is a plain
+        METHOD — every test fake used the property form, so the worker read a bound
+        method (always truthy), treated a live bot as closed, and exited silently
+        after its first nap: the fill loop never ran in production, zero log output.
+        """
+        main, _gen = _prepare(monkeypatch, _store(5, 10), fill=False)
+        caplog.set_level(logging.WARNING, logger="bot")
+        live = SimpleNamespace(is_closed=lambda: False)  # discord.Client-style method
+        await main._contextual_sidecar_worker(live)
+        assert any("5/10" in r.message for r in caplog.records if r.levelno == logging.WARNING)
+
+    @pytest.mark.asyncio
+    async def test_method_style_is_closed_true_stops_the_worker(self, monkeypatch, caplog):
+        """The callable form must still be RESPECTED: a closing bot stops the loop."""
+        main, _gen = _prepare(monkeypatch, _store(5, 10), fill=True, rounds=3)
+        caplog.set_level(logging.WARNING, logger="bot")
+        closing = SimpleNamespace(is_closed=lambda: True)
+        await main._contextual_sidecar_worker(closing)
+        assert not [r for r in caplog.records if "sidecar" in r.message.lower()]
+
+    @pytest.mark.asyncio
     async def test_silent_when_fully_covered(self, monkeypatch, caplog):
         main, _gen = _prepare(monkeypatch, _store(10, 10), fill=False)
         caplog.set_level(logging.WARNING, logger="bot")

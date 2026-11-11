@@ -757,10 +757,14 @@ async def _contextual_sidecar_worker(bot: discord.Client) -> None:
       chunks whose vector really still describes the raw chunk.
     * Data problems are logged, never fatal to the bot.
     """
-    # discord.py's stubs declare is_closed as a method while it is a property
-    # at runtime — read defensively so both type-check and run.
+    # discord.py 2.x (verified on 2.7.1) exposes is_closed as a plain METHOD;
+    # test fakes and type stubs use it as a property. Reading the attribute
+    # without calling it yields a bound method — always truthy — which made
+    # the worker treat a LIVE bot as closed and exit silently after its first
+    # nap (production regression 2026-11-10). Call it when callable.
     def _closed() -> bool:
-        return bool(getattr(bot, "is_closed", False))
+        value = getattr(bot, "is_closed", False)
+        return bool(value() if callable(value) else value)
 
     def _wait(prev: float) -> float:
         # prev<=0 means "nothing left to do": wait a full recheck interval.

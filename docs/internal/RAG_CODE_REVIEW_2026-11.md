@@ -745,3 +745,30 @@ container's baked `env_file` predates the new `.env` lines) → image-window que
 `Retrieval legs: lexical (dense skipped: GPU card is in image mode …)` and no more
 `Name or service not known` clusters; agent turns' JSON records show `tool_calls_detail`
 and `retrieval_legs`.
+
+## 21. Post-deploy finding: the fill worker never ran (R15, 2026-11-11)
+
+Stamped rebuild (`Bot build sha: e6f47fa…`) proved the container was finally on the
+fix-series code — yet the contextual fill worker logged nothing at its first round.
+
+**Root cause (`main.py` `_contextual_sidecar_worker`):** `discord.py` 2.7.1 exposes
+`Client.is_closed` as a plain *method* (verified: `type(Client.__dict__["is_closed"])
+== function`). The worker's defensive `bool(getattr(bot, "is_closed", False))` therefore
+returned the truthiness of a **bound method — always `True`** — so the loop believed a
+LIVE bot was closed and `return`ed silently after its 300 s initial nap. Zero log lines,
+fill permanently stalled, index left 5698/5944. Every test fake used the property form
+(`SimpleNamespace(is_closed=False)`), which is why the suite was green for months.
+
+**Fix:** `_closed()` now calls the attribute when callable (`bool(value() if callable(value)
+else value)`), honouring both the runtime method form and the property-style test fakes.
+Two regression tests added (`test_main_contextual_fill.py`): a method-style *open* bot must
+still run the first round (coverage warning observed), and a method-style *closing* bot
+must still stop the loop. Suite: 1426 passed.
+
+**Live confirmations from the verification session (2026-11-10/11):** stamped boot;
+`!ai ping` full pipeline: `Cache HIT: 5944 chunk(s)`, dense(96)+lexical→RRF 97, rerank 5.2 s,
+and the new R3 log line fired for real — `Attach floor 0.50 (rerank scale) dropped every
+chunk; fell back to unfiltered selection` (top rerank score 0.354 on a `ping` query, i.e.
+the floor works and a junk query gets the documented fallback). The stale-image diagnosis
+that started this hunt is exactly what the `GIT_SHA` build-arg stamp now catches in one log
+line.
