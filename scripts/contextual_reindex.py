@@ -11,8 +11,9 @@ Pipeline:
   1. Read every chunk (content + hash) from the live vector DB.
   2. Batch chunks by file (default 12/call) and ask the chat model for a JSON
      array of one-line context descriptions, keyed to the chunk order.
-  3. Persist ``<persist_dir>/context_lines.json`` (content_hash → line) after
-     every batch — resumable: hashes already present are skipped.
+  3. Persist ``<persist_dir>/context_lines.json`` (``source_file\0content_hash``
+     → line, R5; legacy bare-hash files are migrated in place once) after every
+     batch — resumable: keys already present are skipped.
   4. Re-embed the chunks just contextualized (``--reembed-missing``): a chunk that
      got its line AFTER being embedded still carries a vector of the RAW text, so
      the dense leg never sees the framing (#77). Targeted, seconds. The bot's own
@@ -67,6 +68,12 @@ DEFAULT_PERSIST_DIR = DEFAULT_KB_PATH / ".vector_index_cache"
 # background fill) — single source of truth for both generation paths.
 from kb.contextual_gen import BATCH_PROMPT as _BATCH_PROMPT  # noqa: E402
 from kb.contextual_gen import parse_json_array as _parse_json_array  # noqa: E402
+from kb.vector_db import sidecar_key as _sidecar_key  # noqa: E402
+
+
+def _chunk_key(c: dict) -> str:
+    """The sidecar key of a DB chunk row (R5: file-scoped composite)."""
+    return _sidecar_key(c["source"], c["content"])
 
 
 def _load_chunks(db_path: pathlib.Path) -> list[dict]:
@@ -91,28 +98,34 @@ def _load_chunks(db_path: pathlib.Path) -> list[dict]:
     ]
 
 
-def _load_sidecar(persist_dir: pathlib.Path) -> dict[str, str]:
+def _load_sidecar(persist_dir: pathlib.Path) -> tuple[dict[str, str], bool]:
+    """Read the sidecar → (entries, legacy_keyed).
+
+    ``legacy_keyed`` is True for a pre-R5 file (entries keyed by bare content
+    hash); main() migrates such a file before using it for anything else.
+    """
     path = persist_dir / "context_lines.json"
     if not path.exists():
-        return {}
+        return {}, False
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         sys.exit(f"existing sidecar unreadable ({path}): {exc}")
     if not isinstance(data, dict):
-        return {}
+        return {}, False
     lines = {k: v for k, v in data.items()
              if isinstance(k, str) and isinstance(v, str) and v and not k.startswith("__")}
+    legacy = not bool(data.get("__v3__"))
     # A pre-stamp file (no __v__, no __v2__ marker) is migrated here exactly like
     # KBIndexStore does at load: every existing line is recorded as already
     # embedded. If the script instead wrote the marker with an EMPTY stamp, the
     # bot would later treat all those historical lines as un-embedded and re-embed
     # the entire index once "for free".
     if lines and not data.get("__v__") and not data.get("__v2__"):
-        _save_sidecar(persist_dir, lines, stamped=set(lines))
+        _save_sidecar(persist_dir, lines, stamped=set(lines), keyed_v3=False)
         print(f"sidecar: {len(lines)} pre-stamp entr(ies) recorded as already embedded "
               "(stamp format written)")
-    return lines
+    return lines, legacy
 
 
 def _load_stamp(persist_dir: pathlib.Path) -> set[str]:
@@ -128,8 +141,52 @@ def _load_stamp(persist_dir: pathlib.Path) -> set[str]:
     return {h for h in stamp if isinstance(h, str)} if isinstance(stamp, list) else set()
 
 
+def _migrate_sidecar_v3(
+    persist_dir: pathlib.Path, chunks: list[dict], sidecar: dict[str, str]
+) -> dict[str, str]:
+    """R5: rewrite a bare-hash sidecar as per-file ``source\0hash`` entries.
+
+    Same rules as KBIndexStore._migrate_sidecar_v3: unique-hash lines carry
+    over (stamp included), lines shared by several chunks are DROPPED for
+    per-file regeneration, entries for gone chunks (orphans) disappear.
+    Returns the migrated map (writes the file once).
+    """
+    counts: dict[str, int] = {}
+    for c in chunks:
+        counts[c["hash"]] = counts.get(c["hash"], 0) + 1
+    stamped = _load_stamp(persist_dir)
+    new_lines: dict[str, str] = {}
+    new_stamp: set[str] = set()
+    dropped = 0
+    for c in chunks:
+        h = c["hash"]
+        line = sidecar.get(h)
+        if not line:
+            continue
+        if counts[h] > 1:
+            dropped += 1
+            continue
+        key = _chunk_key(c)
+        if key in new_lines:
+            continue
+        new_lines[key] = line
+        if h in stamped:
+            new_stamp.add(key)
+    # Legacy entries no chunk claims stay dropped (they were orphans anyway).
+    orphans = len([h for h in sidecar if h not in counts])
+    _save_sidecar(persist_dir, new_lines, stamped=new_stamp)
+    print(f"sidecar re-keyed (R5): {len(new_lines)}/{len(sidecar)} entr(ies) moved to "
+          f"per-file keys, {dropped} collision-sharing chunk(s) freed for regeneration, "
+          f"{orphans} orphan entr(ies) dropped")
+    return new_lines
+
+
 def _save_sidecar(
-    persist_dir: pathlib.Path, lines: dict[str, str], *, stamped: set[str] | None = None
+    persist_dir: pathlib.Path,
+    lines: dict[str, str],
+    *,
+    stamped: set[str] | None = None,
+    keyed_v3: bool = True,
 ) -> None:
     persist_dir.mkdir(parents=True, exist_ok=True)
     path = persist_dir / "context_lines.json"
@@ -139,6 +196,11 @@ def _save_sidecar(
     # mid-generation would be migrated too — silently claiming fresh lines were
     # already embedded.
     payload["__v2__"] = 1
+    # R5: "__v3__" claims the keys are file-scoped composites — only set it when
+    # that is actually true of *lines* (the pre-stamp restamp write passes
+    # keyed_v3=False while the entries are still bare hashes).
+    if keyed_v3:
+        payload["__v3__"] = 1
     if stamped is not None:
         payload["__v__"] = sorted(stamped)
     tmp = path.with_suffix(".json.tmp")
@@ -184,7 +246,7 @@ async def _generate(
     """Generate missing lines → (failed_chunk_count, generated_hashes)."""
     import httpx
 
-    todo = [c for c in chunks if c["hash"] not in sidecar]
+    todo = [c for c in chunks if _chunk_key(c) not in sidecar]
     # Scope filter: only files whose path contains the substring.
     if path_substring:
         todo = [c for c in todo if path_substring in c["source"]]
@@ -194,7 +256,7 @@ async def _generate(
         todo.sort(key=lambda c: 0 if priority_substring in c["source"] else 1)
     if limit is not None:
         todo = todo[:limit]
-    print(f"chunks total={len(chunks)}  already contextualized={len(chunks) - len([c for c in chunks if c['hash'] not in sidecar])}  to do={len(todo)}")
+    print(f"chunks total={len(chunks)}  already contextualized={len(chunks) - len([c for c in chunks if _chunk_key(c) not in sidecar])}  to do={len(todo)}")
 
     # Group consecutive chunks by source file so each prompt stays on one file.
     batches: list[list[dict]] = []
@@ -243,8 +305,9 @@ async def _generate(
                     if lines is not None and len(lines) == len(batch):
                         for c, line in zip(batch, lines):
                             if line:
-                                sidecar[c["hash"]] = line[:300]
-                                generated_hashes.add(c["hash"])
+                                key = _chunk_key(c)
+                                sidecar[key] = line[:300]
+                                generated_hashes.add(key)
                         # Stamp is carried through untouched — a generated line is
                         # not an embedded vector; _reembed does the stamping.
                         _save_sidecar(persist_dir, sidecar, stamped=_load_stamp(persist_dir))
@@ -283,9 +346,10 @@ async def _reembed(kb_path: pathlib.Path, persist_dir: pathlib.Path,
                    hashes: set[str] | None) -> None:
     """#77: re-embed chunks whose vector predates their context line.
 
-    *hashes*: chunks to refresh (original-content hashes); ``None`` = every chunk
-    that HAS a context line (the repair path). Runs through the same store code
-    the bot uses: contextual passage → index embedder → incremental upsert.
+    *hashes*: chunks to refresh (R5 composite sidecar keys); ``None`` = every
+    chunk that HAS a context line (the repair path). Runs through the same
+    store code the bot uses: contextual passage → index embedder → incremental
+    upsert.
     """
     from kb.index import KBIndexStore
 
@@ -307,7 +371,7 @@ async def _reembed(kb_path: pathlib.Path, persist_dir: pathlib.Path,
 
 def _prune_orphans(persist_dir: pathlib.Path, chunks: list[dict], sidecar: dict[str, str]) -> int:
     """Drop sidecar entries whose chunk no longer exists (tidiness, #77 item 3)."""
-    known = {c["hash"] for c in chunks}
+    known = {_chunk_key(c) for c in chunks}
     orphans = [h for h in sidecar if h not in known]
     if not orphans:
         print("orphans: none — every sidecar entry matches a live chunk")
@@ -389,7 +453,11 @@ def main() -> None:
     kb_path = pathlib.Path(args.kb_path)
     reembed_all = args.reembed_contextualized or args.reembed_only
     chunks = _load_chunks(persist_dir / "vector_index.db")
-    sidecar = _load_sidecar(persist_dir)
+    sidecar, legacy = _load_sidecar(persist_dir)
+    if legacy and sidecar:
+        # R5: a pre-v3 file is re-keyed against the live chunk rows before any
+        # of the modes below inspect it (idempotent — v3 files skip this).
+        sidecar = _migrate_sidecar_v3(persist_dir, chunks, sidecar)
 
     if args.stamp_all:
         _save_sidecar(persist_dir, sidecar, stamped=set(sidecar))
@@ -400,14 +468,14 @@ def main() -> None:
 
     if args.status:
         stamped = _load_stamp(persist_dir)
-        with_line = [c for c in chunks if c["hash"] in sidecar]
-        lag = [c for c in with_line if c["hash"] not in stamped]
-        known = {c["hash"] for c in chunks}
-        print(f"chunks={len(chunks)}  lines={len(with_line)}  missing={len(chunks) - len(with_line)}")
+        keyed = {_chunk_key(c): c for c in chunks}
+        with_line = [k for k in sidecar if k in keyed]
+        lag = [k for k in with_line if k not in stamped]
+        print(f"chunks={len(chunks)}  lines={len(with_line)}  missing={len(keyed) - len(with_line)}")
         print(f"vectors built WITH their line={len(with_line) - len(lag)}  "
               f"lagging={len(lag)}  "
               f"(stamp: {'present' if stamped else 'written before the stamp existed'})")
-        print(f"orphan sidecar entries={sum(1 for h in sidecar if h not in known)}")
+        print(f"orphan sidecar entries={sum(1 for k in sidecar if k not in keyed)}")
         if lag:
             print("next: the bot's fill loop repairs these on its next round, or run "
                   "--reembed-contextualized with the bot stopped (it rewrites the cache "
@@ -425,9 +493,9 @@ def main() -> None:
             ))
         if reembed_all:
             print(f"dry-run: would re-embed "
-                  f"{sum(1 for c in chunks if c['hash'] in sidecar)} contextualized chunk(s).")
+                  f"{sum(1 for c in chunks if _chunk_key(c) in sidecar)} contextualized chunk(s).")
         if args.prune_orphans:
-            known = {c["hash"] for c in chunks}
+            known = {_chunk_key(c) for c in chunks}
             print(f"dry-run: would prune {sum(1 for h in sidecar if h not in known)} "
                   f"orphan sidecar entry(ies).")
         return

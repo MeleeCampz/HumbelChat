@@ -147,17 +147,32 @@ Each chunk's retrieval input is optionally prefixed with one generated line —
 "{file title} / {header chain}: {chunk content}" — so chunks that are
 indistinguishable on their own (session notes, per-entry book sections) carry
 their location into both retrieval legs. The sidecar is a JSON map,
-`context_lines.json` beside `vector_index.db`, keyed by the chunk's **original
-content hash** (the hash never changes when a line is added, so adding one is
-always a lookup hit and never invalidates the chunk), and deleting every line
-yields byte-identical legacy behavior. `KBIndexStore` attaches the lines to the
+`context_lines.json` beside `vector_index.db`, keyed by the chunk's **(file,
+original content hash) pair** — `source_file\0content_hash`, NUL-separated (R5;
+see *File-scoped keys* below). The hash half never changes when a line is added,
+so adding one is always a lookup hit and never invalidates the chunk, and deleting
+every line yields byte-identical legacy behavior. `KBIndexStore` attaches the lines to the
 chunks on **every** load path — disk cache, fresh build, `add_docs` — and
 `_DocEntry.passage_text()` composes `context_line + "\n\n" + content` for the
 dense embedding input and the BM25 corpus. Chunks without a line fall back to
 raw content. Generated once per chunk by the background fill (#52,
 `kb/contextual_gen.py`) or offline by `scripts/contextual_reindex.py` (resumable
-— existing hashes are skipped); the A/B benchmark showed +2 hits with zero
+— existing keys are skipped); the A/B benchmark showed +2 hits with zero
 regressions on the golden set.
+
+**File-scoped keys (R5):** keying by content hash alone made byte-identical chunks
+in different files share ONE framing line — the same item-index header in three
+parts of one book got one file's provenance, and `passage_text()` told the model
+the wrong source. Keys are therefore `source_file\0content_hash` composites
+(`kb.vector_db.sidecar_key`), and `context_lines.json` carries a `__v3__` marker
+once its entries really are composites. A legacy bare-hash file is **migrated once,
+automatically**: on the bot's next `load()` (under the mutation lock, after the
+chunk set exists) or the offline script's next run. A line matching exactly one
+chunk carries over with its stamp; a line shared by several chunks is dropped
+everywhere — the affected chunks lose their framing immediately and the fill loop
+regenerates one correct per-file line each; orphan entries (chunks that no longer
+exist) are dropped. Migration logs moved/dropped/orphan counts and is idempotent
+(`__v3__` files skip it entirely).
 
 **Coverage watch + background fill (#52, self-healing #80):** new chunks are
 indexed *without* a context line (safe legacy fallback), so after ingesting new
@@ -181,7 +196,7 @@ warning is logged once per run even when the fill is off.
 **The re-embed stamp (`__v__` in `context_lines.json`, #80):** coverage alone
 cannot tell you whether a chunk's *vector* was built from `context + content` or
 from raw content. `KBIndexStore` therefore keeps a reserved `__v__` array — the
-content hashes whose dense vector is known to carry their line — and
+sidecar keys whose dense vector is known to carry their line — and
 `contextual_vector_lag()` reports lines whose vector still doesn't. A lag-only
 round costs no chat calls: it just re-embeds the un-stamped chunks. The stamp is
 younger than the index, so a sidecar **with neither `__v__` nor the `__v2__`

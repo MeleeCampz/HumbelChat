@@ -566,3 +566,120 @@ class TestListSectionsRealIndex:
         from kb import tools
         out = await tools.execute_tool("find_in_kb", {"term": "Alderheart"})
         assert "SessionLogs/2026-10-20_02" in out
+
+
+# ════════════════════ R5: per-file sidecar keys + migration ══════════════
+
+def _r5_pad(tag: str, n: int) -> str:
+    return "\n".join(
+        f"- {tag}{i}: costs {i} gp, a long descriptive line about {tag} item "
+        f"number {i} to fill space generously here" for i in range(n)
+    )
+
+
+_R5_SHARED = _r5_pad("Common", 50)  # byte-identical section in BOTH books
+
+
+@pytest.fixture
+def r5_store(tmp_path):
+    """Two books sharing one byte-identical header section (>MAX_CHUNK_SIZE
+    files so header splitting isolates it) — the live Griffon collision shape."""
+    import pathlib
+    from kb.index import KBIndexStore
+    kb_dir = tmp_path / "kb"
+    kb_dir.mkdir()
+    (kb_dir / "bookA.md").write_text(
+        f"## A items\n{_r5_pad('Aitem', 50)}\n\n## Item index\n{_R5_SHARED}\n", newline="\n")
+    (kb_dir / "bookB.md").write_text(
+        f"## B items\n{_r5_pad('Bitem', 50)}\n\n## Item index\n{_R5_SHARED}\n", newline="\n")
+    store = KBIndexStore(kb_dir, persist_dir=tmp_path / "cache",
+                         model_name="qwen3-embedding-4b")
+    store._embedder = _StampingEmbedder()
+    return store, kb_dir, tmp_path / "cache"
+
+
+def _r5_hashes(docs):
+    from kb.vector_db import _content_hash
+    by_hash: dict[str, list] = {}
+    for d in docs:
+        by_hash.setdefault(_content_hash(d.content), []).append(d)
+    return by_hash
+
+
+class TestSidecarRekeyR5:
+
+    def test_key_shape(self):
+        from kb.contextual_gen import _sidecar_key_of
+        from kb.vector_db import _content_hash, sidecar_key
+        assert sidecar_key("a/b.md", "x") == "a/b.md\x00" + _content_hash("x")
+        doc = SimpleNamespace(content="hi", source=lambda: "f.md")
+        assert _sidecar_key_of(doc) == "f.md\x00" + _content_hash("hi")
+
+    @pytest.mark.asyncio
+    async def test_legacy_shared_line_dropped_unique_carried(self, r5_store):
+        import json
+        from kb.index import KBIndexStore
+        from kb.vector_db import _content_hash, sidecar_key
+        store, kb_dir, cache = r5_store
+        idx = await store.load()
+        by_hash = _r5_hashes(list(idx._docs))
+        shared_hash = next(h for h, ds in by_hash.items() if len(ds) > 1)
+        unique = next(d for d in idx._docs if _content_hash(d.content) != shared_hash)
+
+        # A legacy pre-v3 sidecar: one line SHARED by both collision chunks,
+        # one correctly-scoped unique line, and an orphan entry.
+        (cache / "context_lines.json").write_text(json.dumps({
+            shared_hash: "Source: book A framing (wrong for book B).",
+            _content_hash(unique.content): "Correct framing for this chunk.",
+            "0" * 64: "orphan line for a deleted chunk",
+        }), encoding="utf-8")
+
+        store2 = KBIndexStore(kb_dir, persist_dir=cache, model_name="qwen3-embedding-4b")
+        store2._embedder = _StampingEmbedder()
+        idx2 = await store2.load()  # load() runs the one-time migration
+
+        raw = json.loads((cache / "context_lines.json").read_text(encoding="utf-8"))
+        keys = {k for k in raw if not k.startswith("__")}
+        assert raw.get("__v3__") == 1
+        assert all("\x00" in k for k in keys), "every entry must be a file-scoped composite"
+        assert not any(k.endswith(shared_hash) for k in keys), \
+            "the collision-sharing line must be DROPPED everywhere, not duplicated wrong"
+        want = sidecar_key(unique.source(), unique.content)
+        assert raw[want] == "Correct framing for this chunk."
+        assert want in raw["__v__"], "carried lines keep their re-embed stamp"
+        assert "orphan line for a deleted chunk" not in raw.values()
+
+        docs2 = list(idx2._docs)
+        assert all(not d.context_line for d in docs2
+                   if _content_hash(d.content) == shared_hash), \
+            "collision chunks must stop carrying the foreign framing immediately"
+        covered, total = store2.contextual_coverage()
+        assert total == len(docs2) and covered == 1
+        assert store2.contextual_vector_lag() == 0
+
+        # A THIRD file with the same shared text must NOT inherit either line.
+        assert store2._ctx_lookup("bookC.md", _R5_SHARED) == ""
+
+    @pytest.mark.asyncio
+    async def test_migration_is_idempotent(self, r5_store):
+        import json
+        from kb.index import KBIndexStore
+        from kb.vector_db import _content_hash
+        store, kb_dir, cache = r5_store
+        idx = await store.load()
+        h = _content_hash(next(iter(idx._docs)).content)
+        (cache / "context_lines.json").write_text(
+            json.dumps({h: "one legacy line"}), encoding="utf-8")
+        before = None
+        for _ in range(2):
+            s = KBIndexStore(kb_dir, persist_dir=cache, model_name="qwen3-embedding-4b")
+            s._embedder = _StampingEmbedder()
+            await s.load()
+            raw = json.loads((cache / "context_lines.json").read_text(encoding="utf-8"))
+            keys = sorted(k for k in raw if not k.startswith("__"))
+            assert s._sidecar_legacy is False
+            if before is None:
+                before = (keys, raw.get("__v__"))
+            else:
+                assert (keys, raw.get("__v__")) == before, "second load must not churn the file"
+            await s.shutdown()

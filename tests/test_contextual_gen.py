@@ -46,7 +46,7 @@ def _fake_store(tmp_path, n_chunks=3, with_lines=0, reembed_fails=False):
     hashes asked for); ``reembed_fails=True`` makes it raise, like a downed
     embedding backend.
     """
-    from kb.vector_db import _DocEntry, _content_hash
+    from kb.vector_db import _DocEntry, sidecar_key
 
     docs = []
     for i in range(n_chunks):
@@ -60,7 +60,8 @@ def _fake_store(tmp_path, n_chunks=3, with_lines=0, reembed_fails=False):
             d.context_line = f"Existing line {i}"
         docs.append(d)
     inner = SimpleNamespace(_docs=docs)
-    lines = {_content_hash(d.content): d.context_line for d in docs if d.context_line}
+    lines = {sidecar_key(d.source_file, d.content): d.context_line
+             for d in docs if d.context_line}
     reembed_calls: list[set[str]] = []
 
     def _reembed(hashes):
@@ -174,21 +175,21 @@ class TestReembedWiring:
 
     @pytest.mark.asyncio
     async def test_reembed_runs_once_per_batch_with_that_batches_hashes(self, tmp_path):
-        from kb.vector_db import _content_hash
+        from kb.vector_db import sidecar_key
         store = _fake_store(tmp_path, n_chunks=3)   # 2 files → batches of 2 and 1
         p1, p2, p3, _calls = _fake_ai(['["line A0", "line A1"]', '"line B"'])
         with p1, p2, p3:
             n = await generate_missing_context_lines(store, batch_pause=0)
         assert n == 3
         assert [len(s) for s in store.reembed_calls] == [2, 1]
-        all_hashes = {_content_hash(d.content) for d in store._index._docs}
-        assert set.union(*store.reembed_calls) == all_hashes
+        all_keys = {sidecar_key(d.source(), d.content) for d in store._index._docs}
+        assert set.union(*store.reembed_calls) == all_keys
         # No end-of-run retry was needed.
         assert len(store.reembed_calls) == 2
 
     @pytest.mark.asyncio
     async def test_reembed_failure_never_aborts_the_fill_and_is_retried_once(self, tmp_path):
-        from kb.vector_db import _content_hash
+        from kb.vector_db import sidecar_key
         store = _fake_store(tmp_path, n_chunks=3, reembed_fails=True)
         p1, p2, p3, calls = _fake_ai(['["a0", "a1"]', '"b"'])
         with p1, p2, p3:
@@ -198,7 +199,7 @@ class TestReembedWiring:
         assert len(sidecar) == 3
         assert [len(s) for s in store.reembed_calls] == [2, 1, 3]   # 2 batches + 1 retry
         assert store.reembed_calls[-1] == {  # the retry covers exactly the failed ones
-            _content_hash(d.content) for d in store._index._docs
+            sidecar_key(d.source(), d.content) for d in store._index._docs
         }
 
     @pytest.mark.asyncio
@@ -250,7 +251,8 @@ class TestStoreSidecarMethods:
         raw = (tmp_path / "context_lines.json").read_text(encoding="utf-8")
         # __v2__ marks a stamp-aware file: without it, a reader would treat this
         # sidecar as pre-stamp and stamp every line as "already embedded".
-        assert json.loads(raw) == {"abc": "line one", "__v2__": 1}
+        # __v3__ marks the R5 per-file key format the store now writes.
+        assert json.loads(raw) == {"abc": "line one", "__v2__": 1, "__v3__": 1}
         assert store.reload_context_lines() == {"abc": "line one"}
 
     def test_save_is_atomic_no_partial_readers(self, tmp_path):
@@ -262,7 +264,7 @@ class TestStoreSidecarMethods:
         store.save_context_lines({"new": "v"})
         # no leftover tmp file; the live file is the new one
         assert not (tmp_path / "context_lines.json.tmp").exists()
-        assert json.loads((tmp_path / "context_lines.json").read_text(encoding="utf-8")) == {"new": "v", "__v2__": 1}
+        assert json.loads((tmp_path / "context_lines.json").read_text(encoding="utf-8")) == {"new": "v", "__v2__": 1, "__v3__": 1}
 
     def test_coverage_counts(self):
         from kb.index import KBIndexStore

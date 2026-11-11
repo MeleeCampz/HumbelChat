@@ -67,7 +67,7 @@ import sqlite3
 import time
 from typing import TYPE_CHECKING, Any, Callable, TypedDict
 
-from kb.vector_db import KBVectorIndex, _DocEntry
+from kb.vector_db import KBVectorIndex, _DocEntry, sidecar_key
 from kb.embedder import Embedder, probe_remote
 
 if TYPE_CHECKING:  # only for the _rechunk return annotation
@@ -319,6 +319,18 @@ class KBIndexStore:
     # Reserved key in the sidecar JSON holding the re-embed stamp (#80). A
     # leading-underscore key can never collide with a content hash.
     _CTX_STAMP_KEY = "__v__"
+    # R5: format marker for the file-scoped sidecar keys (``source_file\0hash``).
+    _CTX_FORMAT_KEY = "__v3__"
+
+    def _ctx_lookup(self, source_file: str, content: str) -> str:
+        """Sidecar line for a (file, content) pair — composite key first.
+
+        The bare-hash fallback only ever fires on a not-yet-migrated legacy
+        sidecar (:meth:`_migrate_sidecar_v3` rewrites the file once the chunk
+        set is known, after which every key is file-scoped).
+        """
+        return (self._context_lines.get(sidecar_key(source_file, content))
+                or self._context_lines.get(_content_hash(content), ""))
 
     def _load_context_lines(self) -> dict[str, str]:
         """Read the Contextual Retrieval sidecar (``context_lines.json``).
@@ -333,6 +345,7 @@ class KBIndexStore:
         """
         path = self.persist_dir / "context_lines.json"
         self._ctx_stamp: set[str] = set()
+        self._sidecar_legacy = False
         if not path.exists():
             return {}
         try:
@@ -343,6 +356,10 @@ class KBIndexStore:
             if isinstance(stamp, list):
                 self._ctx_stamp = {h for h in stamp if isinstance(h, str)}
             modern = bool(data.get("__v2__"))
+            # R5: a file without the v3 marker still keys entries by bare
+            # content hash; KBIndexStore.load() migrates it once the chunk set
+            # is known (script twin: contextual_reindex.py --status migrates).
+            self._sidecar_legacy = not bool(data.get(self._CTX_FORMAT_KEY))
             lines = {k: v for k, v in data.items()
                      if isinstance(k, str) and isinstance(v, str) and v
                      and not k.startswith("__")}
@@ -397,6 +414,11 @@ class KBIndexStore:
             self._context_vec = set(stamped)
         payload: dict[str, Any] = {k: v for k, v in lines.items() if not k.startswith("__")}
         payload["__v2__"] = 1  # stamp-aware format marker (see _load_context_lines)
+        # R5 marker may ONLY be written once the keys really are file-scoped
+        # composites — while the store is mid-migration the entries are still
+        # bare hashes and a premature marker would hide them from migration.
+        if not getattr(self, "_sidecar_legacy", False):
+            payload[self._CTX_FORMAT_KEY] = 1
         # Defensive getattr: tests build stores with __new__ and no stamp state.
         stamp = getattr(self, "_context_vec", None)
         if stamp:
@@ -421,6 +443,87 @@ class KBIndexStore:
         """Persist the re-embed stamp (call once after stamping, not per chunk)."""
         self.save_context_lines(self._context_lines)
 
+    async def _migrate_sidecar_v3(self) -> None:
+        """R5: rewrite a bare-hash sidecar as file-scoped ``source\0hash`` entries.
+
+        Runs once per legacy file, inside the load() mutation lock, after the
+        chunk set is known. Rules:
+
+        * a legacy line whose hash matches exactly ONE indexed chunk is carried
+          over to that chunk's composite key (stamp included — its vector was
+          demonstrably built with that line);
+        * a legacy line whose hash matches SEVERAL chunks (the cross-file
+          collision this fix exists for) is DROPPED everywhere: the affected
+          chunks lose their context_line in memory too, so coverage reports
+          them and the fill loop regenerates one correct, per-file line each;
+        * legacy entries for chunks no longer indexed (orphans) are dropped.
+
+        Duck-typed stores without the flag simply skip this method.
+        """
+        if not getattr(self, "_sidecar_legacy", False) or not self._context_lines:
+            return
+        inner = self._index
+        if inner is None or not inner._docs:
+            return  # no chunk set to key against yet — retry on next load
+        docs = list(inner._docs)
+        counts: dict[str, int] = {}
+        for d in docs:
+            if d.content and d.content.strip():
+                h = _content_hash(d.content)
+                counts[h] = counts.get(h, 0) + 1
+
+        new_lines: dict[str, str] = {}
+        new_stamp: set[str] = set()
+        dropped_collisions = 0
+        for d in docs:
+            if not (d.content and d.content.strip()):
+                continue
+            h = _content_hash(d.content)
+            line = self._context_lines.get(h)
+            if not line:
+                continue
+            if counts[h] > 1:
+                dropped_collisions += 1
+                continue
+            key = sidecar_key(d.source(), d.content)
+            if key in new_lines:
+                continue  # duplicate chunk in the SAME file: one entry serves both
+            new_lines[key] = line
+            if h in self._context_vec:
+                new_stamp.add(key)
+
+        # Collision chunks must stop carrying the shared framing NOW — coverage
+        # and lag read doc.context_line, so clearing it is what actually frees
+        # them for regeneration. Replace the DOC LIST OBJECT (cache invalidation
+        # by identity, same rule as _reembed_window).
+        stale = [d for d in docs if d.context_line
+                 and counts.get(_content_hash(d.content), 0) > 1]
+        if stale:
+            stale_hashes = {_content_hash(d.content) for d in stale}
+            inner._docs = [
+                dataclasses.replace(d, context_line="")
+                if _content_hash(d.content) in stale_hashes else d
+                for d in docs
+            ]
+            inner._mat_cache = None
+            await self._warm_retrieval_caches(inner)
+
+        legacy_count = len(self._context_lines)
+        legacy_orphans = len([h for h in self._context_lines
+                              if h not in counts])
+        self._context_lines = new_lines
+        self._context_vec = new_stamp
+        self._ctx_stamp = new_stamp
+        self._sidecar_legacy = False
+        self.save_context_lines(new_lines, stamped=new_stamp)
+        logger.info(
+            "Contextual sidecar re-keyed (R5): %d/%d entr%s moved to per-file keys, "
+            "%d collision-sharing chunk(s) freed for per-file regeneration, %d orphan "
+            "entr(ies) dropped; fill loop will regenerate %d line(s).",
+            len(new_lines), legacy_count, "y" if legacy_count == 1 else "ies",
+            dropped_collisions, legacy_orphans, dropped_collisions,
+        )
+
     def contextual_vector_lag(self) -> int:
         """How many chunks have a context line but an un-stamped (raw) vector.
 
@@ -434,7 +537,7 @@ class KBIndexStore:
             return 0
         return sum(
             1 for d in inner._docs
-            if d.context_line and _content_hash(d.content) not in self._context_vec
+            if d.context_line and sidecar_key(d.source(), d.content) not in self._context_vec
         )
 
     def contextual_coverage(self) -> tuple[int, int]:
@@ -560,7 +663,12 @@ class KBIndexStore:
         # P0 #3: building/loading is a full read → embed → persist mutation;
         # serialize it against concurrent updates/syncs on this store.
         async with self._mutation_lock():
-            return await self._load_inner(force_rebuild, on_batch=on_batch)
+            index = await self._load_inner(force_rebuild, on_batch=on_batch)
+            # R5: one-time sidecar re-key, serialized against every other
+            # mutation and always after the chunk set exists (keys need the
+            # live (source, content) pairs to be assigned correctly).
+            await self._migrate_sidecar_v3()
+            return index
 
     async def _load_inner(
         self,
@@ -705,10 +813,12 @@ class KBIndexStore:
         This rebuilds precisely those vectors from ``context_line + content``.
 
         *content_hashes* selects the chunks to rebuild; they are sidecar keys,
-        i.e. hashes of the chunk's ORIGINAL content.  ``None`` means "every chunk
-        that has a context line" — the repair path for lines generated before
-        this method existed.  Chunks without a line are never touched, so a run
-        can never make an uncontextualized chunk behave differently.
+        i.e. the ``source_file\0content_hash`` composites (R5) that
+        :func:`kb.contextual_gen._sidecar_key_of` produces.  ``None`` means
+        "every chunk that has a context line" — the repair path for lines
+        generated before this method existed.  Chunks without a line are never
+        touched, so a run can never make an uncontextualized chunk behave
+        differently.
 
         Vectors come from ``self._embedder`` — the index-WRITE embedder
         ``_embed_files`` uses — so refreshed rows stay in the same vector space
@@ -774,7 +884,7 @@ class KBIndexStore:
     def _reembed_candidates(
         self, content_hashes: set[str] | None
     ) -> list[tuple[str, str]]:
-        """(content_hash, source_file) of chunks whose vector lags their line.
+        """(sidecar_key, source_file) of chunks whose vector lags their line.
 
         Idempotence (#80): already-stamped chunks are only included when the
         caller named them explicitly — a periodic repair can never re-embed the
@@ -784,13 +894,14 @@ class KBIndexStore:
         if inner is None:
             return []
         return [
-            (_content_hash(doc.content), doc.source())
+            (sidecar_key(doc.source(), doc.content), doc.source())
             for doc in inner._docs
             if doc.context_line
             and doc.content.strip()
-            and (content_hashes is None or _content_hash(doc.content) in content_hashes)
+            and (content_hashes is None
+                 or sidecar_key(doc.source(), doc.content) in content_hashes)
             and (content_hashes is not None
-                 or _content_hash(doc.content) not in self._context_vec)
+                 or sidecar_key(doc.source(), doc.content) not in self._context_vec)
         ]
 
     async def _reembed_window(self, content_hashes: set[str]) -> tuple[int, int]:
@@ -810,7 +921,7 @@ class KBIndexStore:
             docs = list(self._index._docs)
             targets = [
                 (i, doc) for i, doc in enumerate(docs)
-                if _content_hash(doc.content) in content_hashes
+                if sidecar_key(doc.source(), doc.content) in content_hashes
             ]
             if not targets:
                 return 0, 0
@@ -852,7 +963,8 @@ class KBIndexStore:
             # so the fill loop reports and repairs it on the next check instead of
             # hiding a mixed-space index behind a "covered" sidecar.
             self.stamp_context_vectors(
-                {_content_hash(d.content) for (i, d), vec in zip(targets, vectors) if vec}
+                {sidecar_key(d.source(), d.content)
+                 for (i, d), vec in zip(targets, vectors) if vec}
             )
             self.save_stamp()
             logger.info(
@@ -1276,7 +1388,7 @@ class KBIndexStore:
         # when a sidecar entry exists, so vectors carry chunk-specific framing.
         passages = [
             f"{ctx}\n\n{content}"
-            if (ctx := self._context_lines.get(_content_hash(content)))
+            if (ctx := self._ctx_lookup(_key, content))
             else content
             for _display, content, _key in flat
         ]

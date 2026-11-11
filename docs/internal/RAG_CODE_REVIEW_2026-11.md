@@ -22,7 +22,7 @@ not estimated; the scripts in §7 reproduce them.
 | R2 | HIGH | The GPU image switch kills retrieval *inside* an in-flight agent rewrite (log-proved) | OPEN (decision) |
 | R3 | MED | When the reranker is offline, `RAG_ATTACH_FLOOR=0.50` silently changes unit (probability → cosine) | OPEN |
 | R4 | MED | Cache-identity guard validates the **query** model, not the model that **wrote** the vectors | OPEN |
-| R5 | MED | Contextual sidecar is keyed by content hash alone → cross-file duplicate chunks share one context line | OPEN |
+| R5 | MED | Contextual sidecar is keyed by content hash alone → cross-file duplicate chunks share one context line | FIXED 2026-11-11 — see §22 |
 | R6 | MED | Every index mutation invalidates the numpy matrix *and* BM25: measured **0.91 s** added to the next query | OPEN |
 | R7 | LOW | Context lines measurably reshuffle the lexical leg (~1 in 5 of the lexical top-96 changes) — never A/B'd | OPEN (probe) |
 | R8 | LOW | The CRAG agent gate is blind exactly when retrieval quality is worst | OPEN |
@@ -240,7 +240,7 @@ into a 90 s "extend the budget for the weight load" path instead of a 10 s fail 
 
 ## 5. R5 — MED: one context line, three files (sidecar key design)
 
-**Status 2026-11-11: OPEN — sidecar still keyed by content hash only. Awaiting the user decision from §18 (re-key with `source_file\0content_hash` + migration vs. refuse-to-reuse on path mismatch).**
+**Status 2026-11-11: FIXED — the sidecar is re-keyed to `source_file\x00content_hash` with a one-time automatic migration on both paths (store load + offline script). Details in §22.**
 
 The sidecar key is the hash of the chunk's **content** only — `kb/contextual_gen.py:220`:
 
@@ -613,7 +613,7 @@ pytest suite (1 400 passing):
 - **Live model-id mismatch** (flagged in R4): `.env MODEL_NAME` now matches what Strata
   serves (`qwen3.8-flash-next-iq3_xxs-SingleGPU`).
 
-**Outstanding findings, ordered** (effort is honest, not optimistic). **Update 2026-11-10/11: steps 1–9 are DONE — see §20. Remaining: 10 (R5, awaiting your decision), 11 (R13 — `.env.example`/`.env` parts done, `--prune-orphans` still to run host-side), 12 (glossary data task), 13 (R7 probe).**
+**Outstanding findings, ordered** (effort is honest, not optimistic). **Update 2026-11-10/11: steps 1–9 are DONE — see §20; step 10 (R5) is DONE too — see §22. Remaining: 11 (R13 — only the `--prune-orphans` host-side run left), 12 (glossary data task), 13 (R7 probe).**
 
 | Step | Finding | What to do | Effort | Risk |
 |------|---------|-----------|--------|------|
@@ -637,9 +637,9 @@ pytest suite (1 400 passing):
    rewrite/answer is in flight), (b) let retrieval go lexical-only during image windows and
    *say so* in the logs, or (c) both. (c) is what the numbers favour: the retries cost ~25 s
    inside a 45 s agent budget and achieve nothing.
-2. **R5 migration timing** — re-key the sidecar now (cheap while it is small and the stamp
-   already exists) or leave content-hash keys and just *refuse to reuse* a stored line whose
-   leading path token disagrees with the chunk's `source_file`.
+2. **R5 migration timing** — **DECIDED + IMPLEMENTED (2026-11-11)**: full re-key to
+   `source_file\x00content_hash` with a one-time migration (§22). The refuse-to-reuse
+   hardening is no longer needed — keys are now file-scoped by construction.
 
 **Verification state** — `1400 passed, 5 warnings` (`python -m pytest -q`); ruff clean on
 every file touched by #81 (9 pre-existing ruff hits in `tests/test_botperms.py` remain, out
@@ -736,9 +736,9 @@ embedder client are process-global — `tests/conftest.py` gained an autouse fix
 all three per test; two pre-existing suites that patched only `RAG_ATTACH_FLOOR` now pin the
 per-scale knobs too (they exercise the legacy path).
 
-**Still open** (user-owned, untouched): R5 (sidecar re-key vs refuse-to-reuse — §18 decision
-2), R7 probe, R11 glossary data task, `--prune-orphans` run, gpu-switch serialization
-(R2 option a) if wanted.
+**Still open** (user-owned, untouched): R7 probe, R11 glossary data task, `--prune-orphans`
+run, gpu-switch serialization (R2 option a) if wanted. (R5 was decided + implemented the
+same day — see §22.)
 
 **Live verification pending (host-side)**: `docker compose up -d --build` (the running
 container's baked `env_file` predates the new `.env` lines) → image-window query should log
@@ -772,3 +772,60 @@ chunk; fell back to unfiltered selection` (top rerank score 0.354 on a `ping` qu
 the floor works and a junk query gets the documented fallback). The stale-image diagnosis
 that started this hunt is exactly what the `GIT_SHA` build-arg stamp now catches in one log
 line.
+
+---
+
+## 22. Fix series 2026-11-11b: R5 — the sidecar is now keyed per file
+
+**Decision taken (user):** full re-key to `source_file\0content_hash` + one-time
+migration (the §18 option-2 question is closed).
+
+**Key format (`kb/vector_db.py:sidecar_key`).** `f"{source_file}\0{content_hash}"` —
+NUL-separated, so no path/content ambiguity is possible and the bare hash part stays
+recognizable inside the key. Every writer/reader now goes through it:
+`contextual_gen._sidecar_key_of`, `KBIndexStore._ctx_lookup` / `_reembed_candidates` /
+`_reembed_window` / stamp writes / `_embed_files` passages / `contextual_vector_lag`,
+and the script's `_chunk_key`. `from_entries` does composite-lookup first and falls
+back to the bare hash only during the migration window.
+
+**Format marker.** `context_lines.json` gained a `__v3__` marker meaning "entries are
+file-scoped composites". `save_context_lines` writes it ONLY when the entries really
+are composites (`_sidecar_legacy` flag), so a half-migrated file can never masquerade
+as migrated; the script's pre-stamp restamp write passes `keyed_v3=False` for the
+same reason.
+
+**Migration (`KBIndexStore._migrate_sidecar_v3`, run inside `load()` under the
+mutation lock; twin in `scripts/contextual_reindex.py` run before any mode).**
+Rules:
+
+* legacy line whose hash matches exactly ONE indexed chunk → carried to that chunk's
+  composite key, **stamp included** (its vector was demonstrably built with that line);
+* legacy line whose hash matches SEVERAL chunks (the Griffon 3-file collision R5
+  describes) → **DROPPED everywhere**: the affected docs' `context_line` is cleared in
+  memory (via a doc-list swap, so matrix/BM25 caches invalidate), coverage reports
+  them, and the fill loop regenerates one correct per-file line each;
+* legacy entries for chunks no longer indexed (orphans) are dropped — counted in the
+  log line;
+* idempotent: the `__v3__` marker makes every later load skip it (regression-tested).
+
+The script migrates from the DB rows it already loads (no embedder needed); the store
+migrates from its live docs. Both log the moved/dropped/orphan counts.
+
+**Tests.** New `TestSidecarRekeyR5` in `tests/test_rag_review_fixes_2026_11.py`: a
+two-book fixture whose shared `## Item index` section produces a byte-identical chunk
+in both files (the live collision shape), then asserts the full migration contract —
+shared line dropped everywhere, unique line carried with its stamp, orphan dropped,
+collision docs un-framed immediately, a third file cannot inherit, coverage/lag stay
+consistent, and re-loads don't churn the file. Pre-existing contextual suites were
+updated to the composite contract (`_sk()` helper); the legacy-stamp tests still write
+bare-hash sidecars on purpose to exercise migration. Suite: **1429 passed** (random +
+fixed order).
+
+**Live rollout note:** the running production sidecar is still the legacy file (5 944
+covered entries + 53 orphans, ~5 997 total) — it migrates itself on the bot's first load
+after the next `docker compose up -d --build`, logging one line like `Contextual sidecar
+re-keyed (R5): 5996/5997 entr(ies) moved … 3 collision-sharing chunk(s) freed … 53 orphan
+entr(ies) dropped`. The single line stored under the Griffon hash `2734d2a71ed2` is dropped
+and all 3 chunks that shared it are freed for regeneration, which the fill worker completes
+on its next round. The 53-orphan `--prune-orphans` run left over from the R13 item is now
+redundant — the migration prunes orphans as part of the re-key.

@@ -11,9 +11,9 @@ sidecar) for KB chunks that lack them. Two consumers:
 
 Design constraints:
 
-* **Resumable** — chunks whose content hash already has a line are skipped,
-  and the sidecar is persisted (atomic replace) after EVERY batch, so an
-  interrupted fill never loses finished work.
+* **Resumable** — chunks whose sidecar key (file + content hash, R5) already
+  has a line are skipped, and the sidecar is persisted (atomic replace) after
+  EVERY batch, so an interrupted fill never loses finished work.
 * **Gentle** — batches are separated by a pause (default 60 s) so the shared
   chat model keeps serving live /ai traffic; callers may abort at any batch
   boundary via *should_stop* (e.g. bot shutdown).
@@ -287,7 +287,7 @@ async def generate_missing_context_lines(
                     batch_hashes: set[str] = set()
                     for c, line in zip(batch, lines):
                         if line:
-                            h = _content_hash_of(c)
+                            h = _sidecar_key_of(c)
                             index._context_lines[h] = line[:300]
                             c.context_line = line[:300]
                             batch_hashes.add(h)
@@ -336,7 +336,13 @@ async def generate_missing_context_lines(
     return generated
 
 
-def _content_hash_of(doc: Any) -> str:
-    """Content hash of a chunk's ORIGINAL text — the sidecar key."""
-    from kb.vector_db import _content_hash
-    return _content_hash(doc.content)
+def _sidecar_key_of(doc: Any) -> str:
+    """Sidecar key of a chunk: ``source_file\0content_hash`` (R5).
+
+    File-scoped on purpose: byte-identical chunks in different files must get
+    their OWN framing line, not inherit some other file's provenance. The bare
+    content hash stays inside the key, so legacy sidecar files can still be
+    recognized and migrated (KBIndexStore._migrate_sidecar_v3).
+    """
+    from kb.vector_db import sidecar_key
+    return sidecar_key(doc.source(), doc.content)

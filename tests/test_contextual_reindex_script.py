@@ -104,7 +104,10 @@ class TestStampAndStatus:
         assert r.returncode == 0
         assert "recorded as already embedded" in r.stdout
         data = json.loads((persist / "context_lines.json").read_text(encoding="utf-8"))
-        assert data["__v__"] == [hashlib.sha256(content.encode("utf-8")).hexdigest()]
+        # stamp-all migrates the legacy sidecar first: the stamp is carried
+        # onto the per-file composite key (R5), not left as a bare hash.
+        assert data["__v__"] == [
+            "feats.md\x00" + hashlib.sha256(content.encode("utf-8")).hexdigest()]
         assert data["__v2__"] == 1
         # Vectors untouched: the DB file is byte-identical to before the run.
         db = persist / "vector_index.db"
@@ -185,7 +188,21 @@ class TestOrphanPruning:
 
         r = _run(persist, kb, "--prune-orphans", "--reembed-missing", "--limit", "0")
         assert r.returncode == 0
-        assert "removed 1 stale sidecar entry" in r.stdout
+        # The sidecar was legacy on disk, so the R5 migration ran first — it
+        # drops orphans as part of the re-key (counted in its own line).
+        assert "sidecar re-keyed (R5)" in r.stdout
+        assert "orphan entr" in r.stdout
         left = json.loads(sidecar_path.read_text(encoding="utf-8"))
         assert "deadbeef" not in left
         assert len([k for k in left if not k.startswith("__")]) == 1
+        assert all("\x00" in k for k in left if not k.startswith("__"))
+
+        # A second run is post-migration: plain pruning reports stale entries.
+        data = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        data["deadbeef2"] = "orphan written into an already-migrated sidecar"
+        sidecar_path.write_text(json.dumps(data), encoding="utf-8")
+        r2 = _run(persist, kb, "--prune-orphans", "--limit", "0")
+        assert r2.returncode == 0
+        assert "removed 1 stale sidecar entr" in r2.stdout
+        left2 = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        assert "deadbeef2" not in left2

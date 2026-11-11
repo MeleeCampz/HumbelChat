@@ -21,10 +21,16 @@ import pytest
 
 import kb.index as I
 from kb.index import _unpack_embedding
+from kb.vector_db import sidecar_key
 
 
 def _h(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _sk(d) -> str:
+    """The R5 composite sidecar key of a live doc (source-file scoped)."""
+    return sidecar_key(d.source(), d.content)
 
 
 def _vec(text: str) -> list[float]:
@@ -100,7 +106,7 @@ async def _built_store_with_lines(kb, lines: dict[str, str]):
     for d in idx._docs:
         if d.content in lines:
             d.context_line = lines[d.content]
-    store._context_lines = {_h(c): l for c, l in lines.items()}
+    store._context_lines = {_sk(d): d.context_line for d in idx._docs if d.context_line}
     store.save_context_lines(store._context_lines)
     return store
 
@@ -139,7 +145,7 @@ class TestTargetedReembed:
         vecs_before = {k: list(d.embedding) for k, d in before.items()}
         alpha = before["one.md"]
 
-        n = await store.reembed_contextualized({_h(alpha.content)})
+        n = await store.reembed_contextualized({_sk(alpha)})
 
         assert n == 1
         # What was embedded is the CONTEXTUAL passage, not the raw chunk.
@@ -195,7 +201,7 @@ class TestCacheInvalidation:
         stale_row = _vec(alpha.content)
         assert idx._ensure_matrix()[0][row].tolist() == stale_row
 
-        assert await store.reembed_contextualized({_h(alpha.content)}) == 1
+        assert await store.reembed_contextualized({_sk(alpha)}) == 1
         # Same doc order, refreshed row — the cache was rebuilt, not reused.
         assert idx._ensure_matrix()[0][row].tolist() == _vec(alpha.passage_text())
         assert idx._mat_cache is not None and idx._mat_cache[2] is idx._docs
@@ -212,10 +218,10 @@ class TestCacheInvalidation:
         # The fill lands: line on the doc + sidecar on disk, vector still raw.
         alpha = next(d for d in idx._docs if d.source() == "one.md")
         alpha.context_line = ALPHA_LINE
-        store._context_lines = {_h(alpha.content): ALPHA_LINE}
+        store._context_lines = {_sk(alpha): ALPHA_LINE}
         store.save_context_lines(store._context_lines)
 
-        assert await store.reembed_contextualized({_h(alpha.content)}) == 1
+        assert await store.reembed_contextualized({_sk(alpha)}) == 1
         corpus_new = _get_bm25(store._index)
         assert corpus_new is not corpus_raw
         assert corpus_new.scores("polearm master phb")[0] > 0.0
@@ -233,7 +239,7 @@ class TestPersistence:
         await store._save_to_disk()
         db_before = _rows(store.db_path)
 
-        await store.reembed_contextualized({_h(alpha.content)})
+        await store.reembed_contextualized({_sk(alpha)})
         db_after = _rows(store.db_path)
 
         assert set(db_after) == set(db_before)                      # no rows lost/added
@@ -246,7 +252,7 @@ class TestPersistence:
     async def test_reload_from_disk_carries_the_fresh_vectors(self, kb):
         store = await _built_store_with_lines(kb, {"# Alpha\n\nalpha body text here": ALPHA_LINE})
         alpha = next(d for d in store._index._docs if d.source() == "one.md")
-        await store.reembed_contextualized({_h(alpha.content)})
+        await store.reembed_contextualized({_sk(alpha)})
         await store.shutdown()
 
         # A fresh store = a bot restart: cache HIT, zero embed calls, fresh vectors.
@@ -270,7 +276,7 @@ class TestFailurePaths:
         db_before = _rows(store.db_path)
 
         store._embedder = RaisingEmbedder()
-        assert await store.reembed_contextualized({_h(alpha.content)}) == 0
+        assert await store.reembed_contextualized({_sk(alpha)}) == 0
 
         assert store._index._docs is docs_obj                   # not swapped
         assert [d.embedding for d in store._index._docs] == vecs
@@ -302,7 +308,7 @@ class TestFailurePaths:
                 return [[0.5, 0.5, 0.5] for _ in texts]
 
         store._embedder = WideEmbedder()
-        assert await store.reembed_contextualized({_h(alpha.content)}) == 0
+        assert await store.reembed_contextualized({_sk(alpha)}) == 0
         assert [d.embedding for d in store._index._docs] == vecs_before
 
     @pytest.mark.asyncio
@@ -344,7 +350,9 @@ class TestLegacyStampMigration:
         return {d.source(): d.content for d in store._index._docs}
 
     def _write_sidecar(self, store, by_source: dict[str, str], *, stamped=None) -> pathlib.Path:
-        payload = {_h(c): by_source[c] for c in by_source}
+        # Intentionally BARE-hash keys: these tests simulate pre-v3 sidecars;
+        # load() must migrate them to the composite (source\0hash) format.
+        payload = {_h(c): by_source[c] for c in by_source}  # BARE keys on purpose: simulates a pre-v3 sidecar (maps CHUNK CONTENT -> line)
         if stamped is not None:
             payload["__v2__"] = 1
             payload["__v__"] = sorted(stamped)
@@ -368,7 +376,9 @@ class TestLegacyStampMigration:
         assert store2.contextual_vector_lag() == 0, "a stamped load leaves no lag"
         data = json.loads((store2.persist_dir / "context_lines.json").read_text(encoding="utf-8"))
         assert data["__v2__"] == 1
-        assert sorted(data["__v__"]) == sorted([_h(contents["one.md"]), _h(contents["two.md"])])
+        assert sorted(data["__v__"]) == sorted(
+            sidecar_key(s, contents[s]) for s in ("one.md", "two.md"))
+        assert all("\x00" in k for k in data if not k.startswith("__"))
         assert any("predate the re-embed stamp" in r.getMessage() for r in caplog.records)
 
         # It stays resolved: a second start re-stamps nothing and re-embeds nothing.
@@ -386,14 +396,20 @@ class TestLegacyStampMigration:
         store = _store(kb)
         await store.load()
         path = self._write_sidecar(store, lines, stamped={_h(contents["one.md"])})
-        before = path.read_bytes()
 
         store2 = _store(kb)
         await store2.load()
         assert store2.contextual_coverage() == (2, 2)
         assert store2.contextual_vector_lag() == 1
-        assert _h(contents["two.md"]) not in store2._context_vec
-        assert path.read_bytes() == before, "a load must not invent a stamp it was given"
+        key_two = sidecar_key("two.md", contents["two.md"])
+        assert key_two not in store2._context_vec
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["__v__"] == [sidecar_key("one.md", contents["one.md"])], \
+            "the carried stamp stays with its line across the re-key; nothing new is invented"
+        before = path.read_bytes()
+        store3 = _store(kb)
+        await store3.load()
+        assert path.read_bytes() == before, "migration is a one-shot rewrite"
 
     async def test_reembed_records_the_stamp_so_a_second_run_is_a_no_op(self, kb):
         contents = await self._contents(kb)
@@ -402,7 +418,7 @@ class TestLegacyStampMigration:
         n = await store.reembed_contextualized(None)
         assert n == 1
         data = json.loads((store.persist_dir / "context_lines.json").read_text(encoding="utf-8"))
-        assert data["__v__"] == [_h(contents["one.md"])]
+        assert data["__v__"] == [sidecar_key("one.md", contents["one.md"])]
         assert await store.reembed_contextualized(None) == 0
 
 
@@ -433,7 +449,7 @@ class TestReembedWindows:
             dataclasses.replace(d, context_line=line)
             for d, line in ((first, ALPHA_LINE), (second, BETA_LINE))
         ]
-        store._context_lines = {_h(d.content): d.context_line for d in store._index._docs}
+        store._context_lines = {_sk(d): d.context_line for d in store._index._docs}
         inner = store._index
         extra = []
         for i in range(n_extra):
@@ -449,7 +465,7 @@ class TestReembedWindows:
         inner._docs = list(inner._docs) + extra
         store._context_lines = {
             **store._context_lines,
-            **{_h(d.content): d.context_line for d in extra},
+            **{sidecar_key(d.source_file, d.content): d.context_line for d in extra},
         }
         store.save_context_lines(store._context_lines)
         return store

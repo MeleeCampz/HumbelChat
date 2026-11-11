@@ -52,6 +52,18 @@ def _content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def sidecar_key(source_file: str, content: str) -> str:
+    """R5: the context-sidecar lookup key — the (file, content) PAIR.
+
+    Keying by content hash alone made byte-identical chunks in different files
+    share ONE generated context line, so ``passage_text()`` told the model the
+    wrong provenance (live case: the same item-index header in three parts of
+    one book). NUL-separated so no path/content ambiguity is possible; the hash
+    part is unchanged, so a legacy bare-hash key can always be recognized.
+    """
+    return f"{source_file}\0{_content_hash(content)}"
+
+
 @dataclass
 class _DocEntry:
     """Internal representation of an indexed document chunk."""
@@ -203,9 +215,10 @@ class KBVectorIndex:
     ) -> KBVectorIndex:
         """Build an index from pre-embedded entries (no API calls).
 
-        *context_lines* maps a chunk's ORIGINAL content hash to its one-line
-        context (Contextual Retrieval sidecar); matching chunks carry the line
-        so ``passage_text()`` can prepend it.
+        *context_lines* maps a chunk's sidecar key (``sidecar_key(source, content)``,
+        #R5; bare content hashes for a not-yet-migrated legacy file) to its
+        one-line context (Contextual Retrieval sidecar); matching chunks carry
+        the line so ``passage_text()`` can prepend it.
         """
         index = cls.__new__(cls)
         from config.settings import effective_embedding_model
@@ -214,7 +227,11 @@ class KBVectorIndex:
         docs: list[_DocEntry] = []
         for (n, c, s), e in zip(entries, embeddings):
             fh = file_hashes[len(docs)] if file_hashes else None
-            ctx = context_lines.get(_content_hash(c), "") if context_lines else ""
+            # Composite key first; a bare-hash fallback covers the legacy sidecar
+            # during the one-time migration window (see KBIndexStore._migrate_sidecar_v3).
+            ctx = ""
+            if context_lines:
+                ctx = context_lines.get(sidecar_key(s, c)) or context_lines.get(_content_hash(c), "")
             docs.append(_DocEntry(display_name=n, content=c, embedding=e,
                                   source_file=s, file_hash=fh, context_line=ctx))
         index._docs = docs
