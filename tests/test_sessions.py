@@ -495,6 +495,28 @@ class TestLegacyMigration:
         names = {f.name for f in dot.iterdir()}
         assert names == {"notes.md", "old_doc.md", "new_doc.md"}
 
+    def test_legacy_images_moved_to_vault_images_with_embeds(self):
+        """Old hidden .images/ moments → the Images/ sibling folder under the
+        Session_NN_ prefix, embedded in notes.md; second run is a no-op."""
+        folder = self._legacy_folder("2026-09-30_01_Images")
+        (folder / ".images").mkdir()
+        (folder / ".images" / "moment-1.png").write_bytes(b"png-bytes-A")
+        (folder / ".images" / "moment-2.png").write_bytes(b"png-bytes-B")
+        S.migrate_legacy_session_dirs()
+        folder = S.notes_dir() / "SESSION_01_Images"
+        images = S.notes_dir().parent / "Images"
+        assert not (folder / ".images").exists()
+        assert sorted(p.name for p in images.iterdir()) == [
+            "Session_01_moment-1.png", "Session_01_moment-2.png"]
+        assert (images / "Session_01_moment-1.png").read_bytes() == b"png-bytes-A"
+        notes = (folder / "notes.md").read_text(encoding="utf-8")
+        assert "## Momente" in notes
+        assert "![[Session_01_moment-1.png]]" in notes and "![[Session_01_moment-2.png]]" in notes
+        # Idempotent: nothing re-moves, nothing re-embeds.
+        S.migrate_legacy_session_dirs()
+        notes2 = (folder / "notes.md").read_text(encoding="utf-8")
+        assert notes2 == notes
+
     def test_noop_without_legacy_folders(self):
         folder = S.notes_dir() / "SESSION_01_Modern"
         (folder / ".attachments").mkdir(parents=True)

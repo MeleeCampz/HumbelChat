@@ -22,17 +22,39 @@ import bot_core.session_images as si
 from bot_core.channel_delivery import ChannelNotDeliverableError
 
 
-_PNG = b"\x89PNG\r\n\x1a\nfake-png-bytes"
 _MOMENTS_JSON = json.dumps([
     {"title": "The Bridge", "scene": "Trixy crosses the burning bridge."},
     {"title": "Marvin Awakens", "scene": "Marvin opens his eyes in the cellar."},
     {"title": "Bubo's Miracle", "scene": "Bubo heals Romi at the shrine."},
 ])
 
+# A REAL tiny PNG so the vault-convention webp conversion (_to_webp) runs for
+# real in these tests; without Pillow the archive degrades to .png — the
+# expected extension follows suit.
+try:
+    import io as _io
+    from PIL import Image as _Image
+    _buf = _io.BytesIO()
+    _Image.new("RGB", (8, 8), (120, 60, 200)).save(_buf, "PNG")
+    _PNG = _buf.getvalue()
+    _EXT = "webp"
+except ImportError:  # pragma: no cover - pillow is a declared dependency
+    _PNG = b"\x89PNG\r\n\x1a\nfake-png-bytes"
+    _EXT = "png"
+
+
+def _moment_name(i: int) -> str:
+    return f"Session_01_moment-{i}.{_EXT}"
+
 
 def _session(tmp_path) -> dict:
-    d = tmp_path / "20260101_1_test"
-    d.mkdir()
+    # Real layout: the session folder lives INSIDE the session-log dir, whose
+    # parent carries the Images/ sibling.
+    d = tmp_path / "SessionLogs" / "SESSION_01_test"
+    d.mkdir(parents=True)
+    (d / "notes.md").write_text(
+        "# Session: test\n\n- Started: 2026-01-01 10:00\n\nBody text.\n",
+        encoding="utf-8")
     return {
         "id": "20260101000000",
         "name": "test",
@@ -170,10 +192,18 @@ class TestOrchestration:
         sent = [c.kwargs for c in chan.send.await_args_list]
         image_sends = [k for k in sent if "file" in k]
         assert len(image_sends) == 3
-        # All three PNGs archived under the session folder's hidden dir.
-        imgs = (tmp_path / "20260101_1_test" / ".images")
+        # All three moments archived in the vault Images/ folder (sibling of
+        # the session-log dir) under the Session_NN convention, and the posted
+        # files carry the SAME names.
+        imgs = tmp_path / "Images"
         assert sorted(p.name for p in imgs.iterdir()) == [
-            "moment-1.png", "moment-2.png", "moment-3.png"]
+            _moment_name(1), _moment_name(2), _moment_name(3)]
+        assert [k["file"].filename for k in image_sends] == [
+            _moment_name(1), _moment_name(2), _moment_name(3)]
+        # … and embedded in notes.md under the ## Momente section.
+        notes = (tmp_path / "SessionLogs" / "SESSION_01_test" / "notes.md").read_text(encoding="utf-8")
+        assert "## Momente" in notes and "Body text." in notes
+        assert all(f"![[{_moment_name(i)}]]" in notes for i in (1, 2, 3))
 
     async def test_no_usable_moments_posts_friendly_note(self, monkeypatch, tmp_path):
         calls = _patch_pipeline(monkeypatch, moments_raw="I cannot pick moments.")
@@ -196,9 +226,12 @@ class TestOrchestration:
         assert len(image_sends) == 2  # moments 1 + 3 posted
         texts = [c.args[0] for c in chan.send.await_args_list if c.args]
         assert any("Could not paint" in t and "Marvin Awakens" in t for t in texts)
-        imgs = (tmp_path / "20260101_1_test" / ".images")
+        imgs = tmp_path / "Images"
         # Only the successful moments are archived.
-        assert sorted(p.name for p in imgs.iterdir()) == ["moment-1.png", "moment-3.png"]
+        assert sorted(p.name for p in imgs.iterdir()) == [_moment_name(1), _moment_name(3)]
+        notes = (tmp_path / "SessionLogs" / "SESSION_01_test" / "notes.md").read_text(encoding="utf-8")
+        assert f"![[{_moment_name(1)}]]" in notes
+        assert f"![[{_moment_name(2)}]]" not in notes
 
     async def test_whole_window_failure_reports_gracefully(self, monkeypatch, tmp_path):
         """A failed GPU MODE SWITCH (generate_images itself raises) must degrade
@@ -230,7 +263,7 @@ class TestOrchestration:
 
         texts = [c.args[0] for c in chan.send.await_args_list if c.args]
         assert any("None of the highlights" in t for t in texts)
-        assert not (tmp_path / "20260101_1_test" / ".images").exists()
+        assert not (tmp_path / "Images").exists()
 
     async def test_undeliverable_channel_still_paints_and_archives(
             self, monkeypatch, tmp_path):
@@ -241,8 +274,8 @@ class TestOrchestration:
         await si.generate_session_highlights(s, 123)  # must NOT raise
 
         assert any(isinstance(c, tuple) and c[0] == "batch" for c in calls)  # paint time not wasted
-        imgs = (tmp_path / "20260101_1_test" / ".images")
-        assert len(list(imgs.iterdir())) == 2  # the two successful PNGs
+        imgs = tmp_path / "Images"
+        assert len(list(imgs.iterdir())) == 2  # the two successful moments
 
     async def test_broken_progress_never_fails_the_batch(self, monkeypatch, tmp_path):
         _patch_pipeline(monkeypatch)
@@ -252,6 +285,58 @@ class TestOrchestration:
             si, "resolve_channel", AsyncMock(return_value=(chan, "cache")))
 
         await si.generate_session_highlights(_session(tmp_path), 123)  # must NOT raise
+
+
+# ── Selection parsing ──────────────────────────────────────────────
+
+class TestArchiveConvention:
+    """Vault image convention: Images/ sibling folder, Session_NN_ prefix,
+    webp conversion, ## Momente embeds in notes.md."""
+
+    def test_archives_webp_and_embeds_once_idempotent(self, tmp_path):
+        s = _session(tmp_path)
+        first = si._archive(s, 1, _PNG)
+        again = si._archive(s, 1, _PNG)
+        assert first is not None and again is not None
+        assert first[1] == again[1] == _moment_name(1)
+        assert sorted(p.name for p in (tmp_path / "Images").iterdir()) == [_moment_name(1)]
+        notes = (tmp_path / "SessionLogs" / "SESSION_01_test" / "notes.md").read_text(encoding="utf-8")
+        assert notes.count("![[") == 1  # the re-archive did NOT duplicate
+        assert notes.count("## Momente") == 1
+        if _EXT == "webp":  # the archived bytes really are webp now
+            assert (tmp_path / "Images" / _moment_name(1)).read_bytes()[:4] == b"RIFF"
+
+    def test_webp_unavailable_degrades_to_png(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(si, "_to_webp", lambda png: None)
+        s = _session(tmp_path)
+        out = si._archive(s, 2, _PNG)
+        assert out is not None and out[1] == "Session_01_moment-2.png"
+        assert out[0] == _PNG
+
+    def test_legacy_folder_name_still_numbered(self, tmp_path):
+        s = _session(tmp_path)
+        old = tmp_path / "SessionLogs" / "2026-01-01_07_old"
+        old.mkdir(parents=True)
+        (old / "notes.md").write_text("# Session: old\n", encoding="utf-8")
+        s["dir"], s["file"] = str(old), str(old / "notes.md")
+        out = si._archive(s, 1, _PNG)
+        assert out is not None and out[1] == f"Session_07_moment-1.{_EXT}"
+        assert (tmp_path / "Images" / f"Session_07_moment-1.{_EXT}").is_file()
+
+    def test_images_dir_override_setting(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("config.settings.SESSION_IMAGES_DIR",
+                            str(tmp_path / "custom" / "img"))
+        s = _session(tmp_path)
+        assert si._archive(s, 1, _PNG) is not None
+        assert (tmp_path / "custom" / "img" / _moment_name(1)).is_file()
+        assert not (tmp_path / "Images").exists()
+
+    def test_missing_notes_file_is_created_with_the_embed(self, tmp_path):
+        s = _session(tmp_path)
+        (tmp_path / "SessionLogs" / "SESSION_01_test" / "notes.md").unlink()
+        assert si._archive(s, 1, _PNG) is not None
+        notes = (tmp_path / "SessionLogs" / "SESSION_01_test" / "notes.md").read_text(encoding="utf-8")
+        assert f"![[{_moment_name(1)}]]" in notes
 
 
 # ── Selection parsing ────────────────────────────────────────────────────

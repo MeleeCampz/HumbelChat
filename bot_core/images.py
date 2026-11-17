@@ -327,7 +327,7 @@ _CHAR_RULES_FILE = Path(KB_PATH) / "humblewood" / "HumbleWood" \
 # (per-character facts live on the sheets themselves; only cross-cutting rules
 # belong in the note, and its googly-eyes rule is mirrored here).
 _DEFAULT_CHARACTER_RULES = (
-    "Googly eyes are NOT a species trait and belong ONLY to Column Bidae: "
+    "Googly eyes are NOT a species trait and belong ONLY to Colum Bidae: "
     "never give any other character googly eyes, and if he is not in the "
     "image do not mention googly eyes at all."
 )

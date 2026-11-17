@@ -44,6 +44,7 @@ dependencies = [
     "discord.py==2.7.1",
     "openai==2.44.0",
     "httpx==0.28.1",
+    "pillow==13.0.0",   # session moment PNG→webp archiving (session_images)
 ]
 
 [project.optional-dependencies]

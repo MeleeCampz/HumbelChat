@@ -627,10 +627,11 @@ class TestRewriteSystemPolicy:
     """Base-prompt policy strings (regression guards for user decisions)."""
 
     def test_gogglies_only_column_bidae(self):
-        # 2026-10-27 correction: NOBODY has googly eyes except Column Bidae (he).
+        # 2026-10-27 correction: NOBODY has googly eyes except Colum Bidae (he).
+        # 2026-11-17 vault rename: "Column Bidae" → "Colum Bidae".
         s = images._load_rewrite_system()
         assert "Googly eyes are NOT a species trait" in s
-        assert "belong ONLY to Column Bidae" in s
+        assert "belong ONLY to Colum Bidae" in s
         assert "give EVERY one of them those" not in s
 
     def test_fixed_template_with_length_budgets(self):

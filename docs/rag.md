@@ -358,8 +358,12 @@ name, so a book section that happens to be named `Notes` is untouched.
 Legacy session folders are migrated automatically at startup: date-named
 folders (`2026-10-20_02_Title`) are renumbered chronologically to
 `SESSION_<NN>[_Title]`, visible `attachments/` / `transcripts/` sub-folders
-are renamed to dot-dirs, and inline `## Notes` bullets move to the notes
-attachment (with a pointer line added to `notes.md`); the persisted session
+are renamed to dot-dirs, inline `## Notes` bullets move to the notes
+attachment (with a pointer line added to `notes.md`), and old hidden
+`.images/` moment files move to the vault `Images/` sibling folder with the
+`Session_NN_` prefix plus `![[…]]` embeds under `## Momente` in `notes.md`
+(image files are non-text, so they stay out of the index; the embed lines
+ride along inside the session's single RAG document); the persisted session
 state is re-pointed at the renamed folders. The vector index then self-heals
 on its next load (stale rows for old paths pruned, recombined notes
 re-embedded once).

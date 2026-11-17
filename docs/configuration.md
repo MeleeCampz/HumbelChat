@@ -18,6 +18,7 @@ All environment variables are loaded from `.env` at the project root. Copy `.env
 | `SYSTEM_PROMPT` | Fallback system prompt when a character has none | *(empty)* |
 | `FALLBACK_MODELS` | Comma-separated model slugs tried in order if the primary model fails (used by `/summarize` and `/translate`) | *(empty)* |
 | `SESSION_RECAP_PROMPT` | System prompt used by `/end_session` to write the AI session recap (a very brief digest: what happened + next steps), delivered at the next `/start_session`; empty = built-in default | *(empty — built-in default)* |
+| `SESSION_IMAGES_DIR` | Folder where `/end_session` session-highlight moments are archived (vault convention: one `Images/` folder, files named `Session_NN_moment-<i>.webp`, embedded in the session `notes.md`); empty = the `Images/` sibling of the session-log dir | *(empty — derived)* |
 | `AI_TIMEOUT_S` | Maximum silence from the AI backend before a request fails (seconds) — see *Timeouts* below | `120` |
 | `AI_HEALTH_CHECK_INTERVAL` | `0` probes once at startup; positive integer repeats liveness checks every N seconds | `0` |
 | `AI_HEALTH_CHECK_TIMEOUT` | Timeout for each liveness probe | `5` |

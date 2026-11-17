@@ -13,8 +13,12 @@ Spawned as a tracked background task from ``commands.session_commands``
    (:func:`bot_core.images.generate_images`: switch once → paint ×N → switch
    back to rag mode once); chat runs on its own card throughout — no AI-slot
    hold is needed;
-4. post each painted moment to the ending channel as a captioned PNG and
-   archive it under the session folder's hidden ``.images/`` directory.
+4. post each painted moment to the ending channel as a captioned image and
+   archive it under the vault's ``Images/`` folder (sibling of the session
+   log dir) as ``Session_NN_moment-<i>.webp`` — the vault image convention
+   (see the vault ``index.md``) — embedding it in the session's ``notes.md``
+   under a ``## Momente`` section. PNG is kept when webp conversion is
+   unavailable (no Pillow).
 
 This module NEVER raises — every failure degrades to a friendly channel
 message or a log line, and progress display is best-effort (a broken callback
@@ -25,6 +29,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import pathlib
 import re
 from typing import Any
 
@@ -38,13 +43,19 @@ from bot_core.channel_delivery import (
     resolve_channel,
 )
 from bot_core.history import get_active_char_key
-from bot_core.sessions import SESSION_DOCS_BUDGET, session_documents_text
+from bot_core.sessions import (
+    SESSION_DOCS_BUDGET,
+    embed_moment_image,
+    session_documents_text,
+    session_images_dir,
+    session_number_from_folder,
+)
 from config.characters import get_character
 from config.settings import (
     DEFAULT_MODEL,
-    SESSION_IMAGE_MAX_MOMENTS,
     SESSION_IMAGES,
     SESSION_IMAGES_PROMPT,
+    SESSION_IMAGE_MAX_MOMENTS,
     SUMMARY_CALL_MAX_TOKENS,
 )
 
@@ -179,19 +190,44 @@ async def _select_moments(
 
 # ── Delivery helpers ─────────────────────────────────────────────────────
 
-def _archive(session: dict[str, Any], index: int, png: bytes) -> None:
-    """Persist a painted moment under the session folder's hidden .images/ dir.
+def _to_webp(png: bytes) -> bytes | None:
+    """Convert a painted PNG to webp (vault images are webp); None when the
+    bytes are not a real image or Pillow is unavailable."""
+    try:
+        from PIL import Image
+        img = Image.open(io.BytesIO(png))
+        buf = io.BytesIO()
+        img.save(buf, format="WEBP", quality=92)
+        return buf.getvalue()
+    except Exception:  # noqa: BLE001 — conversion is a nicety, never a failure
+        return None
 
-    A disk failure is a log line only — the Discord delivery already happened.
+
+def _archive(session: dict[str, Any], index: int, png: bytes) -> tuple[bytes, str] | None:
+    """Persist a painted moment to the vault Images/ folder as
+    ``Session_NN_moment-<index>.webp`` (png when webp is unavailable) and
+    embed it in the session notes.md.
+
+    Returns the archived ``(bytes, filename)`` — the SAME bytes/filename are
+    posted to Discord, so the vault copy and the posted file match. A disk
+    failure is a log line only (returns None) — the caller still posts the
+    original PNG.
     """
     try:
-        import pathlib
-        folder = pathlib.Path(session["dir"]) / ".images"
-        folder.mkdir(parents=True, exist_ok=True)
-        (folder / f"moment-{index}.png").write_bytes(png)
+        images_dir = session_images_dir(session["dir"])
+        images_dir.mkdir(parents=True, exist_ok=True)
+        num = session_number_from_folder(pathlib.Path(session["dir"]).name)
+        stem = f"Session_{num}" if num else f"session-{session.get('id', 'unknown')}"
+        webp = _to_webp(png)
+        data, ext = (webp, "webp") if webp is not None else (png, "png")
+        filename = f"{stem}_moment-{index}.{ext}"
+        (images_dir / filename).write_bytes(data)
+        embed_moment_image(session, filename)
+        return data, filename
     except OSError as e:
         log.warning("could not archive highlight image %d for session %r: %s",
                     index, session.get("name"), e)
+        return None
 
 
 async def _safe_send(chan: Any, text: str) -> None:
@@ -296,17 +332,21 @@ async def _run_highlights(
     # 3) Paint the whole batch in ONE image-mode window (switch back follows).
     results = await _paint_batch(prompts, chan, name)
 
-    # 4) Deliver: one captioned PNG per success; a line for each failure.
+    # 4) Deliver: one captioned image per success; a line for each failure.
     failures: list[str] = []
     for index, (moment, result) in enumerate(zip(moments, results), 1):
         if isinstance(result, bytes):
-            _archive(session, index, result)
-            if chan is not None:
+            archived = _archive(session, index, result)
+            if archived is not None:
+                data, filename = archived
+            else:
+                data = result
                 filename = f"session-{session.get('id', 'unknown')}-moment-{index}.png"
+            if chan is not None:
                 try:
                     await chan.send(
                         f"🎨 {moment['title']}",
-                        file=discord.File(io.BytesIO(result), filename=filename),
+                        file=discord.File(io.BytesIO(data), filename=filename),
                     )
                 except Exception as e:  # noqa: BLE001 — archived on disk regardless
                     log.warning("highlight image %d send failed: %s", index, e)

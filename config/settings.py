@@ -449,6 +449,11 @@ SESSION_RECAP_PROMPT: str = os.getenv("SESSION_RECAP_PROMPT", "")
 SESSION_IMAGES: bool = _safe_bool(os.getenv("SESSION_IMAGES"), True)
 #: How many key moments (→ one image each) to pick per ended session.
 SESSION_IMAGE_MAX_MOMENTS: int = _safe_int(os.getenv("SESSION_IMAGE_MAX_MOMENTS"), 3)
+#: Folder for painted session moments. Empty (default) = the ``Images/``
+#: sibling of the session-log dir (…/HumbleWood/SessionLogs → …/HumbleWood/Images)
+#: — the vault convention (vault index.md): one Images/ folder, moments named
+#: ``Session_NN_moment-<i>.webp`` and embedded in the session notes.md.
+SESSION_IMAGES_DIR: str = os.getenv("SESSION_IMAGES_DIR", "")
 
 DEFAULT_SESSION_IMAGES_PROMPT: str = (
     "You pick the KEY MOMENTS of exactly ONE D&D campaign session so they can be "

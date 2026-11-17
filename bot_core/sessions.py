@@ -80,6 +80,11 @@ MAX_NAME_LEN: int = 40
 #: dot-dir) — their content reaches RAG only via the combined ``notes.md``.
 _SUBDIR_ATTACHMENTS = ".attachments"
 _SUBDIR_TRANSCRIPTS = ".transcripts"
+_SUBDIR_IMAGES = ".images"  # legacy home of painted session moments (see below)
+#: Section that holds the ``![[…]]`` moment embeds at the end of a session's
+#: notes.md — vault convention (vault ``index.md``: all images live in the
+#: vault ``Images/`` folder, moments named ``Session_NN_…``).
+_MOMENTE_SECTION = "## Momente"
 #: Session folder names are ``SESSION_<NN>[_<name>]`` — the date is NOT part
 #: of the name (it lives in the notes.md header); NN is a globally unique
 #: running index (never resets per day).
@@ -90,6 +95,56 @@ _SESSION_PREFIX = "SESSION_"
 _NOTES_FILE = "notes.md"
 #: One timestamped note bullet: ``- (<timestamp>) <text>``.
 _NOTE_BULLET_RE = re.compile(r"^\s*-\s*\(([^)]+)\)\s*(.+?)\s*$")
+
+
+def session_images_dir(session_dir: str | pathlib.Path) -> pathlib.Path:
+    """The vault image folder for a session: ``SESSION_IMAGES_DIR`` override,
+    else the ``Images/`` sibling of the session-log directory
+    (…/HumbleWood/SessionLogs/SESSION_07 → …/HumbleWood/Images)."""
+    from config.settings import SESSION_IMAGES_DIR
+    if SESSION_IMAGES_DIR:
+        return pathlib.Path(SESSION_IMAGES_DIR)
+    return pathlib.Path(session_dir).parent.parent / "Images"
+
+
+def session_number_from_folder(folder_name: str) -> str | None:
+    """Zero-padded running number from a session folder name (``SESSION_NN…``;
+    the legacy ``YYYY-MM-DD_NN…`` layout as fallback)."""
+    m = _SESSION_FOLDER_RE.match(folder_name) or re.match(
+        r"^\d{4}-\d{2}-\d{2}_(\d+)(?:_|$)", folder_name)
+    return f"{int(m.group(1)):02d}" if m else None
+
+
+def _append_momente_embed(notes_md: pathlib.Path, session_name: str | None,
+                          filename: str) -> None:
+    """Append ``![[filename]]`` to notes.md's ``## Momente`` section, creating
+    the section (or the file) at the end when missing.
+
+    Append-only on purpose: notes.md may hold hand edits, and the section
+    only ever grows. Idempotent — an existing embed is never duplicated.
+    """
+    line = f"![[{filename}]]"
+    try:
+        text = notes_md.read_text(encoding="utf-8") if notes_md.is_file() else ""
+        if line in text:
+            return
+        if not text:
+            text = f"# Session: {session_name or '(untitled)'}\n\n"
+        if not text.endswith("\n"):
+            text += "\n"
+        if _MOMENTE_SECTION not in text:
+            text += f"\n{_MOMENTE_SECTION}\n\n"
+        text += f"{line}\n"
+        notes_md.write_text(text, encoding="utf-8")
+    except OSError as e:
+        log.warning("could not embed image %r into %s: %s", filename, notes_md, e)
+
+
+def embed_moment_image(session: dict[str, Any], filename: str) -> None:
+    """Embed a painted session moment in the session's notes.md and re-index
+    the file (the session's single RAG document must stay current)."""
+    _append_momente_embed(pathlib.Path(session["file"]), session.get("name"), filename)
+    _index_session_paths(session)
 
 # ── Disk layout ──────────────────────────────────────────────────────────
 
@@ -805,6 +860,48 @@ def _migrate_legacy_session_dir(folder: pathlib.Path) -> bool:
     return changed
 
 
+def _migrate_images_to_vault(folder: pathlib.Path) -> bool:
+    """Move ONE folder's legacy ``.images/`` moments to the vault ``Images/``
+    folder with the ``Session_NN_`` prefix and embed them in its notes.md.
+
+    Current convention (vault ``index.md``): all vault images live in ONE
+    ``Images/`` folder next to the session-log dir; a moment that still sits
+    in the old hidden per-session ``.images/`` is moved out (bytes kept as
+    they are) and embedded under ``## Momente``. Idempotent.
+    """
+    src = folder / _SUBDIR_IMAGES
+    if not src.is_dir():
+        return False
+    num = session_number_from_folder(folder.name)
+    target = session_images_dir(folder)
+    notes_md = folder / _NOTES_FILE
+    changed = False
+    try:
+        files = [f for f in sorted(src.iterdir()) if f.is_file()]
+    except OSError:
+        return False
+    for f in files:
+        name = f.name
+        if not name.lower().startswith("session_"):
+            name = f"Session_{num}_{name}" if num else f"session-{folder.name}_{name}"
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            if not (target / name).exists():
+                os.replace(f, target / name)
+            else:  # already migrated — drop the duplicate copy
+                f.unlink()
+            _append_momente_embed(notes_md, folder.name, name)
+            changed = True
+        except OSError as e:
+            log.warning("Could not migrate session image %s → %s: %s", f, target / name, e)
+    try:
+        src.rmdir()  # empty (or already fully migrated) — drop the hidden dir
+        changed = True
+    except OSError:
+        pass
+    return changed
+
+
 def _migrate_notes_to_attachment(folder: pathlib.Path) -> bool:
     """Move ONE folder's inline ``## Notes`` bullets into the notes attachment.
 
@@ -929,6 +1026,9 @@ def migrate_legacy_session_dirs() -> dict[str, str]:
        hidden dot-dirs (old behavior).
     3. **Notes:** the inline ``## Notes`` section → the notes attachment
        (``.attachments/notes.md``) + a pointer line in the main file.
+    4. **Moments:** the hidden per-session ``.images/`` folder → the vault
+       ``Images/`` sibling folder (``Session_NN_`` prefix) + ``![[…]]``
+       embeds under ``## Momente`` in the session's notes.md.
 
     Returns ``{old_folder_name: new_folder_name}`` for the renames actually
     performed (empty dict when nothing changed — every run after the first).
@@ -984,6 +1084,8 @@ def migrate_legacy_session_dirs() -> dict[str, str]:
                 content_changed = True
             if _migrate_notes_to_attachment(p):
                 content_changed = True
+            if _migrate_images_to_vault(p):
+                content_changed = True
             _migrate_legacy_notes_file(p)
             if content_changed:
                 log.info("Migrated session folder to the current layout: %s", p.name)
@@ -1001,6 +1103,8 @@ def migrate_legacy_session_dirs() -> dict[str, str]:
             if _migrate_legacy_session_dir(p):
                 content_changed = True
             if _migrate_notes_to_attachment(p):
+                content_changed = True
+            if _migrate_images_to_vault(p):
                 content_changed = True
             _migrate_legacy_notes_file(p)
             if content_changed:
