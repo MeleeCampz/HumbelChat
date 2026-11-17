@@ -43,8 +43,13 @@ except ImportError:  # pragma: no cover - pillow is a declared dependency
     _EXT = "png"
 
 
+# Moment-title slugs (what the vault filename/embed carries — the TITLE,
+# never the prompt) for the three stub moments above.
+_MOMENT_SLUGS = ("the_bridge", "marvin_awakens", "bubo_s_miracle")
+
+
 def _moment_name(i: int) -> str:
-    return f"Session_01_moment-{i}.{_EXT}"
+    return f"Session_01_moment-{i}_{_MOMENT_SLUGS[i - 1]}.{_EXT}"
 
 
 def _session(tmp_path) -> dict:
@@ -295,8 +300,8 @@ class TestArchiveConvention:
 
     def test_archives_webp_and_embeds_once_idempotent(self, tmp_path):
         s = _session(tmp_path)
-        first = si._archive(s, 1, _PNG)
-        again = si._archive(s, 1, _PNG)
+        first = si._archive(s, 1, _PNG, "The Bridge")
+        again = si._archive(s, 1, _PNG, "The Bridge")
         assert first is not None and again is not None
         assert first[1] == again[1] == _moment_name(1)
         assert sorted(p.name for p in (tmp_path / "Images").iterdir()) == [_moment_name(1)]
@@ -313,6 +318,20 @@ class TestArchiveConvention:
         assert out is not None and out[1] == "Session_01_moment-2.png"
         assert out[0] == _PNG
 
+    def test_title_lands_in_the_filename_not_the_prompt(self, tmp_path):
+        """Filename carries a slug of the SHORT title; umlauts/apostrophes are
+        folded safely; a missing title keeps the bare moment-<i> name."""
+        s = _session(tmp_path)
+        out = si._archive(s, 1, _PNG, "Waldbrände in Alderheart!")
+        assert out is not None and out[1] == f"Session_01_moment-1_waldbrände_in_alderheart.{_EXT}"
+        bare = si._archive(s, 2, _PNG, "   ")
+        assert bare is not None and bare[1] == f"Session_01_moment-2.{_EXT}"
+        notes = (tmp_path / "SessionLogs" / "SESSION_01_test" / "notes.md").read_text(encoding="utf-8")
+        assert f"![[Session_01_moment-1_waldbrände_in_alderheart.{_EXT}]]" in notes
+        # slug length is capped — a runaway title never makes a mega-filename
+        long = si._slugify_title("word " * 30)
+        assert len(long) <= si._TITLE_SLUG_MAX
+
     def test_legacy_folder_name_still_numbered(self, tmp_path):
         s = _session(tmp_path)
         old = tmp_path / "SessionLogs" / "2026-01-01_07_old"
@@ -327,14 +346,14 @@ class TestArchiveConvention:
         monkeypatch.setattr("config.settings.SESSION_IMAGES_DIR",
                             str(tmp_path / "custom" / "img"))
         s = _session(tmp_path)
-        assert si._archive(s, 1, _PNG) is not None
+        assert si._archive(s, 1, _PNG, "The Bridge") is not None
         assert (tmp_path / "custom" / "img" / _moment_name(1)).is_file()
         assert not (tmp_path / "Images").exists()
 
     def test_missing_notes_file_is_created_with_the_embed(self, tmp_path):
         s = _session(tmp_path)
         (tmp_path / "SessionLogs" / "SESSION_01_test" / "notes.md").unlink()
-        assert si._archive(s, 1, _PNG) is not None
+        assert si._archive(s, 1, _PNG, "The Bridge") is not None
         notes = (tmp_path / "SessionLogs" / "SESSION_01_test" / "notes.md").read_text(encoding="utf-8")
         assert f"![[{_moment_name(1)}]]" in notes
 

@@ -467,7 +467,8 @@ DEFAULT_SESSION_IMAGES_PROMPT: str = (
     "(even just one) when the session has few highlights.\n"
     "Respond with ONLY a JSON array — no prose, no code fences — of at most "
     f"{SESSION_IMAGE_MAX_MOMENTS} objects: [{{\"title\": \"...\", \"scene\": \"...\"}}]\n"
-    '  - "title": a short name for the moment (max. ~8 words) — used as the image caption.\n'
+    '  - "title": a short name for the moment (max. ~8 words) — used as the image '
+    'caption and in the saved image filename.\n'
     '  - "scene": 1–3 sentences describing exactly what to paint: who is there, what is '
     'happening, where, the mood.  No negations (the rewrite layer handles those).\n'
     "STRICT RULES:\n"

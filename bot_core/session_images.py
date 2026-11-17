@@ -31,6 +31,7 @@ import json
 import logging
 import pathlib
 import re
+import unicodedata
 from typing import Any
 
 import discord
@@ -203,10 +204,27 @@ def _to_webp(png: bytes) -> bytes | None:
         return None
 
 
-def _archive(session: dict[str, Any], index: int, png: bytes) -> tuple[bytes, str] | None:
+#: Moment-title slug length cap in the archived filename (short on purpose —
+#: the vault filename should read like a label, not like the prompt).
+_TITLE_SLUG_MAX = 40
+
+
+def _slugify_title(title: str) -> str:
+    """Filesystem/Obsidian-safe slug of a moment title (``"Bubo's Miracle" →
+    ``bubo_s_miracle``); keeps each language's letters, folds everything else
+    to underscores. Empty slug = the moment keeps its bare ``moment-<i>`` name."""
+    t = unicodedata.normalize("NFKC", title or "").strip().lower()
+    t = re.sub(r"\W+", "_", t).strip("_")
+    return t[:_TITLE_SLUG_MAX].rstrip("_")
+
+
+def _archive(
+    session: dict[str, Any], index: int, png: bytes, title: str = ""
+) -> tuple[bytes, str] | None:
     """Persist a painted moment to the vault Images/ folder as
-    ``Session_NN_moment-<index>.webp`` (png when webp is unavailable) and
-    embed it in the session notes.md.
+    ``Session_NN_moment-<i>_<title-slug>.webp`` (png when webp is unavailable —
+    the short moment title, NOT the prompt, is what the vault filename and the
+    embed carry) and embed it in the session notes.md.
 
     Returns the archived ``(bytes, filename)`` — the SAME bytes/filename are
     posted to Discord, so the vault copy and the posted file match. A disk
@@ -220,7 +238,9 @@ def _archive(session: dict[str, Any], index: int, png: bytes) -> tuple[bytes, st
         stem = f"Session_{num}" if num else f"session-{session.get('id', 'unknown')}"
         webp = _to_webp(png)
         data, ext = (webp, "webp") if webp is not None else (png, "png")
-        filename = f"{stem}_moment-{index}.{ext}"
+        slug = _slugify_title(title)
+        moment = f"moment-{index}" + (f"_{slug}" if slug else "")
+        filename = f"{stem}_{moment}.{ext}"
         (images_dir / filename).write_bytes(data)
         embed_moment_image(session, filename)
         return data, filename
@@ -336,7 +356,7 @@ async def _run_highlights(
     failures: list[str] = []
     for index, (moment, result) in enumerate(zip(moments, results), 1):
         if isinstance(result, bytes):
-            archived = _archive(session, index, result)
+            archived = _archive(session, index, result, moment["title"])
             if archived is not None:
                 data, filename = archived
             else:
