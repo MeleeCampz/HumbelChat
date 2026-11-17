@@ -317,6 +317,34 @@ async def test_list_sessions_none_found(fake_store, tmp_path, monkeypatch):
     assert "No session logs" in out
 
 
+@pytest.mark.asyncio
+async def test_list_sessions_numbered_folders_date_from_file(fake_store, tmp_path, monkeypatch):
+    """New layout: SESSION_NN[_title] folders (no date in the name) — the
+    roster reads the date from the file header and keeps chronological order."""
+    logs = tmp_path / "humblewood" / "HumbleWood" / "SessionLogs"
+    for folder, body in [
+        ("SESSION_01_DerAnfang",
+         "# Session: Der Anfang\n\n- Started: 2026-09-09 18:00\n"
+         "- Notes: .attachments/notes.md (1 note(s))\n\nThe party leaves the farm.\n"),
+        ("SESSION_02",
+         "# Session: Untitled\n\n- Started: 2026-10-07 19:00\n\nWitch hut content.\n"),
+        ("SESSION_10_Final",
+         "# Session: Final\n\n- Started: 2026-11-09 18:00\n\nClosing the arc.\n"),
+    ]:
+        d = logs / folder
+        d.mkdir(parents=True)
+        (d / "notes.md").write_text(body, encoding="utf-8")
+    monkeypatch.setattr("config.settings.KB_PATH", str(tmp_path))
+    out = await tools.execute_tool("list_sessions", {})
+    assert "3 campaign session(s)" in out
+    assert "Session 1 · 2026-09-09 · DerAnfang" in out
+    assert "Session 2 · 2026-10-07" in out
+    assert "Session 3 · 2026-11-09 · Final" in out
+    # the pointer line must not become the teaser
+    assert ".attachments/notes.md" not in out
+    assert "The party leaves the farm." in out
+
+
 def test_parse_list_sessions_no_args():
     name, args = parse_tool_call('{"tool": "list_sessions", "args": {}}')
     assert name == "list_sessions" and args == {}

@@ -307,12 +307,10 @@ are never indexed. Full setup guide: `docs/obsidian-vault.md`.
 
 ## Session notes — one RAG document per session (#11, #75)
 
-Each session folder under `<SESSIONS_NOTES_DIR>/<date>_<idx>[_<name>]/`
+Each session folder under `<SESSIONS_NOTES_DIR>/SESSION_<NN>[_<name>]/`
 (default `<KB_PATH>/session_notes/`; see Obsidian vault sync above) holds
 exactly ONE RAG-indexed file — `notes.md` — which contains:
 
-- the timestamped session notes (`## Notes`) — indexed while the session is
-  live; superseded once the merged log exists (see #75 note below),
 - the **AI-merged session log** (`## Session Log`) — when a session ends, the
   AI combines all player uploads/transcripts (the same chronological events,
   logged from different perspectives, with heavy overlap) into ONE complete,
@@ -322,11 +320,18 @@ exactly ONE RAG-indexed file — `notes.md` — which contains:
   a few chunks instead of a few × N files,
 - the AI recap written when the session ended.
 
+The folder name carries a globally unique running number (`SESSION_07_Name`),
+NOT a date — the started/ended dates live in the `notes.md` header, which
+also points at the notes file. The timestamped session notes are stored as
+their own attachment file, `.attachments/notes.md` (hidden dot-dir, like the
+uploads), and reach RAG through the main file's `## Documents` fallback while
+no merged log exists.
+
 If the merge is impossible (AI backend down, stale auto-end without AI,
 legacy sessions) the file falls back to a mechanical `## Documents` section
-carrying each upload's full text under its own `### <filename>` subsection —
-content stays reachable via RAG either way. The merge prompt is customizable
-via `SESSION_MERGE_PROMPT` in `.env`.
+carrying the notes attachment plus each upload's full text under its own
+`### <filename>` subsection — content stays reachable via RAG either way.
+The merge prompt is customizable via `SESSION_MERGE_PROMPT` in `.env`.
 
 The raw uploads/transcripts are kept on disk in **hidden dot-dirs**
 (`.attachments/`, `.transcripts/`) as the verbatim record and as the source
@@ -335,13 +340,14 @@ dot-dirs and dot-files, so they can never be re-indexed by `/sync_kb` or a
 startup rebuild — which is what previously let near-identical session uploads
 get attached multiple times by retrieval.
 
-**#75 — superseded `## Notes` are dropped from the index.** While a session
-runs, its live `## Notes` bullets are its searchable content. When the
-session ends *with a successful merge*, the canonical
+**#75 — superseded notes are dropped from the index.** While a session runs,
+its live notes are searchable through the main file's `## Documents` fallback
+(the notes attachment embedded there). When the session ends *with a
+successful merge*, the canonical
 `## Session Log (combined from all uploads — AI-merged)` already contains
-those events (deduplicated), so the raw region is indexed duplicate content:
-the chunker strips the `## Notes` section for files carrying that canonical
-header, and the store load purges such stale rows from pre-#75 caches
+those events (deduplicated), so raw note content would be indexed twice:
+merged `notes.md` files render without any notes region, and the chunker /
+store load still strip and purge stale `## Notes` rows from pre-#75 files
 (embeddings reused — zero re-embedding; the rows are pruned via the
 incremental upsert). Sessions that ended WITHOUT a merge (mechanical
 `## Documents` fallback) keep their notes — there the bullets are the only
@@ -349,15 +355,21 @@ copy. The `## Overview` recap is always kept (digest, different granularity).
 The strip keys on the canonical merged-log header, never on path or file
 name, so a book section that happens to be named `Notes` is untouched.
 
-Legacy folders with visible `attachments/` / `transcripts/` sub-folders are
-migrated automatically at startup (rename to dot-dirs + append the combined
-section to `notes.md`); the vector index then self-heals on its next load
-(stale per-file rows pruned, recombined notes re-embedded once).
+Legacy session folders are migrated automatically at startup: date-named
+folders (`2026-10-20_02_Title`) are renumbered chronologically to
+`SESSION_<NN>[_Title]`, visible `attachments/` / `transcripts/` sub-folders
+are renamed to dot-dirs, and inline `## Notes` bullets move to the notes
+attachment (with a pointer line added to `notes.md`); the persisted session
+state is re-pointed at the renamed folders. The vector index then self-heals
+on its next load (stale rows for old paths pruned, recombined notes
+re-embedded once).
 
 Note: manual edits to the `## Session Log` / `## Documents` sections of a
 `notes.md` are overwritten on the next session change (they are regenerated
-from state + dot-dirs); edits to real notes in `## Notes` survive via
-re-parsing.
+from state + dot-dirs); edits to real notes survive via re-parsing — the
+source of record is the notes attachment (`.attachments/notes.md`); a folder
+still in the legacy layout falls back to the `## Notes` section in
+`notes.md`.
 
 ## Last-session context (#7)
 

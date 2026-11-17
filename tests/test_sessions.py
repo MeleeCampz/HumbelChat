@@ -41,21 +41,28 @@ class TestStartSession:
         f = pathlib.Path(session["file"])
         assert f.exists()
         assert f.name == "notes.md"  # per-session folder
-        # Folder carries date + increasing index + name
-        m = datetime.fromtimestamp(session["started_at"]).strftime("%Y-%m-%d")
+        # Folder is SESSION_<NN>[_name] — NO date in the name, a running index.
         d = f.parent
-        assert d.name.startswith(m)
-        assert "My Session" in d.name
+        assert d.name == "SESSION_01_My Session"
         assert session["dir"] == str(d)
         content = f.read_text(encoding="utf-8")
         assert "# Session: My Session" in content
+        # The date lives in the FILE, not the folder name.
+        started = datetime.fromtimestamp(session["started_at"]).strftime("%Y-%m-%d")
+        assert f"- Started: {started}" in content
+        # Notes live in the hidden notes attachment, not in notes.md itself.
+        att = d / ".attachments" / "notes.md"
+        assert att.is_file()
+        assert "- Notes: .attachments/notes.md" in content
 
     def test_start_without_name(self):
         session, _ = S.start_session()
         assert session["name"] == ""
         f = pathlib.Path(session["file"])
         assert f.name == "notes.md"
-        assert "(no notes)" in f.read_text(encoding="utf-8")
+        assert f.parent.name == "SESSION_01"  # unnamed → no trailing part
+        att = f.parent / ".attachments" / "notes.md"
+        assert "(no notes)" in att.read_text(encoding="utf-8")
 
     def test_start_while_active_refused(self):
         """Only one session at a time — an active (young) session blocks a new start."""
@@ -120,16 +127,20 @@ class TestEndSession:
         assert S.get_current_session() is None
 
     def test_overview_renders_before_session_log(self):
-        """The brief overview leads the file: after the notes, BEFORE the
-        AI-merged session log (and the mechanical Documents fallback)."""
+        """The brief overview leads the file: BEFORE the AI-merged session
+        log (and the mechanical Documents fallback). Notes are not in this
+        file at all — they live in the notes attachment."""
         session, _ = S.start_session(name="S1")
         S.add_note("a note", author="Bob")
         S.end_session(overview="Brief recap.", merged_log="Long merged log body.")
         content = pathlib.Path(session["file"]).read_text(encoding="utf-8")
-        i_notes = content.index("## Notes")
         i_overview = content.index("## Overview (written when the session ended)")
         i_log = content.index("## Session Log (combined from all uploads — AI-merged)")
-        assert i_notes < i_overview < i_log
+        assert i_overview < i_log
+        # the note lives in the attachment, not in the merged main file
+        att = pathlib.Path(session["dir"]) / ".attachments" / "notes.md"
+        assert "a note" in att.read_text(encoding="utf-8")
+        assert "a note" not in content
         # without a merged log, the overview still precedes the Documents section
         session2, _ = S.start_session(name="S2")
         S.add_document("doc body", title="D1", session=session2)
@@ -167,14 +178,33 @@ class TestEndSession:
 
     def test_without_merged_log_mechanical_section_stays(self):
         """AI unavailable / stale end / legacy session → the mechanical
-        full-text copy keeps document content reachable via RAG."""
+        full-text copy keeps document content reachable via RAG — and the
+        notes attachment participates in that fallback too."""
         session, _ = S.start_session(name="M3")
+        S.add_note("remember the ring")
         S.add_document("Player A log: we looted the cave.", title="a.md")
-        S.end_session(overview=None)  # no merged log
+        S.end_session(overview=None)
         content = pathlib.Path(session["file"]).read_text(encoding="utf-8")
         assert "## Documents" in content
         assert "Player A log: we looted the cave." in content
+        assert "remember the ring" in content  # notes attachment embedded
         assert "## Session Log" not in content
+
+    def test_notes_appear_in_documents_fallback(self):
+        """No uploads, no merged log → the notes attachment alone feeds the
+        combined Documents section, so live notes stay RAG-reachable."""
+        session, _ = S.start_session(name="M5")
+        S.add_note("only a note")
+        content = pathlib.Path(session["file"]).read_text(encoding="utf-8")
+        assert "## Documents" in content
+        assert "only a note" in content
+
+    def test_empty_notes_attachment_not_embedded(self):
+        """An untouched (no notes) attachment adds nothing to the main file."""
+        session, _ = S.start_session(name="M6")
+        content = pathlib.Path(session["file"]).read_text(encoding="utf-8")
+        assert "## Documents" not in content
+        assert "(no notes)" not in content
 
     def test_merged_log_survives_persistence_reload(self):
         session, _ = S.start_session(name="M4")
@@ -195,7 +225,7 @@ class TestNotes:
     def test_add_note_requires_active_session(self):
         assert S.add_note("hello") is None
 
-    def test_add_note_appends_and_writes_file(self):
+    def test_add_note_appends_and_writes_attachment(self):
         session, _ = S.start_session(name="N1")
         updated = S.add_note("remember the deploy", author="Alice")
         assert len(updated["notes"]) == 1
@@ -203,13 +233,17 @@ class TestNotes:
         assert isinstance(ts, float)
         assert "remember the deploy" in text
         assert "Alice" in text
-        content = pathlib.Path(session["file"]).read_text(encoding="utf-8")
-        assert "remember the deploy" in content
+        # The note bullet lives in the notes attachment …
+        att = pathlib.Path(session["dir"]) / ".attachments" / "notes.md"
+        assert "remember the deploy" in att.read_text(encoding="utf-8")
+        # … the main file only carries the pointer + count.
+        main = pathlib.Path(session["file"]).read_text(encoding="utf-8")
+        assert "- Notes: .attachments/notes.md (1 note(s))" in main
 
     def test_refresh_notes_from_disk(self):
-        """User edits the file on disk → state picks up the new notes."""
+        """User edits the notes attachment on disk → state picks up the new notes."""
         session, _ = S.start_session(name="E1")
-        f = pathlib.Path(session["file"])
+        f = pathlib.Path(session["dir"]) / ".attachments" / "notes.md"
         # Append a note line in the exact format the bot writes.
         ts = time.time()
         stamp = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
@@ -249,8 +283,10 @@ class TestAddDocument:
         session, n = S.add_document("the answer is 42", title="answer.txt")
         assert n == 1
         # A raw .md file exists under the session's HIDDEN .attachments/ folder
+        # (the reserved notes attachment is not a document upload)
         att_dir = pathlib.Path(session["dir"]) / ".attachments"
-        files = [f for f in att_dir.iterdir() if f.is_file()]
+        files = [f for f in att_dir.iterdir()
+                 if f.is_file() and f.name != "notes.md"]
         assert len(files) == 1
         body = files[0].read_text(encoding="utf-8")
         assert "the answer is 42" in body
@@ -269,8 +305,9 @@ class TestAddDocument:
         session, n = S.add_document("just words")
         assert n == 1
         att_dir = pathlib.Path(session["dir"]) / ".attachments"
-        assert len(list(att_dir.iterdir())) == 1
-        assert "just words" in att_dir.iterdir().__next__().read_text(encoding="utf-8")
+        assert len([f for f in att_dir.iterdir() if f.name != "notes.md"]) == 1
+        upload = next(f for f in att_dir.iterdir() if f.name != "notes.md")
+        assert "just words" in upload.read_text(encoding="utf-8")
 
     def test_long_document_not_chunked(self):
         S.start_session(name="D")
@@ -278,7 +315,8 @@ class TestAddDocument:
         session, n = S.add_document(long_text, title="big.md")
         assert n == 1  # one file, not several bullets
         att_dir = pathlib.Path(session["dir"]) / ".attachments"
-        files = [f for f in att_dir.iterdir() if f.is_file()]
+        files = [f for f in att_dir.iterdir()
+                 if f.is_file() and f.name != "notes.md"]
         assert len(files) == 1
         body = files[0].read_text(encoding="utf-8")
         # The whole document is preserved verbatim (KB will chunk it).
@@ -302,16 +340,18 @@ class TestAddDocument:
         assert "pinned doc" in pathlib.Path(old["file"]).read_text(encoding="utf-8")
         new_file = pathlib.Path(S.get_current_session()["file"]).read_text(encoding="utf-8")
         assert "pinned doc" not in new_file
-        # The new active session's folder has no attachment
+        # The new active session's folder holds only its own notes attachment
         new_dir = pathlib.Path(S.get_current_session()["dir"]) / ".attachments"
-        assert not new_dir.exists() or len(list(new_dir.iterdir())) == 0
+        uploads = [f for f in new_dir.iterdir() if f.name != "notes.md"] \
+            if new_dir.exists() else []
+        assert uploads == []
 
     def test_repeated_uploads_get_distinct_files(self):
         S.start_session(name="D")
         S.add_document("one", title="same.txt")
         S.add_document("two", title="same.txt")
         att_dir = pathlib.Path(S.get_current_session()["dir"]) / ".attachments"
-        names = sorted(f.name for f in att_dir.iterdir())
+        names = sorted(f.name for f in att_dir.iterdir() if f.name != "notes.md")
         assert len(names) == 2  # unique_path disambiguates duplicates
 
     def test_rerender_is_idempotent(self):
@@ -326,8 +366,9 @@ class TestAddDocument:
 
 
 class TestLegacyMigration:
-    """migrate_legacy_session_dirs() — visible attachments/ + transcripts/
-    (indexed file-by-file) → hidden dot-dirs + combined notes.md."""
+    """migrate_legacy_session_dirs() — legacy date-named folders →
+    SESSION_NN[_name] (chronological renumbering), visible attachments/ +
+    transcripts/ → hidden dot-dirs, inline ## Notes → notes attachment."""
 
     def _legacy_folder(self, name: str = "2026-01-01_01_Legacy") -> pathlib.Path:
         folder = S.notes_dir() / name
@@ -338,14 +379,17 @@ class TestLegacyMigration:
         (folder / "transcripts" / "transcript_01.md").write_text(
             "# Voice channel transcript\n\nlegacy words\n", encoding="utf-8")
         (folder / "notes.md").write_text(
-            "# Session: Legacy\n\n## Notes\n\n(no notes)\n",
+            "# Session: Legacy\n\n- Started: 2026-01-01 10:00\n\n"
+            "## Notes\n\n- (2026-01-01 10:30) legacy inline note\n\n(no notes)\n",
             encoding="utf-8")
         return folder
 
     def test_visible_subdirs_renamed_and_notes_combined(self):
         folder = self._legacy_folder()
-        changed = S.migrate_legacy_session_dirs()
-        assert changed == 1
+        renames = S.migrate_legacy_session_dirs()
+        assert renames == {"2026-01-01_01_Legacy": "SESSION_01_Legacy"}
+        folder = S.notes_dir() / "SESSION_01_Legacy"  # renamed, date gone
+        assert not (S.notes_dir() / "2026-01-01_01_Legacy").exists()
         assert not (folder / "attachments").exists()
         assert not (folder / "transcripts").exists()
         assert (folder / ".attachments" / "old_doc.md").is_file()
@@ -355,15 +399,88 @@ class TestLegacyMigration:
         assert "legacy upload text" in content
         assert "legacy words" in content
 
+    def test_folder_renumbered_chronologically_and_notes_extracted(self):
+        """Several legacy folders (colliding per-day indices) get one global
+        running numbering; the inline ## Notes section moves to the
+        notes attachment and the main file gains a pointer."""
+        f1 = self._legacy_folder("2026-09-09_01_First")
+        f2 = S.notes_dir() / "2026-09-14_02_Second"
+        f2.mkdir(parents=True)
+        (f2 / "notes.md").write_text(
+            "# Session: Second\n\n- Started: 2026-09-14 10:00\n\n"
+            "## Notes\n\n- (2026-09-14 10:30) second note\n",
+            encoding="utf-8")
+        f3 = S.notes_dir() / "2026-09-23_01_Third"  # index 01 AGAIN (new date)
+        f3.mkdir(parents=True)
+        (f3 / "notes.md").write_text(
+            "# Session: Third\n\n- Started: 2026-09-23 10:00\n\n"
+            "## Notes\n\n- (2026-09-23 10:30) third note\n\n"
+            "## Overview (written when the session ended)\n\nOld recap text.\n\n"
+            "## Session Log (combined from all uploads — AI-merged)\n\nMerged.\n",
+            encoding="utf-8")
+        renames = S.migrate_legacy_session_dirs()
+        assert renames == {
+            "2026-09-09_01_First": "SESSION_01_First",
+            "2026-09-14_02_Second": "SESSION_02_Second",
+            "2026-09-23_01_Third": "SESSION_03_Third",
+        }
+        # Notes extraction: attachment holds the bullets verbatim.
+        att = f1.parent / "SESSION_01_First" / ".attachments" / "notes.md"
+        assert att.is_file()
+        att_text = att.read_text(encoding="utf-8")
+        assert "- (2026-01-01 10:30) legacy inline note" in att_text
+        # Main file: inline ## Notes gone, pointer added, rest kept.
+        main = (f1.parent / "SESSION_01_First" / "notes.md").read_text(encoding="utf-8")
+        assert "## Notes" not in main
+        assert "- Notes: .attachments/notes.md" in main
+        assert "- Started: 2026-01-01 10:00" in main  # date stays in the FILE
+        # An overview/log-carrying file keeps those sections untouched …
+        main3 = (f3.parent / "SESSION_03_Third" / "notes.md").read_text(encoding="utf-8")
+        assert "Old recap text." in main3 and "Merged." in main3
+        assert "## Session Log" in main3 and "## Documents" not in main3
+        att3 = (f3.parent / "SESSION_03_Third" / ".attachments" / "notes.md")
+        assert "- (2026-09-23 10:30) third note" in att3.read_text(encoding="utf-8")
+
+    def test_existing_session_folders_raise_the_counter(self):
+        """A partially migrated vault continues after the highest SESSION_NN."""
+        (S.notes_dir() / "SESSION_07_Kept").mkdir(parents=True)
+        folder = self._legacy_folder("2026-10-01_01_Late")
+        renames = S.migrate_legacy_session_dirs()
+        assert renames == {"2026-10-01_01_Late": "SESSION_08_Late"}
+
+    def test_state_paths_repointed_after_rename(self):
+        """sessions.json still pointing at a legacy folder is corrected."""
+        import json
+        session, _ = S.start_session(name="Active")  # SESSION_01_Active
+        # Simulate a pre-migration persisted state (legacy dir/file names).
+        p = pathlib.Path(os.environ["SESSIONS_PERSIST_FILE"])
+        raw = json.loads(p.read_text(encoding="utf-8"))
+        raw["session"]["dir"] = str(S.notes_dir() / "2026-01-01_01_Active")
+        raw["session"]["file"] = str(S.notes_dir() / "2026-01-01_01_Active" / "notes.md")
+        p.write_text(json.dumps(raw), encoding="utf-8")
+        # … and the folder itself renamed back to the legacy name on disk.
+        os.replace(S.notes_dir() / "SESSION_01_Active", S.notes_dir() / "2026-01-01_01_Active")
+        S._state["session"] = None
+        S.load_persisted()
+        resumed = S.get_current_session()
+        assert resumed is not None
+        assert pathlib.Path(resumed["dir"]).name == "SESSION_01_Active"
+        assert pathlib.Path(resumed["file"]).is_file()
+        # The fix is persisted too.
+        reloaded = json.loads(p.read_text(encoding="utf-8"))
+        assert pathlib.Path(reloaded["session"]["dir"]).name == "SESSION_01_Active"
+
     def test_migration_is_idempotent(self):
-        folder = self._legacy_folder()
+        self._legacy_folder()
         S.migrate_legacy_session_dirs()
+        folder = S.notes_dir() / "SESSION_01_Legacy"
         first = (folder / "notes.md").read_text(encoding="utf-8")
-        assert S.migrate_legacy_session_dirs() == 0
-        # No double-appended Documents section.
+        assert S.migrate_legacy_session_dirs() == {}
+        # No double-appended Documents section, no renumbering.
         second = (folder / "notes.md").read_text(encoding="utf-8")
         assert first == second
         assert second.count("## Documents") == 1
+        assert (folder / ".attachments" / "notes.md").is_file()
 
     def test_merge_when_dot_dir_already_exists(self):
         folder = self._legacy_folder()
@@ -372,30 +489,42 @@ class TestLegacyMigration:
         (dot / "old_doc.md").write_text("# old doc\n\nalready migrated\n", encoding="utf-8")
         (dot / "new_doc.md").write_text("# new doc\n\ndot-dir only\n", encoding="utf-8")
         S.migrate_legacy_session_dirs()
+        folder = S.notes_dir() / "SESSION_01_Legacy"
+        dot = folder / ".attachments"
         assert not (folder / "attachments").exists()
         names = {f.name for f in dot.iterdir()}
-        assert names == {"old_doc.md", "new_doc.md"}
+        assert names == {"notes.md", "old_doc.md", "new_doc.md"}
 
     def test_noop_without_legacy_folders(self):
-        folder = S.notes_dir() / "2026-01-02_01_Modern"
+        folder = S.notes_dir() / "SESSION_01_Modern"
         (folder / ".attachments").mkdir(parents=True)
-        assert S.migrate_legacy_session_dirs() == 0
+        (folder / ".attachments" / "notes.md").write_text("# Session Notes: Modern\n\n(no notes)\n",
+                                                          encoding="utf-8")
+        (folder / "notes.md").write_text(
+            "# Session: Modern\n\n- Started: x\n- Notes: .attachments/notes.md (0 note(s))\n",
+            encoding="utf-8")
+        assert S.migrate_legacy_session_dirs() == {}
+        assert (folder / "notes.md").read_text(encoding="utf-8").count("- Notes:") == 1
 
 
 class TestNotesSectionParsing:
-    """refresh_notes_from_disk re-parses ONLY the ## Notes section — bullet-
-    looking lines inside ## Documents must never become notes."""
+    """refresh_notes_from_disk re-parses the NOTES ATTACHMENT — bullet-looking
+    lines in the main notes.md (combined ## Documents) must never become notes."""
 
     def test_document_bullets_not_parsed_as_notes(self):
         S.start_session(name="P")
         session = S.get_current_session()
-        path = pathlib.Path(session["file"])
-        path.write_text(
-            "# Session: P\n\n## Notes\n"
-            "- (2026-01-01 12:00) real note\n"
-            "\n## Documents (combined uploads + transcripts — full text)\n\n"
+        # Hand-shape the files: main file has a document pseudo-note bullet,
+        # the attachment has the real one.
+        pathlib.Path(session["file"]).write_text(
+            "# Session: P\n\n- Started: x\n- Notes: .attachments/notes.md (1 note(s))\n\n"
+            "## Documents (combined uploads + transcripts — full text)\n\n"
             "### doc.md\n"
             "- (2026-01-01 13:00) looks like a note but is document text\n",
+            encoding="utf-8")
+        att = pathlib.Path(session["dir"]) / ".attachments" / "notes.md"
+        att.write_text(
+            "# Session Notes: P\n\n- (2026-01-01 12:00) real note\n",
             encoding="utf-8")
         notes = S.refresh_notes_from_disk(session)
         assert len(notes) == 1
@@ -405,15 +534,40 @@ class TestNotesSectionParsing:
         S.start_session(name="P")
         session = S.get_current_session()
         S.add_note("first")
-        path = pathlib.Path(session["file"])
-        text = path.read_text(encoding="utf-8")
-        # Insert a hand-added bullet right after the existing one (still inside ## Notes)
+        att = pathlib.Path(session["dir"]) / ".attachments" / "notes.md"
+        text = att.read_text(encoding="utf-8")
         m = re.search(r"^(- \([^)]+\) first)$", text, flags=re.MULTILINE)
-        assert m, "expected the 'first' note bullet in notes.md"
+        assert m, "expected the 'first' note bullet in the notes attachment"
         text = text[:m.end()] + "\n- (2026-01-01 09:00) hand-added" + text[m.end():]
-        path.write_text(text, encoding="utf-8")
+        att.write_text(text, encoding="utf-8")
         notes = S.refresh_notes_from_disk(session)
         assert [t for _ts, t in notes] == ["first", "hand-added"]
+
+    def test_legacy_inline_notes_section_still_parsed(self):
+        """Pre-migration layout (no attachment, ## Notes inside notes.md):
+        section-scoped parsing still works so an un-migrated vault survives."""
+        S.start_session(name="P")
+        session = S.get_current_session()
+        att = pathlib.Path(session["dir"]) / ".attachments" / "notes.md"
+        att.unlink()
+        pathlib.Path(session["file"]).write_text(
+            "# Session: P\n\n## Notes\n"
+            "- (2026-01-01 12:00) legacy note\n\n"
+            "## Documents (combined uploads + transcripts — full text)\n\n"
+            "### doc.md\n- (2026-01-01 13:00) document text bullet\n",
+            encoding="utf-8")
+        notes = S.refresh_notes_from_disk(session)
+        assert [t for _ts, t in notes] == ["legacy note"]
+
+    def test_new_format_without_attachment_keeps_memory_notes(self):
+        """Attachment deleted, main file in NEW form → in-memory notes are
+        kept (nothing parsable on disk must not silently wipe them)."""
+        S.start_session(name="P")
+        session = S.get_current_session()
+        S.add_note("keep me")
+        (pathlib.Path(session["dir"]) / ".attachments" / "notes.md").unlink()
+        notes = S.refresh_notes_from_disk(session)
+        assert [t for _ts, t in notes] == ["keep me"]
 
 
 class TestNextSessionReminders:
@@ -591,15 +745,29 @@ class TestRecovery:
         assert resumed["file"] == str(pathlib.Path(session["dir"]) / "notes.md")
 
     def test_recovery_picks_up_external_edits(self):
-        """Notes edited on disk while the bot was down are picked up."""
+        """Notes edited on disk (in the attachment) while the bot was down are picked up."""
         session, _ = S.start_session(name="Edited")
-        f = pathlib.Path(session["file"])
+        f = pathlib.Path(session["dir"]) / ".attachments" / "notes.md"
         stamp = datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d %H:%M")
         with f.open("a", encoding="utf-8") as fh:
             fh.write(f"\n- ({stamp}) edited while bot was down\n")
         self._simulated_restart()
         notes = S.get_notes()
         assert any("edited while bot was down" in t for _ts, t in notes)
+
+    def test_recovery_recreates_missing_notes_attachment(self):
+        """Notes attachment deleted (folder hand-edited) → recreated from
+        state so the session's notes are not lost."""
+        session, _ = S.start_session(name="AttGone")
+        S.add_note("note to survive")
+        (pathlib.Path(session["dir"]) / ".attachments" / "notes.md").unlink()
+        self._simulated_restart()
+        resumed = S.get_current_session()
+        assert resumed is not None
+        att = pathlib.Path(resumed["dir"]) / ".attachments" / "notes.md"
+        assert att.is_file()
+        assert "note to survive" in att.read_text(encoding="utf-8")
+        assert any("note to survive" in t for _ts, t in S.get_notes())
 
     def test_recovery_drops_corrupt_session(self):
         """A persisted session without a usable started_at is dropped — it must
@@ -649,13 +817,20 @@ class TestRecovery:
 
 class TestNaming:
 
-    def test_index_increments_per_day(self):
+    def test_index_increments_globally(self):
         d = S.notes_dir()
         d.mkdir(parents=True, exist_ok=True)
-        today = datetime.now().strftime("%Y-%m-%d")
-        (d / f"{today}_01_existing").mkdir()  # a pre-existing session folder
+        (d / "SESSION_01_existing").mkdir()  # a pre-existing session folder
         session, _ = S.start_session(name="Indexed")
-        assert pathlib.Path(session["dir"]).name == f"{today}_02_Indexed"
+        assert pathlib.Path(session["dir"]).name == "SESSION_02_Indexed"
+
+    def test_index_never_resets_per_day(self):
+        """No date in the name ⇒ the running index must stay unique forever."""
+        d = S.notes_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "SESSION_10_old").mkdir()
+        session, _ = S.start_session()
+        assert pathlib.Path(session["dir"]).name == "SESSION_11"
 
     def test_persistence_disabled_via_empty_env(self, monkeypatch):
         monkeypatch.setenv("SESSIONS_PERSIST_FILE", "")

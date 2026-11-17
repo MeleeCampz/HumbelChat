@@ -234,7 +234,8 @@ STAT_BLOCK_FORMAT_RULES: str = os.getenv(
 )
 # Global campaign-continuity appendix, added to EVERY character's system prompt
 # (same pattern as STAT_BLOCK_FORMAT_RULES). Session logs in the KB are a
-# CHRONOLOGICAL record — one dated folder per session — and retrieval can easily
+# CHRONOLOGICAL record — one numbered folder per session (SESSION_<NN>) — and
+# retrieval can easily
 # surface an older session's "open threads" list without the newer one that
 # resolved them. This tells the model to treat the newest session as the current
 # state of the story and merge across sessions instead of copying stale lists.
@@ -243,7 +244,8 @@ SESSION_LOG_CHRONOLOGY_RULES: str = os.getenv(
     (
         "\n\n<campaign-session-logs>\n"
         "The campaign's session notes (SessionLogs) are a CHRONOLOGICAL record: "
-        "one dated folder per played session, oldest to newest. The NEWEST session "
+        "one numbered folder per played session (SESSION_<NN>, oldest to newest). "
+        "The NEWEST session "
         "represents the current state of the story and takes precedence over older "
         "ones. When answering questions about open threads, characters, or the "
         "current situation: merge what you know ACROSS sessions — if an older "

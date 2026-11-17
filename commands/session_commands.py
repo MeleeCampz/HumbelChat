@@ -630,7 +630,8 @@ def _build_info_parts(session: dict[str, Any]) -> list[str]:
 
     lines.append("")
     lines.append(f"📄 Folder: `{pathlib.Path(session['dir']).name}/` (notes.md = single RAG document; "
-                 f"raw files kept in hidden folders)")
+                 f"timestamped notes live in `{S._SUBDIR_ATTACHMENTS}/{S._NOTES_FILE}`; "
+                 f"raw uploads/transcripts in hidden folders)")
     lines.append("(long notes are split across messages; full text is in the session folder)")
 
     return _chunk_display("\n".join(lines))

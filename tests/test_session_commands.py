@@ -372,7 +372,8 @@ class TestSessionInfo:
         session, n = S.add_document("hello world", title="doc.txt")
         assert n == 1
         att_dir = pathlib.Path(session["dir"]) / ".attachments"
-        files = [f for f in att_dir.iterdir() if f.is_file()]
+        files = [f for f in att_dir.iterdir()
+                 if f.is_file() and f.name != "notes.md"]  # uploads only
         assert files
         await handle_session_info(ix)
         info_msgs = [m for m in ix._sent if "Session info" in m]
@@ -409,7 +410,7 @@ class TestSessionNotesDocumentUpload:
         # …and shows up in /session_info with its stored name
         from commands.session_commands import handle_session_info
         await handle_session_info(ix)
-        stored = [f.name for f in att_dir.iterdir() if f.is_file()]
+        stored = [f.name for f in att_dir.iterdir() if f.is_file() and f.name != "notes.md"]
         info = [m for m in ix._sent if "Session info" in m]
         assert any("Attachments" in m and name in m for m in info for name in stored)
 
@@ -487,7 +488,8 @@ class TestSessionNotesDocumentUpload:
                                    file=_doc_attachment("long.md", ("word " * 2000).strip()))
         session = S.get_current_session()
         att_dir = pathlib.Path(session["dir"]) / ".attachments"
-        files = [f for f in att_dir.iterdir() if f.is_file()]
+        files = [f for f in att_dir.iterdir()
+                 if f.is_file() and f.name != "notes.md"]
         # one file, not pre-chunked bullets; the whole doc is preserved verbatim
         assert len(files) == 1
         assert ("word " * 2000).strip() in files[0].read_text(encoding="utf-8")

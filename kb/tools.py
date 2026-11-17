@@ -640,9 +640,12 @@ class _SessionEntry:
 def _session_roster_entries() -> list[_SessionEntry]:
     """Chronological campaign session roster (oldest first).
 
-    Session folders are date-named (``2026-10-20_02_Title``), so 'session N'
-    questions need the ordinal mapping this provides: sort by date, number
-    from 1 (oldest). Shared between the ``list_sessions`` tool and the
+    Session folders are numbered (``SESSION_02_Title`` — the date is no
+    longer part of the name), so the date for the roster comes from the
+    file's ``- Started:`` header line; the folder number is already the
+    chronological ordinal.  The legacy date-named form
+    (``2026-10-20_02_Title``) is still parsed so a not-yet-migrated vault
+    keeps working.  Shared between the ``list_sessions`` tool and the
     /session_file command — one source of truth for the ordinals.
     """
     root = _kb_path()
@@ -655,16 +658,29 @@ def _session_roster_entries() -> list[_SessionEntry]:
 
     parsed: list[tuple[tuple[str, int], _SessionEntry]] = []
     for d in folders:
-        # Folder names: 'YYYY-MM-DD_NN' or 'YYYY-MM-DD_NN_Title_With_Gaps'
-        # (the ordinal is the first underscore group; everything after it —
-        # underscores included — is the title).
-        m = re.match(r"^(\d{4}-\d{2}-\d{2})_(\d+)(?:[_](.*))?$", d.name)
-        date = m.group(1) if m else ""
-        title = (m.group(3) or "").strip() if m else ""
-        sort_key = (date, int(m.group(2)) if m and m.group(2).isdigit() else 0)
+        text = ""
+        try:
+            text = (d / "notes.md").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            pass
+        # Folder names: 'SESSION_NN' or 'SESSION_NN_Title_With_Gaps' (the
+        # number is everything after the prefix's underscore; underscores in
+        # the title are kept), or the legacy 'YYYY-MM-DD_NN[_Title]'.
+        m = re.match(r"^SESSION_(\d+)(?:[_](.*))?$", d.name)
+        if m:
+            index = int(m.group(1)) if m.group(1).isdigit() else 0
+            title = (m.group(2) or "").strip()
+            dm = re.search(r"^- Started:\s*(\d{4}-\d{2}-\d{2})", text, flags=re.MULTILINE)
+            date = dm.group(1) if dm else ""
+        else:
+            m = re.match(r"^(\d{4}-\d{2}-\d{2})_(\d+)(?:[_](.*))?$", d.name)
+            date = m.group(1) if m else ""
+            title = (m.group(3) or "").strip() if m else ""
+            index = int(m.group(2)) if m and m.group(2).isdigit() else 0
+        sort_key = (date, index)
         parsed.append((sort_key, _SessionEntry(
             ordinal="", date=date, title=title, folder=d.name, path=d,
-            teaser=_first_line_teaser(d / "notes.md"),
+            teaser=_first_line_teaser(text),
         )))
     parsed.sort(key=lambda pair: pair[0])
     return [
@@ -700,22 +716,20 @@ async def _tool_list_sessions() -> str:
 
 
 _TEASER_SKIP = re.compile(
-    r"^(session:|started:|ended:|what happened:)|^\(no notes?\)$",
+    r"^(session:|started:|ended:|notes:|what happened:)|^\(no notes?\)$",
     re.IGNORECASE)
 
 
-def _first_line_teaser(notes: pathlib.Path, limit: int = 160) -> str:
+def _first_line_teaser(text: str, limit: int = 160) -> str:
     """First MEANINGFUL line of a session notes file (teaser for the roster).
 
+    Takes the file text (the roster already read it for the date line).
     Skips structural lines by their ORIGINAL form — markdown headers
-    ('# Session: …', '## Notes', '## Overview'), the '- Started/Ended:'
-    metadata, '(no notes)' placeholders and the 'What happened:' lead-in —
-    so the teaser is actual content (or the overview's first bullet).
+    ('# Session: …', '## Notes', '## Overview'), the '- Started/Ended/Notes:'
+    metadata (including the pointer to the notes attachment), '(no notes)'
+    placeholders and the 'What happened:' lead-in — so the teaser is actual
+    content (or the overview's first bullet).
     """
-    try:
-        text = notes.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
     for raw in text.splitlines():
         stripped = raw.strip()
         if not stripped or stripped.startswith("---"):

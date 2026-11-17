@@ -45,16 +45,14 @@ class TestSessionIndexUnnamedFolders:
         return datetime.now().strftime("%Y-%m-%d")
 
     def test_unnamed_folders_are_counted(self):
-        p = self._today_prefix()
-        (self.notes / f"{p}_01").mkdir()
-        (self.notes / f"{p}_02").mkdir()
-        assert S._next_session_index(datetime.now()) == 3
+        (self.notes / "SESSION_01").mkdir()
+        (self.notes / "SESSION_02").mkdir()
+        assert S._next_session_index() == 3
 
     def test_named_and_unnamed_mixed(self):
-        p = self._today_prefix()
-        (self.notes / f"{p}_01_quest").mkdir()
-        (self.notes / f"{p}_02").mkdir()
-        assert S._next_session_index(datetime.now()) == 3
+        (self.notes / "SESSION_01_quest").mkdir()
+        (self.notes / "SESSION_02").mkdir()
+        assert S._next_session_index() == 3
 
     def test_two_unnamed_sessions_same_day_keep_separate_notes(self):
         """The exact data-loss scenario: start → end → start again, no name."""

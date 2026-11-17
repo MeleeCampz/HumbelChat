@@ -7,27 +7,33 @@ Sessions are a global (bot-wide) bookkeeping concept used by the
 * At most ONE session is active at a time.  State survives bot restarts via
   a JSON file (``data/sessions.json`` — same pattern as ``reminders.json``).
 * Each session lives in its own folder inside the knowledge base
-  (``<KB_PATH>/session_notes/<date>_<index>[_<name>]/``) and can be edited
-  on disk at any time:
+  (``<KB_PATH>/session_notes/SESSION_<NN>[_<name>]/`` — a globally unique
+  running number, NO date in the folder name; the date lives in the file
+  header) and can be edited on disk at any time:
 
       notes.md            -- the ONLY RAG-indexed file for the session:
-                             header + timestamped notes + brief end-of-session
-                             overview (when present) + a combined
+                             header (name + started/ended dates + a pointer
+                             to the notes file) + brief end-of-session
+                             overview (when present) + the canonical
+                             ``## Session Log`` or a combined
                              ``## Documents`` section with the full text of
                              every uploaded document / transcript
-      .attachments/       -- raw uploaded .txt/.md files (one per upload);
-                             hidden dot-dir, so the KB indexer skips them
+      .attachments/       -- hidden dot-dir (the KB indexer skips dot-dirs):
+          notes.md        -- the session's timestamped notes live HERE, as
+                             an attachment file, not inside notes.md
+          <upload>.md     -- raw uploaded .txt/.md files (one per upload)
       .transcripts/       -- raw voice-channel transcripts; likewise hidden
 
   Uploading a document or finishing a transcript writes the raw file into
   the hidden dot-dir and re-renders ``notes.md`` with the document's full
   text combined in — one session = one RAG document, so near-duplicate
-  uploads can no longer be attached multiple times by retrieval.
+  uploads can no longer be attached multiple times by retrieval.  The notes
+  attachment participates in that combined ``## Documents`` fallback (when
+  no AI-merged log exists), so its content stays RAG-reachable either way.
 
-  ``notes.md`` is the only file whose bullets are re-parsed into in-memory
-  state (see :func:`refresh_notes_from_disk`); parsing is scoped to the
-  ``## Notes`` section so document text in the same file can never be
-  mistaken for notes.
+  The notes attachment is the only file whose bullets are re-parsed into
+  in-memory state (see :func:`refresh_notes_from_disk`); ``notes.md`` is
+  only parsed as a fallback for pre-migration (legacy) layouts.
 
 * Next-session reminders are plain persisted events: they fire when the NEXT
   session starts, so no live asyncio tasks are needed and restarts are
@@ -74,6 +80,16 @@ MAX_NAME_LEN: int = 40
 #: dot-dir) — their content reaches RAG only via the combined ``notes.md``.
 _SUBDIR_ATTACHMENTS = ".attachments"
 _SUBDIR_TRANSCRIPTS = ".transcripts"
+#: Session folder names are ``SESSION_<NN>[_<name>]`` — the date is NOT part
+#: of the name (it lives in the notes.md header); NN is a globally unique
+#: running index (never resets per day).
+_SESSION_PREFIX = "SESSION_"
+#: Reserved attachment file holding the session's timestamped notes
+#: (``.attachments/notes.md``) instead of a ``## Notes`` section inside the
+#: session's main ``notes.md``.
+_NOTES_FILE = "notes.md"
+#: One timestamped note bullet: ``- (<timestamp>) <text>``.
+_NOTE_BULLET_RE = re.compile(r"^\s*-\s*\(([^)]+)\)\s*(.+?)\s*$")
 
 # ── Disk layout ──────────────────────────────────────────────────────────
 
@@ -119,13 +135,14 @@ def _resolve_path() -> pathlib.Path | None:
 
 
 def notes_dir() -> pathlib.Path:
-    """Directory holding the per-session folders.
+    """Directory holding the per-session folders (``SESSION_NN[_name]/``).
 
     Lives inside the knowledge base by default so each session's combined
     ``notes.md`` is automatically part of the RAG-enabled documents (and
     shows up in /list_kb_docs).  The raw dot-dir files inside each session
-    folder are hidden from the indexer.  Override with ``SESSIONS_NOTES_DIR``
-    to point inside an Obsidian campaign vault (#19, docs/obsidian-vault.md).
+    folder (uploads, transcripts, the notes attachment) are hidden from the
+    indexer.  Override with ``SESSIONS_NOTES_DIR`` to point inside an
+    Obsidian campaign vault (#19, docs/obsidian-vault.md).
     """
     from config.settings import SESSIONS_NOTES_DIR
     return pathlib.Path(SESSIONS_NOTES_DIR)
@@ -156,14 +173,16 @@ def load_persisted() -> None:
     data and fire from the /start_session handler.  A pending manual
     overview survives restarts too and is delivered at the next start.
 
-    Also runs the one-time, idempotent legacy layout migration (visible
-    ``attachments/`` / ``transcripts/`` → hidden dot-dirs + combined
-    ``notes.md``) — deliberately BEFORE the vector index is first loaded,
-    so stale per-file rows are pruned and the recombined notes file is
-    embedded exactly once.
+    Also runs the one-time, idempotent layout migration (legacy date-named
+    folders → ``SESSION_NN``, visible ``attachments/`` / ``transcripts/`` →
+    hidden dot-dirs, inline ``## Notes`` → notes attachment) — deliberately
+    BEFORE the vector index is first loaded, so stale per-file rows are
+    pruned and the recombined notes file is embedded exactly once — and the
+    persisted state is re-pointed at the renamed folders.
     """
+    renames: dict[str, str] = {}
     try:
-        migrate_legacy_session_dirs()
+        renames = migrate_legacy_session_dirs()
     except Exception as e:  # pragma: no cover - defensive
         log.warning("Legacy session layout migration failed: %s", e)
 
@@ -172,6 +191,16 @@ def load_persisted() -> None:
         return
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
+        paths_fixed = False
+        # Rename maps accumulate across processes: a map persisted by an
+        # earlier migration is re-applied to the state (a no-op once the
+        # paths are already modern) so state written between a manual
+        # migration and the next load still gets re-pointed.
+        saved_map = raw.get("renames")
+        merged_map = dict(saved_map) if isinstance(saved_map, dict) else {}
+        merged_map.update(renames)
+        if merged_map:
+            paths_fixed = _apply_folder_renames(raw, merged_map)
         _state["session"] = raw.get("session")
         _state["last_ended"] = raw.get("last_ended")
         _state["last_start_at"] = raw.get("last_start_at")
@@ -179,6 +208,11 @@ def load_persisted() -> None:
         _state["next_session_reminders"] = reminders if isinstance(reminders, list) else []
         log.info("Loaded persisted session state (%d queued next-session reminder(s))",
                  len(_state["next_session_reminders"]))
+        if paths_fixed:
+            # The migration renamed the folders the state still pointed at —
+            # persist the corrected paths (and the map) immediately.
+            _state["renames"] = {k: v for k, v in merged_map.items() if isinstance(v, str)}
+            _save()
     except Exception as e:
         log.warning("Could not load sessions file: %s", e)
 
@@ -243,20 +277,24 @@ def recover_active_session() -> dict[str, Any] | None:
             # the session keeps working (crash mid-creation, folder deleted,
             # a vault sync that did not pull it back).  Bump past any existing
             # sibling folders, same guard as start_session.
-            file_path = _session_file_path(started, s.get("name") or None, 1)
+            file_path = _session_file_path(s.get("name") or None, 1)
             while file_path.parent.exists():
-                file_path = _bump_file_index(file_path, started, s.get("name") or None)
+                file_path = _bump_file_index(file_path, s.get("name") or None)
             path = file_path
             s["file"] = str(file_path)
             s["dir"] = str(file_path.parent)
         log.warning("Resumed session %r had no notes file on disk — recreating at %s",
                     s.get("name"), s["file"])
+    # Ensure the notes attachment exists too (deleted folder / legacy session)
+    # BEFORE any disk re-read, so state notes survive as the source.
+    if not _notes_attachment_path(s).is_file():
+        _write_notes_attachment(s)
     if file_missing:
         _write_session_file(s)      # recreate from state (nothing to clobber)
     else:
         # Disk is the source of truth: re-read user edits made while the bot
         # was down WITHOUT re-rendering (a render would drop any manual
-        # changes outside the ## Notes section).
+        # changes outside the header sections).
         _reindex_notes_file(s)      # indexing inside is best-effort
     age_h = (time.time() - started) / 3600
     if age_h >= STALE_SESSION_SEC / 3600:
@@ -317,20 +355,19 @@ def _sanitize_stem(name: str | None) -> str:
     return safe[:MAX_NAME_LEN]
 
 
-def _next_session_index(now: datetime) -> int:
-    """1-based per-day index for the new session (date is part of the folder name)."""
-    prefix = now.strftime("%Y-%m-%d")
+def _next_session_index() -> int:
+    """Next globally unique session index (max existing SESSION_NN + 1).
+
+    Without a date in the folder name the index can no longer restart per
+    day — it must stay unique across the whole notes directory.
+    """
     try:
-        folders = [p for p in notes_dir().glob(f"{prefix}_*") if p.is_dir()]
+        folders = [p for p in notes_dir().iterdir() if p.is_dir()]
     except OSError:
         return 1
     best = 0
     for f in folders:
-        # Unnamed sessions produce folders like ``2026-01-01_03`` with NO
-        # trailing underscore — the old ``(\\d+)_`` pattern skipped them, so
-        # the next session re-used their index and silently overwrote their
-        # notes.md (os.replace in _write_session_file). Accept both shapes.
-        m = re.match(rf"^{re.escape(prefix)}_(\d+)(?:_|$)", f.name)
+        m = re.match(rf"^{_SESSION_PREFIX}(\d+)(?:_|$)", f.name)
         if m:
             try:
                 best = max(best, int(m.group(1)))
@@ -353,24 +390,22 @@ def _session_dir(session: dict[str, Any]) -> pathlib.Path:
     return notes_dir()
 
 
-def _session_file_path(started_at: float, name: str | None, index: int) -> pathlib.Path:
-    """Each session is a folder: ``<date>_<index>[_<name>]/notes.md``."""
-    dt = datetime.fromtimestamp(started_at)
+def _session_file_path(name: str | None, index: int) -> pathlib.Path:
+    """Each session is a folder: ``SESSION_<NN>[_<name>]/notes.md``."""
     safe = _sanitize_name(name)
-    stem = f"{dt.strftime('%Y-%m-%d')}_{index:02d}" + (f"_{safe}" if safe else "")
+    stem = f"{_SESSION_PREFIX}{index:02d}" + (f"_{safe}" if safe else "")
     return notes_dir() / stem / "notes.md"
 
 
-def _bump_file_index(file_path: pathlib.Path, started_at: float,
-                     name: str | None) -> pathlib.Path:
-    """Next free sibling path for the same date/name (folder index +1).
+def _bump_file_index(file_path: pathlib.Path, name: str | None) -> pathlib.Path:
+    """Next free sibling path for the same name (folder index +1).
 
     Used by :func:`start_session`'s collision guard and by crash recovery so
     a recreated session never points at an existing folder.
     """
-    m = re.match(r"^\d{4}-\d{2}-\d{2}_(\d{2})(?:_|$)", file_path.parent.name)
+    m = re.match(rf"^{_SESSION_PREFIX}(\d+)(?:_|$)", file_path.parent.name)
     index = (int(m.group(1)) + 1) if m else 2
-    return _session_file_path(started_at, name, index)
+    return _session_file_path(name, index)
 
 
 def _unique_path(directory: pathlib.Path, stem: str, ext: str) -> pathlib.Path:
@@ -385,7 +420,12 @@ def _unique_path(directory: pathlib.Path, stem: str, ext: str) -> pathlib.Path:
 
 
 def _session_docs(session: dict[str, Any], subdir: str) -> list[str]:
-    """Names of standalone documents currently in one of the session's sub-folders."""
+    """Names of standalone uploaded documents in one of the session's sub-folders.
+
+    The reserved notes attachment (``.attachments/notes.md``) is NOT listed —
+    the notes have their own display section; this lists *uploads/transcripts*
+    only (used by /session_info and the AI document assembly).
+    """
     d = _session_dir(session) / subdir
     if not d.exists():
         return []
@@ -394,6 +434,7 @@ def _session_docs(session: dict[str, Any], subdir: str) -> list[str]:
             f.name for f in d.iterdir()
             if f.is_file() and not f.name.startswith(".")
             and f.suffix.lower() in {".md", ".txt"}
+            and not (subdir == _SUBDIR_ATTACHMENTS and f.name == _NOTES_FILE)
         )
     except OSError:
         return []
@@ -453,9 +494,12 @@ def _documents_block_for_dir(folder: pathlib.Path) -> list[str]:
 
     Every uploaded document / transcript in the hidden dot-dirs contributes
     one ``### <filename>`` subsection with its full text (the file's own
-    leading H1 is dropped — it duplicates the subsection heading).  Raw files
-    are immutable once written, so rendering is deterministic and idempotent:
-    same dot-dir contents ⇒ byte-identical section.
+    leading H1 is dropped — it duplicates the subsection heading).  The
+    reserved notes attachment participates too (so live notes stay
+    RAG-reachable while no AI-merged log exists), but only when it actually
+    holds note bullets — an empty placeholder is skipped.  Uploaded raw
+    files are immutable once written, so rendering is deterministic and
+    idempotent: same dot-dir contents ⇒ byte-identical section.
     """
     lines: list[str] = []
     for subdir in (_SUBDIR_ATTACHMENTS, _SUBDIR_TRANSCRIPTS):
@@ -477,6 +521,11 @@ def _documents_block_for_dir(folder: pathlib.Path) -> list[str]:
                 continue
             if not body:
                 continue
+            if subdir == _SUBDIR_ATTACHMENTS and f.name == _NOTES_FILE:
+                # Skip the notes attachment while it is just a placeholder —
+                # the (no notes) skeleton adds nothing to the RAG document.
+                if not any(_NOTE_BULLET_RE.match(l) for l in body.splitlines()):
+                    continue
             # Drop the raw file's own leading "# Title" line — the subsection
             # heading below already names the document, and a nested H1 would
             # otherwise split the chunker section in two.
@@ -495,20 +544,22 @@ def _documents_section_lines(session: dict[str, Any]) -> list[str]:
 
 
 def _session_file_content(session: dict[str, Any]) -> str:
-    """Render the session's ``notes.md`` from its state + raw dot-dir files.
+    """Render the session's main ``notes.md`` from its state + raw dot-dir files.
 
-    Real notes are timestamped bullets under ``## Notes``.  The session's RAG
-    content is the AI-merged canonical log (``## Session Log``, written at end
-    when the AI combined all player uploads into one de-duplicated record);
-    without it — AI unavailable, stale auto-end, legacy sessions — uploaded
+    Timestamped notes are NOT part of this file any more — they live in the
+    notes attachment (``.attachments/notes.md``); the header carries a
+    pointer to it.  The session's RAG content is the AI-merged canonical log
+    (``## Session Log``, written at end when the AI combined all player
+    uploads into one de-duplicated record); without it — AI unavailable,
+    stale auto-end, legacy sessions — the notes attachment plus uploaded
     documents and transcripts appear with their FULL text under ``##
     Documents`` instead, so content stays reachable either way.  The brief
-    end-of-session overview, when present, sits right after the notes —
-    before the session log / documents.
+    end-of-session overview sits right after the header.
     """
     started = fmt_local(session["started_at"])
     ended = (fmt_local(session["ended_at"])
              if session.get("ended_at") else None)
+    n_notes = len(session.get("notes") or [])
     lines = [
         f"# Session: {session.get('name') or 'Untitled'}",
         "",
@@ -516,14 +567,9 @@ def _session_file_content(session: dict[str, Any]) -> str:
     ]
     if ended:
         lines.append(f"- Ended: {ended}")
-    lines += ["", "## Notes", ""]
-    for ts, text in session.get("notes", []):
-        t = fmt_local(ts)
-        lines.append(f"- ({t}) {text}")
-    if not session.get("notes"):
-        lines.append("(no notes)")
-    # The brief end-of-session overview leads the file after the notes (the
-    # reader gets the digest before the long log).
+    lines.append(f"- Notes: {_SUBDIR_ATTACHMENTS}/{_NOTES_FILE} ({n_notes} note(s))")
+    # The brief end-of-session overview leads the body (the reader gets the
+    # digest before the long log).
     if session.get("overview"):
         lines += ["", "## Overview (written when the session ended)", "", str(session["overview"]).strip()]
     # The AI-merged canonical log (written at end) replaces the mechanical
@@ -539,7 +585,7 @@ def _session_file_content(session: dict[str, Any]) -> str:
 
 
 def _write_session_file(session: dict[str, Any]) -> None:
-    """(Re)write the session's ``notes.md``. Failures are logged, never raised."""
+    """(Re)write the session's main ``notes.md``. Failures are logged, never raised."""
     path = pathlib.Path(session.get("file") or "")
     if not path:
         return
@@ -550,6 +596,45 @@ def _write_session_file(session: dict[str, Any]) -> None:
         os.replace(tmp, path)
     except Exception as e:
         log.warning("Failed to write session notes file %s: %s", path, e)
+
+
+def _notes_attachment_path(session: dict[str, Any]) -> pathlib.Path:
+    """The session folder's notes attachment (``.attachments/notes.md``)."""
+    return _session_dir(session) / _SUBDIR_ATTACHMENTS / _NOTES_FILE
+
+
+def _notes_attachment_content(session: dict[str, Any]) -> str:
+    """Render the notes attachment file from state: header + note bullets.
+
+    Deliberately NO ``##`` section heading below the title — when the
+    combined ``## Documents`` fallback embeds this file, the bullets must
+    nest under the file's ``###`` subsection, not open a competing ``##``.
+    """
+    lines = [f"# Session Notes: {session.get('name') or 'Untitled'}", ""]
+    for ts, text in session.get("notes", []):
+        lines.append(f"- ({fmt_local(ts)}) {text}")
+    if not session.get("notes"):
+        lines.append("(no notes)")
+    return "\n".join(lines) + "\n"
+
+
+def _write_notes_attachment(session: dict[str, Any]) -> None:
+    """(Re)write the session's notes attachment. Failures logged, never raised."""
+    path = _notes_attachment_path(session)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(_notes_attachment_content(session), encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception as e:
+        log.warning("Failed to write session notes attachment %s: %s", path, e)
+
+
+def _write_session_files(session: dict[str, Any]) -> None:
+    """Write BOTH session files: notes attachment first, then the main file
+    (whose ``## Documents`` fallback embeds the freshly written notes)."""
+    _write_notes_attachment(session)
+    _write_session_file(session)
 
 
 def _index_session_file(path: pathlib.Path) -> None:
@@ -589,13 +674,13 @@ def _index_session_file(path: pathlib.Path) -> None:
 
 
 def _session_index_paths(session: dict[str, Any]) -> list[pathlib.Path]:
-    """Indexable files for a session: ONLY ``notes.md``.
+    """Indexable files for a session: ONLY the main ``notes.md``.
 
-    The combined notes file carries the full text of every upload and
-    transcript (see :func:`_documents_section_lines`); the raw dot-dir files
-    are hidden from the KB indexer and must never be indexed on their own —
-    that is what caused near-duplicate session content to be attached
-    multiple times by RAG.
+    The combined notes file carries the full text of the notes attachment,
+    every upload and every transcript (see :func:`_documents_section_lines`);
+    the raw dot-dir files are hidden from the KB indexer and must never be
+    indexed on their own — that is what caused near-duplicate session content
+    to be attached multiple times by RAG.
     """
     f = session.get("file")
     if f and pathlib.Path(f).exists():
@@ -609,45 +694,78 @@ def _index_session_paths(session: dict[str, Any]) -> None:
 
 
 def _reindex_notes_file(session: dict[str, Any]) -> None:
-    """Re-read the session's ``notes.md`` from disk and sync state + index.
+    """Re-read the session's notes file from disk and sync state + index.
 
-    The user may have edited the markdown file on disk; treat it as the new
-    source of truth.  Only real ``(<timestamp>)`` note bullets inside the
-    ``## Notes`` section are re-parsed into state — scoping to that section is
-    essential because the combined ``## Documents`` section (and document
-    text) may itself contain bullet-like lines.  The overview stays in memory.
+    The user may have edited the markdown on disk; treat it as the new
+    source of truth.  Source of record is the notes attachment
+    (``.attachments/notes.md``) — it holds ONLY note bullets, so parsing
+    the whole file is safe.  A session folder still in the LEGACY layout
+    (no attachment yet, a ``## Notes`` section inside notes.md) is parsed
+    with the old section scoping so document text in the same file cannot
+    be mistaken for notes.  When neither source carries a parsable notes
+    region (new-format main file, attachment deleted) the in-memory notes
+    are kept rather than wiped.  The overview stays in memory.
     """
-    path = pathlib.Path(session.get("file") or "")
-    if not path or not path.exists():
-        return
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError as e:
-        log.warning("Could not read session notes file %s: %s", path, e)
-        return
-    # Isolate the ## Notes section (up to the next "## " heading).
-    m = re.search(r"^## Notes\s*$", text, flags=re.MULTILINE)
-    section = text[m.end():] if m else text
-    cut = re.search(r"^## ", section, flags=re.MULTILINE)
-    if cut:
-        section = section[:cut.start()]
     notes: list[list[float | str]] = []
-    for line in section.splitlines():
-        bm = re.match(r"^\s*-\s*\(([^)]+)\)\s*(.+?)\s*$", line)
-        if bm:
-            try:
-                ts = parse_local(bm.group(1))
-            except ValueError:
-                continue
-            notes.append([ts, bm.group(2)])
+    att_path = _notes_attachment_path(session)
+    text: str | None = None
+    if att_path.is_file():
+        try:
+            text = att_path.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            log.warning("Could not read session notes attachment %s: %s", att_path, e)
+            return
+        for line in text.splitlines():
+            bm = _NOTE_BULLET_RE.match(line)
+            if bm:
+                try:
+                    ts = parse_local(bm.group(1))
+                except ValueError:
+                    continue
+                notes.append([ts, bm.group(2)])
+    else:
+        # Legacy fallback: notes bullets inside the main notes.md's ## Notes
+        # section (scoped so combined document text is never mis-parsed).
+        path = pathlib.Path(session.get("file") or "")
+        if not path or not path.is_file():
+            return
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            log.warning("Could not read session notes file %s: %s", path, e)
+            return
+        m = re.search(r"^## Notes\s*$", text, flags=re.MULTILINE)
+        if not m:
+            # New-format file without a notes attachment — nothing on disk to
+            # re-parse; keep the in-memory notes (recovery recreates the
+            # attachment from state).
+            return
+        section = text[m.end():]
+        cut = re.search(r"^## ", section, flags=re.MULTILINE)
+        if cut:
+            section = section[:cut.start()]
+        for line in section.splitlines():
+            bm = _NOTE_BULLET_RE.match(line)
+            if bm:
+                try:
+                    ts = parse_local(bm.group(1))
+                except ValueError:
+                    continue
+                notes.append([ts, bm.group(2)])
     session["notes"] = notes
     _index_session_paths(session)
 
 
-# ── Legacy layout migration (visible sub-dirs → hidden dot-dirs) ─────────
+# ── Layout migration (legacy date-folders / visible sub-dirs / inline notes) ──
+
+#: Legacy session folder names: ``<YYYY-MM-DD>_<NN>[_<name>]``.
+_LEGACY_FOLDER_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})_(\d+)(?:_(.*))?$")
+#: Current session folder names: ``SESSION_<NN>[_<name>]``.
+_SESSION_FOLDER_RE = re.compile(rf"^{_SESSION_PREFIX}(\d+)(?:_|$)")
+
 
 def _migrate_legacy_session_dir(folder: pathlib.Path) -> bool:
-    """Migrate ONE session folder to the hidden dot-dir layout.
+    """Migrate ONE session folder's raw documents to the hidden dot-dir layout.
 
     Legacy folders stored raw documents in visible ``attachments/`` /
     ``transcripts/`` sub-folders, which the KB indexed file-by-file (the
@@ -687,13 +805,93 @@ def _migrate_legacy_session_dir(folder: pathlib.Path) -> bool:
     return changed
 
 
+def _migrate_notes_to_attachment(folder: pathlib.Path) -> bool:
+    """Move ONE folder's inline ``## Notes`` bullets into the notes attachment.
+
+    Legacy ``notes.md`` files carried the live notes as a ``## Notes``
+    section.  They are extracted (bullets kept verbatim) into
+    ``.attachments/notes.md`` and the section is removed from the main file,
+    which gains a ``- Notes:`` pointer under its Started/Ended header lines.
+    For folders that never had a ``## Notes`` section an (empty) attachment
+    is still created so every session folder has the new form.  Never
+    re-renders the whole main file (that would drop a stored overview) —
+    the live renderer regenerates it from state on the next change.
+    Idempotent: no-op when the attachment already exists.
+    """
+    notes_md = folder / "notes.md"
+    att = folder / _SUBDIR_ATTACHMENTS / _NOTES_FILE
+    if att.exists():
+        return False
+    if not notes_md.is_file():
+        return False
+    try:
+        text = notes_md.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    if re.search(r"^- Notes:", text, flags=re.MULTILINE):
+        # Already in the NEW form (pointer present) but the attachment is
+        # gone — a deletion, not a legacy layout.  Do not fabricate an empty
+        # attachment here (it would clobber the notes recovery path); crash
+        # recovery recreates it from persisted state instead.
+        return False
+    title = "Untitled"
+    mt = re.search(r"^# Session:\s*(.*)$", text, flags=re.MULTILINE)
+    if mt and mt.group(1).strip():
+        title = mt.group(1).strip()
+    bullets: list[str] = []
+    m = re.search(r"^## Notes\s*$", text, flags=re.MULTILINE)
+    if m:
+        section = text[m.end():]
+        cut = re.search(r"^## ", section, flags=re.MULTILINE)
+        if cut:
+            section = section[:cut.start()]
+        for line in section.splitlines():
+            bm = _NOTE_BULLET_RE.match(line)
+            if bm:
+                bullets.append(f"- ({bm.group(1)}) {bm.group(2)}")
+    # Write the attachment first (header + verbatim bullets or placeholder).
+    body = [f"# Session Notes: {title}", ""] + (bullets or ["(no notes)"])
+    try:
+        folder.joinpath(_SUBDIR_ATTACHMENTS).mkdir(parents=True, exist_ok=True)
+        att.write_text("\n".join(body) + "\n", encoding="utf-8")
+    except OSError as e:
+        log.warning("Could not create notes attachment %s: %s", att, e)
+        return False
+    # Surgical main-file edit: drop the ## Notes section, add the pointer.
+    lines = text.splitlines()
+    if m:
+        # Locate the section bounds in the lines list (start at '## Notes',
+        # end at the next '## ' heading or EOF).
+        start_i = next(i for i, l in enumerate(lines) if l.strip() == "## Notes")
+        end_i = next((i for i, l in enumerate(lines[start_i + 1:], start_i + 1)
+                      if l.startswith("## ")), len(lines))
+        del lines[start_i:end_i]
+        # Trim blank lines left dangling before the next section heading.
+        while lines and not lines[-1].strip():
+            lines.pop()
+    if not any(l.startswith("- Notes:") for l in lines):
+        insert_at = 0
+        for i, l in enumerate(lines):
+            if l.startswith("- Started:") or l.startswith("- Ended:"):
+                insert_at = i + 1
+        lines.insert(insert_at, f"- Notes: {_SUBDIR_ATTACHMENTS}/{_NOTES_FILE}")
+    try:
+        notes_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except OSError as e:
+        log.warning("Could not update migrated notes file %s: %s", notes_md, e)
+        return False
+    return True
+
+
 def _migrate_legacy_notes_file(folder: pathlib.Path) -> None:
     """Append the combined Documents section to a migrated session's notes.md.
 
     For sessions that are NOT in memory we must not re-render the whole file
     (that would drop the stored overview), so the section is appended instead;
     the live renderer regenerates it from the dot-dirs on the next change.
-    Idempotent: no-op when a ``## Documents`` section already exists.
+    Idempotent: no-op when a ``## Documents`` section already exists — and a
+    session whose AI-merged ``## Session Log`` is already present never gets
+    one (the merged log intentionally replaces the mechanical copy).
     """
     notes = folder / "notes.md"
     if not notes.is_file():
@@ -703,6 +901,8 @@ def _migrate_legacy_notes_file(folder: pathlib.Path) -> None:
     except OSError:
         return
     if re.search(r"^## Documents\b", text, flags=re.MULTILINE):
+        return
+    if re.search(r"^## Session Log", text, flags=re.MULTILINE):
         return
     block = _documents_block_for_dir(folder)
     if not block:
@@ -715,29 +915,120 @@ def _migrate_legacy_notes_file(folder: pathlib.Path) -> None:
         log.warning("Could not update migrated notes file %s: %s", notes, e)
 
 
-def migrate_legacy_session_dirs() -> int:
+def migrate_legacy_session_dirs() -> dict[str, str]:
     """One-time, idempotent migration of ALL session folders.
 
-    Called from :func:`load_persisted` at startup.  Returns the number of
-    folders that changed (0 on every run after the first).
+    Called from :func:`load_persisted` at startup.  Brings every folder to
+    the current form:
+
+    1. **Rename** legacy date-named folders (``2026-10-20_02_Title``) to
+       ``SESSION_<NN>[_Title]`` — renumbered chronologically (date, old
+       index) continuing after the highest existing ``SESSION_NN``, so the
+       numbers are globally unique once the date is gone.
+    2. **Raw documents:** visible ``attachments/`` / ``transcripts/`` →
+       hidden dot-dirs (old behavior).
+    3. **Notes:** the inline ``## Notes`` section → the notes attachment
+       (``.attachments/notes.md``) + a pointer line in the main file.
+
+    Returns ``{old_folder_name: new_folder_name}`` for the renames actually
+    performed (empty dict when nothing changed — every run after the first).
+    :func:`load_persisted` uses the map to re-point the persisted session
+    state at the renamed folders.
     """
     try:
         root = notes_dir()
         if not root.exists():
-            return 0
+            return {}
         folders = [p for p in sorted(root.iterdir())
                    if p.is_dir() and not p.name.startswith(".")]
     except OSError:
-        return 0
-    changed = 0
-    for folder in folders:
+        return {}
+
+    # 1. Chronological renumbering of the legacy date folders.
+    max_idx = 0
+    legacy: list[pathlib.Path] = []
+    for p in folders:
+        m_new = _SESSION_FOLDER_RE.match(p.name)
+        if m_new:
+            try:
+                max_idx = max(max_idx, int(m_new.group(1)))
+            except ValueError:
+                pass
+            continue
+        if _LEGACY_FOLDER_RE.match(p.name):
+            legacy.append(p)
+    renames: dict[str, str] = {}
+    # Sort by (date, old index) — ISO dates sort chronologically by name.
+    legacy.sort(key=lambda p: (_LEGACY_FOLDER_RE.match(p.name).group(1),
+                               int(_LEGACY_FOLDER_RE.match(p.name).group(2))))
+    for p in legacy:
+        m = _LEGACY_FOLDER_RE.match(p.name)
+        title = f"_{m.group(3)}" if m.group(3) else ""  # the trailing ``_<name>`` part
+        while True:
+            max_idx += 1
+            new_name = f"{_SESSION_PREFIX}{max_idx:02d}" + title
+            if not (root / new_name).exists():
+                break
         try:
-            if _migrate_legacy_session_dir(folder):
-                _migrate_legacy_notes_file(folder)
-                log.info("Migrated session folder to hidden dot-dir layout: %s", folder.name)
-                changed += 1
+            os.replace(p, root / new_name)
+            renames[p.name] = new_name
+            log.info("Renamed legacy session folder %s → %s", p.name, new_name)
+        except OSError as e:
+            log.warning("Could not rename session folder %s → %s: %s", p.name, new_name, e)
+            continue
+        p = root / new_name
+        # 2 + 3. Content migration on the renamed folder.
+        try:
+            content_changed = False
+            if _migrate_legacy_session_dir(p):
+                content_changed = True
+            if _migrate_notes_to_attachment(p):
+                content_changed = True
+            _migrate_legacy_notes_file(p)
+            if content_changed:
+                log.info("Migrated session folder to the current layout: %s", p.name)
         except Exception as e:  # one bad folder must not block the rest
-            log.warning("Legacy migration failed for %s: %s", folder, e)
+            log.warning("Legacy migration failed for %s: %s", p, e)
+
+    # Content-only migration of already-SESSION_-named folders (idempotent).
+    for p in folders:
+        if p.name in renames or not _SESSION_FOLDER_RE.match(p.name):
+            continue
+        if not (root / p.name).exists():
+            continue
+        try:
+            content_changed = False
+            if _migrate_legacy_session_dir(p):
+                content_changed = True
+            if _migrate_notes_to_attachment(p):
+                content_changed = True
+            _migrate_legacy_notes_file(p)
+            if content_changed:
+                log.info("Migrated session folder to the current layout: %s", p.name)
+        except Exception as e:
+            log.warning("Legacy migration failed for %s: %s", p, e)
+    return renames
+
+
+def _apply_folder_renames(raw: dict[str, Any], renames: dict[str, str]) -> bool:
+    """Re-point the persisted session state at folders renamed by the migration."""
+    changed = False
+    for key in ("session", "last_ended"):
+        s = raw.get(key)
+        if not isinstance(s, dict):
+            continue
+        d = s.get("dir")
+        if d:
+            p = pathlib.Path(d)
+            if p.name in renames:
+                s["dir"] = str(p.parent / renames[p.name])
+                changed = True
+        f = s.get("file")
+        if f:
+            p = pathlib.Path(f)
+            if p.parent.name in renames:
+                s["file"] = str(p.parent.parent / renames[p.parent.name] / p.name)
+                changed = True
     return changed
 
 
@@ -818,13 +1109,13 @@ def start_session(name: str | None = None) -> tuple[dict[str, Any], dict[str, An
 
     dt = datetime.fromtimestamp(now)
     safe_name = _sanitize_name(name)
-    index = _next_session_index(dt)
-    file_path = _session_file_path(now, safe_name, index)
+    index = _next_session_index()
+    file_path = _session_file_path(safe_name, index)
     # Defensive collision guard: never point a new session at an existing
     # folder, no matter how it got there (manual rename, clock skew, a
     # partially-created session). Bump until the path is free.
     while file_path.parent.exists():
-        file_path = _bump_file_index(file_path, now, safe_name)
+        file_path = _bump_file_index(file_path, safe_name)
     session = {
         "id": dt.strftime("%Y%m%d%H%M%S"),
         "name": safe_name,
@@ -838,7 +1129,7 @@ def start_session(name: str | None = None) -> tuple[dict[str, Any], dict[str, An
     }
     _state["session"] = session
     _state["last_start_at"] = now
-    _write_session_file(session)
+    _write_session_files(session)
     _index_session_paths(session)
     _save()
     log.info("Session started: %s (dir: %s)", safe_name or "(untitled)", session["dir"])
@@ -858,7 +1149,7 @@ def _end_session_internal(session: dict[str, Any], overview: str | None,
         session["merged_log"] = merged_log
     _state["last_ended"] = session
     _state["session"] = None
-    _write_session_file(session)
+    _write_session_files(session)
     _index_session_paths(session)
     _save()
     return session
@@ -912,7 +1203,7 @@ def add_note(text: str, author: str = "") -> dict[str, Any] | None:
         return None
     text = f"{clean} (by {author})" if author else clean
     session.setdefault("notes", []).append([time.time(), text])
-    _write_session_file(session)
+    _write_session_files(session)
     _index_session_paths(session)
     _save()
     log.info("Session note added to %s: %.60s", session.get("name"), clean)
