@@ -80,8 +80,11 @@ Budgets are settings, not guesses: `IMAGE_PROMPT_BASE_CHARS`,
 `IMAGE_PROMPT_FOREGROUND_FIGURES`.
 
 Reasoning effort on the rewrite is `IMAGE_REASONING_EFFORT` (default `medium`):
-measured on the live backend at `low` 42.7 s median / `medium` 52.2 s / `high`
-152.8 s, with **identical** plan correctness at all three and `medium` writing
-visibly more paintable detail (§12). `IMAGE_REWRITE_MAX_TOKENS` tracks it — a
-thinking model spends part of the output cap on thinking and will otherwise
-truncate the plan. The first routing turn always runs thinking-off.
+applied to **every** rewrite turn (tool-picking, plan answer, lookup, prose
+fallback) — measured on the live backend at `low` 42.7 s median / `medium`
+52.2 s / `high` 152.8 s, with **identical** plan correctness at all three and
+`medium` writing visibly more paintable detail (§12). `IMAGE_REWRITE_MAX_TOKENS`
+tracks it — a thinking model spends part of the output cap on thinking and will
+otherwise truncate the plan. Do not gate the effort on `agent_loop`'s per-turn
+`thinking` flag: a plan answer comes out of a decision turn, so gating it there
+makes the setting inert (that was the state until it was measured).

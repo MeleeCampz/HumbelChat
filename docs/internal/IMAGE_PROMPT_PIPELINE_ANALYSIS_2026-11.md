@@ -479,3 +479,36 @@ path while Alisa Pennygleam clutches her coin bag."* One mention, plural verb.
 
 §11.5's open item stands unchanged: nothing yet compares the **request's** own actors
 ("Boss Frey und seinen Banditen") against the figures the plan chose to paint.
+
+
+## 14. The knob was inert until it was measured against the turn map
+
+An observer run (no patching, just recording the effort each completion actually
+used) showed a whole rewrite — plan, no tools — running in **one turn at `off`**.
+
+`agent_loop` runs its tool-picking turns with `thinking=False` by design, and a plan
+answer comes out of exactly such a turn. The completer had been gating the effort on
+that flag (`"low" if thinking else "off"`, and then `"off" if not thinking else …`),
+so the configured level reached only fallback / forced-answer / nudge turns — the rare
+path. The setting was inert on the common path, and §12's numbers described a
+configuration the code did not have (every turn raised together).
+
+**Corrected:** `IMAGE_REASONING_EFFORT` now applies to every rewrite turn alike —
+tool-picking, plan answer, lookup pass, prose fallback — which is what §12 varied.
+
+Measured under the shipped setting, efforts logged per turn:
+
+| request | before (`off` on decision turns) | after (`medium` everywhere) |
+|---|---|---|
+| single figure, an override ("Trixy ohne Goggle…") | 2.7 s, 1 turn | **8.2 s**, 1 turn — "leaning close over a half-assembled clockwork mechanism and turning tiny lenses into place with brass tweezers" |
+| group, 8 named beings, lookup pass triggered | ~43–57 s | **43.7 s**, 7 turns (all medium), 10 tool calls costing 17.8 s |
+
+The group rewrite is dominated by tool turns and the enforced lookup pass, not by the
+reasoning level; the single-figure case is where the level shows up as latency — and as
+the extra concrete action in the scene sentence.
+
+**Loop bounds that shape the turn map** (`RAG_AGENT_*`): code defaults 2 iterations /
+6 tool calls / 45 s per loop; production `.env` sets `RAG_AGENT_MAX_ITERATIONS=3`. When
+iterations run out the loop adds one **forced final** completion over the gathered
+transcript. The enforced lookup pass is a SECOND loop with its own bounds — which is why
+one rewrite can log seven completions.

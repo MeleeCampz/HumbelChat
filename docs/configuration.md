@@ -214,7 +214,7 @@ back to `rag` mode happens in a `finally` after every painting window.
 | `GPU_HEAL_ON_START` | Bot startup restores rag mode if a crash left the 4070 image-side (idempotent; `false` opts out) | `true` |
 | `IMAGE_MODE_HOLD_S` | Hold window after a generation the **bot** switched for: the rag switch-back is deferred, back-to-back generations skip switch+load (a manual-mode window earns no hold) | `0` |
 | `IMAGE_DEFAULT_SIZE` / `IMAGE_MAX_SIZE` | Painting square (working set grows with resolution) | `1024` / `2048` |
-| `IMAGE_GEN_TIMEOUT_S` / `IMAGE_LOAD_TIMEOUT_S` | Per-image request / model-load readiness deadlines | `180` / `300` |
+| `IMAGE_GEN_TIMEOUT_S` / `IMAGE_LOAD_TIMEOUT_S` | Per-image request / model-load readiness deadlines | `600` / `300` |
 | `IMAGE_NEGATIVE_PROMPT` | What the model steers away from (user-requested text is NOT suppressed) | built-in default |
 
 **Prompt composition (#84)** — the rewrite model returns a plan; `bot_core/image_prompt.py` writes the prompt, so these are budget knobs, not style knobs:
@@ -225,7 +225,7 @@ back to `rag` mode happens in a `finally` after every painting window.
 | `IMAGE_PROMPT_CHARS_PER_FIGURE` | Extra budget per named figure | `420` |
 | `IMAGE_PROMPT_MAX_CHARS` | Hard ceiling regardless of figure count (measured: 6 anchors fit; 7–8 figures hit it and the ladder starts cutting) | `3600` |
 | `IMAGE_PROMPT_FOREGROUND_FIGURES` | Figures painted in the front group; the rest get "behind them, smaller and softer" | `4` |
-| `IMAGE_REASONING_EFFORT` | Reasoning effort on the rewrite's plan/lookup turns (the routing turn is always off). Measured: `low` 42.7 s median, `medium` 52.2 s, `high` 152.8 s — `medium` writes visibly more paintable detail, `high` buys nothing at 3.6× | `medium` |
+| `IMAGE_REASONING_EFFORT` | Reasoning effort on **every** rewrite turn (tool-picking, plan answer, lookup, prose fallback). Measured: `low` 42.7 s median, `medium` 52.2 s, `high` 152.8 s — `medium` writes visibly more paintable detail, `high` buys nothing at 3.6× | `medium` |
 | `IMAGE_REWRITE_MAX_TOKENS` | Output cap for those calls; thinking spends part of it and can truncate the plan, so it tracks the effort (`4096` at off/low, `6144` above). `0` = derive | `0` (derived) |
 
 | Variable | Description | Default |

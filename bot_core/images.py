@@ -547,14 +547,18 @@ def _make_completer(client: AsyncOpenAI):
     async def _complete(
         messages: list[dict], model: str, *, thinking: bool,
     ) -> str:
-        # Decision/routing turns: reasoning OFF (fast, no leak). Plan, lookup
-        # and prose turns: IMAGE_REASONING_EFFORT (default "medium" — measured,
-        # see config/settings.py and the analysis doc §12). Same param plumbing
-        # + 4xx fallback as the main AI path (bot_core.ai_client, #20).
+        # The loop's `thinking` flag used to gate the effort here, and that made
+        # the setting inert: measured live, a plan answer arrives out of a
+        # DECISION turn (thinking=False), so a whole rewrite ran reasoning-off
+        # and the configured level never reached a single request. The effort is
+        # now applied to every rewrite turn — decision, answer, lookup and
+        # fallback alike — which is what the §12 measurement actually varied.
+        # Same param plumbing + 4xx fallback as the main AI path
+        # (bot_core.ai_client, #20).
         resp = await asyncio.wait_for(
             _create_with_reasoning_fallback(
                 client,
-                "off" if not thinking else IMAGE_REASONING_EFFORT,
+                IMAGE_REASONING_EFFORT,
                 model=model,
                 messages=list(messages),
                 # IMAGE_REWRITE_MAX_TOKENS grows with the reasoning effort: a

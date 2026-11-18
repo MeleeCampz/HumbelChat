@@ -277,8 +277,10 @@ RECAP_REASONING_EFFORT: str | None
 #: more than latency (runs deferred). None = omit the param → current
 #: behaviour (thinking on, model default effort).
 MERGE_LOG_REASONING_EFFORT: str | None
-#: /image prompt rewrite — the plan turn, the lookup turn, the prose fallback
-#: (the first routing turn always stays "off": it only picks tools). Default
+#: /image prompt rewrite — EVERY turn of it: tool-picking (decision), plan
+#: answer, lookup pass, prose fallback. Not gated on the loop's per-turn
+#: thinking flag: measured live, a plan answer comes out of a decision turn, so
+#: gating left the setting inert (a whole rewrite ran reasoning-off). Default
 #: "medium" after measuring it on the live backend (12 rewrites, 2 requests ×
 #: 3 efforts × 2 rounds run in reverse order, 2026-11-18):
 #:   low  median 42.7 s · medium 52.2 s · high 152.8 s

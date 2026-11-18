@@ -382,13 +382,29 @@ class TestRewriteReasoningEffort:
         assert client.chat.completions.create.call_args.kwargs["extra_body"] == \
             {"reasoning_effort": "medium"}
 
-    async def test_the_routing_turn_still_runs_with_thinking_off(self):
+    async def test_every_turn_pays_the_configured_effort_thinking_flag_included(self):
+        """A plan answer arrives out of a DECISION turn (measured: one rewrite,
+        one turn, thinking=False) — gating the effort on `thinking` made the
+        setting inert, so both turn kinds now get it."""
         client = MagicMock()
         client.chat.completions.create = AsyncMock(return_value=self._resp("ok"))
         complete = images._make_completer(client)
         await complete([{"role": "user", "content": "pick tools"}], "m", thinking=False)
-        assert client.chat.completions.create.call_args.kwargs["extra_body"] == \
-            {"reasoning_effort": "none", "enable_thinking": False}
+        await complete([{"role": "user", "content": "plan"}], "m", thinking=True)
+        bodies = [c.kwargs["extra_body"]
+                  for c in client.chat.completions.create.call_args_list]
+        assert bodies == [{"reasoning_effort": "medium"}, {"reasoning_effort": "medium"}]
+
+    async def test_an_explicit_off_setting_still_thinks_on_no_turn(self, monkeypatch):
+        monkeypatch.setattr(images, "IMAGE_REASONING_EFFORT", "off")
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(return_value=self._resp("ok"))
+        complete = images._make_completer(client)
+        await complete([{"role": "user", "content": "pick tools"}], "m", thinking=False)
+        await complete([{"role": "user", "content": "plan"}], "m", thinking=True)
+        off = {"reasoning_effort": "none", "enable_thinking": False}
+        assert [c.kwargs["extra_body"]
+                for c in client.chat.completions.create.call_args_list] == [off, off]
 
     async def test_the_effort_is_overridable_without_touching_the_loop(self, monkeypatch):
         monkeypatch.setattr(images, "IMAGE_REASONING_EFFORT", "low")
