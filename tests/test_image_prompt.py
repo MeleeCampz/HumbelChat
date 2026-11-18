@@ -813,3 +813,60 @@ def test_a_species_retrieved_in_german_counts_as_backed():
                   "handelt mit Fellen.")
     assert "fox-folk" in c.prompt and "russet fur" in c.prompt
     assert not any("species" in w for w in c.warnings)
+
+
+def test_a_species_found_in_an_unrelated_chunk_does_not_back_a_look():
+    """The rewrite searched "Frey bandit badger wolf fox species appearance" and
+    the vault answered with a D&D magic-item chunk about a badger. The species
+    was then present in the loop's context — but not about Boss Frey. Evidence
+    counts when it is about the character named."""
+    retrieved = RETRIEVED_FREY + """
+
+DnDRules/books/The Griffon's Saddlebag.md
+### Claymore of the Great Badger *(uncommon)*
+This weighty blade carries the strength of the mighty badger."""
+    plan = _plan("Boss Frey blocks the path", [{
+        "name": "Boss Frey", "pose": "snarling forward",
+        "look": "heavy-set badger-folk bandit leader with a flat dark snout",
+        "source": "SessionLogs/SESSION_01_DerAnfang/notes.md"}])
+    c = ip.compose_prompt(
+        plan, _anchors(), BASE,
+        read_paths=["Humblewood/HumbleWood/SessionLogs/SESSION_01_DerAnfang/notes.md"],
+        retrieved=retrieved)
+    assert "badger" not in c.prompt, c.prompt
+    assert any("badger" in w for w in c.warnings)
+
+
+def test_a_character_hidden_in_entities_is_painted_and_counted_as_a_figure():
+    """Measured on the live bandit request: the model wrote "Boss Frey and his
+    bandit crew" into the scene text, so the count line said 6 named figures while
+    eight named beings were in the prompt — the shape that paints an extra crowd.
+    The name becomes a figure, the crew stays an entity, and the name joins the
+    lookup pass."""
+    plan = _plan("Boss Frey and Alisa Pennygleam stand before them; the party "
+                 "faces them",
+                 [{"name": "Seta Onix", "pose": "drawing her bow"},
+                  {"name": "Marvin", "pose": "raising a pincer"}],
+                 entities=["Boss Frey and his bandit crew", "Alisa Pennygleam"])
+    c = _compose(plan)
+    # No pose and nothing retrieved: the name is painted, with nothing invented
+    # to go with it.
+    assert "Boss Frey" in c.prompt and "Alisa Pennygleam" in c.prompt
+    assert "Boss Frey: standing before them" in c.prompt, c.prompt
+    assert "Alisa Pennygleam: standing before them" in c.prompt, c.prompt
+    assert "bandit crew" in c.prompt              # the crowd stays a crowd
+    assert "face them" in c.prompt, "a collective replaced by a list needs the ' \
+        'plural verb"
+    assert "Exactly 4 named figures" in c.prompt, c.prompt
+    assert "Boss Frey" in c.ungrounded and "Alisa Pennygleam" in c.ungrounded
+    assert any("painted as a figure" in w for w in c.warnings), c.warnings
+
+
+def test_a_place_name_in_entities_is_not_painted_as_a_character():
+    plan = _plan("Trixy Smoldersome works at the forge of Winnowing Reach",
+                 [{"name": "Trixy Smoldersome", "pose": "hammering a bracket"}],
+                 entities=["Winnowing Reach", "a coal forge"])
+    c = _compose(plan)
+    assert "Winnowing Reach:" not in c.prompt, c.prompt
+    assert "Exactly 1 named figure" in c.prompt, c.prompt
+    assert "Winnowing Reach" in c.prompt   # still in the scene sentence

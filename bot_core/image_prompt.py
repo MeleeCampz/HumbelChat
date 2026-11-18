@@ -170,13 +170,39 @@ def replace_collectives(text: str, names: list[str]) -> tuple[str, int]:
     """
     out = text
     hits = 0
+    if len(names) >= 2:
+        listed = ", ".join(names[:-1]) + " and " + names[-1]
+    else:
+        listed = ", ".join(names)
     for pat in _COLLECTIVE_REPLACE:
         def sub(m: re.Match) -> str:
             nonlocal hits
             hits += 1
-            return ", ".join(names) if names else m.group(0)
+            return listed or m.group(0)
         out = re.sub(pat, sub, out, flags=re.I)
+    if listed and hits:
+        # "the party faces them" → "Seta Onix, Marvin and Boss Frey faces them"
+        # is what a literal substitution leaves behind. The verb was agreeing
+        # with a collective noun; it has to agree with a list.
+        esc = re.escape(listed)
+        for bad, good in _VERB_AFTER_LIST.items():
+            out = re.sub(rf"\b{esc}\s+{bad}\b", f"{listed} {good}",
+                         out, flags=re.I)
+            out = re.sub(rf"\b{esc} and\s+{bad}\b", f"{listed} {good}",
+                         out, flags=re.I)
     return out, hits
+
+
+# Only curated verbs: an unknown word after the list is left alone rather than
+# guessed at.
+_VERB_AFTER_LIST = {
+    "is": "are", "was": "were", "stands": "stand", "faces": "face",
+    "battles": "battle", "attacks": "attack", "assaults": "assault",
+    "fights": "fight", "charges": "charge", "advances": "advance",
+    "circles": "circle", "surrounds": "surround", "blocks": "block",
+    "watches": "watch", "moves": "move", "waits": "wait", "strikes": "strike",
+    "looms": "loom", "gathered": "gather", "was": "were",
+}
 
 
 def has_negation(clause: str) -> bool:
@@ -334,6 +360,33 @@ _species_variants = {w: frozenset(variants) for variants in _SPECIES for w in va
 _all_species = frozenset(_species_variants)
 
 
+def evidence_about(name: str, retrieved: str) -> str:
+    """The retrieved material that is ABOUT this character.
+
+    A species has to be retrieved about the character, not merely somewhere in
+    the loop's context: measured on the bandit request, the rewrite searched
+    "Frey bandit badger wolf fox species appearance" and the vault answered with
+    a D&D magic-item chunk about a badger — which made an invented badger-folk
+    look look backed. Retrieved material arrives in blocks (one search hit or
+    one file read per block); only the blocks naming the character count.
+    """
+    if not retrieved:
+        return ""
+    keys = [k for k in {name, name.split()[-1] if " " in name else "",
+                        name.split()[0]} if len(k) >= 4]
+    if not keys:
+        return retrieved
+    # Sections, not just paragraphs: a heading stays with its body, so a
+    # character's own section counts and the next section (another character, or
+    # an unrelated D&D entry) does not.
+    blocks: list[str] = []
+    for part in re.split(r"\n\s*\n", retrieved):
+        blocks.extend(re.split(r"\n(?=#{1,4} )", part))
+    keep = [b for b in blocks
+            if any(k.lower() in b.lower() for k in keys)]
+    return "\n".join(keep)
+
+
 def invented_species(look: str, retrieved: str) -> list[str]:
     """Species the description claims that nothing retrieved mentions.
 
@@ -384,11 +437,11 @@ def verify_look(figure: Figure, read_paths: Sequence[str] | None,
                           "nothing — painted unverified")
         return False, ("`look` without a `source` — the vault records NPC roles, "
                        "never appearances")
-    bad = invented_species(figure.look, retrieved)
+    bad = invented_species(figure.look, evidence_about(figure.name, retrieved))
     if bad:
         return False, ("describes it as " + "/".join(bad) + "-folk, which nothing "
-                       "retrieved says — the vault never gives this character a "
-                       "species, so the figure is painted by name")
+                       "retrieved ABOUT THIS CHARACTER says — the vault never "
+                       "gives them a species, so the figure is painted by name")
     if read_paths is None and not snippet_paths:
         return True, ""
     if read_paths is not None and source_matches(figure.source, read_paths):
@@ -935,6 +988,101 @@ def _render_text(r: _Render) -> str:
     return " ".join(lines)
 
 
+# A name the plan hid in `entities` is still a character in the frame.
+_NAME_SHAPE = re.compile(
+    r"^\s*((?:[A-ZÄÖÜ][A-Za-zÀ-ÿ'’-]+[, ]+){1,3}[A-ZÄÖÜ][A-Za-zÀ-ÿ'’-]+)")
+# A name the scene only ever mentions after one of these is a place, not an actor.
+_PLACE_PREPOSITIONS = frozenset(
+    "at in of to from near inside through toward über bei von aus nach zu auf vor".split())
+
+
+_POSE_ING = {
+    "stand": "standing", "sit": "sitting", "lie": "lying", "crouch": "crouching",
+    "kneel": "kneeling", "face": "facing", "battle": "battling",
+    "attack": "attacking", "fight": "fighting", "charge": "charging",
+    "advance": "advancing", "watch": "watching", "wait": "waiting",
+    "strike": "striking", "move": "moving", "block": "blocking",
+    "circle": "circling", "surround": "surrounding", "run": "running",
+    "leap": "leaping", "dash": "dashing", "turn": "turning", "look": "looking",
+    "stare": "staring", "glare": "glaring", "hold": "holding", "carry": "carrying",
+    "raise": "raising", "aim": "aiming", "shoot": "shooting", "cast": "casting",
+    "hammer": "hammering", "work": "working", "assist": "assisting",
+    "clutch": "clutching", "brandish": "brandishing", "snarl": "snarling",
+    "loom": "looming", "gather": "gathering", "point": "pointing",
+}
+
+
+def _pose_from_scene(scene: str, name: str) -> str:
+    """What the scene sentence says this character is doing."""
+    for seg in re.split(r"[;,]", scene):
+        if not re.search(r"\b" + re.escape(name) + r"\b", seg, re.I):
+            continue
+        rest = re.sub(r"\b(?:and|with|while|as)\b", ",", seg)
+        # Every name-shaped run goes; what is left is the action.
+        rest = re.sub(r"\b[A-ZÄÖÜ][A-Za-zÀ-ÿ'’-]+(?:\s+[A-ZÄÖÜ][A-Za-zÀ-ÿ'’-]+){0,2}",
+                      ",", rest)
+        parts = [w.strip() for w in rest.split(",") if w.strip()]
+        action = [p for p in parts if p.lower() not in _PLACE_PREPOSITIONS
+                  and not re.match(r"^[A-ZÄÖÜ]", p)]
+        if action:
+            # "stand before them" is what the scene says; as a pose line it reads
+            # as a person's verb. A pose is an -ing phrase.
+            first = action[0].split()[0]
+            action[0] = _POSE_ING.get(first.lower(), first) + action[0][len(first):]
+            return " ".join(action).strip(" ,.")
+        break
+    return ""
+
+
+def promote_named_entities(plan: ImagePlan) -> tuple[ImagePlan, list[str]]:
+    """Move a named character out of `entities` and into the cast.
+
+    `entities` is for monsters and objects; `figures` is for the cast. Measured on
+    the live bandit request the model wrote "Boss Frey and his bandit crew" into
+    the scene text only, which did two things at once: the two named characters
+    escaped the grounding rules entirely, and the count line read "Exactly 6 named
+    figures" while eight named beings were named in the same prompt — the exact
+    shape that makes a diffusion model paint an extra unnamed crowd.
+
+    A name counts as an actor when the scene says it and does not say it as a
+    location ("at the forge of Winnowing Reach" stays a place).
+    """
+    figures = list(plan.figures)
+    have = {str(getattr(f, "name", "")).lower() for f in figures}
+    entities: list[str] = []
+    notes: list[str] = []
+    scene_low = _norm(plan.scene)
+    for e in plan.entities:
+        m = _NAME_SHAPE.match(e)
+        name = m.group(1).strip(" ,&") if m else ""
+        if not name or name.lower() in have:
+            entities.append(e)
+            continue
+        actor = False
+        for occ in re.finditer(re.escape(name), plan.scene, re.I):
+            before = plan.scene[:occ.start()].rstrip().split()
+            if before and before[-1].lower().strip(",.") in _PLACE_PREPOSITIONS:
+                continue
+            actor = True
+            break
+        if not actor or _norm(name) not in scene_low:
+            entities.append(e)
+            continue
+        # The plan's own sentence already says what they are doing; taking the
+        # pose from it is derivation, not invention, and a named figure with an
+        # action paints better than a bare name.
+        figures.append(Figure(name=name, pose=_pose_from_scene(plan.scene, name)))
+        rest = re.sub(r"^(?:(?:and|with|plus|his|her|their|the|a|an)\b[ ,]*)+",
+                      "", e[m.end():].strip(" ,&"))
+        if rest:
+            entities.append(rest)
+        notes.append(f"entities named {name!r}, a character in the scene — painted "
+                     "as a figure and looked up like one")
+    if not notes:
+        return plan, notes
+    return replace(plan, figures=figures, entities=entities), notes
+
+
 def compose_prompt(
     plan: ImagePlan,
     anchors: dict[str, Anchor],
@@ -957,6 +1105,8 @@ def compose_prompt(
     cut.
     """
     warnings: list[str] = []
+    plan, promoted = promote_named_entities(plan)
+    warnings.extend(promoted)
     figures = [f for f in (_as_figure(x) for x in plan.figures) if f is not None]
     if not figures and not plan.scene.strip():
         # An empty plan must never paint an empty prompt: the caller's raw-request
