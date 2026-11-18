@@ -19,7 +19,7 @@ runtime state lives in bind-mounted host directories.
 
 ## Services (expected steady-state container set)
 
-After the 2026-11 GPU split a plain `docker compose up -d` runs exactly FIVE
+After the 2026-11 GPU split a plain `docker compose up -d` runs exactly FOUR
 core containers:
 
 | Container | Role |
@@ -32,7 +32,11 @@ core containers:
 Retired services stay in the file but are **profile-gated** so they never
 start on a normal `up`: `reranker` (`--profile tei-rerank`, TEI),
 `reranker-qwen` (vLLM rollback — would steal ~5 GiB of GPU 1, Strata chat's
-card), `embedder-qwen` (removed). If you see MORE containers than the table
+card), `embedder-qwen` (removed). `tts-ollama` — the Ollama sidecar that was
+renamed from `embedder-qwen` and finally served `/speak` — was **deleted from
+the file outright** with the TTS feature (2026-11, backlog #81), so the first
+`up` after that change WILL list `humbelchat-tts-ollama` as an orphan; clean it
+with `--remove-orphans` once. If you see MORE containers than the table
 above, they are leftovers from an older compose version; compose lists them
 under the "orphan containers" warning. Clean them with `docker compose up -d
 --remove-orphans` (or a one-time `docker compose down --remove-orphans`

@@ -247,8 +247,10 @@ services:
               device_ids: ["0"]
               capabilities: [gpu]
 
-  # Pinned llama.cpp embedder (2026-10-25, replaces the Ollama container above
-  # — kept as rollback). Official Qwen3-Embedding-4B Q4_K_M GGUF (~2.5 GB,
+  # Pinned llama.cpp embedder (2026-10-25, replaces the Ollama embedder sidecar that
+  # used to sit here — that container is gone from compose entirely: renamed
+  # tts-ollama, then deleted with the TTS feature in 2026-11, backlog #81).
+  # Official Qwen3-Embedding-4B Q4_K_M GGUF (~2.5 GB,
   # quality ≈ Q8_0 per docs/internal/EVAL_QWEN3_EMBEDDING.md); OpenAI-compatible
   # /v1/embeddings, so the bot only swaps EMBED_URL + model name (the one-time
   # auto-reindex keeps all vectors in one space). Shares GPU 0 with the

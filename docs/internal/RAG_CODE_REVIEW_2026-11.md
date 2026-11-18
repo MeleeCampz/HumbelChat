@@ -493,7 +493,8 @@ parent chain), whereas context lines reach both.
   `docs/configuration.md`: `DEFAULT_ITEM_TABLE`, `EMBED_API_KEY`,
   `INDEX_EMBED_FALLBACK_LOCAL`, `ITEMS_DIR`, `RAG_REWRITE_LOAD_BUDGET_SECONDS`,
   `SESSION_LOG_CHRONOLOGY_RULES`, `SESSION_MERGE_PROMPT`, `STAT_BLOCK_FORMAT_RULES`,
-  `TTS_BACKEND`. `INDEX_EMBED_FALLBACK_LOCAL` is the one that matters (R4's guard rail).
+  `TTS_BACKEND` (moot since 2026-11-18 — the TTS feature and its whole settings block were
+  removed, backlog #81). `INDEX_EMBED_FALLBACK_LOCAL` is the one that matters (R4's guard rail).
 - Sidecar housekeeping: **53 orphan entries** (hashes of chunks no longer indexed) and, at
   review time, **246 chunks with no context line** — the startup warning agrees exactly
   (`Contextual sidecar covers 5698/5944 indexed chunks`, `logs/dev.log:17663`). Both are now

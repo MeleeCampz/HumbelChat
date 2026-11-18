@@ -114,8 +114,12 @@ server image, official `Qwen3-Embedding-4B-Q4_K_M.gguf`, OpenAI-compatible
 `/v1/embeddings`, pinned to GPU 0 via `CUDA_VISIBLE_DEVICES=0` (same image,
 pattern and pinning as `reranker-llama`; GPU 0 = the 4070 Ti SUPER since the
 2026-11 GPU split — the 5070 is chat-only now; the old Ollama `embedder-qwen`
-container stays in compose, stopped, as rollback). `EMBED_URL` points at the
-compose service name; loopback `:8091` is host debug only. Renaming
+container is GONE from compose — it was renamed `tts-ollama` and deleted with
+the TTS feature in 2026-11, backlog #81). The embedding rollback is therefore
+the in-process path — `EMBED_BACKEND=local` + `INDEX_EMBED_MODEL=gpustack/bge-m3-GGUF`
++ `EMBED_URL` back to the chat backend — and it needs bge-m3 re-downloaded into
+`hf-cache/` first. `EMBED_URL` points at the compose service name; loopback
+`:8091` is host debug only. Renaming
 `EMBEDDING_MODEL`/`INDEX_EMBED_MODEL` invalidates the vector cache and triggers
 a one-time full reindex on next bot start (atomic swap keeps the old cache until
 the new one is built).

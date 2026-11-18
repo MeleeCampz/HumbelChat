@@ -11,6 +11,12 @@ configs/inputs, **L** = hygiene/robustness.
 
 ### 1.1 `bot_core/tts.py` — chat-model swap-back repeats the #73 bug (latent H, config-gated)
 
+> **Status 2026-11-18: MOOT — superseded by backlog #81.** The whole TTS feature was
+> removed (`feat/remove-tts`): `bot_core/tts.py`, `/speak`, its settings block, the
+> `tts-ollama` service and `utils/studio_model.py` (built for exactly this fix) are all
+> gone. The finding stays as the record of the #73 payload class; the live-verified twin
+> of that logic remains inline in `bot_core/images.py`.
+
 `_swap_chat_model_back()` → `_ensure_slug_loaded(DEFAULT_MODEL, …)` POSTs
 
 ```json
@@ -204,6 +210,10 @@ turn into a real incident.
 Implemented on `feat/tool-calling` (commit `a97d331`; hermetic tests only — no live Studio
 verification in this pass; the host was out of GPU headroom, so the TTS fix ships
 untested-against-Studio but payload-identical to the live-verified #73 shape):
+
+> **Superseded 2026-11-18**: the TTS half of this was deleted with the feature itself
+> (backlog #81) — see the §1.1 status note. `utils/studio_model.py` was removed with it;
+> the `images.py` side of the fix is still the live code path.
 
 - **§1.1 done** — new `utils/studio_model.py` (`split_repo_variant` / `load_payload` /
   `is_resident`); `bot_core/tts._ensure_slug_loaded` now splits repo:quant, checks the POST
