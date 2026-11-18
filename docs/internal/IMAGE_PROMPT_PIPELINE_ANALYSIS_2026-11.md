@@ -393,10 +393,8 @@ reasoning effort changed:
 | `medium` | 27.7 s | 8 s | 6 |
 
 `medium` wrote marginally better *queries* and marginally nicer nouns, and bought
-nothing that grounding rules would not have caught anyway. The recommendation is
-to keep the plan turn at `low` and spend the fast backend's headroom on **more
-targeted lookups**, not more thinking — which is what the enforced lookup pass
-already does.
+nothing that grounding rules would not have caught anyway. That pair was a single
+run each and is **superseded by §12**, which repeats it.
 
 **11.5 Considered and rejected: cutting a leading roll call.** A scene sentence
 that opens "Trixy, Seta, Colum, Romi, Bubo, Marvin, Benner Seridan battles a
@@ -410,3 +408,45 @@ asked for: the ambush request said "Boss Frey und seinen Banditen" and the final
 plan named only their boss. Nothing in the composer compares the request's own
 actors against what the plan decided to paint — a completeness check there is the
 next obvious guarantee, and it is not yet built.
+
+
+## 12. Reasoning effort, measured with repeats (2026-11-18)
+
+§11's low-vs-medium pair was one run each — noise. This is 12 runs: 2 requests ×
+3 efforts × 2 rounds, the second round in reverse order so backend warm-up cannot
+favour one level. `/tmp/reasoning_ab.py`, results `/tmp/reasoning_ab.json`.
+
+| effort | request A (8 named beings) | request B (7 figures) | overall median | model turns as share of wall time |
+|---|---|---|---|---|
+| `low` | 42.8 / 57.0 s | 23.7 / 42.6 s | **42.7 s** | 87 % |
+| `medium` | 33.5 / 58.1 s | 46.3 / 84.9 s | **52.2 s** | 89 % |
+| `high` | 164.5 / 167.6 s | 82.6 / 141.1 s | **152.8 s** | 97 % |
+
+`low` and `medium` are inside each other's spread; `high` is 3.6× and consistent
+about it. Tools cost 2–10 s in every run — the time being bought is model turns.
+
+**What effort levels did not change** (identical at `low`, `medium` and `high`):
+invented species for NPCs (the composer caught 4 / 5 / 3 attempts), a named
+character hiding in `entities`, the number of figures painted, how many clauses
+the budget cut, and whether the enforced lookup pass had to run. Those are
+guarded by code, and thinking does not substitute for them.
+
+**What `medium` did buy** — six override requests run at both levels
+(`/tmp/override_ab.py`), correctness checked from the composed text:
+
+| case | `low` | `medium` |
+|---|---|---|
+| clothing swap, signature item must survive (Seta's bow) | correct — "thick fur-lined heavy winter coat in warm russet-brown with cream fur trim" | correct — "…with a high standing collar, heavy quilted seams and a plush pale-fur lining visible at the cuffs and hem" |
+| removal the user asked for (Trixy's goggles → three-lens spectacles) | correct — "brass three-lens spectacles" | correct — "brass spectacles with three round lenses **set in a triangular frame**", "adjusting a tiny gear **between her claws**" |
+| costume swap that must not change the species | correct | correct |
+
+So: same decisions, more **paintable specificity** — the kind of detail a diffusion
+model can actually act on. Cost: ~+9 s on a hard group rewrite.
+
+**Decision taken.** `IMAGE_REASONING_EFFORT` (allowlist as the other reasoning
+families) defaults to **`medium`** for the plan/lookup/prose turns; the routing
+turn stays thinking-off, since it only picks tools. `IMAGE_REWRITE_MAX_TOKENS`
+tracks it — 4096 at off/low, 6144 above — because a thinking model spends part of
+the cap on its thinking phase and had previously truncated a party prompt (2048 →
+671 chars). `high` stays available but is not the default: 3.6× for no measured
+gain.

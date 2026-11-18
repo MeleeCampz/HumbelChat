@@ -57,8 +57,13 @@ Two paths, one outcome (`bot_core/images.py::rewrite_prompt`):
 - **Primary — plan + composer.** The model answers with an `<image_plan>` JSON
   block (`prompts/image_plan_system.md`) and **`bot_core/image_prompt.py` writes the
   prompt**. Style sentence, figure-count line, foreground/background split, budget
-  ladder, collective-noun replacement, NPC-look verification and every reported cut
-  are guarantees of that module, not requests to the model.
+  ladder, collective-noun replacement, NPC-look verification (opened file / search
+  snippet / invention — an invented `look` is dropped, and a **species claim needs
+  its own backing** in the retrieved text about that character), promotion of a
+  named character hiding in `entities`, and every reported cut are guarantees of
+  that module, not requests to the model. A named character with no verified
+  appearance triggers one **enforced lookup pass** before composing again; the
+  agent loop refuses a repeated identical tool call instead of re-running it.
 - **Fallback — prose.** `prompts/image_rewrite_system.md` (the pre-#84 path) runs
   only when the plan path fails.
 
@@ -73,3 +78,10 @@ measurement in `docs/internal/IMAGE_PROMPT_PIPELINE_ANALYSIS_2026-11.md`.
 Budgets are settings, not guesses: `IMAGE_PROMPT_BASE_CHARS`,
 `IMAGE_PROMPT_CHARS_PER_FIGURE`, `IMAGE_PROMPT_MAX_CHARS`,
 `IMAGE_PROMPT_FOREGROUND_FIGURES`.
+
+Reasoning effort on the rewrite is `IMAGE_REASONING_EFFORT` (default `medium`):
+measured on the live backend at `low` 42.7 s median / `medium` 52.2 s / `high`
+152.8 s, with **identical** plan correctness at all three and `medium` writing
+visibly more paintable detail (§12). `IMAGE_REWRITE_MAX_TOKENS` tracks it — a
+thinking model spends part of the output cap on thinking and will otherwise
+truncate the plan. The first routing turn always runs thinking-off.

@@ -217,6 +217,17 @@ back to `rag` mode happens in a `finally` after every painting window.
 | `IMAGE_GEN_TIMEOUT_S` / `IMAGE_LOAD_TIMEOUT_S` | Per-image request / model-load readiness deadlines | `180` / `300` |
 | `IMAGE_NEGATIVE_PROMPT` | What the model steers away from (user-requested text is NOT suppressed) | built-in default |
 
+**Prompt composition (#84)** — the rewrite model returns a plan; `bot_core/image_prompt.py` writes the prompt, so these are budget knobs, not style knobs:
+
+| Variable | Description | Default |
+|---|---|---|
+| `IMAGE_PROMPT_BASE_CHARS` | Budget for everything that is not a figure (style, scene, count line, lighting/palette/mood) | `1100` |
+| `IMAGE_PROMPT_CHARS_PER_FIGURE` | Extra budget per named figure | `420` |
+| `IMAGE_PROMPT_MAX_CHARS` | Hard ceiling regardless of figure count (measured: 6 anchors fit; 7–8 figures hit it and the ladder starts cutting) | `3600` |
+| `IMAGE_PROMPT_FOREGROUND_FIGURES` | Figures painted in the front group; the rest get "behind them, smaller and softer" | `4` |
+| `IMAGE_REASONING_EFFORT` | Reasoning effort on the rewrite's plan/lookup turns (the routing turn is always off). Measured: `low` 42.7 s median, `medium` 52.2 s, `high` 152.8 s — `medium` writes visibly more paintable detail, `high` buys nothing at 3.6× | `medium` |
+| `IMAGE_REWRITE_MAX_TOKENS` | Output cap for those calls; thinking spends part of it and can truncate the plan, so it tracks the effort (`4096` at off/low, `6144` above). `0` = derive | `0` (derived) |
+
 | Variable | Description | Default |
 |---|---|---|
 | `RERANK_ENABLED` | Enable the reranker sidecar | `0` |
