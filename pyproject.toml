@@ -44,7 +44,10 @@ dependencies = [
     "discord.py==2.7.1",
     "openai==2.44.0",
     "httpx==0.28.1",
-    "pillow==13.0.0",   # session moment PNG→webp archiving (session_images)
+    # session moment PNG→webp archiving (session_images). Kept <13.0 so the
+    # rag-vector/all extras (fastembed 0.8.0, which requires pillow<13.0) resolve
+    # together with it — pillow 13 + fastembed 0.8 is a ResolutionImpossible.
+    "pillow==12.3.0",
 ]
 
 [project.optional-dependencies]

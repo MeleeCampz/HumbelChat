@@ -332,3 +332,76 @@ class TestLowPrioPolish:
                            text=True, env=e, cwd=".")
         assert r.returncode == 0, r.stderr
         assert int(r.stdout.strip()) == expected
+
+
+# ─────────────── dep pins: pillow/fastembed conflict (2026-11-17) ────────────
+# `docker compose up -d --build` failed with pip ResolutionImpossible:
+# requirements.txt pinned pillow==13.0.0 (added for the session-moment PNG→webp
+# archiving) while fastembed==0.8.0 requires pillow<13.0. Locked here so a
+# version bump can never break the production image build silently again.
+class TestDependencyPinsResolve:
+    # Upper bound fastembed puts on pillow, per its PyPI metadata (2026-11-17).
+    # Keyed by fastembed version — add the new row when bumping fastembed.
+    FASTEMBED_PILLOW_CAP = {
+        "0.8.0": "13.0",
+        "0.8.1": "13.0",
+        "0.9.0": "13.0",
+        "0.9.1": "14.0",
+    }
+
+    @staticmethod
+    def _requirement_pins() -> dict[str, str]:
+        """{name: pinned version} from the `name==version` lines of requirements.txt."""
+        from pathlib import Path
+
+        pins: dict[str, str] = {}
+        for raw in Path("requirements.txt").read_text(encoding="utf-8").splitlines():
+            line = raw.split("#", 1)[0].strip()
+            name, sep, ver = line.partition("==")
+            if sep and ver:
+                pins[name.strip().lower()] = ver.split(",")[0].strip()
+        return pins
+
+    @staticmethod
+    def _pyproject_pins() -> dict[str, str]:
+        """{name: pinned version} from [project].dependencies in pyproject.toml."""
+        import tomllib
+        from pathlib import Path
+
+        data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+        pins: dict[str, str] = {}
+        for req in data["project"]["dependencies"]:
+            name, sep, ver = req.partition("==")
+            if sep and ver:
+                pins[name.strip().lower()] = ver.split(",")[0].strip()
+        return pins
+
+    def test_pillow_pin_respects_fastembed_cap(self):
+        from packaging.version import Version
+
+        pins = self._requirement_pins()
+        assert "pillow" in pins, "pillow must be pinned (session_images PNG→webp)"
+        assert "fastembed" in pins, "fastembed pin is the constraint source here"
+        cap = self.FASTEMBED_PILLOW_CAP.get(pins["fastembed"])
+        assert cap is not None, (
+            f"fastembed=={pins['fastembed']} is not in FASTEMBED_PILLOW_CAP — "
+            "check its PyPI pillow constraint and add the row"
+        )
+        assert Version(pins["pillow"]) < Version(cap), (
+            f"pillow=={pins['pillow']} conflicts with fastembed=="
+            f"{pins['fastembed']} (needs pillow<{cap}) — pip cannot resolve it, "
+            "so `docker compose up --build` fails. Either lower pillow or bump "
+            "fastembed to a release whose pillow cap allows it."
+        )
+
+    def test_requirements_and_pyproject_core_pins_agree(self):
+        """The two dependency lists must not drift apart on shared packages."""
+        req = self._requirement_pins()
+        proj = self._pyproject_pins()
+        shared = set(req) & set(proj)
+        assert shared, "expected overlapping core pins (discord.py, openai, …)"
+        mismatched = {k: (req[k], proj[k]) for k in shared if req[k] != proj[k]}
+        assert not mismatched, (
+            "requirements.txt and pyproject.toml disagree — the container build "
+            f"and `pip install -e .` would resolve different versions: {mismatched}"
+        )
