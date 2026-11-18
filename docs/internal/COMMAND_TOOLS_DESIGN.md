@@ -8,7 +8,7 @@ Last updated: 2026-10-24.
 
 The AI can *read* the world (KB search, sections, sessions, item tables) but
 cannot *act* in Discord: it cannot roll items for a channel, queue a reminder,
-add a session note, or trigger TTS. Users currently have to leave `/ai` and
+add a session note, or send a message. Users currently have to leave `/ai` and
 type the slash command themselves. The agent machinery needed for this (bounded
 tool loop, parallel batches, error-as-data, telemetry) already exists — what's
 missing is an **action surface** with the right safety properties.
@@ -57,8 +57,10 @@ model weaves into its answer.
 
 ### Phase 3 — expressive actions (only if 1–2 prove out)
 
-`speak(text)` (TTS), `start/end_session`, item include/exclude management.
+`start/end_session`, item include/exclude management.
 Each re-evaluated against observed usage from `logs/ai_turns/`.
+(~~`speak(text)`~~ — dropped: the TTS feature was removed from the product
+entirely in 2026-11, backlog #81.)
 
 ## Cross-cutting design decisions
 
@@ -99,7 +101,8 @@ Each re-evaluated against observed usage from `logs/ai_turns/`.
 1. Phase 2 scope: all three mutations, or start with `roll_items` only?
 2. Should the AI be allowed to act in channels **without** an active
    character (rolls yes / session notes no)?
-3. TTS (`speak`) in v1 or strictly Phase 3?
+3. ~~TTS (`speak`) in v1 or strictly Phase 3?~~ — **RESOLVED 2026-11**: out of
+   scope, the TTS feature was removed completely (backlog #81).
 
 ## Effort estimate
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 class MockMessage:
     """Stand-in for a sent discord.Message: awaitable edit/delete + records.
 
-    Progress-message patterns (e.g. #70 /speak, /reindex_kb) do
+    Progress-message patterns (e.g. #70 /reindex_kb, /generate_image) do
     ``msg = await interaction.followup.send(...)`` and later
     ``await msg.edit(content=...)`` / ``await msg.delete()``.
     """

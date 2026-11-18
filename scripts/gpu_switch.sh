@@ -7,7 +7,7 @@
 #     "rag"   reranker-llama + embedder-llama (default steady state)
 #     "image" those stopped + the Studio diffusion model loaded (~12.5 GiB
 #             measured at Q4_K_M; loads via Studio's management API)
-#   GPU 1 (5070 Ti): chat (Strata) + tts-ollama — NEVER touched here.
+#   GPU 1 (5070 Ti): chat (Strata) — NEVER touched here.
 #
 # The bot switches modes automatically around generations via the gpu-switch
 # helper service (compose service "gpu-switch", scripts/gpu_switch_helper.py).

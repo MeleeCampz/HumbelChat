@@ -464,14 +464,6 @@ async def translate_command(
     await handle_translate_command(interaction, target_language, source_language)
 
 
-@bot.tree.command(name="speak", description="Read out text aloud (TTS) and send it as an audio message.")
-@app_commands.describe(text="The text to read out")
-async def speak_command(interaction: discord.Interaction, text: str) -> None:
-    """TTS read-aloud — delegated to commands/speak_command.py."""
-    from commands.speak_command import handle_speak_command
-    await handle_speak_command(interaction, text=text)
-
-
 @bot.tree.command(name="generate_image", description="Paint an image from a short prompt (whimsical storybook style).")
 @app_commands.describe(
     prompt="What to paint (short is fine — it gets expanded into a rich prompt)",

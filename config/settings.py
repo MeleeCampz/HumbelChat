@@ -75,50 +75,6 @@ INFER_API_KEY: str = os.getenv("INFER_API_KEY", "")  # sometimes empty for local
 EMBED_URL: str = os.getenv("EMBED_URL", "") or INFER_URL
 EMBED_API_KEY: str = os.getenv("EMBED_API_KEY", "") or INFER_API_KEY
 
-# ════════════════════════════════════
-#  TTS (/speak, #34 — any OpenAI-compatible /v1/audio/speech endpoint;
-#  Unsloth Studio serves it at the same base URL as its chat API)
-# ════════════════════════════════════
-# Backend selector (#57): "studio" (Unsloth Studio, default — Qwen3-TTS +
-# saved voice clone + chat-model swap-back) or "ollama" (any Ollama TTS model,
-# e.g. phonon:de — one fixed "default" voice per language checkpoint, no
-# cloning, separate process so no Studio swap-back dance). Unknown values fall
-# back to studio with a warning.
-_raw_tts_backend = os.getenv("TTS_BACKEND", "studio").strip().lower()
-if _raw_tts_backend not in ("studio", "ollama"):
-    if _raw_tts_backend:
-        logging.getLogger("config.settings").warning(
-            "unknown TTS_BACKEND %r — treating as studio", _raw_tts_backend)
-    _raw_tts_backend = "studio"
-TTS_BACKEND: str = _raw_tts_backend
-# Empty = feature off: /speak replies with a "not configured" hint.
-TTS_MODEL: str = os.getenv("TTS_MODEL", "")
-# Voice name sent with each request (the OpenAI-compatible API requires the
-# parameter). Set it to the voice your TTS model expects, e.g. a Kokoro voice
-# like "af_heart"; "default" works for servers that ignore the value.
-TTS_VOICE: str = os.getenv("TTS_VOICE", "") or "default"
-TTS_URL: str = os.getenv("TTS_URL", "") or INFER_URL
-TTS_API_KEY: str = os.getenv("TTS_API_KEY", "") or INFER_API_KEY
-TTS_TIMEOUT_S: float = _safe_float(os.getenv("TTS_TIMEOUT_S"), 120.0)
-# Hard cap on text length per /speak request (model input limits + Discord's
-# 10 MB attachment limit at typical mp3 bitrates).
-TTS_MAX_CHARS: int = _safe_int(os.getenv("TTS_MAX_CHARS"), 5000)
-# Qwen3-TTS quirk (Unsloth Studio): the base model's ICL reference prompting can
-# leak the tail of the saved voice's transcript into the output. Using only the
-# speaker embedding (x-vector) for cloning avoids that; non-Studio backends
-# ignore the option.
-TTS_X_VECTOR_ONLY_MODE: bool = _safe_bool(os.getenv("TTS_X_VECTOR_ONLY_MODE"), True)
-# Unsloth Studio only: GPU id(s) the TTS model is pinned to on (re-)load
-# Unsloth Studio only: GPU id(s) the TTS model is pinned to on (re-)load
-# (e.g. "1" for the second GPU). NOTE: this Studio version silently ignores
-# gpu_ids for audio.cpp GGUF models — a GPU TTS load then evicts the resident
-# chat model and the pair swaps back and forth per use (accepted trade-off).
-TTS_GPU_IDS: list[int] = [
-    int(part)
-    for part in os.getenv("TTS_GPU_IDS", "").replace(",", " ").split()
-    if part.lstrip("-").isdigit()
-]
-
 # ── Image generation (/generate_image, #42) ────────────────────────
 # Unsloth Studio diffusion via the OpenAI-compatible /v1/images/generations
 # endpoint. GPU-split (2026-11, feat/image-gpu-split): the image backend is a

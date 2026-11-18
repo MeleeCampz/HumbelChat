@@ -42,7 +42,7 @@ CHECKS: tuple[tuple[str, str, str], ...] = (
     ("view_channel", "View Channel", "background senders must fetch the channel object"),
     ("send_messages", "Send Messages", "highlights, reminders, roll views"),
     ("read_message_history", "Read Message History", "sending into a channel not cached yet"),
-    ("attach_files", "Attach Files", "highlight/image PNGs, /session_file, /speak"),
+    ("attach_files", "Attach Files", "highlight/image PNGs, /session_file"),
     ("send_messages_in_threads", "Send Messages in Threads", "sessions or reminders inside threads"),
     ("create_public_threads", "Create Public Threads", "posting into a forum channel"),
     ("manage_threads", "Manage Threads", "archive/edit forum posts"),

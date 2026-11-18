@@ -28,7 +28,6 @@ core containers:
 | `humbelchat-gpu-switch` | owns the 4070's rag⇄image mode switching (loopback `:8082`) |
 | `humbelchat-reranker-llama` | RAG reranker (GPU 0, loopback `:8090`) |
 | `humbelchat-embedder-llama` | RAG embedder (GPU 0, loopback `:8091`) |
-| `humbelchat-tts-ollama` | TTS sidecar (GPU 1, loopback `:11435`) |
 
 Retired services stay in the file but are **profile-gated** so they never
 start on a normal `up`: `reranker` (`--profile tei-rerank`, TEI),
@@ -54,7 +53,7 @@ docker compose down            # stop (data is untouched — it's all on the hos
   from logs ("logged in as …", backend probe settling UP). Give ~10–20 s after
   a start before judging; bge-m3 loads from `hf-cache/` in seconds and the
   first backend-health probe can log a transient `DOWN (timeout)` that
-  recovers. The sidecars (reranker/embedder/gpu-switch/tts) DO have
+  recovers. The sidecars (reranker/embedder/gpu-switch) DO have
   healthchecks; gpu-switch may briefly read "unhealthy" *during* a long mode
   switch (its status GET serializes behind the switch lock) — cosmetic.
 - The container needs no published ports: the Discord gateway is an outbound

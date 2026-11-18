@@ -9,12 +9,12 @@ What Discord permissions the bot needs to work, and where to set them.
 | **View Channel** | The bot must be able to see each channel it posts in — chat replies, session reports, and scheduled reminder delivery all fail silently-invisible if this is missing (Discord simply refuses the send). This is also the permission that lets background senders fetch the channel object at all. |
 | **Send Messages** | Every outbound feature: `/ai` replies, prefix (`!ai`) replies, command follow-ups, and reminder messages. |
 | **Read Message History** | Needed so the bot can read a channel's recent context when it posts there (e.g. delivery into channels it hasn't seen yet). Grant this to be safe. |
-| **Attach Files** | Anything that sends a file: session highlight images (`bot_core/session_images.py`, webp), `/generate_image` results, `/session_file` exports, `/speak` audio. Without it every one of those sends is refused. |
+| **Attach Files** | Anything that sends a file: session highlight images (`bot_core/session_images.py`, webp), `/generate_image` results, `/session_file` exports. Without it every one of those sends is refused. |
 
 That's the entire functional set. Nothing else is required for the core loop.
 
 > Docs note: this row used to say "no feature sends files yet". That stopped being
-> true with session highlights (#69), `/generate_image`, `/session_file` and `/speak`.
+> true with session highlights (#69), `/generate_image` and `/session_file`.
 
 ## Recommended (nice to have)
 

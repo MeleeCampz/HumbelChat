@@ -4,7 +4,7 @@ Two physical cards, two backends — **never mix them up**:
 
 - **Chat (the bot AND this agent): Strata on the 5070 Ti (GPU 1)** — `INFER_URL`
   in `.env`. The 5070 is chat-only: image gen and the RAG sidecars must never
-  load onto it. `tts-ollama` (phonon) also lives on this card.
+  load onto it.
 - **Image generation: Unsloth Studio on the 4070 Ti SUPER (GPU 0)** —
   `IMAGE_INFER_URL` (default falls back to `INFER_URL`; production sets it to
   `http://host.docker.internal:8888/v1`, Studio pinned to GPU 0 only).

@@ -118,7 +118,7 @@ services:
   # keep NF4-on-official-weights; the INT4 checkpoint avoids that maintenance.
   #
   # GPU 1 budget (llama.cpp era, 2026-10-25+): reranker ~2.7 GB + embedder
-  # ~3.6 GB + chat-model share 4-6 GB + tts-ollama (phonon) when warm — all on
+  # ~3.6 GB + chat-model share 4-6 GB — all on
   # the 16 GB card; see scripts/gpu_switch.sh for the image-gen trade-off.
   #
   # Pinned to v0.31.0 (first release line with native Qwen3-Reranker support via
@@ -189,40 +189,6 @@ services:
       - --max-num-seqs
       - "32"
       - --enforce-eager
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["1"]
-              capabilities: [gpu]
-
-  # Ollama host — ALWAYS ON because it serves /speak (TTS_BACKEND=ollama,
-  # phonon:de, #57). Idle models auto-unload after ~5 min, so the resident
-  # footprint is just the small base server. History: originally the optional
-  # Qwen3-Embedding host for the RAG embedding swap (Phase 2 — see
-  # docs/internal/EVAL_QWEN3_EMBEDDING.md; models qwen3-embedding:4b and
-  # phonon{,:de} already pulled into ./ollama-models). Renamed from
-  # `embedder-qwen` on 2026-10-26 — it no longer serves embeddings (that's
-  # embedder-llama now), only TTS. Stop it with `docker compose stop tts-ollama`
-  # — /speak then degrades to an error reply until it's back up.
-  tts-ollama:
-    image: ollama/ollama:latest
-    container_name: humbelchat-tts-ollama
-    restart: unless-stopped
-    environment:
-      # Keep phonon warm (#57): every idle-unload → MLX-runner restart is a
-      # cold-start window where the first /speak can hit the runner's
-      # intermittent Windows panic (bot retries once, but warmth also saves
-      # the 6-16 s load). Drop this if the resident VRAM ever matters.
-      - OLLAMA_KEEP_ALIVE=24h
-    # Debug access for the dev sandbox (host.docker.internal:11435). Host port
-    # 11435 (not 11434) so a natively installed Ollama on the host is unaffected.
-    # Loopback-only, same rationale as reranker-qwen.
-    ports:
-      - "127.0.0.1:11435:11434"
-    volumes:
-      - ./ollama-models:/root/.ollama   # model store, outside the repo tree
     deploy:
       resources:
         reservations:
