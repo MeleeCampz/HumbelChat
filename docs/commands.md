@@ -127,6 +127,15 @@ wagon). What the vault does NOT yet hold is NPC appearance data — its `Lexikon
 entries record roles and bounties, not species or colours — so recurring NPCs stay partly
 invented until the vault carries Visual Anchors for them. An amount in a request ('a bag
 with 70 gold') describes the scene and is not lettering to paint.
+Group scenes carry one more rule after the first A/B test on the rendered images: the
+cast must not be named twice. Both six-figure scenes had a collective subject in the
+scene sentence ('Party members battle…', 'the whole upright party squares off…') AND six
+individually described characters, and the model painted an unnamed crowd on top of the
+cast — a second Colum in the background in one image, no individual Colum at all in the
+other. So a collective subject is banned, the scene sentence must close with the figure
+count ('Exactly N named figures in this image.'), each character is listed exactly once,
+and `IMAGE_NEGATIVE_PROMPT` gained `duplicate of the same character, identical clone of a
+character, doppelganger of a main figure`.
 GPU-split under the hood (#42, 2026-11): the rewrite runs on the CHAT backend
 (Strata on the 5070) while the 4070 is still in `rag` mode; only then the bot
 switches the 4070 into `image` mode (stop reranker/embedder + load the diffusion

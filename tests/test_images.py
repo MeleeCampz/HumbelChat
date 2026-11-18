@@ -82,6 +82,15 @@ class TestImageGenConfigured:
         monkeypatch.setattr(images, "IMAGE_MODEL", "unsloth/Qwen-Image-2.1-Turbo-GGUF")
         assert images.image_gen_configured() is True
 
+    def test_negative_prompt_suppresses_duplicate_figures(self):
+        # The prompt side bans the unnamed crowd; the negative-prompt side
+        # steers the diffusion model away from the visible symptom of it.
+        from config.settings import _DEFAULT_IMAGE_NEGATIVE_PROMPT as d
+        for needle in ("duplicate of the same character",
+                       "identical clone of a character",
+                       "doppelganger of a main figure"):
+            assert needle in d, needle
+
     def test_false_when_empty(self, monkeypatch):
         monkeypatch.setattr(images, "IMAGE_MODEL", "")
         assert images.image_gen_configured() is False
@@ -850,6 +859,23 @@ class TestRewriteSystemPolicy:
                        "never assign a species or a colouring to a named NPC from "
                        "imagination",
                        "NOT lettering to render"):
+            assert needle in s, needle
+
+    def test_no_collective_subject_and_a_figure_count(self):
+        # Both group images that came back wrong had the cast named TWICE: a
+        # collective subject in the scene sentence ("Party members battle…",
+        # "the whole upright party squaring off…") plus six individually
+        # described characters. The model then painted an unnamed crowd on top
+        # of the enumerated cast — a second Colum in the background in one
+        # image, no individual Colum at all in the other. Policy answer: a
+        # collective subject is banned and the scene sentence must state how
+        # many bodies the image contains.
+        s = images._load_rewrite_system()
+        for needle in ("NEVER give the cast a collective subject",
+                       "an extra UNNAMED crowd on top of the characters",
+                       "Exactly N named figures in this image",
+                       "list each character EXACTLY ONCE",
+                       "never add an unnamed look-alike"):
             assert needle in s, needle
 
     def test_character_style_lines_never_copied_into_prompt(self):

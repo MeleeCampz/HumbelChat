@@ -133,7 +133,9 @@ _DEFAULT_IMAGE_NEGATIVE_PROMPT = (
     "humans, human, person, realistic human face,"
     " watermark, signature, username,"
     " modern objects, car, smartphone, plastic, neon,"
-    " blurry, lowres, bad anatomy, extra limbs, deformed, cropped out of frame"
+    " blurry, lowres, bad anatomy, extra limbs, deformed, cropped out of frame,"
+    " duplicate of the same character, identical clone of a character,"
+    " doppelganger of a main figure"
 )
 IMAGE_NEGATIVE_PROMPT: str = os.getenv("IMAGE_NEGATIVE_PROMPT", _DEFAULT_IMAGE_NEGATIVE_PROMPT).strip()
 IMAGE_GEN_TIMEOUT_S: float = _safe_float(os.getenv("IMAGE_GEN_TIMEOUT_S"), 600.0)
