@@ -77,10 +77,10 @@ The harness can also run against the bind-mounted repo from any machine that
 has the deps installed — no Docker needed. Verified 2026-10-17 from the dev
 sandbox (`/ai` full turns worked, ~55 s each). Caveats:
 
-- **Embeddings/reranker ARE reachable over IPv4** (verified 2026-10-17):
-  `EMBED_URL=http://host.docker.internal:11435/v1` serves
-  `qwen3-embedding:4b` and `RERANK_API_BASE=http://host.docker.internal:8000`
-  is the Qwen reranker — full production-equivalent runs work from the sandbox
+- **Embeddings/reranker ARE reachable over IPv4**:
+  `EMBED_URL=http://host.docker.internal:8091/v1` is
+  `embedder-llama` (`qwen3-embedding-4b`) and `RERANK_API_BASE=http://host.docker.internal:8090/v1`
+  is `reranker-llama` — full production-equivalent runs work from the sandbox
   (real vector index + rerank, no fallback). Plain `curl http://...` may fail
   with `[::1] refused` because dialing tries IPv6 first; force IPv4
   (`curl -4`) or let the HTTP client retry. Under heavy GPU load the embedder

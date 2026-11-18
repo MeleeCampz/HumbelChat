@@ -24,8 +24,8 @@ def in_sandbox() -> bool:
 
 # docker service name (bot container) → published port on the host
 SANDBOX_ENDPOINT_SHIMS = {
-    "EMBED_URL": "http://host.docker.internal:11435/v1",
-    "RERANK_API_BASE": "http://host.docker.internal:8000",
+    "EMBED_URL": "http://host.docker.internal:8091/v1",   # embedder-llama
+    "RERANK_API_BASE": "http://host.docker.internal:8090/v1",  # reranker-llama
 }
 
 

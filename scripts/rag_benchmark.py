@@ -24,8 +24,8 @@ Design notes
   ``.env`` work as-is. From the dev sandbox, override the two compose-internal
   URLs with their published loopback ports, e.g.::
 
-      EMBED_URL=http://host.docker.internal:11435/v1 \
-      RERANK_API_BASE=http://host.docker.internal:8000 \
+      EMBED_URL=http://host.docker.internal:8091/v1 \
+      RERANK_API_BASE=http://host.docker.internal:8090/v1 \
       python scripts/rag_benchmark.py
 
 Usage:

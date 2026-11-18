@@ -40,9 +40,9 @@ os.chdir(REPO)  # .env + relative KB paths resolve like in production
 
 # Sandbox network shim: .env points EMBED_URL at the docker-internal service
 # name (correct for the bot container). From the sandbox that hostname does
-# not work; compose publishes the same sidecar on 127.0.0.1:11435, reachable
-# as host.docker.internal:11435 — the endpoint previous healthy benchmarks
-# used. Host runs are unaffected (shim only applies inside the sandbox).
+# not work; compose publishes embedder-llama / reranker-llama on loopback
+# :8091 / :8090, reachable as host.docker.internal:<port>. Host runs are
+# unaffected (shim only applies inside the sandbox).
 # Sandbox detection: clone mode has /run/sandbox; direct mode mounts the host
 # tree at a drive letter (/c/Repos/...).
 def _in_sandbox() -> bool:
@@ -51,8 +51,8 @@ def _in_sandbox() -> bool:
 
 _SANDBOX_ENDPOINT_SHIMS = {
     # docker service name (bot container) → published port on the host
-    "EMBED_URL": "http://host.docker.internal:11435/v1",
-    "RERANK_API_BASE": "http://host.docker.internal:8000",
+    "EMBED_URL": "http://host.docker.internal:8091/v1",   # embedder-llama
+    "RERANK_API_BASE": "http://host.docker.internal:8090/v1",  # reranker-llama
 }
 if _in_sandbox():
     os.environ.update(_SANDBOX_ENDPOINT_SHIMS)

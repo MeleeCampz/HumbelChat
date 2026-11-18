@@ -36,7 +36,7 @@ Usage (from the repo root, real backends — on Windows use .venv\Scripts\python
 a bare invocation picks up a system Python that has none of this project's deps):
   # read-only state report (safe with the bot running):
   .venv/bin/python scripts/contextual_reindex.py --status
-  EMBED_URL=http://host.docker.internal:11435/v1 \
+  EMBED_URL=http://host.docker.internal:8091/v1 \
   .venv/bin/python scripts/contextual_reindex.py --batch-size 12 --reembed-missing
   # repair vectors that lag their context line, without generating anything:
   .venv/bin/python scripts/contextual_reindex.py --reembed-only

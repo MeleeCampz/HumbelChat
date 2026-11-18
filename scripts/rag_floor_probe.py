@@ -13,8 +13,8 @@ the Qwen3-Reranker active, captures every candidate's rerank score, and:
 Read-only: no index writes, no config changes. Run from the repo with a
 production-equivalent environment (remote embedder + reranker reachable):
 
-    EMBED_URL=http://host.docker.internal:11435/v1 \
-    RERANK_API_BASE=http://host.docker.internal:8000 \
+    EMBED_URL=http://host.docker.internal:8091/v1 \
+    RERANK_API_BASE=http://host.docker.internal:8090/v1 \
     BOT_NO_LOG_FILES=1 python scripts/rag_floor_probe.py [--top-n 4] [--out FILE]
 """
 from __future__ import annotations
