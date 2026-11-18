@@ -176,11 +176,13 @@ def _gathered_reappend(meta: AgentTurnMeta) -> str:
             f"<gathered-context>\n{ctx}\n</gathered-context>")
 
 
-def _agent_system_addendum() -> str:
+def _agent_system_addendum(answer_instruction: str | None = None,
+                           mention_attached_context: bool = True) -> str:
     from config.settings import RAG_AGENT_MAX_ITERATIONS, RAG_AGENT_MAX_TOOL_CALLS
 
     return (
-        tool_prompt_block()
+        tool_prompt_block(answer_instruction=answer_instruction,
+                          mention_attached_context=mention_attached_context)
         + f"\n(Hard limits: at most {RAG_AGENT_MAX_ITERATIONS} tool turns and "
           f"{RAG_AGENT_MAX_TOOL_CALLS} tool calls total — then you MUST "
           "answer with the information you have.)"
@@ -205,6 +207,8 @@ async def run_agent_loop(
     user_message: str = "",
     initial_context: str = "",
     initial_messages: list[dict[str, Any]] | None = None,
+    answer_instruction: str | None = None,
+    mention_attached_context: bool = True,
 ) -> tuple[str, AgentTurnMeta]:
     """Run the bounded loop; ALWAYS returns ``(answer_text, meta)``.
 
@@ -223,14 +227,16 @@ async def run_agent_loop(
     meta = AgentTurnMeta()
     if initial_messages is not None:
         messages: list[dict[str, Any]] = [dict(m) for m in initial_messages]
+        addendum = _agent_system_addendum(answer_instruction,
+                                          mention_attached_context)
         if messages and messages[0].get("role") == "system":
             base = str(messages[0].get("content") or "")
-            messages[0]["content"] = (base + "\n\n" if base else "") \
-                + _agent_system_addendum()
+            messages[0]["content"] = (base + "\n\n" if base else "") + addendum
     else:
         messages = [
             {"role": "system",
-             "content": system_prompt + "\n\n" + _agent_system_addendum()},
+             "content": system_prompt + "\n\n" + _agent_system_addendum(
+                 answer_instruction, mention_attached_context)},
         ]
         if history_block:
             messages.append({"role": "user", "content": history_block})

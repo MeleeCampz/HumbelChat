@@ -208,8 +208,22 @@ def _validate_args(
     return name, clean
 
 
-def tool_prompt_block() -> str:
-    """The system-prompt addendum describing the protocol + tools."""
+# The closing paragraphs are the part two callers need to phrase differently.
+# ASK_AI answers in prose from an attached KB context; the image rewrite answers
+# with a machine-parsed block and has NO attached context. Measured 2026-11-19:
+# the shared block ended with "answer in plain text (no JSON)" directly under a
+# contract demanding a JSON block, and told the model not to re-verify "what is
+# right there" while a roster preview sat in the prompt looking like an answer —
+# both push the image rewrite to answer from memory instead of searching.
+def tool_prompt_block(*, answer_instruction: str | None = None,
+                      mention_attached_context: bool = True) -> str:
+    """The system-prompt addendum describing the protocol + tools.
+
+    ``answer_instruction`` replaces the closing "Answering:" paragraph (``None``
+    = the chat-path default). ``mention_attached_context`` toggles the "when NOT
+    to call tools" paragraph, which only makes sense for a caller that really
+    does attach retrieved context.
+    """
     from config.settings import RAG_AGENT_SEARCH_TOP_K
 
     lines = [
@@ -229,25 +243,29 @@ def tool_prompt_block() -> str:
         )
         desc = schema["description"]
         if "%d" in desc:  # only search_kb carries the top-k placeholder
-            desc = desc % RAG_AGENT_SEARCH_TOP_K
+            desc = schema["description"] % RAG_AGENT_SEARCH_TOP_K
         lines.append(f"- {name} — {desc}")
         lines.append(f"  args: {args_desc}   (* = required)")
-    lines += [
-        "",
-        "When NOT to call tools: if the knowledge-base context already attached "
-        "to this conversation fully answers the question, answer directly from "
-        "it — do not call tools to re-verify what is right there. Call tools "
-        "only for what the attached context does not cover: other files or "
-        "sections, enumeration ('which/all ...', 'list every ...'), exact names "
-        "or terms, or which session something happened in.",
+
+    closing: list[str] = [""]
+    if mention_attached_context:
+        closing.append(
+            "When NOT to call tools: if the knowledge-base context already "
+            "attached to this conversation fully answers the question, answer "
+            "directly from it — do not call tools to re-verify what is right "
+            "there. Call tools only for what the attached context does not "
+            "cover: other files or sections, enumeration ('which/all ...'), "
+            "exact names or terms, or which session something happened in.")
+    closing.append(
         "Batching: if you need several INDEPENDENT lookups (none needs another's "
         "result), put them all in ONE array so they run in parallel. Only "
-        "serialize calls that depend on a previous result.",
+        "serialize calls that depend on a previous result.")
+    closing.append(answer_instruction or (
         "Answering: after at most a few tool turns, answer in plain text (no "
         "JSON) with the findings, citing file/section per key claim. If nothing "
         "you find is relevant, say plainly that it is not in the rules/campaign "
-        "notes instead of guessing.",
-    ]
+        "notes instead of guessing."))
+    lines += closing
     return "\n".join(lines)
 
 

@@ -87,7 +87,7 @@ def _patch_pipeline(
         calls.append("select")
         return si._parse_moments(moments_raw)
 
-    async def fake_prepare(text, raw=False):
+    async def fake_prepare(text, raw=False, **kw):
         calls.append(f"prepare:{text[:20]}")
         return f"REWRITTEN: {text}"
 

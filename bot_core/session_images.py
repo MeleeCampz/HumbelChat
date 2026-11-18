@@ -339,10 +339,14 @@ async def _run_highlights(
         return
 
     # 2) Prepare ALL prompts first — rag mode still live (KB tools + rerank).
+    #    Keyed to the channel the highlights are being posted to, so moment N's
+    #    plan is visible to moment N+1 (the same party in the same session).
     prompts: list[str] = []
     for moment in moments:
         text = (f"{moment['title']}\n{moment['scene']}" if moment["title"] else moment["scene"]).strip()
-        prepared = await I.prepare_prompt(text)  # rewrite failure degrades to raw text
+        prepared = await I.prepare_prompt(text,
+                                         memory_key=(guild_id, channel_id))
+        # rewrite failure degrades to raw text
         if prepared:
             prompts.append(prepared)
     if not prompts:

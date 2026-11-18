@@ -1161,6 +1161,214 @@ class TestBackendHardening:
             await images._image_status(client)
 
 
+class TestRewritePromptShape:
+    """What the rewrite is actually TOLD (analysis §15).
+
+    Measured in the prompt as sent: the shared chat-path tool addendum ended
+    "answer in plain text (no JSON)" directly under a contract demanding a JSON
+    block; the vault note's 610-character header written for the human who edits
+    it was injected whole; the contract's own example named a live campaign NPC
+    with an invented species; and the request arrived as a bare sentence with no
+    memory of the frame the same channel had just painted.
+    """
+
+    @staticmethod
+    def _resp(content: str):
+        return MagicMock(choices=[MagicMock(message=MagicMock(content=content))])
+
+    @staticmethod
+    def _plan(scene: str, figures: str) -> str:
+        return ('<image_plan>\n{"scene": "%s", "figures": [%s], '
+                '"lighting": "forest light", "palette": "moss green", '
+                '"mood": "tense"}\n</image_plan>' % (scene, figures))
+
+    @staticmethod
+    def _systems(client) -> list[str]:
+        """The system message of every completion the loop made."""
+        return [c.kwargs["messages"][0]["content"]
+                for c in client.chat.completions.create.call_args_list]
+
+    @staticmethod
+    def _users(client) -> list[list[str]]:
+        return [[m["content"] for m in c.kwargs["messages"] if m["role"] == "user"]
+                for c in client.chat.completions.create.call_args_list]
+
+    @staticmethod
+    def _fresh_memory(monkeypatch):
+        from collections import OrderedDict
+        monkeypatch.setattr(images, "_PLAN_MEMORY", OrderedDict())
+
+    async def test_the_answer_shape_is_said_by_code_not_left_to_the_chat_block(
+            self, monkeypatch):
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(return_value=self._resp(
+            self._plan("Seta Onix draws her bow on the forest path",
+                       '{"name": "Seta Onix", "pose": "drawing her bow"}')))
+        monkeypatch.setattr(images, "_chat_client", lambda: client)
+        await images.rewrite_prompt("seta aiming on the path")
+        system = self._systems(client)[0]
+        assert "must be the <image_plan> block" in system
+        # The contradiction that made narration-instead-of-plan answers plausible.
+        assert "plain text (no JSON)" not in system
+
+    async def test_the_image_rewrite_is_not_told_not_to_re_verify_nothing(
+            self, monkeypatch):
+        """No KB context is attached here — that paragraph only ever has the
+        roster PREVIEW in view, and it discourages the lookups a missing NPC
+        appearance needs."""
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(return_value=self._resp(
+            self._plan("Seta Onix draws her bow on the forest path",
+                       '{"name": "Seta Onix", "pose": "drawing her bow"}')))
+        monkeypatch.setattr(images, "_chat_client", lambda: client)
+        await images.rewrite_prompt("seta aiming on the path")
+        assert "already attached to this conversation" not in self._systems(client)[0]
+
+    def _client_answering(self, monkeypatch, pick):
+        """A fake backend that answers EVERY turn, chosen from the turn in view.
+
+        Robust to how many turns a path actually takes: a lookup pass, a retry or
+        a forced final completion all still get an answer instead of running the
+        mock dry.
+        """
+        client = MagicMock()
+
+        def _side(*a, **kw):
+            users = [m["content"] for m in kw["messages"] if m["role"] == "user"]
+            return self._resp(pick(users[-1] if users else ""))
+
+        client.chat.completions.create = AsyncMock(side_effect=_side)
+        monkeypatch.setattr(images, "_chat_client", lambda: client)
+        return client
+
+    async def test_the_lookup_pass_is_told_the_same_thing(self, monkeypatch):
+        """The enforced lookup pass is a SECOND loop; it must carry the same
+        answer shape, not the chat-path one."""
+        first = self._plan(
+            "Boss Frey blocks the path as Seta Onix draws her bow",
+            '{"name": "Seta Onix", "pose": "drawing her bow"}, '
+            '{"name": "Boss Frey", "pose": "blocking the path", '
+            '"look": "broad-shouldered bandit in a patched coat", '
+            '"source": "SESSION_05/notes.md"}')
+        after = self._plan(
+            "Boss Frey blocks the path as Seta Onix draws her bow",
+            '{"name": "Seta Onix", "pose": "drawing her bow"}, '
+            '{"name": "Boss Frey", "pose": "blocking the path"}')
+        client = self._client_answering(
+            monkeypatch,
+            lambda turn: after if "not in the party sheet" in turn else first)
+        await images.rewrite_prompt("boss frey blocks the path")
+        systems = self._systems(client)
+        assert len(systems) >= 2          # the lookup pass ran as its own loop
+        assert all("must be the <image_plan> block" in s for s in systems)
+        assert all("plain text (no JSON)" not in s for s in systems)
+
+    def test_the_chat_path_keeps_its_own_answer_shape(self):
+        from kb import tools
+        default = tools.tool_prompt_block()
+        assert "answer in plain text (no JSON)" in default
+        assert "already attached to this conversation" in default
+        tailored = tools.tool_prompt_block(
+            answer_instruction="Answer with the <image_plan> block only.",
+            mention_attached_context=False)
+        assert "Answer with the <image_plan> block only." in tailored
+        assert "already attached to this conversation" not in tailored
+        for name in ("search_kb", "read_section", "list_sections",
+                     "find_in_kb", "list_sessions"):
+            assert name in tailored          # the tools themselves are shared
+
+    def test_the_vault_note_owners_instructions_are_not_sent_to_the_model(self):
+        for loaded in (images._load_plan_system(), images._load_rewrite_system()):
+            assert "Edit freely" not in loaded
+            assert "This note is loaded into" not in loaded
+        if not images._CHAR_RULES_FILE.exists():
+            pytest.skip("vault policy note not present (data/ is gitignored)")
+        # The rules themselves still arrive — only the human-facing header goes.
+        assert "Googly eyes" in images._load_plan_system()
+
+    def test_the_plan_example_names_nobody_from_the_campaign(self):
+        raw = images._PLAN_FILE.read_text(encoding="utf-8")
+        example = raw.split("```")[1]
+        assert "<image_plan>" in example
+        assert "Pell Wicker" in example and "Orin Vek" in example
+        # Measured: the example used to hand the model "Boss Frey … heavy-set
+        # badger-folk bandit in a torn grey coat" — a ready-made answer to the
+        # live request we were testing, for an NPC the vault has no appearance for.
+        for name in ("Boss Frey", "badger", "Colum", "Seta", "Marvin",
+                     "Trixy", "Romi", "Bubo"):
+            assert name.lower() not in example.lower()
+
+    async def test_the_request_travels_as_a_labelled_block(self, monkeypatch):
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(return_value=self._resp(
+            self._plan("Seta Onix draws her bow on the forest path",
+                       '{"name": "Seta Onix", "pose": "drawing her bow"}')))
+        monkeypatch.setattr(images, "_chat_client", lambda: client)
+        self._fresh_memory(monkeypatch)
+        await images.rewrite_prompt("seta aiming on the path", memory_key=(1, 2))
+        users = self._users(client)[0]
+        assert any("<request>\nseta aiming on the path\n</request>" in u
+                   for u in users)
+
+    async def test_a_follow_up_in_the_same_channel_sees_the_previous_plan(
+            self, monkeypatch):
+        self._fresh_memory(monkeypatch)
+        plans = {
+            "seta aiming": self._plan(
+                "Seta Onix draws her bow on the forest path",
+                '{"name": "Seta Onix", "pose": "drawing her bow"}'),
+            "torches": self._plan(
+                "Seta Onix draws her bow under torchlight",
+                '{"name": "Seta Onix", "pose": "drawing her bow"}'),
+            "forge": self._plan(
+                "Trixy Smoldersome works at the forge",
+                '{"name": "Trixy Smoldersome", "pose": "turning a wrench"}'),
+        }
+
+        def _pick(turn: str) -> str:
+            for needle, plan in plans.items():
+                if needle in turn:
+                    return plan
+            return plans["forge"]
+
+        client = self._client_answering(monkeypatch, _pick)
+        await images.rewrite_prompt("seta aiming on the path", memory_key=(1, 2))
+        assert "<previous_image_plan>" not in self._users(client)[0][-1]
+        await images.rewrite_prompt("again but with torches", memory_key=(1, 2))
+        second = self._users(client)[1][-1]
+        assert "<previous_image_plan>" in second
+        assert "Seta Onix draws her bow on the forest path" in second
+        assert "drawing her bow" in second
+        # A different channel is a different conversation.
+        await images.rewrite_prompt("a forge at dusk", memory_key=(1, 3))
+        assert "<previous_image_plan>" not in self._users(client)[2][-1]
+
+    async def test_the_previous_plan_is_small_and_marked_as_optional(
+            self, monkeypatch):
+        self._fresh_memory(monkeypatch)
+        long_scene = " ".join(f"word{i}" for i in range(300))
+        images._remember_plan((1, 2), images.image_prompt.ImagePlan(
+            scene=long_scene,
+            figures=[images.image_prompt.Figure(name="Seta Onix", pose="walking")]))
+        block = images._previous_plan_block((1, 2))
+        assert len(block) <= images._PREVIOUS_PLAN_MAX_CHARS + 400
+        assert "ignore this block entirely" in block   # unrelated → no contamination
+        assert "word299" not in block
+
+    def test_the_plan_memory_is_bounded(self, monkeypatch):
+        self._fresh_memory(monkeypatch)
+        plan = images.image_prompt.ImagePlan(scene="s",
+                                             figures=[images.image_prompt.Figure(
+                                                 name="Seta Onix", pose="walking")])
+        for i in range(images._PLAN_MEMORY_MAX + 8):
+            images._remember_plan((1, i), plan)
+        assert len(images._PLAN_MEMORY) == images._PLAN_MEMORY_MAX
+        assert (1, 0) not in images._PLAN_MEMORY
+
+    def test_the_plan_memory_forgets_a_stale_frame_instead_of_hoarding_it(self):
+        assert images._previous_plan_block(None) == ""
+
+
 class TestCommandHandler:
     """commands/generate_image_command — mocked core, fake interaction."""
 
@@ -1209,7 +1417,7 @@ class TestCommandHandler:
     async def test_raw_skips_rewrite(self, monkeypatch):
         import commands.generate_image_command as cmd
         monkeypatch.setattr(cmd, "image_gen_configured", lambda: True)
-        prepared = AsyncMock(side_effect=lambda text, raw=False: text)
+        prepared = AsyncMock(side_effect=lambda text, raw=False, **kw: text)
         monkeypatch.setattr(cmd, "prepare_prompt", prepared)
         generated: list[str] = []
 
@@ -1222,7 +1430,9 @@ class TestCommandHandler:
         monkeypatch.setattr(cmd, "generate_image", fake_gen)
         inter, followups = self._interaction()
         await handle_generate_image_command(inter, prompt="verbatim bird", raw=True)
-        prepared.assert_awaited_once_with("verbatim bird", raw=True)
+        prepared.assert_awaited_once_with(
+            "verbatim bird", raw=True,
+            memory_key=(inter.guild_id, inter.channel_id))
         assert generated == ["verbatim bird"]
         # ONE message: the final answer (text + image) landed in place on the
         # progress message — no separate reply.

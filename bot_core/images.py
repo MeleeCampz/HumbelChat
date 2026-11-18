@@ -24,6 +24,7 @@ import base64
 import logging
 import re
 import time
+from collections import OrderedDict
 from pathlib import Path
 
 from typing import Any, Callable
@@ -509,7 +510,8 @@ def _load_rewrite_system() -> str:
                   exc)
         policy = _FALLBACK_POLICY
     try:
-        char_rules = _CHAR_RULES_FILE.read_text(encoding="utf-8").strip()
+        char_rules = _strip_editor_preamble(
+            _CHAR_RULES_FILE.read_text(encoding="utf-8"))
         if not char_rules:
             raise OSError("empty")
     except OSError as exc:
@@ -607,6 +609,87 @@ _PLAN_RETRY_NUDGE = (
     "entities, lighting, palette, mood.\n\nRequest: "
 )
 
+# How the answer must look, said by CODE. The shared chat-path addendum used to
+# be appended verbatim here and it ended "answer in plain text (no JSON)" —
+# measured sitting directly under a contract that demands a JSON block (analysis
+# §15), which is the shape of the narration-instead-of-plan failures
+# _PLAN_RETRY_NUDGE exists to mop up.
+_IMAGE_ANSWER_INSTRUCTION = (
+    "Answering: your final answer must be the <image_plan> block of the "
+    "contract and nothing else — not prose, not lookup findings, not the image "
+    "described in sentences. A reply without that block cannot be painted and is "
+    "discarded. On a lookup turn, reply only with the JSON tool call.")
+
+
+def _strip_editor_preamble(text: str) -> str:
+    """Drop the vault note's header, which is written for the human editing it.
+
+    Image Generation Policy.md opens with 610 characters addressed to the vault's
+    owner — 'This note is loaded into the system prompt… Edit freely — changes
+    apply to the next image… Write direct instructions for the model; keep it
+    short.' The prose path already skipped its file's header; the plan path was
+    injecting this one whole, telling the model to edit a markdown file.
+    """
+    i = text.find("\n## ")
+    return text[i + 1:].strip() if i >= 0 else text.strip()
+
+
+def _wrap_request(text: str) -> str:
+    """The request as a labelled block, the way ASK_AI sends its context blocks.
+
+    A bare sentence under ~13k characters of rules is how a request gets
+    paraphrased instead of answered; ASK_AI gained the same benefit from tagging
+    its context ("<history_context> … do NOT re-answer these").
+    """
+    return f"<request>\n{text}\n</request>"
+
+
+# What the LAST image in this channel was. A follow-up ("nochmal mit Fackeln",
+# "ohne die Banditen") is an edit of a frame, but the rewrite was amnesiac: it
+# re-planned from scratch and re-searched the same NPCs. In-memory and bounded —
+# a restart forgets, which is the right failure mode for a stale frame.
+_PLAN_MEMORY: "OrderedDict[Any, str]" = OrderedDict()
+_PLAN_MEMORY_MAX = 12
+_PREVIOUS_PLAN_MAX_CHARS = 700
+
+
+def _plan_note(plan: image_prompt.ImagePlan) -> str:
+    """A plan rendered small enough to be worth re-reading every later turn."""
+    parts = [f"scene: {plan.scene}"]
+    for f in plan.figures:
+        pose = str(getattr(f, "pose", "") or "").strip()
+        parts.append(f"- {f.name}" + (f": {pose}" if pose else ""))
+    if plan.entities:
+        parts.append("entities: " + ", ".join(plan.entities))
+    for label, value in (("lighting", plan.lighting), ("palette", plan.palette),
+                         ("mood", plan.mood)):
+        if value:
+            parts.append(f"{label}: {value}")
+    note = "\n".join(parts)
+    return note if len(note) <= _PREVIOUS_PLAN_MAX_CHARS \
+        else note[:_PREVIOUS_PLAN_MAX_CHARS].rstrip() + " …"
+
+
+def _remember_plan(key: Any, plan: image_prompt.ImagePlan) -> None:
+    if key is None:
+        return
+    _PLAN_MEMORY[key] = _plan_note(plan)
+    _PLAN_MEMORY.move_to_end(key)
+    while len(_PLAN_MEMORY) > _PLAN_MEMORY_MAX:
+        _PLAN_MEMORY.popitem(last=False)
+
+
+def _previous_plan_block(key: Any) -> str:
+    note = _PLAN_MEMORY.get(key) if key is not None else None
+    if not note:
+        return ""
+    return ("<previous_image_plan>\n"
+            "The plan of the LAST image painted in this channel. The new request "
+            "may be an edit of it (\"again, but with torches\", \"without the "
+            "bandits\"): keep what still applies and re-use the same characters. "
+            "If the new request is unrelated, ignore this block entirely.\n"
+            f"{note}\n</previous_image_plan>")
+
 
 def _load_anchors() -> dict[str, image_prompt.Anchor]:
     """Party anchors, re-read from the vault on EVERY rewrite.
@@ -667,7 +750,8 @@ def _load_plan_system() -> str:
     except OSError as exc:
         raise ImageGenError(f"plan contract file missing ({exc})") from exc
     try:
-        char_rules = _CHAR_RULES_FILE.read_text(encoding="utf-8").strip()
+        char_rules = _strip_editor_preamble(
+            _CHAR_RULES_FILE.read_text(encoding="utf-8"))
         if not char_rules:
             raise OSError("empty")
     except OSError as exc:
@@ -730,7 +814,8 @@ def _budget_kwargs() -> dict[str, int]:
             "hard_cap": IMAGE_PROMPT_MAX_CHARS}
 
 
-async def _rewrite_composed(text: str, complete) -> str:
+async def _rewrite_composed(text: str, complete,
+                            memory_key: Any = None) -> str:
     """Plan the image with the chat model, then COMPOSE the prompt in code.
 
     Raises ImageGenError when no usable plan comes back; rewrite_prompt then
@@ -738,13 +823,23 @@ async def _rewrite_composed(text: str, complete) -> str:
     """
     system = _load_plan_system()
     anchors = _load_anchors()
-    log.info("image plan requested: %s", text[:120])
-    for i, msg in enumerate((text, _PLAN_RETRY_NUDGE + text)):
+    prior = _previous_plan_block(memory_key)
+    base_msg = _wrap_request(text)
+    first_msg = f"{prior}\n\n{base_msg}" if prior else base_msg
+    log.info("image plan requested: %s%s", text[:120],
+             " (+previous plan injected)" if prior else "")
+    for i, msg in enumerate((first_msg, _PLAN_RETRY_NUDGE + base_msg)):
         out, meta = await run_agent_loop(
             complete=complete,
             model=DEFAULT_MODEL,
             system_prompt=system,
             user_message=msg,
+            answer_instruction=_IMAGE_ANSWER_INSTRUCTION,
+            # No KB context is attached on this path — the paragraph telling the
+            # model not to re-verify "what is right there" only ever has the
+            # roster PREVIEW in view, and it discourages exactly the lookups a
+            # missing NPC appearance needs.
+            mention_attached_context=False,
         )
         out = (out or "").strip()
         if meta.fallback and any(
@@ -761,6 +856,7 @@ async def _rewrite_composed(text: str, complete) -> str:
                 continue
             raise ImageGenError(
                 "rewrite produced no plan block: " + out[:80].replace("\n", " "))
+        final_plan = plan
         composed = image_prompt.compose_prompt(
             plan, anchors, _BASE_STYLE,
             foreground=IMAGE_PROMPT_FOREGROUND_FIGURES,
@@ -774,7 +870,11 @@ async def _rewrite_composed(text: str, complete) -> str:
             read_paths=_read_paths_from(meta.tool_calls_detail),
             snippet_paths=_snippet_paths_from(
                 meta.gathered_context, _read_paths_from(meta.tool_calls_detail)),
-            retrieved=meta.gathered_context)
+            retrieved=meta.gathered_context,
+            # The request's own words: which species the USER named, and the
+            # spelling a campaign name really has ("Frey" painted for "Boss Frey"
+            # was measured live, analysis §15).
+            request_text=text)
         for w in composed.warnings:
             if w.startswith("budget "):
                 log.warning("composer budget: %s", w)
@@ -802,6 +902,8 @@ async def _rewrite_composed(text: str, complete) -> str:
                     {"role": "user", "content": _LOOKUP_NUDGE.replace(
                         "{{NAMES}}", ", ".join(worth))},
                 ],
+                answer_instruction=_IMAGE_ANSWER_INSTRUCTION,
+                mention_attached_context=False,
             )
             retry = image_prompt.extract_plan(retry_out or "")
             if retry is None:
@@ -819,7 +921,7 @@ async def _rewrite_composed(text: str, complete) -> str:
                     budget_kwargs=_budget_kwargs(),
                     read_paths=opened,
                     snippet_paths=_snippet_paths_from(gathered, opened),
-                    retrieved=gathered)
+                    retrieved=gathered, request_text=text)
                 for w in composed.warnings:
                     if w.startswith("budget "):
                         log.warning("composer budget: %s", w)
@@ -829,7 +931,9 @@ async def _rewrite_composed(text: str, complete) -> str:
                          "char(s), %d figure(s), %d tool call(s) in the lookup",
                          len(composed.prompt), composed.figures,
                          len(retry_meta.tool_calls))
+                final_plan = retry
 
+        _remember_plan(memory_key, final_plan)
         log.info(
             "image prompt composed: %d char(s), %d figure(s) (%d foreground), "
             "%d tool call(s), %d cut(s), %d anchor(s) available%s — %s",
@@ -842,7 +946,7 @@ async def _rewrite_composed(text: str, complete) -> str:
     raise ImageGenError("rewrite produced no plan")  # unreachable
 
 
-async def rewrite_prompt(text: str) -> str:
+async def rewrite_prompt(text: str, memory_key: Any = None) -> str:
     """Turn a short user request into the prompt the image model gets.
 
     Runs on the chat backend (its own card) while rag mode is live — call this
@@ -873,7 +977,7 @@ async def rewrite_prompt(text: str) -> str:
     client = _chat_client()
     complete = _make_completer(client)
     try:
-        return await _rewrite_composed(text, complete)
+        return await _rewrite_composed(text, complete, memory_key)
     except ImageGenError as exc:
         log.warning("composed rewrite unavailable (%s) — falling back to the "
                     "prose rewrite path", str(exc)[:160])
@@ -958,13 +1062,15 @@ def resolve_size(raw: str | None) -> int | None:
     return min(n, IMAGE_MAX_SIZE)
 
 
-async def prepare_prompt(text: str, raw: bool = False) -> str:
+async def prepare_prompt(text: str, raw: bool = False,
+                         memory_key: Any = None) -> str:
     """Final prompt for the image backend: rewrite via the chat model unless
     ``raw`` (verbatim passthrough).  A failed rewrite degrades to the raw
     text (never blocks a generation over a rewrite hiccup).
 
     Shared by the live path and the dry-run mode (#65b) so both see exactly
-    what would be sent.
+    what would be sent. ``memory_key`` (usually ``(guild_id, channel_id)``)
+    lets a follow-up request in the same channel see the previous plan.
     """
     text = (text or "").strip()
     if not text:
@@ -972,7 +1078,7 @@ async def prepare_prompt(text: str, raw: bool = False) -> str:
     if raw:
         return text
     try:
-        return await rewrite_prompt(text)
+        return await rewrite_prompt(text, memory_key)
     except ImageGenError as exc:
         log.warning("prompt rewrite failed (%s) — using the raw prompt", exc)
         return text

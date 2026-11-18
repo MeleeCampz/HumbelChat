@@ -94,7 +94,11 @@ async def handle_generate_image_command(
 
     # 1) Rewrite FIRST, on the chat backend while rag mode is live (its KB
     #    tools include the reranker — a mode switch would take it offline).
-    final_prompt = await prepare_prompt(prompt, raw=raw)
+    #    The channel is the memory key: "again, but with torches" is an edit of
+    #    the frame this channel just painted, not a fresh request.
+    final_prompt = await prepare_prompt(
+        prompt, raw=raw,
+        memory_key=(interaction.guild_id, interaction.channel_id))
 
     # Dry run (#65b): show exactly what would be sent — no mode switch, no image.
     if dry_run:
