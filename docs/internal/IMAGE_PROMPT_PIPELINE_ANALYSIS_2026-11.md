@@ -348,3 +348,65 @@ plan extraction) plus `tests/test_images.py` adapted to the two paths. Full suit
 - Whether Qwen-Image-Turbo's *positive* prompt really ignores negations (§9.3's
   A/B) — the composer no longer emits them, so this is now a vault-negative-prompt
   tuning question only.
+
+
+## 11. Second review pass (same day, after the enforcement landed)
+
+Four more measured failures, all found by running the real rewrite path rather
+than reading the code.
+
+**11.1 Invention through a file that was really opened.** The bandit rewrite
+wrote "heavy-set badger-folk bandit chief, flat snout, cutlass at his hip" for
+Boss Frey and cited `SESSION_01_DerAnfang` — which it *had* read, and which
+mentions him by name and says nothing about his looks. "Opened ⇒ believed" was
+the weak point. `verify_look` now separates the two claims: a creature noun must
+appear in the retrieved text **about that character** (`evidence_about`: the
+sections of the retrieved material that name them), in English or German. The
+first version of that gate was itself fooled — the model searched *"Frey bandit
+badger wolf fox species appearance"* and the vault answered with a D&D
+magic-item entry about a badger, so the species was present in the context but
+not about Boss Frey. Section-scoped evidence closes that. Re-measured: the same
+request now paints Frey and Alisa with real actions and **no species at all**,
+which is what the vault actually supports.
+
+**11.2 A character hidden in `entities` was invisible to every rule.** The plan
+put "Boss Frey and his bandit crew" and "Alisa Pennygleam" in the scene text.
+They skipped grounding, skipped the lookup pass, and the count line said *six*
+named figures while eight were named in the same prompt — the exact shape that
+paints an extra crowd. A name in `entities` that the scene treats as an actor is
+now a figure (pose taken from the scene's own words, group left as a group); a
+name the scene only ever says after "at/of/in" stays a place.
+
+**11.3 Duplicate tool calls, not tool count, were the cost.** The 145 s rewrite
+of the ambush request spent **4 s** in tools. The rest was model turns, and the
+model had re-issued the same `read_section` three times. `agent_loop` now
+refuses the second identical call in a loop with a pointer to the result it
+already has. The same request went 145.7 s → 21.6 s with that and the retrieval
+fixes together.
+
+**11.4 Thinking: measured, not assumed.** Same hard request, same code, only the
+reasoning effort changed:
+
+| every rewrite turn | wall time | tool time | tool calls |
+|---|---|---|---|
+| `low` (today) | 21.6 s | 13 s | 6 |
+| `medium` | 27.7 s | 8 s | 6 |
+
+`medium` wrote marginally better *queries* and marginally nicer nouns, and bought
+nothing that grounding rules would not have caught anyway. The recommendation is
+to keep the plan turn at `low` and spend the fast backend's headroom on **more
+targeted lookups**, not more thinking — which is what the enforced lookup pass
+already does.
+
+**11.5 Considered and rejected: cutting a leading roll call.** A scene sentence
+that opens "Trixy, Seta, Colum, Romi, Bubo, Marvin, Benner Seridan battles a
+black pudding" wastes ~110 characters and re-lists the cast. Cutting the list
+would leave a verb without its actors, and the actors are exactly what the figure
+lines then describe — the fix would have quietly changed *who* the scene says is
+fighting. Left alone on purpose.
+
+**Still open after this pass.** The plan can also *lose* something the user
+asked for: the ambush request said "Boss Frey und seinen Banditen" and the final
+plan named only their boss. Nothing in the composer compares the request's own
+actors against what the plan decided to paint — a completeness check there is the
+next obvious guarantee, and it is not yet built.
