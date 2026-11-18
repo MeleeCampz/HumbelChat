@@ -1227,6 +1227,15 @@ def run_bot() -> None:
         _sha = open("/app/.build_sha").read().strip()
         if _sha and _sha != "unknown":
             log.info("Bot build sha: %s", _sha)
+        else:
+            # Derived by the Dockerfile from the build context's .git metadata.
+            # "unknown" means that derivation found nothing (context had no .git,
+            # or an empty GIT_SHA override) — say so loudly instead of staying
+            # silent, so an unverifiable deploy is never mistaken for a verified one.
+            log.warning(
+                "Bot build sha: UNKNOWN — the image carries no commit stamp, so this "
+                "container's code cannot be matched to a repo commit."
+            )
     except OSError:
         pass  # local dev (no stamp file) — nothing to verify
 

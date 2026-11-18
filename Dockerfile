@@ -35,20 +35,51 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 WORKDIR /app
 
-# Build stamp: which commit this image was built from. The bot logs it at
-# startup and deploys can verify the running container matches the repo tip —
-# a stale cached build once served pre-fix code while looking healthy (#68
-# follow-up, 2026-10-28). Pass: docker compose build --build-arg GIT_SHA=$(git rev-parse HEAD)
-ARG GIT_SHA=unknown
-ENV BOT_BUILD_SHA=${GIT_SHA}
-LABEL org.opencontainers.image.revision=${GIT_SHA}
+# Build stamp: which commit this image was built from. Derived AT BUILD TIME from
+# the repo's own .git metadata (see the RUN right after COPY . .), so a plain
+# `docker compose up -d --build` stamps itself — no --build-arg, no env var, no
+# chance of a stale value being typed by hand. The bot logs it at startup and
+# deploys verify the running container against the repo tip — a stale cached
+# build once served pre-fix code while looking healthy (#68 follow-up, 2026-10-28).
+# Override only for contexts that have no .git at all (CI from a tarball, a
+# copied source tree): docker compose build --build-arg GIT_SHA=<full sha>
+# (/app/.build_sha is the single source of truth — nothing reads an env var).
+ARG GIT_SHA=
 
 COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements.txt
 
 COPY . .
-RUN echo "${GIT_SHA}" > /app/.build_sha
+# Resolve HEAD -> commit sha inside the build. The context mount carries only
+# what .dockerignore allows (HEAD, packed-refs, refs/**), which is enough:
+# loose ref file first, packed-refs as the fallback (git gc packs refs), a bare
+# sha in HEAD covers detached-HEAD builds. Anything unresolvable stays "unknown"
+# — a visible unknown beats a confidently wrong sha. The whole-context mount
+# (instead of source=.git) is deliberate: a context with no .git at all must
+# still build.
+RUN --mount=type=bind,source=.,target=/tmp/ctx \
+    set -eu; \
+    sha="${GIT_SHA}"; \
+    gm=/tmp/ctx/.git; \
+    if [ -z "$sha" ] && [ -f "$gm/HEAD" ]; then \
+      head_content=$(tr -d ' \t\r\n' < "$gm/HEAD"); \
+      case "$head_content" in \
+        ref:*) ref="${head_content#ref:}"; \
+               if [ -f "$gm/$ref" ]; then \
+                 sha=$(tr -d ' \t\r\n' < "$gm/$ref"); \
+               elif [ -f "$gm/packed-refs" ]; then \
+                 sha=$(awk -v r="$ref" '$2 == r && length($1) == 40 { print $1; exit }' "$gm/packed-refs"); \
+               fi; \
+               ;; \
+        *) sha="$head_content" ;; \
+      esac; \
+    fi; \
+    case "$sha" in *[!0-9a-f]*) sha=unknown;; esac; \
+    [ "${#sha}" -ge 7 ] || sha=unknown; \
+    printf '%s' "$sha" > /app/.build_sha; \
+    rm -rf /app/.git; \
+    echo "build stamp -> $sha"
 
 # NOTE: intentionally runs as root. The bind-mounted host dirs (./data, ./logs,
 # ./hf-cache) are owned by uid 0 inside the container on Docker Desktop, so a

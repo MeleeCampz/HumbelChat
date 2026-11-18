@@ -1,7 +1,18 @@
-# Keep the image lean: no VCS, no venvs, no runtime state (all bind-mounted).
-# Everything not needed at runtime is excluded — the context is uploaded to the
-# daemon on EVERY build, so big dirs here make `docker compose up --build` slow.
-.git
+# Keep the image lean: no VCS payload, no venvs, no runtime state (all
+# bind-mounted). Everything not needed at runtime is excluded — the context is
+# uploaded to the daemon on EVERY build, so big dirs here make
+# `docker compose up --build` slow.
+#
+# .git is excluded EXCEPT the few bytes the Dockerfile reads to derive the build
+# stamp itself: `.git/**` drops everything recursively, the !-lines re-include
+# HEAD + packed-refs + refs/ (verified on BuildKit 29: objects/, logs/, index,
+# hooks/ stay out of the context, and the stamp RUN deletes the leftovers from
+# the image). Keep these four lines — without them the stamp degrades to
+# "unknown".
+.git/**
+!.git/HEAD
+!.git/packed-refs
+!.git/refs/**
 .venv
 .venv-linux/
 .venv-test/

@@ -48,15 +48,22 @@ docker compose restart bot     # restart
 docker compose down            # stop (host data untouched)
 ```
 
-**Build stamp (verify every deploy):** the image bakes the git SHA into
-`/app/.build_sha` and the bot logs `Bot build sha: …` at startup. After any
-deploy, confirm the running container is on the repo tip — a stale cached
-build once served pre-fix code while looking healthy (2026-10-28):
+**Build stamp (verify every deploy):** the Dockerfile derives the git SHA from
+the build context's own `.git` metadata (`HEAD` → loose ref → `packed-refs`, or a
+bare sha if HEAD is detached) into `/app/.build_sha`, and the bot logs
+`Bot build sha: …` at startup — a plain `docker compose up -d --build` stamps
+itself, no `--build-arg` needed. After any deploy, confirm the running container
+is on the repo tip — a stale cached build once served pre-fix code while looking
+healthy (2026-10-28):
 
 ```bash
 diff <(docker exec humbelchat-bot cat /app/.build_sha) <(git rev-parse HEAD) \
-  && echo "bot on repo tip" || echo "STALE IMAGE — rebuild with --build-arg GIT_SHA=$(git rev-parse HEAD)"
+  && echo "bot on repo tip" || echo "STALE IMAGE — docker compose up -d --build"
 ```
+
+If the stamp reads `unknown` the build context had no `.git` in it (the startup
+log says so explicitly) — pass it by hand for that build:
+`docker compose build --build-arg GIT_SHA=<full sha>`.
 
 - `restart: unless-stopped` — the container self-recovers from crashes/reboots.
 - No published ports (outbound WebSocket + UDP only); no healthcheck endpoint —

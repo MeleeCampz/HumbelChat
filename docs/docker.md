@@ -106,13 +106,39 @@ Discord drops for a few seconds during the recreate; the bot re-logs in on
 start. Run `/sync` in the bot's channel if slash commands misbehave after an
 update.
 
+### Build stamp — derived, nothing to remember
+
+Every image is stamped with the commit it was built from, computed **during the
+build**: the Dockerfile mounts the build context, resolves `.git/HEAD` → loose
+ref file → `packed-refs` (a bare sha in `HEAD` covers detached-HEAD builds), and
+writes the result to `/app/.build_sha`; the bot logs `Bot build sha: <sha>` at
+startup. The `.git` fragments that `COPY . .` picked up are deleted from the
+image in that same layer. For this to work `.dockerignore` re-includes exactly
+`HEAD`, `packed-refs` and `refs/**` — a few kilobytes; `objects/`, `logs/`,
+`index`, `hooks/` stay out of the context.
+
+```bash
+diff <(docker exec humbelchat-bot cat /app/.build_sha) <(git rev-parse HEAD) \
+  && echo "bot on repo tip" || echo "STALE IMAGE — rebuild"
+```
+
+The stamp is *identification*, not freshness: `COPY . .` plus content-keyed
+layers already guarantee the image holds the tree you built from. What the stamp
+buys you is proof of *which commit is running* — it exists because a stale cached
+build once served pre-fix code while looking healthy (2026-10-28). If the
+derivation finds nothing (a context with no `.git` at all, e.g. a CI tarball) the
+stamp is literally `unknown` and the bot logs a warning at startup rather than
+staying silent; `docker compose build --build-arg GIT_SHA=<full sha>` is the
+manual override for exactly that case.
+
 ### Build speed
 
 - Code-only changes: everything is layer-cached, rebuild takes ~1 s.
 - `requirements.txt` changes: pip wheels (incl. the ~900 MB CPU torch) are
   served from a daemon-side BuildKit cache mount — no re-download.
 - The `.dockerignore` keeps the uploaded build context small (no venvs,
-  caches, or runtime state). If you add big directories to the repo, add them
+  caches, or runtime state). The only VCS files allowed in are the ref fragments
+  the build stamp needs. If you add big directories to the repo, add them
   there too — the whole context is transferred on every build.
 - A truly fresh machine (empty Docker cache) still pays one full download:
   base image + torch + requirements ≈ a few GB.

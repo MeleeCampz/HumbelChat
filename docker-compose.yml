@@ -12,6 +12,9 @@
 # ──────────────────────────────────────────────────────────────
 services:
   bot:
+    # Plain `build: .` is enough: the Dockerfile derives its own commit stamp from
+    # the .git metadata .dockerignore allows into the context — no --build-arg and
+    # no env var to remember (see the stamp RUN in the Dockerfile).
     build: .
     container_name: humbelchat-bot
     restart: unless-stopped
