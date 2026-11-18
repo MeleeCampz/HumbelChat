@@ -343,7 +343,16 @@ def test_a_look_without_a_source_is_reported():
     c = _compose(_plan("Frey blocks the road",
                        [{"name": "Frey", "pose": "blocking",
                          "look": "heavy-set badger-folk in a torn coat"}]))
-    assert any("`look` without a `source`" in w for w in c.warnings)
+    # No evidence channel here: painted, but said out loud to be unverified.
+    assert "badger-folk" in c.prompt
+    assert any("has no `source`" in w and "unverified" in w for w in c.warnings)
+    # Once the caller verifies, the same look is a rule violation and goes.
+    c = ip.compose_prompt(_plan("Frey blocks the road",
+                                [{"name": "Frey", "pose": "blocking",
+                                  "look": "heavy-set badger-folk in a torn coat"}]),
+                          {}, BASE, read_paths=[])
+    assert "badger-folk" not in c.prompt
+    assert any("without a `source`" in w for w in c.warnings)
 
 
 def test_override_on_an_unknown_field_is_ignored_and_reported():
@@ -646,13 +655,60 @@ def test_an_unverified_npc_look_is_dropped_and_said_so():
                  [{"name": "Boss Frey", "pose": "blocking the road",
                    "look": "large badger-folk with grey-black striped fur",
                    "source": "Characters/Villains.md"}])
-    c = _compose(plan, anchors=anchors)          # no read_paths → old behaviour
+    c = _compose(plan, anchors=anchors)     # no evidence channel: taken at face value
     assert "badger-folk" in c.prompt
     c = ip.compose_prompt(plan, anchors, BASE, read_paths=[])
     assert "badger-folk" not in c.prompt
-    assert any("did not read" in w for w in c.warnings)
+    assert any("never retrieved" in w for w in c.warnings)
     assert "Boss Frey" in c.prompt, "the figure stays; only the look goes"
     assert "Exactly 1 named figure" in c.prompt
+
+
+def test_a_look_citing_a_search_snippet_must_be_traceable_to_it():
+    """A hit is evidence; a description invented on top of one is not.
+
+    Same citation, two looks: the one whose wording is in what was retrieved is
+    painted, the one matching none of it is dropped. This is the difference
+    between reading a note and pattern-matching a headline.
+    """
+    retrieved = ('8 hit(s): [{"file": "humblewood/SessionLogs/SESSION_01/notes.md", '
+                 '"snippet": "Spleck Smandra: a lizard merchant who travels by a '
+                 'wagon with a blue and yellow canopy"}]')
+    snips = ["humblewood/SessionLogs/SESSION_01/notes.md"]
+    traceable = _plan("Spleck waits by the wagon",
+                      [{"name": "Spleck Smandra", "pose": "waiting by the wagon",
+                        "look": "a lizard merchant with a blue and yellow wagon",
+                        "source": "SESSION_01/notes.md"}])
+    invented = _plan("Spleck waits by the wagon",
+                     [{"name": "Spleck Smandra", "pose": "waiting by the wagon",
+                       "look": "a tall reptilian warrior in black plate armour "
+                               "carrying a two-handed axe",
+                       "source": "SESSION_01/notes.md"}])
+    keep = ip.compose_prompt(traceable, {}, BASE, read_paths=[],
+                             snippet_paths=snips, retrieved=retrieved)
+    drop = ip.compose_prompt(invented, {}, BASE, read_paths=[],
+                             snippet_paths=snips, retrieved=retrieved)
+    assert "blue and yellow wagon" in keep.prompt
+    assert "reptilian warrior" not in drop.prompt
+    assert any("search snippet" in w for w in drop.warnings)
+    assert not any("search snippet" in w for w in keep.warnings)
+
+
+def test_an_opened_file_is_believed_even_when_the_wording_does_not_match():
+    """The vault is half German: a look written in English from a German section
+    is a translation, not an invention, so the wording test never applies to a
+    file the rewrite actually opened."""
+    retrieved = ('8 hit(s): [{"file": "humblewood/CampainNotes/07.10.2026.md", '
+                 '"snippet": "die Echse (Händler) mit ihrem blau-gelben Wagen"}]')
+    plan = _plan("die Echse beside her wagon",
+                 [{"name": "Spleck Smandra", "pose": "standing by the wagon",
+                   "look": "a lizard merchant with scaled green-grey skin",
+                   "source": "CampainNotes/07.10.2026.md"}])
+    out = ip.compose_prompt(plan, {}, BASE,
+                            read_paths=["CampainNotes/07.10.2026.md"],
+                            snippet_paths=[], retrieved=retrieved)
+    assert "lizard merchant" in out.prompt
+    assert not out.warnings
 
 
 def test_a_look_from_a_file_the_rewrite_read_is_kept():
@@ -695,3 +751,23 @@ def test_the_party_holds_the_foreground_even_if_the_plan_listed_npc_first():
         "the plan listed the bandit first; the composer puts the party first"
     assert "Behind them, smaller and softer, Boss Frey:" in c.prompt
     assert any("reordered" in w for w in c.warnings)
+
+
+def test_a_scene_that_re_enumerates_the_cast_is_cut():
+    """A name mentioned three times is a character painted twice (§4.2's
+    'a second Colum in the background'). Bare repeats in an enumeration go;
+    a mention carrying the character's own action stays."""
+    plan = _plan("In a clearing, Seta Onix aims her bow at Boss Frey while Romi "
+                 "Stachelpfote advances; bandits surround Seta Onix, Romi "
+                 "Stachelpfote, Bubo Krallensturm, Marvin",
+                 [{"name": "Seta Onix", "pose": "aiming"},
+                  {"name": "Romi Stachelpfote", "pose": "advancing"},
+                  {"name": "Bubo Krallensturm", "pose": "raising his staff"},
+                  {"name": "Marvin", "pose": "standing"},
+                  {"name": "Boss Frey", "pose": "blocking the path"}])
+    c = _compose(plan, anchors=_anchors())
+    scene = c.prompt.split("Exactly")[0]
+    for name in ("Romi Stachelpfote", "Bubo Krallensturm", "Marvin"):
+        assert scene.count(name) == 1, f"{name} still repeated in the scene"
+    assert "aims her bow" in scene, "the action-bearing mention must survive"
+    assert any("re-enumerated the cast" in w for w in c.warnings)

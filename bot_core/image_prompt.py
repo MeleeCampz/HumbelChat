@@ -276,7 +276,85 @@ _FIELD_WEIGHT = {"signature": 12, "face": 8, "species": 6, "outfit": 4,
 _IDENTITY_FIELDS = ("species", "look")
 
 
-def source_matches(source: str, read_paths: Iterable[str]) -> bool:
+_GENERIC_LOOK_WORDS = frozenset((
+    "with from over under above below beside behind within without the a an and or of"
+    " his her its their in on at by is are as while small large long short dark light"
+    " deep soft bright round broad slender narrow fine plain simple warm cool rich"
+    " highly giving made wearing dressed clad carrying holding built steel brass"
+    " leather fur head face body eyes ears neck chest shoulder hands feet one two"
+    " three four five six seven eight nine ten".split()))
+
+
+def look_tokens(look: str) -> list[str]:
+    """The distinctive words of a description — the ones a check can match."""
+    return [t for t in re.findall(r"[a-z\u00e4-\u00fc\u00df]{3,}", look.lower())
+            if t not in _GENERIC_LOOK_WORDS]
+
+
+def look_supported_by(look: str, retrieved: str) -> tuple[int, int]:
+    """(matched, total) distinctive words of `look` found in retrieved text."""
+    toks = look_tokens(look)
+    text = retrieved.lower()
+    return sum(1 for t in toks if t in text), len(toks)
+
+
+def _snippet_supported(look: str, retrieved: str) -> bool:
+    """A look taken from a SEARCH hit has to be traceable to that hit."""
+    hits, total = look_supported_by(look, retrieved)
+    if total == 0:
+        return True
+    if total <= 3:
+        return hits == total
+    return hits >= max(2, -(-total // 2))
+
+
+def verify_look(figure: Figure, read_paths: Sequence[str] | None,
+                snippet_paths: Iterable[str] | None,
+                retrieved: str) -> tuple[bool, str]:
+    """May this NPC's `look` be painted? Three grounds, not equally strong.
+
+    * The rewrite OPENED the file it cites: it had the section in front of it and
+      may describe it in its own words (the vault is half German, so wording
+      overlap is not the test there).
+    * The file came back only as a SEARCH snippet: then the wording must be
+      traceable to that snippet. A ten-word description matching none of a
+      hundred-character snippet was not read from it — §4.2 measured a "large
+      badger-folk with coarse grey-brown fur and a red bandana" for a character
+      the vault never describes, written after no lookup at all.
+    * It cites nothing this rewrite touched: invention, dropped loudly.
+
+    With no evidence channel at all (`read_paths=None`, no snippets) there is
+    nothing to check against and the plan is taken at its word — that is the
+    caller's choice, not this function's.
+    """
+    if not figure.look:
+        return True, ""
+    if not figure.source:
+        if read_paths is None and not snippet_paths:
+            # No evidence channel at all (a unit test, a caller that trusts the
+            # plan): paint it, but say out loud that nothing backs it.
+            return True, ("`look` has no `source` and this caller verifies "
+                          "nothing — painted unverified")
+        return False, ("`look` without a `source` — the vault records NPC roles, "
+                       "never appearances")
+    if read_paths is None and not snippet_paths:
+        return True, ""
+    if read_paths is not None and source_matches(figure.source, read_paths):
+        return True, ""
+    if snippet_paths and source_matches(figure.source, snippet_paths):
+        if _snippet_supported(figure.look, retrieved):
+            return True, ""
+        hits, total = look_supported_by(figure.look, retrieved)
+        return False, (f"`look` cites {figure.source!r} only as a search snippet, "
+                       f"and {total - hits} of its {total} descriptive words are "
+                       "not in what was retrieved — the appearance is dropped and "
+                       "the figure is painted by name")
+    return False, (f"`look` cites {figure.source!r}, which this rewrite never "
+                   "retrieved — the appearance is dropped and the figure is painted"
+                   " by name (measured drift, analysis §10)")
+
+
+def source_matches(source: str, read_paths: Sequence[str]) -> bool:
     """Does *source* name a file in *read_paths*?
 
     Suffix-segment equality, not substring: a plan citing
@@ -299,6 +377,58 @@ def source_matches(source: str, read_paths: Iterable[str]) -> bool:
         if r[-n:] == s[-n:]:
             return True
     return False
+
+
+def drop_bare_repeat_mentions(scene: str, names: Sequence[str]) -> tuple[str, list[str]]:
+    """Cut second mentions of a name that stand alone in a comma segment.
+
+    The safe shape to cut is a segment that is nothing but a name — the tail of
+    an enumeration ("…as bandits surround Seta Onix, Romi Stachelpfote, Bubo
+    Krallensturm"). A mention welded to the character's own action ("Seta Onix
+    aims her bow") is information about the scene and is never touched.
+    """
+    known = [n for n in names if n]
+    segments: list[str] = []
+    current = ""
+    depth = 0
+    for ch in scene:
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth = max(0, depth - 1)
+        if ch == "," and depth == 0:
+            segments.append(current)
+            current = ""
+        else:
+            current += ch
+    segments.append(current)
+
+    def bare_name(seg: str) -> str | None:
+        core = seg.strip().strip(".").strip()
+        for n in known:
+            if core.lower() == n.lower():
+                return n
+        return None
+
+    seen: set[str] = set()
+    kept: list[str] = []
+    dropped: list[str] = []
+    for seg in segments:
+        n = bare_name(seg)
+        if n is not None and n.lower() in {k.lower() for k in seen}:
+            dropped.append(n)
+            continue
+        for name in known:
+            if re.search(r"\b" + re.escape(name) + r"\b", seg, re.I):
+                seen.add(name)
+        kept.append(seg)
+    out = ", ".join(seg for seg in kept if seg.strip())
+    # Tidy what the cut left behind: no dangling comma, no double punctuation.
+    out = re.sub(r"\s+,", ",", out)
+    out = re.sub(r",\s*(?=[.,;])", "", out)
+    out = re.sub(r"[.,;]+$", "", out)
+    out = re.sub(r"\s{2,}", " ", out).strip().rstrip(",;")
+    return out, dropped
 
 
 def prompt_budget(figures: int, *, base: int = _BASE_CHARS,
@@ -695,6 +825,15 @@ class Composed:
     foreground: int
     cuts: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # The figures actually painted, in prompt order. `figures` is a COUNT, so a
+    # caller that needs to know WHICH characters ended up in the frame (images.py
+    # asks for the ones with no grounded appearance) must not re-derive it from
+    # the prompt text.
+    cast: list["Figure"] = field(default_factory=list)
+    # Names painted by name alone — no anchor, no verified appearance. The
+    # caller (images.py) uses this to run one lookup pass instead of trusting a
+    # rule the model may simply not have followed.
+    ungrounded: list[str] = field(default_factory=list)
 
 
 def _protect_names(anchors: dict[str, Anchor], figures: list[Figure]) -> set[str]:
@@ -752,7 +891,9 @@ def compose_prompt(
     max_chars: int | None = None,
     foreground: int = 4,
     budget_kwargs: dict[str, int] | None = None,
-    read_paths: Sequence[str] | None = None,
+    read_paths: Iterable[str] | None = None,
+    snippet_paths: Iterable[str] | None = None,
+    retrieved: str = "",
 ) -> Composed:
     """Assemble the final prompt from the plan + the vault anchors.
 
@@ -771,7 +912,12 @@ def compose_prompt(
         raise ValueError("image plan has neither figures nor a scene")
     # Dedupe AFTER resolving names, so "Seta" and "Seta Onix" are one figure.
     resolved = dedupe_figures([(f, match_anchor(f.name, anchors)) for f in figures])
+    # Every name the plan named, before any budget cut: the scene sentence may
+    # enumerate a figure the budget later drops, and that mention is still one
+    # too many.
+    plan_names = [a.name if a is not None else f.name for f, a in resolved]
     keep: list[tuple[Figure, Anchor | None]] = []
+    ungrounded: list[str] = []
     for f, a in resolved:
         if a is not None:
             keep.append((f, a))
@@ -779,28 +925,19 @@ def compose_prompt(
         if not f.look:
             warnings.append(f"{f.name}: no party anchor and no `look` — painted "
                             "by name alone (a named NPC must be looked up first)")
+            ungrounded.append(f.name)
             keep.append((f, a))
             continue
-        if not f.source:
-            warnings.append(f"{f.name}: `look` without a `source` — the vault "
-                            "records NPC roles, never appearances")
-        elif read_paths is not None and not source_matches(f.source, read_paths):
-            # Measured drift: a model that skipped the lookup still wrote a
-            # confident appearance and named a file it never read. An appearance
-            # that cannot be traced to a file THIS rewrite read is invention — the
-            # policy paints by name and species rules instead, so that is what
-            # this does, loudly.
-            warnings.append(f"{f.name}: `look` cites {f.source!r}, which this "
-                            "rewrite did not read — the appearance is dropped and "
-                            "the figure is painted by name (measured drift, "
-                            "analysis §10)")
-        else:
+        ok, why = verify_look(f, read_paths, snippet_paths, retrieved)
+        if why:
+            warnings.append(f"{f.name}: {why}")
+        if ok:
             keep.append((f, a))
             continue
-        if read_paths is not None:
-            # Never mutate the caller's plan: an unverifiable look is dropped on a
-            # copy, so the plan the log shows is the plan the model wrote.
-            keep.append((replace(f, look=""), None))
+        ungrounded.append(f.name)
+        # Never mutate the caller's plan: an unverifiable look is dropped on a
+        # copy, so the plan the log shows is the plan the model wrote.
+        keep.append((replace(f, look=""), None))
     resolved = keep
 
     # The foreground is for the characters the party actually plays. A plan that
@@ -856,6 +993,17 @@ def compose_prompt(
             # the cast in place.
             warnings.append("scene sentence names the cast collectively — the figure "
                             "count line is what holds the cast in place")
+
+    # A plan that enumerates the cast inside the scene sentence AS WELL as in
+    # the figure lines mentions every name three times, and a name mentioned
+    # three times is what got a second Colum painted in the background (§4.2).
+    # Pure-name segments of a trailing enumeration are cut; a mention that
+    # carries the character's own action stays.
+    scene, cut_names = drop_bare_repeat_mentions(scene, plan_names)
+    if cut_names:
+        warnings.append("scene sentence re-enumerated the cast — the bare repeat "
+                        f"mentions were cut ({', '.join(cut_names)}); the figure "
+                        "lines are where each character is described")
 
     count = len(resolved)
     front_n = min(foreground, count)
@@ -1008,7 +1156,9 @@ def compose_prompt(
         log.debug("shared palette tokens in this scene: %s", ", ".join(sorted(shared)))
     cuts = [w for w in warnings if w.startswith("budget ")]
     return Composed(prompt=prompt, figures=count, foreground=front_n,
-                    cuts=cuts, warnings=warnings)
+                    cuts=cuts, warnings=warnings,
+                    cast=[f for f, _ in resolved if f.name],
+                    ungrounded=ungrounded)
 
 
 # ─────────────────────────── the party sheet ──────────────────────────────

@@ -252,6 +252,110 @@ class TestRewritePrompt:
         assert "Marvin" in out
 
 
+    async def test_a_look_taken_from_a_search_hit_is_grounded(self, monkeypatch):
+        """A description read out of a SEARCH result counts as retrieved.
+
+        The verification must not demand an explicit read: a hit carries its
+        file, and a `look` citing that file is grounded.
+        """
+        import bot_core.agent_loop as agent_loop
+        executed = []
+
+        async def fake_execute(name, args):
+            executed.append(name)
+            return ('8 hit(s): [{"file": '
+                    '"humblewood/HumbleWood/SessionLogs/SESSION_05/notes.md", '
+                    '"section": "Lexikon", "snippet": "Boss Frey: a scarred '
+                    'bear-folk bandit chief with a silver tooth"}]')
+
+        monkeypatch.setattr(agent_loop, "execute_tool", fake_execute)
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(side_effect=[
+            self._resp('{"tool": "search_kb", "args": {"query": "Boss Frey '
+                       'bandit appearance", "scope": "lore"}}'),
+            self._resp('<image_plan>\n{"scene": "Boss Frey blocks the path as '
+                       'Seta Onix draws her bow", "figures": [{"name": "Seta '
+                       'Onix", "pose": "drawing her bow"}, {"name": "Boss Frey", '
+                       '"pose": "brandishing an axe", "look": "a scarred '
+                       'bear-folk bandit chief with a silver tooth", "source": '
+                       '"SESSION_05/notes.md"}], "lighting": "dappled forest '
+                       'light"}\n</image_plan>'),
+        ])
+        monkeypatch.setattr(images, "_chat_client", lambda: client)
+        out = await images.rewrite_prompt("die ganze Gruppe stellt sich Boss Frey")
+        assert executed == ["search_kb"]
+        assert "bear-folk bandit chief with a silver tooth" in out
+        assert "SESSION_05" not in out          # provenance is not painted
+
+    async def test_a_named_figure_with_no_look_gets_one_lookup_pass(self, monkeypatch):
+        """Code-enforced lookup, not a rule the model may ignore.
+
+        Pass 1 names Boss Frey with no appearance and no tool call. The
+        composer reports him as ungrounded, one corrective pass runs (which
+        does the search), and pass 2's grounded look is what gets painted.
+        """
+        import bot_core.agent_loop as agent_loop
+        executed = []
+
+        async def fake_execute(name, args):
+            executed.append(name)
+            return ('8 hit(s): [{"file": '
+                    '"humblewood/HumbleWood/SessionLogs/SESSION_05/notes.md", '
+                    '"section": "Lexikon", "snippet": "Boss Frey: a scarred '
+                    'bear-folk bandit chief with a silver tooth"}]')
+
+        monkeypatch.setattr(agent_loop, "execute_tool", fake_execute)
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(side_effect=[
+            self._resp('<image_plan>\n{"scene": "Boss Frey blocks the path as '
+                       'Seta Onix draws her bow", "figures": [{"name": "Seta '
+                       'Onix", "pose": "drawing her bow"}, {"name": "Boss Frey", '
+                       '"pose": "brandishing an axe"}], "lighting": "dappled '
+                       'forest light"}\n</image_plan>'),
+            self._resp('{"tool": "search_kb", "args": {"query": "Boss Frey '
+                       'bandit appearance", "scope": "lore"}}'),
+            self._resp('<image_plan>\n{"scene": "Boss Frey blocks the path as '
+                       'Seta Onix draws her bow", "figures": [{"name": "Seta '
+                       'Onix", "pose": "drawing her bow"}, {"name": "Boss Frey", '
+                       '"pose": "brandishing an axe", "look": "a scarred '
+                       'bear-folk bandit chief with a silver tooth", "source": '
+                       '"SESSION_05/notes.md"}], "lighting": "dappled forest '
+                       'light"}\n</image_plan>'),
+        ])
+        monkeypatch.setattr(images, "_chat_client", lambda: client)
+        out = await images.rewrite_prompt("die ganze Gruppe stellt sich Boss Frey")
+        assert executed == ["search_kb"]
+        assert client.chat.completions.create.call_count == 3
+        assert "bear-folk bandit chief with a silver tooth" in out
+
+    async def test_a_lookup_that_finds_nothing_still_paints_the_name(self, monkeypatch):
+        """One corrective pass, then the policy's fallback: name + pose."""
+        import bot_core.agent_loop as agent_loop
+        executed = []
+
+        async def fake_execute(name, args):
+            executed.append(name)
+            return "0 hit(s): []"
+
+        monkeypatch.setattr(agent_loop, "execute_tool", fake_execute)
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(side_effect=[
+            self._resp('<image_plan>\n{"scene": "Boss Frey blocks the path", '
+                       '"figures": [{"name": "Boss Frey", "pose": "brandishing '
+                       'an axe"}], "lighting": "forest light"}\n</image_plan>'),
+            self._resp('{"tool": "search_kb", "args": {"query": "Boss Frey '
+                       'appearance", "scope": "lore"}}'),
+            self._resp('<image_plan>\n{"scene": "Boss Frey blocks the path", '
+                       '"figures": [{"name": "Boss Frey", "pose": "brandishing '
+                       'an axe"}], "lighting": "forest light"}\n</image_plan>'),
+        ])
+        monkeypatch.setattr(images, "_chat_client", lambda: client)
+        out = await images.rewrite_prompt("Boss Frey blocks the path")
+        assert "Boss Frey: brandishing an axe" in out
+        assert executed == ["search_kb"]          # looked, once
+        assert "invent" not in out.lower()
+
+
 class TestPromptShapeGuard:
     """A rewrite must be a PROMPT, not narration (found live 2026-11-18).
 

@@ -581,6 +581,17 @@ _NO_ROSTER = ("(No party roster available — look EVERY character up with the "
 # One corrective retry, same reasoning as _RETRY_NUDGE below: the failure cases
 # answered in ~3 s with no tool calls, so a retry is cheap and recovers the
 # answer instead of dropping to the raw request.
+_LOOKUP_NUDGE = (
+    "These named characters are not in the party sheet, and you have not "
+    "retrieved their appearance from the vault: {{NAMES}}.\n"
+    "Search the vault for each one NOW — one search per character, all in a "
+    "single batch — and open the section that names them if a search found "
+    "one. Then output the WHOLE plan again (scene sentence, every figure, the "
+    "count) with their `look` written from what you retrieved and `source` "
+    "citing the exact \"file\" value it came from. If the vault holds no "
+    "appearance for one, leave its `look` out and name it in the scene "
+    "instead: an appearance you made up is worse than none.")
+
 _PLAN_RETRY_NUDGE = (
     "Your previous answer had no <image_plan> block, so nothing could be "
     "painted. The party roster and its appearance fields are ALREADY in your "
@@ -662,23 +673,48 @@ def _load_plan_system() -> str:
              .strip())
 
 
-def _read_paths_from(detail: list[dict]) -> list[str]:
-    """Every path this rewrite's KB tools were asked to read.
+_READ_ARG_KEYS = ("path", "paths", "relPath", "relPaths", "file", "files",
+                  "folder", "dir")
+_FILE_IN_RESULTS = re.compile(r'"(?:file|relPath|path)"\s*:\s*"([^"]+\.(?:md|txt))"')
 
-    A `source` in the plan is checked against these. kb_search/kb_grep do not
-    count — a look may be painted from a file the model actually opened.
+
+def _read_paths_from(detail: list[dict]) -> list[str]:
+    """Files this rewrite OPENED (kb_read_section and friends).
+
+    `read_section` is called with a folder name rather than a vault path, which
+    is why `source_matches` compares path segments instead of whole strings.
     """
     out: list[str] = []
     for d in detail or []:
         args = d.get("args")
         if not isinstance(args, dict):
             continue
-        for key in ("path", "relPath", "paths", "relPaths"):
+        for key in _READ_ARG_KEYS:
             v = args.get(key)
             if isinstance(v, str) and v.strip():
                 out.append(v)
             elif isinstance(v, (list, tuple)):
                 out.extend(x for x in v if isinstance(x, str) and x.strip())
+    return out
+
+
+def _snippet_paths_from(gathered: str, opened: Sequence[str]) -> list[str]:
+    """Files that came back as search HITS — seen, but only as a snippet.
+
+    Every kb_search hit carries its file, so a description taken from a hit is
+    grounded in the vault; what it is not is fully read. The composer accepts
+    such a `look` only when its wording is traceable to the retrieved text
+    (image_prompt.verify_look), which is the difference between reading a note
+    and pattern-matching a headline.
+    """
+    opened_last = {o.strip().rstrip("/").rsplit("/", 1)[-1].lower()
+                   for o in opened if o.strip()}
+    out: list[str] = []
+    for hit in _FILE_IN_RESULTS.findall(gathered or ""):
+        last = hit.rsplit("/", 1)[-1].lower()
+        if any(last == o or last in o or o in last for o in opened_last):
+            continue                      # counted as a read already
+        out.append(hit)
     return out
 
 
@@ -729,12 +765,65 @@ async def _rewrite_composed(text: str, complete) -> str:
             # the vault has no appearance notes for — after making no tool call at
             # all. Verification against the files actually read is the only rule
             # that holds when the model skips the lookup.
-            read_paths=_read_paths_from(meta.tool_calls_detail))
+            read_paths=_read_paths_from(meta.tool_calls_detail),
+            snippet_paths=_snippet_paths_from(
+                meta.gathered_context, _read_paths_from(meta.tool_calls_detail)),
+            retrieved=meta.gathered_context)
         for w in composed.warnings:
             if w.startswith("budget "):
                 log.warning("composer budget: %s", w)
             else:
                 log.warning("composer: %s", w)
+        # #84's enforcement, in code rather than in a rule the model may ignore.
+        # A named character the party does not own was supposed to be looked up
+        # before being described; when the plan painted it by name anyway — with a
+        # `look` it never retrieved, or none at all — the bot runs ONE lookup pass
+        # and composes from what that found. Only for names the request itself
+        # named: a bystander the model invented is worth dropping, not searching.
+        worth = [n for n in composed.ungrounded
+                 if any(part.lower() in text.lower() for part in n.split()
+                        if len(part) >= 4)]
+        if worth:
+            log.info("rewrite: %s named without a verified appearance — one "
+                     "lookup pass before composing again", ", ".join(worth))
+            retry_out, retry_meta = await run_agent_loop(
+                complete=complete,
+                model=DEFAULT_MODEL,
+                initial_messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": msg},
+                    {"role": "assistant", "content": out},
+                    {"role": "user", "content": _LOOKUP_NUDGE.replace(
+                        "{{NAMES}}", ", ".join(worth))},
+                ],
+            )
+            retry = image_prompt.extract_plan(retry_out or "")
+            if retry is None:
+                log.warning("rewrite: the lookup pass returned no plan — keeping "
+                            "the first (%s painted by name)", ", ".join(worth))
+            else:
+                opened = (_read_paths_from(meta.tool_calls_detail)
+                          + _read_paths_from(retry_meta.tool_calls_detail))
+                gathered = "\n\n".join(g for g in
+                                       (meta.gathered_context,
+                                        retry_meta.gathered_context) if g)
+                composed = image_prompt.compose_prompt(
+                    retry, anchors, _BASE_STYLE,
+                    foreground=IMAGE_PROMPT_FOREGROUND_FIGURES,
+                    budget_kwargs=_budget_kwargs(),
+                    read_paths=opened,
+                    snippet_paths=_snippet_paths_from(gathered, opened),
+                    retrieved=gathered)
+                for w in composed.warnings:
+                    if w.startswith("budget "):
+                        log.warning("composer budget: %s", w)
+                    else:
+                        log.warning("composer: %s", w)
+                log.info("image prompt recomposed after the lookup pass: %d "
+                         "char(s), %d figure(s), %d tool call(s) in the lookup",
+                         len(composed.prompt), composed.figures,
+                         len(retry_meta.tool_calls))
+
         log.info(
             "image prompt composed: %d char(s), %d figure(s) (%d foreground), "
             "%d tool call(s), %d cut(s), %d anchor(s) available%s — %s",
