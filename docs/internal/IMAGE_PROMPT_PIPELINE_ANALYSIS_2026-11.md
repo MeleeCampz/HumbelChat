@@ -147,6 +147,10 @@ style the model actually wants, and it is a shorter, reference-first style than 
 
 ## 6. Options
 
+> **Status update before reading the table:** option **C** (reference conditioning)
+> measured badly against this machine's constraints and against the variant use case —
+> see §9. B + E remain the recommendation.
+
 | | change | kills | cost | risk |
 |---|---|---|---|---|
 | **A** | rails on the current essay: figure cap (≤4 named), one threshold for compression (fix the 5-vs-6 contradiction), guard rejects headings + wrong entity count | compression drift, contradictory rule | small | identity failures remain (measured root cause untouched) |
@@ -176,3 +180,86 @@ real fix for identity, gated on restoring the vault portraits, which is a data
 recovery task the repo cannot solve by itself. Add **E**'s figure cap as part of B (it
 is the cheapest way to stop the observed failure today). Keep A's threshold fix as a
 drive-by. Skip F until C is measured.
+
+**§9 revises this:** C is dropped for now; B gains an override semantics requirement.
+
+## 9. Same-day follow-up: VRAM headroom and the "but wearing metal armour" case
+
+Two objections from the user, both measured, both correct.
+
+### 9.1 Reference conditioning costs VRAM on a card that has ~3.8 GB spare
+
+`GET /api/system?refresh_memory=true` (Studio, live):
+
+| | total | used in `rag` mode | free |
+|---|---|---|---|
+| GPU 0 — RTX 4070 Ti SUPER (image + RAG sidecars) | **15.99 GB** | 8.00 GB (reranker + embedder) | 7.99 GB |
+| GPU 1 — RTX 5070 Ti (Strata chat) | 15.92 GB | 13.95 GB | 1.97 GB |
+
+During an image window the sidecars stop, so the diffusion model lands on a card that is
+otherwise empty: it reports `resident_mib: 12456` (12.2 GB), which leaves roughly
+**3.8 GB** for activations, VAE decode and any conditioning images. A condition image is
+not free — it is VAE-encoded and appended to the sequence as additional tokens, so it
+costs attention and memory the same way extra prompt content does.
+
+What is usable as the knob: `reference_resolution` (512 / 1024 / 2048) resizes each
+condition image **by area**, so 512 costs a quarter of 1024 per image — six references at
+512 are about the token cost of 1.5 at 1024. `memory_mode: balanced | low_vram`,
+`vae_tiling` and `cpu_offload` exist as fallbacks, at a speed cost. `max_condition_images:
+10` is the family's ceiling, not a budget this card can afford.
+
+Conclusion: C is not a free feature. Any move on it starts with a measured probe (1 and 3
+references at 512, then 1024) reading `/api/system` VRAM before and after each render.
+
+### 9.2 The verbatim rule breaks on a MODIFIED character — and today it breaks badly
+
+Request: "Seta Onix, aber sie trägt eine glänzende Metallrüstung statt ihres Umhangs".
+The model did **not** copy the anchor verbatim (good instinct): it deleted the cloak,
+tunic, bracers and satchel clauses. But it expressed the substitution as narration and
+negation, which a diffusion model cannot execute:
+
+- B_armour: "…adjusting shiny metal plate armor **replacing her usual cloak**" — "her
+  usual cloak" refers to an outfit the renderer has no memory of.
+- C_no_cape ("Colum ohne seinen Umhang"): "wearing ONLY a simple dark tunic **with NO
+  cape or cloak**" — a negation written into the positive prompt, which the policy itself
+  forbids, and negations in the positive prompt routinely *add* the thing.
+- D_new_eyes ("Trixy ohne ihre Brille"): "brass steampunk goggles **removed from**
+  forehead, revealing her bright intelligent dark eyes" — same class of instruction.
+
+So the current design has no way to say "same character, different outfit field": the
+anchor is one opaque blob, so a deliberate variant can only be phrased as a
+contradiction of the blob.
+
+**Design requirement this adds to option B:** the anchor must become **typed fields**
+(species/body, palette, face features, default outfit, signature items, quirks) and the
+composer must support **overrides**: the request replaces one field with a positive
+description and the composer *omits* the replaced field, inheriting everything else.
+"Seta in metal armour" then renders as *quokka-like ranger, sandy-tan fur, olive tunic
+replaced by polished steel plate armour, recurve bow with leaf pendant* — no negation,
+no "instead of", no self-contradiction. Signature items (the bow, the googly eyes, the
+brass horn, Marvin's teacup body) are a separate class that a clothing override must not
+touch.
+
+This also means the **vault sheets must change shape**: one `>` blockquote paragraph
+today → field lines under `## Visual Anchor`. That is an Obsidian editing decision, and
+the parser should accept both shapes (old quote = one blob, treated as today).
+
+And it is a second, independent argument against C: a reference image pins the *whole*
+character including the outfit, so it makes deliberate variants harder, not easier.
+
+### 9.3 Revised recommendation
+
+1. **B (composer) with typed anchors and override semantics** — costs no VRAM at render
+   time, and it is the only option that fixes identity drift, verbatim-vs-variant,
+   headings, count and budget in one move.
+2. **E (figure cap + split)** inside B: ≤4 named figures per render, bigger requests
+   become two images in the same GPU window (~12 s each) — more time, not more VRAM.
+3. **Seeds** (`seed`, and `seeds[]` for 2-3 candidates) — free to send, and the only way
+   to A/B prompt changes or reproduce a good render. Candidates cost generations, not
+   memory.
+4. **C (reference conditioning): dropped for now.** Blocked by the LFS-stub portraits,
+   costs the card's last 3.8 GB, and fights the variant use case. Revisit only after
+   §9.1 is measured and portraits exist.
+5. Drive-bys: one compression threshold (fix five-vs-six), shrink the negative prompt if
+   a fixed-seed A/B shows it does nothing at `guidance 1.0`.
+
