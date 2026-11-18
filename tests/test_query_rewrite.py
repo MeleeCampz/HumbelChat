@@ -415,26 +415,34 @@ class TestGlobalAISlot:
         assert order == ["first", "second", "third"]
 
 
-# ─────────── thinking-disable request params (2026-10-15 TQ failure) ───────────
-# On the Unsloth/llama.cpp backend (:8888) top-level reasoning_effort="none" is
-# actively HARMFUL: measured 38.6 s for a ~50-token expansion vs 1.2 s with
-# enable_thinking alone, and in the combo it overrode enable_thinking so the
-# model spent its whole 256-token budget reasoning ("full output budget on
-# reasoning" — empty expansions, TQ torture failure).
+# ─────────── thinking-disable request params (2026-11-17 Strata failure) ──────
+# 2026-10-15 (chat on Unsloth Studio :8888) the rewriter deliberately sent
+# enable_thinking=False ONLY, because reasoning_effort="none" cost 38.6 s there.
+# The chat backend is Strata (:8890, llama.cpp jinja) now and that param is NOT
+# honoured there: measured live 11.9 s / 256-of-256 output tokens burned on
+# reasoning / content=None — every low-confidence rewrite ended as
+# AIResponseTruncatedError with no expansions. reasoning_effort="none" on the
+# same backend: 0.3 s warm, 0 reasoning chars, 3 clean expansions.
+# The rewriter therefore no longer hardcodes a backend-specific param: it routes
+# through the shared reasoning control used by every other call site
+# (bot_core.ai_client._create_with_reasoning_fallback, effort "off" → sends BOTH
+# known off-switches and lets the backend pick the one it understands).
 
 class TestRewriterThinkingParams:
     @staticmethod
     def _make_response(content="quiver hidden attack\nranged stealth item\nmiss does not reveal position"):
         message = MagicMock()
         message.content = content
+        message.model_extra = {}
         choice = MagicMock()
         choice.message = message
+        choice.finish_reason = "stop"
         resp = MagicMock()
         resp.choices = [choice]
         return resp
 
     @pytest.mark.asyncio
-    async def test_sends_enable_thinking_only(self):
+    async def test_sends_shared_off_switches(self):
         from kb.query_rewriter import QueryRewriter
 
         client = MagicMock()
@@ -445,20 +453,28 @@ class TestRewriterThinkingParams:
 
         assert len(client.chat.completions.create.call_args_list) == 1
         kwargs = client.chat.completions.create.call_args.kwargs
-        assert kwargs["extra_body"] == {"enable_thinking": False}, (
-            "rewrite must disable thinking via enable_thinking ONLY — "
-            "reasoning_effort is a 30x slowdown on :8888"
+        assert kwargs["extra_body"] == {"reasoning_effort": "none", "enable_thinking": False}, (
+            "rewrite must use the shared 'off' reasoning control — a single "
+            "backend-specific off-switch silently does nothing on the other backend"
         )
-        assert "reasoning_effort" not in kwargs["extra_body"]
         assert len(out) == 4  # original + 3 expansions
 
     @pytest.mark.asyncio
     async def test_param_rejection_falls_back_to_plain_call(self):
+        import httpx
+        import openai
+
         from kb.query_rewriter import QueryRewriter
 
+        req = httpx.Request("POST", "http://backend.invalid/v1/chat/completions")
+        rejected = openai.BadRequestError(
+            "Unknown parameter: reasoning_effort",
+            response=httpx.Response(400, request=req),
+            body=None,
+        )
         client = MagicMock()
         client.chat.completions.create = AsyncMock(
-            side_effect=[Exception("unknown parameter"), self._make_response()]
+            side_effect=[rejected, self._make_response()]
         )
         rw = QueryRewriter(client=client)
 
@@ -467,9 +483,23 @@ class TestRewriterThinkingParams:
         assert len(client.chat.completions.create.call_args_list) == 2
         first_kwargs = client.chat.completions.create.call_args_list[0].kwargs
         second_kwargs = client.chat.completions.create.call_args_list[1].kwargs
-        assert first_kwargs["extra_body"] == {"enable_thinking": False}
+        assert first_kwargs["extra_body"] == {"reasoning_effort": "none", "enable_thinking": False}
         assert "extra_body" not in second_kwargs  # plain retry
         assert len(out) == 4
+
+    @pytest.mark.asyncio
+    async def test_truncated_empty_rewrite_degrades_to_no_expansions(self):
+        """A thinking model that ate the whole budget (content=None, length) must
+        degrade to 'original query only', not raise into the retriever."""
+        from kb.query_rewriter import QueryRewriter
+
+        resp = self._make_response(content=None)
+        resp.choices[0].finish_reason = "length"
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(return_value=resp)
+        rw = QueryRewriter(client=client)
+
+        assert await rw.expand("test query") == ["test query"]
 
 
 # ─────────── prompt: mechanic-preserving expansions (TQ, 2026-10-15) ──────────
@@ -553,6 +583,49 @@ class TestModelIsLoaded:
         with patch("httpx.AsyncClient", _fake_httpx_cls(exc=OSError("down"))):
             assert await rw.model_is_loaded() is None
         assert await QueryRewriter(client=None, model_slug="m").model_is_loaded() is None
+
+    # llama.cpp-style servers (Strata, :8890) nest the flag in status.value and
+    # advertise an id that is NOT the MODEL_NAME slug the bot requests — the
+    # cold-load probe was dead there (always None → warm budget only).
+    async def test_parses_status_value_loaded(self):
+        from unittest.mock import patch
+
+        from kb.query_rewriter import QueryRewriter
+
+        rw = QueryRewriter(client=_fake_openai_client(), model_slug="m:q4")
+        payload = {"data": [{"id": "m:q4", "status": {"value": "loaded"}}]}
+        with patch("httpx.AsyncClient", _fake_httpx_cls(payload)):
+            assert await rw.model_is_loaded() is True
+
+    async def test_parses_status_value_not_loaded(self):
+        from unittest.mock import patch
+
+        from kb.query_rewriter import QueryRewriter
+
+        rw = QueryRewriter(client=_fake_openai_client(), model_slug="m:q4")
+        payload = {"data": [{"id": "m:q4", "status": {"value": "not_loaded"}}]}
+        with patch("httpx.AsyncClient", _fake_httpx_cls(payload)):
+            assert await rw.model_is_loaded() is False
+
+    async def test_single_model_server_answers_for_a_mismatched_slug(self):
+        from unittest.mock import patch
+
+        from kb.query_rewriter import QueryRewriter
+
+        rw = QueryRewriter(client=_fake_openai_client(), model_slug="requested-slug")
+        payload = {"data": [{"id": "served-model-id", "status": {"value": "loaded"}}]}
+        with patch("httpx.AsyncClient", _fake_httpx_cls(payload)):
+            assert await rw.model_is_loaded() is True
+
+    async def test_ambiguous_multi_model_slug_miss_stays_unknown(self):
+        from unittest.mock import patch
+
+        from kb.query_rewriter import QueryRewriter
+
+        rw = QueryRewriter(client=_fake_openai_client(), model_slug="requested-slug")
+        payload = {"data": [{"id": "a", "loaded": True}, {"id": "b", "loaded": False}]}
+        with patch("httpx.AsyncClient", _fake_httpx_cls(payload)):
+            assert await rw.model_is_loaded() is None
 
 
 async def _llm_expansions_with_fake(loaded_state: bool | None, sleep_s: float) -> list[str]:

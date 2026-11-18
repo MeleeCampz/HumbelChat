@@ -117,7 +117,8 @@ Expansions:
         """Is the rewrite target model currently resident on the backend?
 
         Backends that expose load state (LM Studio / Unsloth Studio: ``GET
-        /v1/models`` entries carry a ``loaded`` flag) let callers distinguish
+        /v1/models`` entries carry a ``loaded`` flag; llama.cpp-style servers
+        such as Strata nest it in ``status.value``) let callers distinguish
         "model cold — this call will pay the weight-load cost" from "model warm
         — a slow call is a real stall".  Returns ``None`` when the state is
         unknown (no client/slug, request failure, or a backend without the
@@ -141,11 +142,41 @@ Expansions:
                     headers={"Authorization": f"Bearer {self._client.api_key}"},
                 )
                 r.raise_for_status()
-            for entry in r.json().get("data", []):
-                if entry.get("id") == slug and isinstance(entry.get("loaded"), bool):
-                    return entry["loaded"]
+            entries = r.json().get("data", []) or []
         except Exception:  # noqa: BLE001 — probe is best-effort by design
-            pass
+            return None
+
+        entry = next((e for e in entries if e.get("id") == slug), None)
+        if entry is None and len(entries) == 1:
+            # A single-model server answers ANY requested slug from the one model
+            # it hosts, so its load state IS the answer for our slug. Observed
+            # live on Strata (:8890): MODEL_NAME "qwen3.8-flash-next-iq3_xxs-
+            # SingleGPU" vs advertised id "qwen3.8-flash-next-ud-iq2_xs-
+            # SingleGPU-lean65k-af2" — completions succeed, so a strict slug
+            # match would have made the cold-load probe useless there.
+            entry = entries[0]
+        if entry is None:
+            return None
+        return self._load_state_from_entry(entry)
+
+    @staticmethod
+    def _load_state_from_entry(entry: dict) -> bool | None:
+        """Extract a load flag from a /v1/models entry, or None if absent.
+
+        Shapes seen: Studio ``{"loaded": true|false}`` and llama.cpp-style
+        ``{"status": {"value": "loaded"}}`` (Strata, :8890).
+        """
+        flag = entry.get("loaded")
+        if isinstance(flag, bool):
+            return flag
+        status = entry.get("status")
+        value = status.get("value") if isinstance(status, dict) else status
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in ("loaded", "ready", "running"):
+                return True
+            if v in ("not_loaded", "not loaded", "unloaded", "stopped", "error"):
+                return False
         return None
 
     async def _rewrite(self, original_query: str) -> list[str]:
@@ -169,35 +200,39 @@ Expansions:
         # a short utility call — disable thinking. Measured: 0.5s with it off vs
         # 5.7s of pure thinking (see docs/internal/RAG_ANALYSIS_2026-09-27.md).
         #
-        # Send ONLY enable_thinking=False. On the Unsloth/llama.cpp backend (:8888)
-        # top-level reasoning_effort="none" is actively HARMFUL: measured 38.6 s for
-        # a ~50-token expansion vs 1.2 s with enable_thinking alone (it defeats a
-        # fast generation path), and in the combo it overrode enable_thinking so the
-        # model thought its way through the whole 256-token budget — the exact
-        # failure of 2026-10-15 ("full output budget on reasoning", TQ case).
-        # A backend that rejects the param (older LM Studio) gets one plain retry.
+        # Which param works is BACKEND-DEPENDENT, and this call used to hardcode the
+        # answer for a backend we no longer use:
+        #   - 2026-10-15, chat on Unsloth Studio (:8888): top-level
+        #     reasoning_effort="none" measured 38.6 s vs 1.2 s with enable_thinking
+        #     alone, so the rewriter sent enable_thinking=False ONLY.
+        #   - 2026-11-17, chat on Strata (:8890, llama.cpp/jinja): enable_thinking is
+        #     NOT honoured at all — measured 11.9 s, 256/256 output tokens of
+        #     reasoning, content=None (i.e. every rewrite ended as
+        #     AIResponseTruncatedError → no expansions, the exact "full output budget
+        #     on reasoning" failure the old comment claimed to prevent). With
+        #     reasoning_effort="none" (alone or combined with enable_thinking): 0.3 s
+        #     warm, 0 reasoning chars, 3 clean expansions.
+        # So the param choice now comes from the shared reasoning control used by
+        # every other LLM call site in the bot (bot_core.ai_client
+        # ._create_with_reasoning_fallback, effort "off" = send BOTH known
+        # off-switches and let the backend pick). One plain retry is kept for
+        # backends that reject the param with a 4xx; timeouts/5xx propagate to the
+        # no-expansions fallback below.
+        from bot_core.ai_client import _create_with_reasoning_fallback
+
         try:
-            response = await self._client.chat.completions.create(
+            response = await _create_with_reasoning_fallback(
+                self._client,
+                "off",
                 model=self.model_slug,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,  # Low for consistent, focused expansions
                 max_tokens=256,
                 timeout=self.REWRITE_TIMEOUT_SEC,
-                extra_body={"enable_thinking": False},
             )
-        except Exception:
-            # Backend rejected the param — retry plain.
-            try:
-                response = await self._client.chat.completions.create(
-                    model=self.model_slug,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.3,
-                    max_tokens=256,
-                    timeout=self.REWRITE_TIMEOUT_SEC,
-                )
-            except Exception as exc:
-                logger.warning("Query rewrite attempt failed (%s); returning no expansions", exc)
-                return []
+        except Exception as exc:
+            logger.warning("Query rewrite attempt failed (%s); returning no expansions", exc)
+            return []
 
         # P1 #8: empty `choices` raises AIBackendError → caught below →
         # no expansions (instead of an IndexError from `choices[0]`).

@@ -263,6 +263,22 @@ The rewrite always uses **the same model as the main completion call** for
 that request (a per-character model override is forwarded into the rewriter),
 so a single-model local backend never has to load a second set of weights.
 
+Thinking is disabled for this call (it is a short utility call, and a
+hybrid-thinking model will otherwise spend the whole 256-token output budget
+reasoning and return no expansions). The off-switch is **backend-dependent**,
+so the rewriter sends it through the shared reasoning control used by every
+other call site (`bot_core.ai_client._create_with_reasoning_fallback`, effort
+`off` = both known off-switches, the backend picks the one it understands).
+Hardcoding one param is a silent failure on the other backend: `enable_thinking`
+is ignored by llama.cpp-style servers (Strata), `reasoning_effort` was measured
+~30x slower on Unsloth Studio. See `tests/test_query_rewrite.py`.
+
+The rewrite budget is load-state aware: `model_is_loaded()` probes `GET
+/v1/models` (Studio `loaded` flag or `status.value`, and a single-model server
+answers for any requested slug) and, when the model is reported **cold**, the
+call gets `RAG_REWRITE_LOAD_BUDGET_SECONDS` instead of the tight warm budget, so
+the weight load happens during the rewrite rather than killing it.
+
 ## Request serialization (single local backend)
 The bot assumes one inference backend serving one model. AI requests are
 therefore serialized **process-wide**: at most one request (RAG retrieval +
