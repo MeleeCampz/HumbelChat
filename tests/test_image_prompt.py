@@ -870,3 +870,14 @@ def test_a_place_name_in_entities_is_not_painted_as_a_character():
     assert "Winnowing Reach:" not in c.prompt, c.prompt
     assert "Exactly 1 named figure" in c.prompt, c.prompt
     assert "Winnowing Reach" in c.prompt   # still in the scene sentence
+
+
+def test_one_entity_naming_two_characters_promotes_both():
+    plan = _plan("Boss Frey and Alisa Pennygleam stand before the party",
+                 [{"name": "Marvin", "pose": "raising a pincer"}],
+                 entities=["Boss Frey and Alisa Pennygleam"])
+    c = _compose(plan)
+    assert "Boss Frey: standing before" in c.prompt, c.prompt
+    assert "Alisa Pennygleam: standing before" in c.prompt, c.prompt
+    assert "Exactly 3 named figures" in c.prompt, c.prompt
+    assert not any("Also in the scene" in p for p in [c.prompt]), c.prompt

@@ -1052,7 +1052,11 @@ def promote_named_entities(plan: ImagePlan) -> tuple[ImagePlan, list[str]]:
     entities: list[str] = []
     notes: list[str] = []
     scene_low = _norm(plan.scene)
-    for e in plan.entities:
+    # A remainder can name another character ("Boss Frey and Alisa Pennygleam"),
+    # so the leftovers go back through the same test.
+    queue = list(plan.entities)
+    while queue:
+        e = queue.pop(0)
         m = _NAME_SHAPE.match(e)
         name = m.group(1).strip(" ,&") if m else ""
         if not name or name.lower() in have:
@@ -1071,11 +1075,12 @@ def promote_named_entities(plan: ImagePlan) -> tuple[ImagePlan, list[str]]:
         # The plan's own sentence already says what they are doing; taking the
         # pose from it is derivation, not invention, and a named figure with an
         # action paints better than a bare name.
+        have.add(name.lower())
         figures.append(Figure(name=name, pose=_pose_from_scene(plan.scene, name)))
         rest = re.sub(r"^(?:(?:and|with|plus|his|her|their|the|a|an)\b[ ,]*)+",
                       "", e[m.end():].strip(" ,&"))
         if rest:
-            entities.append(rest)
+            queue.insert(0, rest)
         notes.append(f"entities named {name!r}, a character in the scene — painted "
                      "as a figure and looked up like one")
     if not notes:
