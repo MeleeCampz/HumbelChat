@@ -94,7 +94,7 @@ send it as a PNG. Base style: semi-realistic fantasy illustration (explicitly
 no painterly/watercolor look), set in Humblewood (the D&D world). The rewrite enforces
 "no humans — only animals or humanoid animals (Humbelfolk style)" drawn as
 upright D&D player characters in adventurer gear. Googly eyes are NOT a
-bird-folk trait — only Column Bidae (Luma) has them, and they're mentioned only
+bird-folk trait — only Colum Bidae (Luma) has them, and they're mentioned only
 when he's in the picture. No
 modern objects, and no unsolicited text — but user-requested text (signs,
 book titles, labels) is included verbatim and NOT suppressed by the negative
@@ -103,6 +103,20 @@ expanded into a rich image prompt by the CHAT model (no extra model involved —
 `raw: true` skips the rewrite entirely, sending your text verbatim). `dry: true`
 does the prompt work and replies with the FINAL prompt that would be sent — no
 GPU mode switch, no generation (for iterating on prompts without burning images).
+
+Three layers build the rewrite system prompt, all re-read on every generation
+(so editing any of them takes effect without a restart): `prompts/image_rewrite_system.md`
+(structure, world, hard limits), the vault note `HumbleWood/Image Generation Policy.md`
+(the `{{CHARACTER_RULES}}` placeholder), and — since 2026-11-18 — the party roster read
+from `HumbleWood/Characters/Player Characters.md` (the `{{PARTY_DOSSIER}}` placeholder):
+every player character with their Visual Anchor injected in full, so a group request
+cannot drift into invented characters. That third layer exists because the live failure
+mode was exactly that: "die ganze Gruppe" produced a badger named Bramble and an antlered
+elf named Elara, rendered Colum as a raven and Trixy as a tabby cat, and dropped Seta,
+Bubo and Romi — the model had been told to look the party up and its lookup failed.
+The answer is only accepted as a prompt if it opens with the base style sentence; a reply
+that is really a plan ("I need to look up the Player Characters sheet…") gets ONE
+corrective retry and otherwise degrades to painting your raw request instead of the plan.
 GPU-split under the hood (#42, 2026-11): the rewrite runs on the CHAT backend
 (Strata on the 5070) while the 4070 is still in `rag` mode; only then the bot
 switches the 4070 into `image` mode (stop reranker/embedder + load the diffusion

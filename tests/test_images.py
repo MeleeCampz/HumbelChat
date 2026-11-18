@@ -144,10 +144,15 @@ class TestRewritePrompt:
     async def test_plain_answer_returned_stripped(self, monkeypatch):
         client = MagicMock()
         client.chat.completions.create = AsyncMock(
-            return_value=self._resp('  "A rich painterly bird-folk prompt in Humblewood" '))
+            return_value=self._resp('  "Semi-realistic fantasy illustration — detailed '
+                                    'fur and feather texture, natural light, storybook '
+                                    'charm. A blue-tit bird-folk warlock perched on a '
+                                    'mossy log." '))
         monkeypatch.setattr(images, "_chat_client", lambda: client)
         out = await images.rewrite_prompt("a bird")
-        assert out == "A rich painterly bird-folk prompt in Humblewood"
+        assert out == ('Semi-realistic fantasy illustration — detailed fur and feather '
+                       'texture, natural light, storybook charm. A blue-tit bird-folk '
+                       'warlock perched on a mossy log.')
 
     async def test_all_empty_raises(self, monkeypatch):
         # Every turn empty (reasoning truncation) → the loop's forced final is
@@ -164,11 +169,14 @@ class TestRewritePrompt:
         client = MagicMock()
         client.chat.completions.create = AsyncMock(side_effect=[
             self._resp(""),
-            self._resp("A rich painterly bird-folk prompt in Humblewood"),
+            self._resp("Semi-realistic fantasy illustration — detailed fur and feather "
+                       "texture, natural light, storybook charm. A blue-tit warlock in "
+                       "a moonlit clearing."),
         ])
         monkeypatch.setattr(images, "_chat_client", lambda: client)
         assert await images.rewrite_prompt("a bird") == \
-            "A rich painterly bird-folk prompt in Humblewood"
+            ("Semi-realistic fantasy illustration — detailed fur and feather texture, "
+             "natural light, storybook charm. A blue-tit warlock in a moonlit clearing.")
 
     async def test_total_backend_failure_raises(self, monkeypatch):
         # The agent loop never raises — it returns an apology sentence on total
@@ -202,7 +210,7 @@ class TestRewritePrompt:
 
     async def test_campaign_lookup_goes_through_kb_tools(self, monkeypatch):
         """The user-facing capability: the rewrite may query the KB (same tools
-        as normal chat) before answering — e.g. grounding 'Marvin #13'."""
+        as normal chat) before answering — e.g. grounding 'Marvin #14'."""
         import bot_core.agent_loop as agent_loop
 
         executed: list[str] = []
@@ -215,14 +223,165 @@ class TestRewritePrompt:
 
         client = MagicMock()
         client.chat.completions.create = AsyncMock(side_effect=[
-            self._resp('{"tool": "search_kb", "args": {"query": "Marvin #13"}}'),
-            self._resp("A rich painterly prompt with Marvin the Steel Defender golem"),
+            self._resp('{"tool": "search_kb", "args": {"query": "Marvin #14"}}'),
+            self._resp("Semi-realistic fantasy illustration — detailed fur and feather "
+                       "texture, natural light, storybook charm. Marvin the Steel "
+                       "Defender golem guards a campfire."),
         ])
         monkeypatch.setattr(images, "_chat_client", lambda: client)
 
-        out = await images.rewrite_prompt("Marvin #13 guarding a camp")
+        out = await images.rewrite_prompt("Marvin #14 guarding a camp")
         assert "Steel Defender" in out
         assert executed == ["search_kb"]
+
+
+class TestPromptShapeGuard:
+    """A rewrite must be a PROMPT, not narration (found live 2026-11-18).
+
+    A group request returned the model's plan — "I need to look up the Player
+    Characters sheet…" — with no tool calls, and nothing in the old guards
+    would have stopped it from being PAINTED.
+    """
+
+    @staticmethod
+    def _resp(content: str):
+        return MagicMock(choices=[MagicMock(message=MagicMock(content=content))])
+
+    def test_base_style_constant_matches_the_policy_file(self):
+        """The guard and the policy must not drift apart (the policy is the
+        source of truth the model is told to follow VERBATIM)."""
+        policy = images._POLICY_FILE.read_text(encoding="utf-8")
+        assert images._BASE_STYLE in policy
+
+    def test_real_prompts_pass(self):
+        base = images._BASE_STYLE
+        assert images.looks_like_image_prompt(base)
+        assert images.looks_like_image_prompt(base + ". Colum stands on a log.")
+        # live model habit: stray space before the period
+        assert images.looks_like_image_prompt(base + " . Seta stands in a clearing.")
+        # paraphrased opening still passes (drift, not narration)
+        assert images.looks_like_image_prompt(
+            "Semi-realistic fantasy illustration with soft fur texture, a raccoon "
+            "artificer at a workbench.")
+
+    def test_narration_and_empty_rejected(self):
+        assert not images.looks_like_image_prompt(
+            "I need to look up the Player Characters sheet to get all party members "
+            "and their Visual Anchors.")
+        assert not images.looks_like_image_prompt(
+            "Sure! Here is what I would draw: a hedgehog monk.")
+        assert not images.looks_like_image_prompt("")
+        assert not images.looks_like_image_prompt("   ")
+
+    async def test_narration_gets_one_corrective_retry(self, monkeypatch):
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(side_effect=[
+            self._resp("I need to look up the Player Characters sheet first."),
+            self._resp(images._BASE_STYLE + ". Colum and Seta face a bandit; Colum "
+                       "lunges, Seta nocks an arrow."),
+        ])
+        monkeypatch.setattr(images, "_chat_client", lambda: client)
+        out = await images.rewrite_prompt("die ganze Gruppe")
+        assert out.startswith(images._BASE_STYLE)
+        # the retry restates the request and says no lookup is needed
+        sent = client.chat.completions.create.call_args_list[1].kwargs["messages"]
+        assert sent[-1]["content"].startswith("Your previous answer was not an image prompt")
+        assert "die ganze Gruppe" in sent[-1]["content"]
+
+    async def test_narration_twice_raises_not_painted(self, monkeypatch):
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(
+            return_value=self._resp("Let me search the knowledge base for that."))
+        monkeypatch.setattr(images, "_chat_client", lambda: client)
+        with pytest.raises(images.ImageGenError, match="no prompt"):
+            await images.rewrite_prompt("die ganze Gruppe")
+        # degrades to the RAW request rather than painting a plan
+        assert await images.prepare_prompt("die ganze Gruppe") == "die ganze Gruppe"
+
+
+def _parse_party_sheet_safe():
+    """Read the monkeypatched sheet and parse it (test helper)."""
+    return images._parse_party_sheet(images._PARTY_SHEET_FILE.read_text(encoding="utf-8"))
+
+
+class TestPartyDossier:
+    """Party roster + Visual Anchors injected into the rewrite system prompt
+    from the vault sheet, so group requests never depend on a retrieval win."""
+
+    _SHEET = """# Colum Bidae
+Birdfolk (blue tit), Warlock. Pronouns: he/him.
+
+![[Colum.webp]]
+
+## Appearance
+A small plump blue-tit warlock bird.
+Rendering: high-detail digital fantasy illustration.
+
+## Visual Anchor (group images — reuse VERBATIM for named appearances)
+
+> A small plump blue-tit warlock bird: golden breast, blue wings.
+
+# Romi Stachelpfote
+Hedge (hedgehog), Monk. Pronouns: he/him.
+
+## Appearance
+A small round hedgehog.
+
+## Visual Anchor (group images — reuse VERBATIM for named appearances)
+
+> A small anthropomorphic hedgehog monk: taupe quills, golden rose.
+
+# Some NPC Without An Anchor
+Squirrel rogue.
+
+## Appearance
+A squirrel.
+"""
+
+    def _point_at(self, monkeypatch, tmp_path, text=None):
+        sheet = tmp_path / "Player Characters.md"
+        sheet.write_text(text if text is not None else self._SHEET, encoding="utf-8")
+        monkeypatch.setattr(images, "_PARTY_SHEET_FILE", sheet)
+        return sheet
+
+    def test_parses_names_species_line_and_anchor(self, monkeypatch, tmp_path):
+        self._point_at(monkeypatch, tmp_path)
+        entries = images._parse_party_sheet(images._PARTY_SHEET_FILE.read_text(encoding="utf-8"))
+        assert [e[0] for e in entries] == ["Colum Bidae", "Romi Stachelpfote"]
+        assert entries[0][1].startswith("Birdfolk (blue tit)")
+        assert entries[1][2] == ("A small anthropomorphic hedgehog monk: taupe "
+                                 "quills, golden rose.")
+
+    def test_dossier_reaches_the_system_prompt_verbatim(self, monkeypatch, tmp_path):
+        self._point_at(monkeypatch, tmp_path)
+        s = images._load_rewrite_system()
+        assert "{{PARTY_DOSSIER}}" not in s
+        assert "Visual Anchor: A small plump blue-tit warlock bird: golden breast, " \
+               "blue wings." in s
+        assert "copy their anchor" in s
+        # the Appearance/Rendering blocks are NOT injected — anchors only
+        assert "high-detail digital fantasy illustration" not in s
+        # a character without an anchor is not advertised as party
+        assert "Some NPC Without An Anchor" not in s
+
+    def test_missing_sheet_degrades_to_a_lookup_instruction(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(images, "_PARTY_SHEET_FILE", tmp_path / "absent.md")
+        s = images._load_rewrite_system()
+        assert "No party dossier available" in s
+        assert "{{PARTY_DOSSIER}}" not in s
+
+    def test_fenced_blocks_are_not_read_as_character_headings(self, monkeypatch, tmp_path):
+        # A stat block inside the sheet must not create a fake party member.
+        self._point_at(monkeypatch, tmp_path, text=self._SHEET + "\n```\n# Fake Head\n"
+                       "## Visual Anchor\n> fake anchor.\n```\n")
+        names = [e[0] for e in _parse_party_sheet_safe()]
+        assert names == ["Colum Bidae", "Romi Stachelpfote"]
+
+    def test_sheet_without_anchors_degrades_too(self, monkeypatch, tmp_path):
+        self._point_at(monkeypatch, tmp_path,
+                       text="# Nobody\nSquirrel rogue.\n\n## Appearance\nA squirrel.\n")
+        assert images._load_party_dossier() == ""
+        assert "No party dossier available" in images._load_rewrite_system()
 
 
 class TestModeSwitching:
@@ -646,9 +805,12 @@ class TestRewriteSystemPolicy:
         # species words must come from the sheet, never be invented (live: Seta
         # kept coming out a mangled 'cochran')
         assert "Never invent or mangle a species word" in s
-        # group scenes: one sheet read, and no silent character-dropping
-        # (live: 'the whole party' came back with 3 of 5 members)
-        assert "read the 'Player Characters' sheet ONCE" in s
+        # group scenes: the party anchors are IN the system prompt now, so
+        # there is no sheet lookup left to fail, and no silent character drop
+        # (live: 'the whole party' came back with 3 of 5 members; 2026-11-18:
+        # it came back with invented members instead)
+        assert "EVERY entry of the Party dossier" in s
+        assert "never re-read the 'Player Characters' sheet" in s
         assert "never silently drop any" in s
         # negations stay OUT of the positive prompt (negative prompt handles them)
         assert "Never write negations" in s

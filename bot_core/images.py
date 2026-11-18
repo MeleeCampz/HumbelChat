@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import re
 import time
 from pathlib import Path
 
@@ -345,7 +346,139 @@ _FALLBACK_POLICY = (
     "(2000 for 3+ characters). No negations in the prompt; include user-"
     "requested text VERBATIM.\n"
     "Character rules: {{CHARACTER_RULES}}\n"
+    "Party dossier: {{PARTY_DOSSIER}}\n"
     "Ground campaign specifics with the knowledge-base tools before writing."
+)
+
+# The party sheet is a THIRD editable layer: the party itself (names, species,
+# pronouns, Visual Anchors) is read straight from the vault on every rewrite,
+# so a group request no longer depends on the model successfully retrieving it.
+# Until this existed (2026-11-18) group rewrites were pure retrieval gambles:
+# when the sheet lookup failed the model invented party members outright —
+# "die ganze Gruppe" produced a badger named Bramble and an antlered elf named
+# Elara, Colum as a raven and Trixy as a tabby cat, and dropped Seta, Bubo and
+# Romi entirely.
+_PARTY_SHEET_FILE = Path(KB_PATH) / "humblewood" / "HumbleWood" / "Characters" \
+    / "Player Characters.md"
+
+# The base style sentence the policy makes the model open with VERBATIM. Used
+# as the structural check that a rewrite is a PROMPT and not narration — and
+# kept in sync with prompts/image_rewrite_system.md by a test.
+_BASE_STYLE = ("Semi-realistic fantasy illustration — detailed fur and feather "
+               "texture, natural light, storybook charm")
+
+_MAX_ANCHOR_CHARS = 900   # a Visual Anchor runs ~550; a runaway quote must not
+# monopolise the system prompt (it is truncated with a warning instead)
+
+_NO_DOSSIER = ("(No party dossier available — look the campaign characters up "
+               "with the knowledge-base tools.)")
+
+
+def _parse_party_sheet(raw: str) -> list[tuple[str, str, str]]:
+    """(name, species/pronoun line, Visual Anchor) per character block.
+
+    Sheet shape (the convention the sheets follow):
+      `# Name` → a free line (species, class, pronouns) → portraits →
+      `## Appearance` → `## Visual Anchor …` with the anchor as a `>` quote.
+    Characters without an anchor are skipped: without one there is nothing to
+    inject, and the model's own no-anchor creature rules apply to them.
+    """
+    out: list[tuple[str, str, str]] = []
+    name = desc = anchor = ""
+    expect_anchor = False
+    in_fence = False
+
+    def flush() -> None:
+        if name and anchor:
+            out.append((name, desc, anchor))
+
+    for line in raw.splitlines():
+        s = line.strip()
+        if s.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue    # a '# ' inside a stat block is not a character heading
+        if s.startswith("# "):
+            flush()
+            name, desc, anchor, expect_anchor = s[2:].strip(), "", "", False
+        elif name and not desc and s and not s.startswith(("#", ">", "!", "[")):
+            desc = s
+        elif s.startswith("## "):
+            expect_anchor = "visual anchor" in s.lower()
+        elif expect_anchor and s.startswith("> "):
+            anchor = s[2:].strip()
+            expect_anchor = False
+    flush()
+    return out
+
+
+def _load_party_dossier() -> str:
+    """The party roster + every Visual Anchor, re-read on EVERY rewrite."""
+    try:
+        raw = _PARTY_SHEET_FILE.read_text(encoding="utf-8")
+    except OSError as exc:
+        log.warning("party sheet unreadable (%s) — no party dossier injected", exc)
+        return ""
+    entries = _parse_party_sheet(raw)
+    if not entries:
+        log.warning("party sheet has no parsable 'Visual Anchor' quote — "
+                    "no party dossier injected")
+        return ""
+    lines = [
+        "The player characters, read from the vault right now. Each Visual Anchor",
+        "is given in FULL: when that character is in the image, copy their anchor",
+        "VERBATIM from here — do not rephrase it, do not shorten it, and do not use",
+        "a tool call to look it up. Use tools only for what is NOT listed here",
+        "(NPCs, places, items, events). Anyone not listed is not a party member.",
+    ]
+    for name, desc, anchor in entries:
+        a = anchor
+        if len(a) > _MAX_ANCHOR_CHARS:
+            a = a[:_MAX_ANCHOR_CHARS].rsplit(" ", 1)[0] + "…"
+            log.warning("Visual Anchor of %s exceeds %d chars — truncated in the "
+                        "dossier", name, _MAX_ANCHOR_CHARS)
+        lines.append(f"- {name}" + (f" — {desc}" if desc else "")
+                     + f"\n  Visual Anchor: {a}")
+    return "\n".join(lines)
+
+
+def _norm_prompt(text: str) -> str:
+    """Compare prompts past the model's punctuation habits.
+
+    Live outputs carry stray spaces ('storybook charm . Seta stands…'), so the
+    check compares letters/digits only.
+    """
+    return re.sub(r"[^a-z0-9]+", "", (text or "").lower())
+
+
+def looks_like_image_prompt(text: str) -> bool:
+    """False for narration: the policy makes a real prompt OPEN with the base
+    style sentence, so its absence means the model answered with something
+    else — a plan, a comment, an apology. Observed live 2026-11-18: a group
+    request returned "I need to look up the Player Characters sheet…" and that
+    text would otherwise have been PAINTED.
+
+    A paraphrased-but-real prompt still passes on the distinctive opening
+    phrase, so the guard rejects narration rather than wording drift.
+    """
+    n = _norm_prompt(text)
+    if not n:
+        return False
+    if n.startswith(_norm_prompt(_BASE_STYLE)):
+        return True
+    head = _norm_prompt(_BASE_STYLE.split(" — ")[0])
+    return bool(head) and head in n[:220]
+
+
+# One corrective retry: cheap (the narration cases answered in ~3 s with no
+# tool calls) and it recovers the reply instead of dropping to the raw request.
+_RETRY_NUDGE = (
+    "Your previous answer was not an image prompt — it was a plan or a comment. "
+    "The party and their Visual Anchors are already in your system prompt, so no "
+    "lookup is needed. Write the final prompt NOW: open with the base style "
+    "sentence VERBATIM, then scene, then one line per character, then lighting. "
+    "Reply with the prompt only.\n\nRequest: "
 )
 
 
@@ -368,7 +501,10 @@ def _load_rewrite_system() -> str:
         log.warning("character-rules vault note missing (%s) — using built-in "
                     "default", exc)
         char_rules = _DEFAULT_CHARACTER_RULES
-    return policy.replace("{{CHARACTER_RULES}}", char_rules).strip()
+    return (policy
+            .replace("{{CHARACTER_RULES}}", char_rules)
+            .replace("{{PARTY_DOSSIER}}", _load_party_dossier() or _NO_DOSSIER)
+            .strip())
 
 
 
@@ -431,38 +567,53 @@ async def rewrite_prompt(text: str) -> str:
         return extract_reply_text(resp, default="").strip()
 
     log.info("prompt rewrite started: %s", text[:120])
+    system = _load_rewrite_system()
     try:
-        out, meta = await run_agent_loop(
-            complete=_complete,
-            model=DEFAULT_MODEL,
-            system_prompt=_load_rewrite_system(),
-            user_message=text,
-        )
-        out = (out or "").strip().strip('"')
-        if not out:
-            raise ImageGenError("empty rewrite")
-        # The loop NEVER raises — on total backend failure it returns an
-        # apology sentence instead of a prompt. Those sentinels must fall back
-        # to the RAW user prompt, not be painted.
-        if meta.fallback and any(
-            s in out.lower()
-            for s in ("unexpected error", "couldn't finish that lookup")
-        ):
-            raise ImageGenError(f"rewrite unusable ({meta.fallback_reason})")
-        # Defense in depth: a mangled tool-call fragment is never a usable
-        # image prompt (the loop already rejects these — but the fallback
-        # single-turn path can still emit one, observed live 2026-10-28).
-        if looks_like_tool_call_fragment(out):
-            raise ImageGenError(
-                "rewrite returned a tool-call fragment: " + out[:80].replace("\n", " "))
-        log.info(
-            "prompt rewrite done: %d iteration(s), tools=%s fallback=%s%s — %s",
-            meta.iterations, ",".join(meta.tool_calls) or "-",
-            meta.fallback,
-            f" ({meta.fallback_reason})" if meta.fallback else "",
-            out[:200] + ("…" if len(out) > 200 else ""),
-        )
-        return out
+        # First the request as given; if the answer turns out to be narration
+        # rather than a prompt, ONE corrective retry (see _RETRY_NUDGE).
+        for i, msg in enumerate((text, _RETRY_NUDGE + text)):
+            out, meta = await run_agent_loop(
+                complete=_complete,
+                model=DEFAULT_MODEL,
+                system_prompt=system,
+                user_message=msg,
+            )
+            out = (out or "").strip().strip('"')
+            if not out:
+                raise ImageGenError("empty rewrite")
+            # The loop NEVER raises — on total backend failure it returns an
+            # apology sentence instead of a prompt. Those sentinels must fall
+            # back to the RAW user prompt, not be painted.
+            if meta.fallback and any(
+                s in out.lower()
+                for s in ("unexpected error", "couldn't finish that lookup")
+            ):
+                raise ImageGenError(f"rewrite unusable ({meta.fallback_reason})")
+            # Defense in depth: a mangled tool-call fragment is never a usable
+            # image prompt (the loop already rejects these — but the fallback
+            # single-turn path can still emit one, observed live 2026-10-28).
+            if looks_like_tool_call_fragment(out):
+                raise ImageGenError(
+                    "rewrite returned a tool-call fragment: " + out[:80].replace("\n", " "))
+            if not looks_like_image_prompt(out):
+                if i == 0:
+                    log.warning(
+                        "rewrite answer is not a prompt (%d chars, opens %r) — "
+                        "one corrective retry", len(out), out[:70].replace("\n", " "))
+                    continue
+                raise ImageGenError(
+                    "rewrite produced no prompt (base style sentence absent): "
+                    + out[:80].replace("\n", " "))
+            log.info(
+                "prompt rewrite done: %d iteration(s), tools=%s fallback=%s%s%s — %s",
+                meta.iterations, ",".join(meta.tool_calls) or "-",
+                meta.fallback,
+                f" ({meta.fallback_reason})" if meta.fallback else "",
+                " [after retry]" if i else "",
+                out[:200] + ("…" if len(out) > 200 else ""),
+            )
+            return out
+        raise ImageGenError("rewrite produced no prompt")  # unreachable
     except ImageGenError:
         raise
     except Exception as e:  # noqa: BLE001 — fall back to raw prompt in the caller
