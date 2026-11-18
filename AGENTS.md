@@ -49,3 +49,27 @@ Two physical cards, two backends — **never mix them up**:
 - **Known gap (user decision 2026-10-19):** ~394 header-only magic-item stubs + 6 Arcana
   Unleashed monsters whose D&D Beyond URLs redirect to the paid marketplace never got content —
   they stay as name+rarity stubs unless a logged-in/headful DDB harvest is done.
+
+## Image prompt pipeline (read before touching `/image` or the vault's Visual Anchors)
+
+Two paths, one outcome (`bot_core/images.py::rewrite_prompt`):
+
+- **Primary — plan + composer.** The model answers with an `<image_plan>` JSON
+  block (`prompts/image_plan_system.md`) and **`bot_core/image_prompt.py` writes the
+  prompt**. Style sentence, figure-count line, foreground/background split, budget
+  ladder, collective-noun replacement, NPC-look verification and every reported cut
+  are guarantees of that module, not requests to the model.
+- **Fallback — prose.** `prompts/image_rewrite_system.md` (the pre-#84 path) runs
+  only when the plan path fails.
+
+Vault coupling: `Characters/Player Characters.md` holds each character's Visual
+Anchor as **typed field lines** (`> species:`, `> body:`, `> face:`, `> outfit:`,
+`> signature:`, `> quirks:`). The composer paints those verbatim; a plan's
+`modify` replaces one field (an empty value removes it, naming nothing — never
+write "no cloak" into a prompt). A legacy single-paragraph anchor still parses (as
+an opaque blob). Keep the field labels when editing the sheet — analysis and
+measurement in `docs/internal/IMAGE_PROMPT_PIPELINE_ANALYSIS_2026-11.md`.
+
+Budgets are settings, not guesses: `IMAGE_PROMPT_BASE_CHARS`,
+`IMAGE_PROMPT_CHARS_PER_FIGURE`, `IMAGE_PROMPT_MAX_CHARS`,
+`IMAGE_PROMPT_FOREGROUND_FIGURES`.

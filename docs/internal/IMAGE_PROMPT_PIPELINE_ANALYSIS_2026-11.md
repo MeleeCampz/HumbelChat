@@ -263,3 +263,88 @@ character including the outfit, so it makes deliberate variants harder, not easi
 5. Drive-bys: one compression threshold (fix five-vs-six), shrink the negative prompt if
    a fixed-seed A/B shows it does nothing at `guidance 1.0`.
 
+
+---
+
+## 10. What was built (2026-11-18, same day as §1–§9)
+
+§9's Option B, with the typed-field and override parts the measurement demanded.
+
+**`bot_core/image_prompt.py`** — the deterministic composer (the module §5.1 said
+was missing). The model now plans; the code writes the prompt.
+
+**`prompts/image_plan_system.md`** — the plan contract: the model answers with one
+`<image_plan>` JSON block (`scene`, `figures[{name,pose,modify,look,source}]`,
+`entities`, `lighting`, `palette`, `mood`) and nothing else. It is asked for that
+block twice at most, then the pipeline falls back to the older prose path
+(`image_rewrite_system.md`, kept as the fallback and retitled as such).
+
+**The vault party sheet became typed** (`Characters/Player Characters.md`): each
+Visual Anchor is now `> species:` / `> body:` / `> face:` / `> outfit:` /
+`> signature:` / `> quirks:` field lines. The parser accepts the old single
+paragraph too (→ an opaque blob painted verbatim), so nothing else in the vault has
+to change. `Image Generation Policy.md` gained a note saying the party sheet is
+composed from and that its group-scene wording now describes the composer.
+
+### How each measured failure from §4 is now answered by code
+
+| # | Failure | Fix in code |
+|---|---|---|
+| 1 | Named NPCs invented / dropped | An NPC's `look` is painted **only** if its `source` names a file this rewrite actually read (`source_matches`, suffix-segment rule — the rule `kb/tools.py:193` got wrong). Otherwise the appearance is dropped and logged. Caught live: the model cited `SESSION_05/notes.md` for Boss Frey after making **no tool call at all**. |
+| 2 | Anchor text rewritten/shortened | Anchors are parsed into fields and emitted verbatim; the model never re-emits them. `match_anchor` maps plan names to sheets. |
+| 3 | Group images lose outfits | Foreground/background split written by the composer (`Exactly N named figures, F in the foreground…`), so the cast fits the budget instead of being improvised away. |
+| 4 | Duplicate figures | `dedupe_figures` keys on the matched anchor name, drops parentheticals, treats a bare prefix ("Seta" / "Seta Onix") as one figure, and merges poses + overrides. |
+| 5 | Prompt-length guessing | `prompt_budget(figures) = min(IMAGE_PROMPT_MAX_CHARS, base + per_figure × figures)`, and the compression score penalises **background** figures so the "smaller and softer" ones lose detail before the foreground does. Settings: `IMAGE_PROMPT_BASE_CHARS` / `_CHARS_PER_FIGURE` / `_MAX_CHARS` / `_FOREGROUND_FIGURES`. |
+| 6 | Crowd nouns painted as extra bodies | `replace_collectives` swaps a determiner-anchored crowd noun for the cast's names ("die ganze Gruppe" → the nine names), or reports when it cannot swap safely. |
+
+### Override semantics (the variant use case §9.2 measured)
+
+`modify: {"outfit": "polished steel plate armour"}` replaces that field's clauses
+and nothing else — the bow, the goggles, the face features, the size all survive.
+`modify: {"outfit": ""}` or `remove_fields: ["outfit"]` paints the character
+**without** that field, and says nothing about the removal (§9.3's negation lesson).
+A legacy blob anchor cannot be replaced exactly; filtering approximates it and the
+composer says so in the log. Unknown field names are refused with a warning.
+
+### Guarantees that are properties of the composer, not requests to a model
+
+Style sentence first · each named figure described exactly once · figure-count line
+written by code · party members hold the foreground (a plan that listed bandits
+first is reordered, and the reorder is logged) · no negation anywhere except the
+one fixed `No text, lettering, logos or watermarks.` tail · budget trimmed in a
+declared order (mood → palette → quirks/extra → entities → least-distinctive
+clause by distinctiveness score → lighting → hard truncate) with **every cut
+reported** · identity clauses (`species`, an NPC's first `look` clause) cut last.
+
+Negation handling needed three passes, each learned from a real string:
+`(no hair on the head)` must be cut **inside** its clause ("fur coloration only"
+survives — that clause is a positive species marker), `NOT an animal … but a
+machine` resolves to `construct — a machine`, and comma-level splitting keeps
+"2 feet tall" while dropping "no visible pupils". `has_negation` had to become
+word-boundary regexes: a space-anchored search misses `(no hair…)`.
+
+### Live dry run (chat backend live, rag mode, no GPU switch, no image generated)
+
+| Request | Result |
+|---|---|
+| "Die ganze Gruppe in einer Kampfszene … mit Boss Frey und zwei bewaffneten Banditen" | 9 figures, 4 foreground / 5 behind, 3584 chars, 3 clauses compressed; collective noun replaced; the three NPCs' invented looks **dropped** with a warning each |
+| "Seta in polierter Metallrüstung statt ihres Umhangs, sie spannt ihren Bogen" | 875 chars, outfit replaced, cloak absent, bow + leaf-charm pendant intact, no negation |
+| "Trixy ohne ihre Brille, sie lötet an Marvin" | 1416 chars, goggles gone from the outfit line, no "without" anywhere, Marvin's "construct — a machine" kept |
+
+6-figure party + scene composes at 3308 chars under the 3600 cap with **zero**
+cuts — measured, so the policy's old "six figures: identity-critical core only"
+guess can go (it already did in the vault note).
+
+**Tests**: `tests/test_image_prompt.py` (43 tests: parsing, overrides, budget
+ladder, negation scrubbing, dedupe, collective replacement, source verification,
+plan extraction) plus `tests/test_images.py` adapted to the two paths. Full suite
+**1456 passed**.
+
+### Still open
+- Painted images in a real GPU window for the three dry-run requests (§9.1's
+  before/after comparison).
+- NPC Visual Anchors in the vault (`Characters/NPC Visual Anchors.md`) — until
+  then grounded NPCs like Frey are painted by name, which is honest but plain.
+- Whether Qwen-Image-Turbo's *positive* prompt really ignores negations (§9.3's
+  A/B) — the composer no longer emits them, so this is now a vault-negative-prompt
+  tuning question only.
