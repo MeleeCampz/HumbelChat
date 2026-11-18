@@ -308,6 +308,53 @@ def _snippet_supported(look: str, retrieved: str) -> bool:
     return hits >= max(2, -(-total // 2))
 
 
+# A species is the most consequential thing a description asserts, and the
+# easiest to invent: measured live on the bandit-ambush rewrite, the model wrote
+# "heavy-set badger-folk bandit chief, flat snout, cutlass at his hip" for a
+# character the vault never describes — and cited a session note it HAD opened,
+# which mentions him by name and says nothing about how he looks. "The file was
+# opened, so believe the description" is therefore not sufficient on its own.
+# A creature noun must appear in what was actually retrieved, in English or in
+# German (the vault is half German and the model translates).
+_SPECIES = (
+    ("badger", "dachs"), ("fox", "fuchs"), ("squirrel", "eichh\u00f6rnchen"),
+    ("raccoon", "waschb\u00e4r"), ("hedgehog", "igel"), ("owl", "eule"),
+    ("rabbit", "kaninchen", "hase"), ("mouse", "maus"), ("rat", "ratte"),
+    ("crow", "kr\u00e4he"), ("raven", "rabe"), ("jay", "h\u00e4her"),
+    ("cat", "katze"), ("dog", "hund"), ("bear", "b\u00e4r"), ("wolf", "wolf"),
+    ("deer", "reh", "hirsch"), ("boar", "eber"), ("lizard", "echse"),
+    ("frog", "frosch"), ("toad", "kr\u00f6te"), ("mole", "maulwurf"),
+    ("otter", "otter"), ("beaver", "biber"), ("skunk", "stinktier"),
+    ("weasel", "wiesel"), ("horse", "pferd", "pony"), ("donkey", "esel"),
+    ("goat", "ziege"), ("sheep", "schaf"), ("bat", "fledermaus"),
+    ("turtle", "schildkr\u00f6te", "turtle"), ("snake", "schlange"),
+    ("hamster", "hamster"), ("quokka", "quokka"), ("mink", "mink"),
+)
+_species_variants = {w: frozenset(variants) for variants in _SPECIES for w in variants}
+_all_species = frozenset(_species_variants)
+
+
+def invented_species(look: str, retrieved: str) -> list[str]:
+    """Species the description claims that nothing retrieved mentions.
+
+    Generic words (beast-folk, anthropomorphic) name no species and are not
+    policed. A specific one is a fact claim, and the vault has its own notions
+    of who is a badger-folk.
+    """
+    if not retrieved:
+        return []
+    hay = _norm(retrieved)
+    bad = []
+    for token in set(re.findall(r"[a-z\u00e4\u00f6\u00fc]+", _norm(look))):
+        if token not in _all_species:
+            continue
+        if any(re.search(r"\b" + re.escape(v) + r"\b", hay)
+               for v in _species_variants[token]):
+            continue
+        bad.append(token)
+    return sorted(bad)
+
+
 def verify_look(figure: Figure, read_paths: Sequence[str] | None,
                 snippet_paths: Iterable[str] | None,
                 retrieved: str) -> tuple[bool, str]:
@@ -337,6 +384,11 @@ def verify_look(figure: Figure, read_paths: Sequence[str] | None,
                           "nothing — painted unverified")
         return False, ("`look` without a `source` — the vault records NPC roles, "
                        "never appearances")
+    bad = invented_species(figure.look, retrieved)
+    if bad:
+        return False, ("describes it as " + "/".join(bad) + "-folk, which nothing "
+                       "retrieved says — the vault never gives this character a "
+                       "species, so the figure is painted by name")
     if read_paths is None and not snippet_paths:
         return True, ""
     if read_paths is not None and source_matches(figure.source, read_paths):

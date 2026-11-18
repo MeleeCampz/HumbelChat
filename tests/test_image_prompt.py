@@ -771,3 +771,45 @@ def test_a_scene_that_re_enumerates_the_cast_is_cut():
         assert scene.count(name) == 1, f"{name} still repeated in the scene"
     assert "aims her bow" in scene, "the action-bearing mention must survive"
     assert any("re-enumerated the cast" in w for w in c.warnings)
+
+
+RETRIEVED_FREY = ("Boss Frey, der Bandit, überfiel die Gruppe an der Old Bridge und "
+                  "verlangte den Zoll für die überfallene Händlerin.")
+
+
+def test_a_species_claim_needs_backing_even_when_the_file_was_opened():
+    """Measured drift, analysis §10: the rewrite invented "heavy-set badger-folk
+    bandit chief, flat snout, cutlass at his hip" for a character the vault never
+    describes, and cited a session note it HAD opened — the note mentions him by
+    name and says nothing about his appearance. Opening a file proves the name is
+    there. The species is a separate claim and has to be retrieved too."""
+    plan = _plan("Boss Frey blocks the path", [{
+        "name": "Boss Frey", "pose": "snarling forward",
+        "look": "heavy-set badger-folk bandit chief with a flat snout and a "
+                "cutlass at his hip",
+        "source": "SessionLogs/SESSION_01_DerAnfang/notes.md"}])
+    c = ip.compose_prompt(
+        plan, _anchors(), BASE,
+        read_paths=["Humblewood/HumbleWood/SessionLogs/SESSION_01_DerAnfang/notes.md"],
+        retrieved=RETRIEVED_FREY)
+    assert "badger" not in c.prompt and "cutlass" not in c.prompt
+    assert "Boss Frey: snarling forward" in c.prompt   # pose survives, look does not
+    assert any("badger" in w and "species" in w for w in c.warnings), c.warnings
+    assert "Boss Frey" in c.ungrounded
+
+
+def test_a_species_retrieved_in_german_counts_as_backed():
+    """The vault is half German and the plan writes English. The gate matches the
+    species in either language, so real vault text is not punished for being
+    written in the language the vault uses."""
+    plan = _plan("Alisa Pennygleam clutches her pouch", [{
+        "name": "Alisa Pennygleam", "pose": "clutching a leather pouch",
+        "look": "slim fox-folk trader with russet fur",
+        "source": "SessionLogs/SESSION_02/notes.md"}])
+    c = ip.compose_prompt(
+        plan, _anchors(), BASE,
+        read_paths=["Humblewood/HumbleWood/SessionLogs/SESSION_02/notes.md"],
+        retrieved="Alisa Pennygleam, eine Fuchs-H\xe4ndlerin aus Clearwater, "
+                  "handelt mit Fellen.")
+    assert "fox-folk" in c.prompt and "russet fur" in c.prompt
+    assert not any("species" in w for w in c.warnings)
