@@ -277,6 +277,18 @@ RECAP_REASONING_EFFORT: str | None
 #: more than latency (runs deferred). None = omit the param → current
 #: behaviour (thinking on, model default effort).
 MERGE_LOG_REASONING_EFFORT: str | None
+#: /image prompt rewrite — the plan turn, the lookup turn, the prose fallback
+#: (the first routing turn always stays "off": it only picks tools). Default
+#: "medium" after measuring it on the live backend (12 rewrites, 2 requests ×
+#: 3 efforts × 2 rounds run in reverse order, 2026-11-18):
+#:   low  median 42.7 s · medium 52.2 s · high 152.8 s
+#: medium bought visibly more PAINTABLE detail (the shape of a three-lens
+#: frame, a coat's collar construction, claws instead of hands) and the same
+#: correctness; `high` bought nothing at 3.6× the time. What no effort level
+#: changed: inventing a creature for an NPC, hiding a named character in
+#: `entities`, or needing the enforced lookup pass — those are guarded by code,
+#: not by thinking. See IMAGE_PROMPT_PIPELINE_ANALYSIS_2026-11.md §12.
+IMAGE_REASONING_EFFORT: str | None
 
 def _reasoning_effort_env(name: str, raw: str | None) -> str | None:
     """Parse a reasoning-effort env var against the allowlist.
@@ -303,6 +315,26 @@ AI_REASONING_EFFORT = _reasoning_effort_env("AI_REASONING_EFFORT", os.getenv("AI
 SUMMARY_REASONING_EFFORT = _reasoning_effort_env("SUMMARY_REASONING_EFFORT", os.getenv("SUMMARY_REASONING_EFFORT"))
 RECAP_REASONING_EFFORT = _reasoning_effort_env("RECAP_REASONING_EFFORT", os.getenv("RECAP_REASONING_EFFORT"))
 MERGE_LOG_REASONING_EFFORT = _reasoning_effort_env("MERGE_LOG_REASONING_EFFORT", os.getenv("MERGE_LOG_REASONING_EFFORT"))
+# Unlike the chat families, the image rewrite never omits the param — an unset
+# or mistyped value falls back to the measured default rather than to the
+# model's own (xhigh) default, which once truncated a party prompt to nothing.
+IMAGE_REASONING_EFFORT = _reasoning_effort_env("IMAGE_REASONING_EFFORT", os.getenv("IMAGE_REASONING_EFFORT")) or "medium"
+
+#: Output cap for the rewrite calls. A reasoning model spends part of the cap on
+#: its thinking phase and can then return an EMPTY or mid-sentence plan (observed
+#: live: at 2048 a party prompt died at 671 chars), so the cap has to grow WITH
+#: the reasoning effort instead of staying fixed. 0 = derive from the effort.
+def _rewrite_max_tokens(effort: str | None) -> int:
+    """Output cap for an image rewrite at a given reasoning effort.
+
+    The cap has to grow WITH the effort: the model spends part of it on thinking
+    and can then return an empty or mid-sentence plan (observed live at 2048).
+    """
+    return 4096 if effort in (None, "off", "low") else 6144
+
+
+IMAGE_REWRITE_MAX_TOKENS: int = _safe_int(
+    os.getenv("IMAGE_REWRITE_MAX_TOKENS"), 0) or _rewrite_max_tokens(IMAGE_REASONING_EFFORT)
 
 # Retained for reference / backward compatibility: chat no longer applies a
 # global output cap — requests omit max_tokens so the backend (LM Studio)

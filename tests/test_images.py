@@ -356,6 +356,68 @@ class TestRewritePrompt:
         assert "invent" not in out.lower()
 
 
+class TestRewriteReasoningEffort:
+    """IMAGE_REASONING_EFFORT / IMAGE_REWRITE_MAX_TOKENS reach the rewrite turns.
+
+    Measured on the live backend (12 rewrites: 2 requests × 3 efforts × 2 rounds
+    run in opposite order) — docs/internal/
+    IMAGE_PROMPT_PIPELINE_ANALYSIS_2026-11.md §12: `low` median 42.7 s,
+    `medium` 52.2 s, `high` 152.8 s. `medium` wrote measurably more PAINTABLE
+    detail (the shape of a three-lens frame, a coat's collar construction) with
+    identical override correctness; `high` bought nothing at 3.6× the time. The
+    routing turn stays unreasoned — it only picks tools.
+    """
+
+    @staticmethod
+    def _resp(content: str):
+        return MagicMock(choices=[MagicMock(message=MagicMock(content=content))])
+
+    async def test_a_thinking_turn_pays_the_configured_effort(self, monkeypatch):
+        from config import settings
+        assert settings.IMAGE_REASONING_EFFORT == "medium"      # the measured default
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(return_value=self._resp("ok"))
+        complete = images._make_completer(client)
+        await complete([{"role": "user", "content": "plan"}], "m", thinking=True)
+        assert client.chat.completions.create.call_args.kwargs["extra_body"] == \
+            {"reasoning_effort": "medium"}
+
+    async def test_the_routing_turn_still_runs_with_thinking_off(self):
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(return_value=self._resp("ok"))
+        complete = images._make_completer(client)
+        await complete([{"role": "user", "content": "pick tools"}], "m", thinking=False)
+        assert client.chat.completions.create.call_args.kwargs["extra_body"] == \
+            {"reasoning_effort": "none", "enable_thinking": False}
+
+    async def test_the_effort_is_overridable_without_touching_the_loop(self, monkeypatch):
+        monkeypatch.setattr(images, "IMAGE_REASONING_EFFORT", "low")
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(return_value=self._resp("ok"))
+        complete = images._make_completer(client)
+        await complete([{"role": "user", "content": "plan"}], "m", thinking=True)
+        assert client.chat.completions.create.call_args.kwargs["extra_body"] == \
+            {"reasoning_effort": "low"}
+
+    async def test_the_output_cap_is_the_one_settings_derives(self, monkeypatch):
+        # A thinking model spends part of the cap on thinking and can then return
+        # an empty or truncated plan (observed live at 2048) — so the cap the
+        # rewrite sends has to be the effort-aware one.
+        from config import settings
+        monkeypatch.setattr(images, "IMAGE_REWRITE_MAX_TOKENS", settings.IMAGE_REWRITE_MAX_TOKENS)
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(return_value=self._resp("ok"))
+        complete = images._make_completer(client)
+        await complete([{"role": "user", "content": "plan"}], "m", thinking=True)
+        sent = client.chat.completions.create.call_args.kwargs
+        assert sent["max_tokens"] == settings.IMAGE_REWRITE_MAX_TOKENS == 6144
+
+    def test_the_cap_grows_with_the_effort_and_never_shrinks_below_the_old_one(self):
+        from config.settings import _rewrite_max_tokens as cap
+        assert cap(None) == cap("off") == cap("low") == 4096
+        assert cap("medium") == cap("high") == cap("xhigh") == 6144
+
+
 class TestPromptShapeGuard:
     """A rewrite must be a PROMPT, not narration (found live 2026-11-18).
 

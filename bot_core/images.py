@@ -55,6 +55,8 @@ from config.settings import (
     IMAGE_PROMPT_CHARS_PER_FIGURE,
     IMAGE_PROMPT_FOREGROUND_FIGURES,
     IMAGE_PROMPT_MAX_CHARS,
+    IMAGE_REASONING_EFFORT,
+    IMAGE_REWRITE_MAX_TOKENS,
     INFER_API_KEY,
     INFER_URL,
     KB_PATH,
@@ -545,23 +547,23 @@ def _make_completer(client: AsyncOpenAI):
     async def _complete(
         messages: list[dict], model: str, *, thinking: bool,
     ) -> str:
-        # Decision turns: reasoning OFF (fast, no leak); the final turn gets a
-        # LOW effort — the chat model is a reasoning model and at default effort
-        # its thinking budget can eat the token cap and leave content empty
-        # (observed live). Same param plumbing + 4xx fallback as the main AI
-        # path (bot_core.ai_client, #20).
+        # Decision/routing turns: reasoning OFF (fast, no leak). Plan, lookup
+        # and prose turns: IMAGE_REASONING_EFFORT (default "medium" — measured,
+        # see config/settings.py and the analysis doc §12). Same param plumbing
+        # + 4xx fallback as the main AI path (bot_core.ai_client, #20).
         resp = await asyncio.wait_for(
             _create_with_reasoning_fallback(
                 client,
-                "low" if thinking else "off",
+                "off" if not thinking else IMAGE_REASONING_EFFORT,
                 model=model,
                 messages=list(messages),
-                # A plan is short (~600 chars) but the loop's forced-answer turn
-                # repeats the gathered context, and the older prose path writes
-                # ~2000-char prompts — at 2048 the thinking budget could eat the
-                # cap and truncate content mid-sentence (observed live: a party
-                # prompt died at 671 chars). 4096 leaves headroom for both.
-                max_tokens=4096,
+                # IMAGE_REWRITE_MAX_TOKENS grows with the reasoning effort: a
+                # plan is short (~600 chars) but the loop's forced-answer turn
+                # repeats the gathered context, the older prose path writes
+                # ~2000-char prompts, and any of those can be eaten by the
+                # thinking budget (observed live: a party prompt died at 671
+                # chars at a 2048 cap).
+                max_tokens=IMAGE_REWRITE_MAX_TOKENS,
             ),
             timeout=120.0,
         )
