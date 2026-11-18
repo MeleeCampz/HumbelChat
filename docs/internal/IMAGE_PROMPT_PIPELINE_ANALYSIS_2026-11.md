@@ -450,3 +450,32 @@ tracks it — 4096 at off/low, 6144 above — because a thinking model spends pa
 the cap on its thinking phase and had previously truncated a party prompt (2048 →
 671 chars). `high` stays available but is not the default: 3.6× for no measured
 gain.
+
+
+## 13. The replacement itself invented a duplicate (found by running `medium` live)
+
+First live rewrite after the setting landed, 24.7 s, all guarantees fired — and the
+scene sentence read:
+
+> `Seta Onix, Bubo Krallensturm, Romi Stachelpfote, Trixy Smoldersome, Marvin, Colum
+> Bidae, Boss Frey and Alisa Pennygleam confronts Boss Frey and his bandits…`
+
+Two defects in one substitution, both introduced by the collective replacement this
+pass exists to make safe:
+
+1. **It re-named characters the sentence already named.** Boss Frey appears as both
+   subject and object — the composer itself produced the "paint him twice" shape it
+   was built to prevent. Names already present in the sentence are now excluded from
+   the inserted list.
+2. **`confronts` stayed singular.** The verb-agreement map was hand-written and
+   therefore always missing the verb this particular request happened to use. It is
+   now generated from ~70 verb stems (`_sforms` handles `-es`/`-ies`), keeping the
+   curation principle (an unknown word after the list is left alone) without hand-
+   listing every s-form.
+
+Re-run of the same request: *"…Seta Onix, Romi Stachelpfote, Bubo Krallensturm and
+Trixy Smoldersome, with Marvin beside her, **confront** Boss Frey across a blocked
+path while Alisa Pennygleam clutches her coin bag."* One mention, plural verb.
+
+§11.5's open item stands unchanged: nothing yet compares the **request's** own actors
+("Boss Frey und seinen Banditen") against the figures the plan chose to paint.

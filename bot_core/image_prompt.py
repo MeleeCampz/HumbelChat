@@ -167,20 +167,26 @@ def replace_collectives(text: str, names: list[str]) -> tuple[str, int]:
     Grammar-safe: a subject is replaced by a subject. This is the part that
     actually stops the extra-figures render; detection without replacement would
     just log a failure that still got painted.
+
+    A name the sentence ALREADY names is not inserted again (measured live:
+    "the party confronts Boss Frey and his bandits" became "…Boss Frey and Alisa
+    Pennygleam confronts Boss Frey and his bandits" — asking the model to paint
+    the same character twice, which is the very defect this pass exists to stop).
     """
     out = text
     hits = 0
-    if len(names) >= 2:
-        listed = ", ".join(names[:-1]) + " and " + names[-1]
-    else:
-        listed = ", ".join(names)
+    inserted: list[str] = []
     for pat in _COLLECTIVE_REPLACE:
-        def sub(m: re.Match) -> str:
+        def sub(m: re.Match, base: str = out) -> str:
             nonlocal hits
             hits += 1
+            rest = base[:m.start()] + "\n" + base[m.end():]
+            keep = [n for n in names if not _names_it(rest, n)]
+            listed = _listed(keep) or _listed(names)
+            inserted.append(listed)
             return listed or m.group(0)
         out = re.sub(pat, sub, out, flags=re.I)
-    if listed and hits:
+    for listed in dict.fromkeys(inserted):
         # "the party faces them" → "Seta Onix, Marvin and Boss Frey faces them"
         # is what a literal substitution leaves behind. The verb was agreeing
         # with a collective noun; it has to agree with a list.
@@ -193,16 +199,50 @@ def replace_collectives(text: str, names: list[str]) -> tuple[str, int]:
     return out, hits
 
 
+def _listed(names: list[str]) -> str:
+    if len(names) >= 2:
+        return ", ".join(names[:-1]) + " and " + names[-1]
+    return ", ".join(names)
+
+
+def _names_it(text: str, name: str) -> bool:
+    """Is this character already named in this sentence (including "Marvin's")?"""
+    return bool(re.search(r"(?<![A-Za-z\u00c0-\u00ff])" + re.escape(name)
+                          + r"(?![A-Za-z\u00c0-\u00ff])", text, re.I))
+
+
 # Only curated verbs: an unknown word after the list is left alone rather than
-# guessed at.
-_VERB_AFTER_LIST = {
-    "is": "are", "was": "were", "stands": "stand", "faces": "face",
-    "battles": "battle", "attacks": "attack", "assaults": "assault",
-    "fights": "fight", "charges": "charge", "advances": "advance",
-    "circles": "circle", "surrounds": "surround", "blocks": "block",
-    "watches": "watch", "moves": "move", "waits": "wait", "strikes": "strike",
-    "looms": "loom", "gathered": "gather", "was": "were",
+# guessed at. Generated from stems so an s-form cannot be missed — the live run
+# that produced "…and Alisa Pennygleam confronts Boss Frey" proved that a
+# hand-written list always lacks the verb this request happened to use.
+_VERB_STEMS = (
+    "confront", "face", "battle", "fight", "attack", "assault", "charge",
+    "advance", "circle", "surround", "encircle", "block", "watch", "move",
+    "wait", "strike", "loom", "gather", "stand", "hold", "keep", "meet",
+    "close", "point", "raise", "fire", "shoot", "draw", "ready", "nock",
+    "leap", "run", "rush", "grab", "seize", "tackle", "restrain", "corner",
+    "ambush", "defend", "guard", "shield", "support", "cover", "follow",
+    "lead", "approach", "arrive", "hesitate", "freeze", "stare", "glare",
+    "look", "turn", "step", "nod", "shout", "call", "speak", "sing",
+    "crouch", "kneel", "hover", "float", "fly", "swing", "slash", "throw",
+    "catch", "grip", "clutch", "aim", "bar", "hunt", "chase", "outnumber",
+    "trap",
+)
+
+
+def _sforms(stem: str) -> list[str]:
+    if stem.endswith(("s", "x", "z", "ch", "sh", "o")):
+        return [stem + "es"]
+    if stem.endswith("y") and stem[-2] not in "aeiou":
+        return [stem + "ies"]
+    return [stem + "s"]
+
+
+_VERB_AFTER_LIST: dict[str, str] = {
+    form: stem for stem in _VERB_STEMS for form in _sforms(stem)
 }
+_VERB_AFTER_LIST.update({"is": "are", "was": "were", "has": "have",
+                         "does": "do"})
 
 
 def has_negation(clause: str) -> bool:

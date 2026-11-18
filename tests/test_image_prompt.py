@@ -881,3 +881,29 @@ def test_one_entity_naming_two_characters_promotes_both():
     assert "Alisa Pennygleam: standing before" in c.prompt, c.prompt
     assert "Exactly 3 named figures" in c.prompt, c.prompt
     assert not any("Also in the scene" in p for p in [c.prompt]), c.prompt
+
+
+# ── 9. A replacement must not re-name someone the sentence already names ─────
+
+def test_a_replacement_does_not_re_name_a_character_the_sentence_already_names():
+    """Measured live 2026-11-19: "the party confronts Boss Frey and his bandits"
+    came out as "…Boss Frey and Alisa Pennygleam confronts Boss Frey and his
+    bandits" — one sentence naming the same character twice, which is an
+    invitation to paint him twice. A name already in the sentence is not inserted.
+    """
+    out, hits = ip.replace_collectives(
+        "the party confronts Boss Frey and his bandits in a forest clearing",
+        ["Seta Onix", "Marvin", "Boss Frey", "Alisa Pennygleam"])
+    assert hits == 1
+    assert out.count("Boss Frey") == 1, out
+    assert out.startswith("Seta Onix, Marvin and Alisa Pennygleam confront "), out
+
+
+def test_the_plural_verb_fix_is_generated_from_stems_not_a_short_hand_list():
+    """The hand-written verb list always lacked the verb the live request used."""
+    for verb, want in (("confronts", "confront"), ("watches", "watch"),
+                       ("blocks", "block"), ("chases", "chase"),
+                       ("clutches", "clutch"), ("aims", "aim")):
+        out, _ = ip.replace_collectives(f"the party {verb} the shrine",
+                                        ["Seta Onix", "Marvin"])
+        assert out == f"Seta Onix and Marvin {want} the shrine", out
