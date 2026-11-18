@@ -42,6 +42,7 @@ from config.settings import (
     GPU_HEAL_ON_START,
     GPU_SWITCH_URL,
     IMAGE_DEFAULT_SIZE,
+    IMAGE_ANIMAL_FLOOR,
     IMAGE_GEN_TIMEOUT_S,
     IMAGE_GGUF_FILENAME,
     IMAGE_GPU_IDS,
@@ -874,7 +875,8 @@ async def _rewrite_composed(text: str, complete,
             # The request's own words: which species the USER named, and the
             # spelling a campaign name really has ("Frey" painted for "Boss Frey"
             # was measured live, analysis §15).
-            request_text=text)
+            request_text=text,
+            animal_floor=IMAGE_ANIMAL_FLOOR)
         for w in composed.warnings:
             if w.startswith("budget "):
                 log.warning("composer budget: %s", w)
@@ -921,7 +923,8 @@ async def _rewrite_composed(text: str, complete,
                     budget_kwargs=_budget_kwargs(),
                     read_paths=opened,
                     snippet_paths=_snippet_paths_from(gathered, opened),
-                    retrieved=gathered, request_text=text)
+                    retrieved=gathered, request_text=text,
+                    animal_floor=IMAGE_ANIMAL_FLOOR)
                 for w in composed.warnings:
                     if w.startswith("budget "):
                         log.warning("composer budget: %s", w)

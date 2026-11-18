@@ -156,6 +156,13 @@ IMAGE_PROMPT_MAX_CHARS: int = _safe_int(os.getenv("IMAGE_PROMPT_MAX_CHARS"), 360
 # figures in one 1024² frame (docs/internal/IMAGE_PROMPT_PIPELINE_ANALYSIS_2026-11.md).
 IMAGE_PROMPT_FOREGROUND_FIGURES: int = _safe_int(
     os.getenv("IMAGE_PROMPT_FOREGROUND_FIGURES"), 4)
+# Every figure in a generated image is animal-folk in this world; this line is the
+# floor under a cast member the vault gives no species for, so an undescribed bandit
+# is not painted as a person (table owner's ruling 2026-11-19). It rides in the style
+# sentence, which the composer's budget ladder never cuts. Empty string disables it.
+IMAGE_ANIMAL_FLOOR: str = os.getenv(
+    "IMAGE_ANIMAL_FLOOR",
+    "Every figure in this image is an anthropomorphic animal-folk character of this world")
 IMAGE_GEN_TIMEOUT_S: float = _safe_float(os.getenv("IMAGE_GEN_TIMEOUT_S"), 600.0)
 IMAGE_LOAD_TIMEOUT_S: float = _safe_float(os.getenv("IMAGE_LOAD_TIMEOUT_S"), 300.0)
 # (Image-backend base WITHOUT the /v1 suffix — Studio's management API
