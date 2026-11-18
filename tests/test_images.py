@@ -174,7 +174,9 @@ class TestRewritePrompt:
         assert client.chat.completions.create.call_count >= 2
 
     async def test_empty_then_recovery(self, monkeypatch):
-        # First turn empty (nudged), second a real answer → recovered.
+        # First turn empty (nudged), second a real answer → recovered. This is
+        # the FALLBACK prose path exercised directly (#84: the plan path runs
+        # first in rewrite_prompt and has its own tests in TestComposedRewrite).
         client = MagicMock()
         client.chat.completions.create = AsyncMock(side_effect=[
             self._resp(""),
@@ -183,7 +185,8 @@ class TestRewritePrompt:
                        "a moonlit clearing."),
         ])
         monkeypatch.setattr(images, "_chat_client", lambda: client)
-        assert await images.rewrite_prompt("a bird") == \
+        complete = images._make_completer(client)
+        assert await images._rewrite_prose("a bird", complete) == \
             ("Semi-realistic fantasy illustration — detailed fur and feather texture, "
              "natural light, storybook charm. A blue-tit warlock in a moonlit clearing.")
 
@@ -233,15 +236,20 @@ class TestRewritePrompt:
         client = MagicMock()
         client.chat.completions.create = AsyncMock(side_effect=[
             self._resp('{"tool": "search_kb", "args": {"query": "Marvin #14"}}'),
-            self._resp("Semi-realistic fantasy illustration — detailed fur and feather "
-                       "texture, natural light, storybook charm. Marvin the Steel "
-                       "Defender golem guards a campfire."),
+            self._resp('<image_plan>\n{"scene": "Marvin guards a campfire at night", '
+                       '"figures": [{"name": "Marvin", "pose": "guarding the fire"}], '
+                       '"lighting": "firelight", "palette": "brass, ember", '
+                       '"mood": "watchful"}\n</image_plan>'),
         ])
         monkeypatch.setattr(images, "_chat_client", lambda: client)
 
         out = await images.rewrite_prompt("Marvin #14 guarding a camp")
-        assert "Steel Defender" in out
+        # The lookup happened, and the composed prompt opens with the style
+        # sentence and states the figure count (both are now code guarantees).
         assert executed == ["search_kb"]
+        assert out.startswith(images._BASE_STYLE)
+        assert "Exactly 1 named figure" in out
+        assert "Marvin" in out
 
 
 class TestPromptShapeGuard:
@@ -283,6 +291,8 @@ class TestPromptShapeGuard:
         assert not images.looks_like_image_prompt("   ")
 
     async def test_narration_gets_one_corrective_retry(self, monkeypatch):
+        # Fallback prose path, driven directly (see TestComposedRewrite for the
+        # plan path that normally runs first).
         client = MagicMock()
         client.chat.completions.create = AsyncMock(side_effect=[
             self._resp("I need to look up the Player Characters sheet first."),
@@ -290,7 +300,8 @@ class TestPromptShapeGuard:
                        "lunges, Seta nocks an arrow."),
         ])
         monkeypatch.setattr(images, "_chat_client", lambda: client)
-        out = await images.rewrite_prompt("die ganze Gruppe")
+        complete = images._make_completer(client)
+        out = await images._rewrite_prose("die ganze Gruppe", complete)
         assert out.startswith(images._BASE_STYLE)
         # the retry restates the request and says no lookup is needed
         sent = client.chat.completions.create.call_args_list[1].kwargs["messages"]

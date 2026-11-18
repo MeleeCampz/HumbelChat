@@ -1,6 +1,14 @@
-# Image prompt rewrite policy
+# Image prompt rewrite policy (FALLBACK path)
 
-Source of truth for the `/generate_image` rewrite system prompt. Edit freely —
+Used when the plan path fails: `/generate_image` normally asks the model for an
+`<image_plan>` block (`prompts/image_plan_system.md`) and assembles the prompt
+in code (`bot_core/image_prompt.py`). If no usable plan comes back — a backend
+hiccup, a model that ignored the contract — this prose policy runs instead, and
+the model writes the prompt itself. Rules that the composer enforces by
+construction (figure counts, no crowd nouns, no negations, anchor fidelity) are
+kept here too, because a hand-written fallback prompt needs the same rules.
+
+Source of truth for the fallback rewrite system prompt. Edit freely —
 the bot re-reads this file on every generation (no restart needed). The
 `{{CHARACTER_RULES}}` placeholder is replaced at load time with the content of
 the vault note `HumbleWood/Image Generation Policy.md` (character-specific
@@ -27,7 +35,7 @@ You are a prompt engineer for a semi-realistic fantasy image model set in Humble
 
 ## Characters
 
-3. CHARACTERS — one line per character in this form: Name (VISUAL ANCHOR), pose/action/expression in THIS scene (at most 12 words). For any character whose sheet carries a 'Visual Anchor' section, copy the ENTIRE anchor block VERBATIM — every clause, including all outfit and gear details; do not rephrase, summarize or truncate it; consistency across images depends on it. For creatures or characters WITHOUT an anchor: an explicit ANIMAL species + at most 3 visible animal features (ears, snout, fur, tail) + outfit, in at most 25 words — never vague "X-like" and never human-face cues; every creature in this world is beast-folk. Include EVERY character the request calls for — "the whole party" means EVERY entry of the Party dossier below; if that is more than five (e.g. the party plus a bandit), compress each anchor to its identity-critical core (species + top three features + signature item) so everyone fits. The CHARACTERS lines ARE the group: list each character EXACTLY ONCE, never repeat a name, never describe the same character twice, and never add an unnamed look-alike to fill the frame — the count you stated in SCENE is the number of bodies the image contains.
+3. CHARACTERS — one line per character in this form: Name (VISUAL ANCHOR), pose/action/expression in THIS scene (at most 12 words). For any character whose sheet carries a 'Visual Anchor' section, copy the ENTIRE anchor block VERBATIM — every clause, including all outfit and gear details; do not rephrase, summarize or truncate it; consistency across images depends on it. For creatures or characters WITHOUT an anchor: an explicit ANIMAL species + at most 3 visible animal features (ears, snout, fur, tail) + outfit, in at most 25 words — never vague "X-like" and never human-face cues; every creature in this world is beast-folk. Include EVERY character the request calls for — "the whole party" means EVERY entry of the Party dossier below; if that is more than six (e.g. the party plus a bandit), compress each anchor to its identity-critical core (species + top three features + signature item) so everyone fits — the same threshold the vault note states. The CHARACTERS lines ARE the group: list each character EXACTLY ONCE, never repeat a name, never describe the same character twice, and never add an unnamed look-alike to fill the frame — the count you stated in SCENE is the number of bodies the image contains.
 
 ## Lighting
 

@@ -31,6 +31,7 @@ from typing import Any, Callable
 import httpx
 from openai import APIStatusError, AsyncOpenAI, OpenAIError
 
+from bot_core import image_prompt
 from bot_core.agent_loop import looks_like_tool_call_fragment, run_agent_loop
 from bot_core.ai_client import _create_with_reasoning_fallback
 from bot_core.errors import extract_reply_text
@@ -50,6 +51,10 @@ from config.settings import (
     IMAGE_MODE_HOLD_S,
     IMAGE_MODEL,
     IMAGE_NEGATIVE_PROMPT,
+    IMAGE_PROMPT_BASE_CHARS,
+    IMAGE_PROMPT_CHARS_PER_FIGURE,
+    IMAGE_PROMPT_FOREGROUND_FIGURES,
+    IMAGE_PROMPT_MAX_CHARS,
     INFER_API_KEY,
     INFER_URL,
     KB_PATH,
@@ -533,21 +538,9 @@ def _chat_client() -> AsyncOpenAI:
     return AsyncOpenAI(api_key=INFER_API_KEY, base_url=INFER_URL, max_retries=0)
 
 
-async def rewrite_prompt(text: str) -> str:
-    """Expand a short user request into a rich image prompt via the chat model.
-
-    Runs on the chat backend (its own card) while rag mode is live — call
-    this BEFORE ensure_image_mode(): the rewrite's KB tools include the
-    reranker, which a mode switch takes offline.
-    The rewrite goes through the SAME bounded tool-calling loop as normal chat
-    (bot_core.agent_loop) with the SAME knowledge-base tools, so campaign
-    specifics in the request (characters, companions, places, items) are looked
-    up and grounded instead of invented. Speed is not a concern — reliability
-    is: the loop NEVER raises; every failure degrades to a single-turn answer
-    over whatever context was gathered.
-    Raises ImageGenError on failure (caller falls back to the raw prompt).
-    """
-    client = _chat_client()
+def _make_completer(client: AsyncOpenAI):
+    """The completion callable the agent loop drives (shared by both rewrite
+    paths — the plan path and the older prose path)."""
 
     async def _complete(
         messages: list[dict], model: str, *, thinking: bool,
@@ -563,25 +556,248 @@ async def rewrite_prompt(text: str) -> str:
                 "low" if thinking else "off",
                 model=model,
                 messages=list(messages),
-                # Multi-character prompts run up to ~2000 chars (~500+ tokens)
-                # and the chat model is a reasoning model — at 2048 its thinking
-                # budget could eat the cap and truncate content mid-sentence
-                # (observed live: party prompt died at 671 chars). 4096 leaves
-                # headroom for both.
+                # A plan is short (~600 chars) but the loop's forced-answer turn
+                # repeats the gathered context, and the older prose path writes
+                # ~2000-char prompts — at 2048 the thinking budget could eat the
+                # cap and truncate content mid-sentence (observed live: a party
+                # prompt died at 671 chars). 4096 leaves headroom for both.
                 max_tokens=4096,
             ),
             timeout=120.0,
         )
         return extract_reply_text(resp, default="").strip()
 
-    log.info("prompt rewrite started: %s", text[:120])
+    return _complete
+
+
+# ── The plan path (#84): the model plans, the composer writes the prompt ──
+
+_PLAN_FILE = Path(__file__).resolve().parent.parent / "prompts" \
+    / "image_plan_system.md"
+
+_NO_ROSTER = ("(No party roster available — look EVERY character up with the "
+              "knowledge-base tools and give each one a `look` and a `source`.)")
+
+# One corrective retry, same reasoning as _RETRY_NUDGE below: the failure cases
+# answered in ~3 s with no tool calls, so a retry is cheap and recovers the
+# answer instead of dropping to the raw request.
+_PLAN_RETRY_NUDGE = (
+    "Your previous answer had no <image_plan> block, so nothing could be "
+    "painted. The party roster and its appearance fields are ALREADY in your "
+    "system prompt — no lookup is needed for them. Answer NOW with the "
+    "<image_plan> block alone: scene (naming individuals, never a crowd noun), "
+    "figures (name + pose, plus `look`/`source` for anyone off the roster), "
+    "entities, lighting, palette, mood.\n\nRequest: "
+)
+
+
+def _load_anchors() -> dict[str, image_prompt.Anchor]:
+    """Party anchors, re-read from the vault on EVERY rewrite.
+
+    Re-reading is deliberate: a Visual Anchor the user edits in Obsidian must
+    take effect on the next image, not the next bot restart.
+    """
+    try:
+        raw = _PARTY_SHEET_FILE.read_text(encoding="utf-8")
+    except OSError as exc:
+        log.warning("party sheet unreadable (%s) — no anchors for the composer", exc)
+        return {}
+    anchors = {a.name: a for a in image_prompt.parse_party_sheet(raw)}
+    untyped = [a.name for a in anchors.values() if not a.typed]
+    if untyped:
+        log.info("party anchors still in the legacy single-paragraph form for: %s "
+                 "(painted verbatim; field overrides fall back to clause "
+                 "filtering)", ", ".join(untyped))
+    return anchors
+
+
+def _load_roster_block() -> str:
+    """The roster as the plan path needs it: names + a PREVIEW of each field.
+
+    The model must know which field a request is asking to change ("her cloak" →
+    `outfit`), but it no longer copies these values — the composer paints them in
+    full. A 110-character preview per field is enough to aim an override and keeps
+    the system prompt small: the rewrite path used to inject 12,564 characters, of
+    which the model had to reproduce 2,757.
+    """
+    anchors = _load_anchors()
+    if not anchors:
+        return _NO_ROSTER
+    lines = [f"fields you may override: {', '.join(image_prompt.ANCHOR_FIELDS)} "
+             "(outfit = clothing, signature = carried/built-in items)", ""]
+    for a in anchors.values():
+        lines.append(f"- {a.name}" + (f" — {a.desc}" if a.desc else ""))
+        if a.typed:
+            for f in image_prompt.ANCHOR_FIELDS:
+                v = a.fields.get(f, "")
+                if not v:
+                    continue
+                preview = v if len(v) <= 110 else v[:110].rsplit(" ", 1)[0] + "…"
+                lines.append(f"    {f}: {preview}")
+        else:
+            preview = a.blob if len(a.blob) <= 200 else a.blob[:200] + "…"
+            lines.append(f"    appearance (one block, painted verbatim; an "
+                         f"override replaces the whole look): {preview}")
+        for x in a.extra:
+            lines.append(f"    extra: {x}")
+    return "\n".join(lines)
+
+
+def _load_plan_system() -> str:
+    """Assemble the plan-contract system prompt (repo contract + vault layers)."""
+    try:
+        raw = _PLAN_FILE.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ImageGenError(f"plan contract file missing ({exc})") from exc
+    try:
+        char_rules = _CHAR_RULES_FILE.read_text(encoding="utf-8").strip()
+        if not char_rules:
+            raise OSError("empty")
+    except OSError as exc:
+        log.warning("character-rules vault note missing (%s) — using built-in "
+                    "default", exc)
+        char_rules = _DEFAULT_CHARACTER_RULES
+    return (raw.replace("{{CHARACTER_RULES}}", char_rules)
+             .replace("{{PARTY_ROSTER}}", _load_roster_block())
+             .strip())
+
+
+def _read_paths_from(detail: list[dict]) -> list[str]:
+    """Every path this rewrite's KB tools were asked to read.
+
+    A `source` in the plan is checked against these. kb_search/kb_grep do not
+    count — a look may be painted from a file the model actually opened.
+    """
+    out: list[str] = []
+    for d in detail or []:
+        args = d.get("args")
+        if not isinstance(args, dict):
+            continue
+        for key in ("path", "relPath", "paths", "relPaths"):
+            v = args.get(key)
+            if isinstance(v, str) and v.strip():
+                out.append(v)
+            elif isinstance(v, (list, tuple)):
+                out.extend(x for x in v if isinstance(x, str) and x.strip())
+    return out
+
+
+def _budget_kwargs() -> dict[str, int]:
+    return {"base": IMAGE_PROMPT_BASE_CHARS,
+            "per_figure": IMAGE_PROMPT_CHARS_PER_FIGURE,
+            "hard_cap": IMAGE_PROMPT_MAX_CHARS}
+
+
+async def _rewrite_composed(text: str, complete) -> str:
+    """Plan the image with the chat model, then COMPOSE the prompt in code.
+
+    Raises ImageGenError when no usable plan comes back; rewrite_prompt then
+    falls back to the older prose path.
+    """
+    system = _load_plan_system()
+    anchors = _load_anchors()
+    log.info("image plan requested: %s", text[:120])
+    for i, msg in enumerate((text, _PLAN_RETRY_NUDGE + text)):
+        out, meta = await run_agent_loop(
+            complete=complete,
+            model=DEFAULT_MODEL,
+            system_prompt=system,
+            user_message=msg,
+        )
+        out = (out or "").strip()
+        if meta.fallback and any(
+            s in out.lower()
+            for s in ("unexpected error", "couldn't finish that lookup")
+        ):
+            raise ImageGenError(f"plan unusable ({meta.fallback_reason})")
+        plan = image_prompt.extract_plan(out)
+        if plan is None:
+            if i == 0:
+                log.warning("rewrite returned no <image_plan> block (%d chars, "
+                            "opens %r) — one corrective retry", len(out),
+                            out[:70].replace("\n", " "))
+                continue
+            raise ImageGenError(
+                "rewrite produced no plan block: " + out[:80].replace("\n", " "))
+        composed = image_prompt.compose_prompt(
+            plan, anchors, _BASE_STYLE,
+            foreground=IMAGE_PROMPT_FOREGROUND_FIGURES,
+            budget_kwargs=_budget_kwargs(),
+            # An NPC appearance is only painted when it came from a file THIS
+            # rewrite read. The live dry run caught the model writing a confident
+            # "large badger-folk with grey-black fur" for Boss Frey — a character
+            # the vault has no appearance notes for — after making no tool call at
+            # all. Verification against the files actually read is the only rule
+            # that holds when the model skips the lookup.
+            read_paths=_read_paths_from(meta.tool_calls_detail))
+        for w in composed.warnings:
+            if w.startswith("budget "):
+                log.warning("composer budget: %s", w)
+            else:
+                log.warning("composer: %s", w)
+        log.info(
+            "image prompt composed: %d char(s), %d figure(s) (%d foreground), "
+            "%d tool call(s), %d cut(s), %d anchor(s) available%s — %s",
+            len(composed.prompt), composed.figures, composed.foreground,
+            len(meta.tool_calls), len(composed.cuts), len(anchors),
+            " [after retry]" if i else "",
+            composed.prompt[:200] + ("…" if len(composed.prompt) > 200 else ""),
+        )
+        return composed.prompt
+    raise ImageGenError("rewrite produced no plan")  # unreachable
+
+
+async def rewrite_prompt(text: str) -> str:
+    """Turn a short user request into the prompt the image model gets.
+
+    Runs on the chat backend (its own card) while rag mode is live — call this
+    BEFORE ensure_image_mode(): the rewrite's KB tools include the reranker,
+    which a mode switch takes offline.
+
+    Two paths, in order (#84 — analysis doc §9.3):
+    1. **plan + composer** — the model answers with an `<image_plan>` block (a
+       scene, the figures, their poses, an optional field override, and a
+       looked-up `look` for anyone off the roster) and bot_core.image_prompt
+       writes the prompt from the vault Visual Anchor fields. Every guarantee the
+       policy used to ask for is now structural: style sentence first, each
+       character described exactly once, a figure-count line, no negations, a
+       budget that compresses the least distinctive clauses first.
+    2. **the older prose path** — the model writes the prompt itself. Kept as the
+       fallback: when a backend hiccup produces no plan, a hand-written prompt is
+       still better than a raw request, and a hand-written prompt that turns out
+       to be narration is still rejected.
+
+    The rewrite goes through the SAME bounded tool-calling loop as normal chat
+    (bot_core.agent_loop) with the SAME knowledge-base tools, so campaign
+    specifics in the request (characters, companions, places, items) are grounded
+    instead of invented. Speed is not a concern — reliability is: the loop NEVER
+    raises; every failure degrades to a single-turn answer over the gathered
+    context. Raises ImageGenError when both paths fail (the caller then paints
+    the raw request rather than failing).
+    """
+    client = _chat_client()
+    complete = _make_completer(client)
+    try:
+        return await _rewrite_composed(text, complete)
+    except ImageGenError as exc:
+        log.warning("composed rewrite unavailable (%s) — falling back to the "
+                    "prose rewrite path", str(exc)[:160])
+    except Exception as exc:  # noqa: BLE001 — a composer bug must never block a paint
+        log.exception("composer path failed unexpectedly (%s) — falling back to the "
+                      "prose rewrite path", exc)
+    return await _rewrite_prose(text, complete)
+
+
+async def _rewrite_prose(text: str, complete) -> str:
+    """The pre-#84 path: the model writes the whole prompt itself."""
+    log.info("prompt rewrite started (prose path): %s", text[:120])
     system = _load_rewrite_system()
     try:
         # First the request as given; if the answer turns out to be narration
         # rather than a prompt, ONE corrective retry (see _RETRY_NUDGE).
         for i, msg in enumerate((text, _RETRY_NUDGE + text)):
             out, meta = await run_agent_loop(
-                complete=_complete,
+                complete=complete,
                 model=DEFAULT_MODEL,
                 system_prompt=system,
                 user_message=msg,

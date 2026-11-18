@@ -138,6 +138,24 @@ _DEFAULT_IMAGE_NEGATIVE_PROMPT = (
     " doppelganger of a main figure"
 )
 IMAGE_NEGATIVE_PROMPT: str = os.getenv("IMAGE_NEGATIVE_PROMPT", _DEFAULT_IMAGE_NEGATIVE_PROMPT).strip()
+# ── Prompt composer budget (#84) ───────────────────────────────────
+# The final prompt is assembled by bot_core.image_prompt from the rewrite
+# model's PLAN plus the vault Visual Anchor fields, so its length is a budget
+# we control rather than whatever a 3-bit model managed to write. It scales
+# with the cast because the anchors ARE the content: six full Visual Anchors +
+# scene line measure 3,566 characters, and "every requested character beats
+# brevity" is the repo's own rule (prompts/image_rewrite_system.md).
+# Over budget, the composer compresses the LEAST distinctive clauses first and
+# logs what it cut.
+IMAGE_PROMPT_BASE_CHARS: int = _safe_int(os.getenv("IMAGE_PROMPT_BASE_CHARS"), 1100)
+IMAGE_PROMPT_CHARS_PER_FIGURE: int = _safe_int(
+    os.getenv("IMAGE_PROMPT_CHARS_PER_FIGURE"), 420)
+IMAGE_PROMPT_MAX_CHARS: int = _safe_int(os.getenv("IMAGE_PROMPT_MAX_CHARS"), 3600)
+# Named figures painted in the front group; the rest are painted "behind them,
+# smaller and softer" — the measured model cannot hold six equally-detailed
+# figures in one 1024² frame (docs/internal/IMAGE_PROMPT_PIPELINE_ANALYSIS_2026-11.md).
+IMAGE_PROMPT_FOREGROUND_FIGURES: int = _safe_int(
+    os.getenv("IMAGE_PROMPT_FOREGROUND_FIGURES"), 4)
 IMAGE_GEN_TIMEOUT_S: float = _safe_float(os.getenv("IMAGE_GEN_TIMEOUT_S"), 600.0)
 IMAGE_LOAD_TIMEOUT_S: float = _safe_float(os.getenv("IMAGE_LOAD_TIMEOUT_S"), 300.0)
 # (Image-backend base WITHOUT the /v1 suffix — Studio's management API
