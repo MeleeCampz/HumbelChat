@@ -31,6 +31,11 @@ def in_sandbox() -> bool:
 SANDBOX_ENDPOINT_SHIMS = {
     "EMBED_URL": "http://host.docker.internal:8091/v1",   # embedder-llama
     "RERANK_API_BASE": "http://host.docker.internal:8090/v1",  # reranker-llama
+    # The bot reaches the GPU-switch helper as http://gpu-switch:8080 inside
+    # the compose network; that container publishes :8082 on the host, which is
+    # how a probe here can drive a real rag<->image window and let
+    # bot_core.images paint on the same card the live bot uses.
+    "GPU_SWITCH_URL": "http://host.docker.internal:8082",
 }
 
 

@@ -364,6 +364,25 @@ A squirrel.
         # a character without an anchor is not advertised as party
         assert "Some NPC Without An Anchor" not in s
 
+    def test_dossier_orders_batched_lookup_of_named_non_party_characters(self, tmp_path,
+                                                                         monkeypatch):
+        # The party half of a group prompt needs no retrieval; the NPC half MUST
+        # be retrieved, in ONE batch — and the dossier is where that instruction
+        # reliably reaches the model (it sits in the system prompt, not in a
+        # policy section the model may skim past).
+        sheet = tmp_path / "Player Characters.md"
+        sheet.write_text(
+            "# Colum Bidae\n## Visual Anchor\n> A small plump blue-tit warlock "
+            "bird, blue wings.\n\n", encoding="utf-8")
+        monkeypatch.setattr(images, "_PARTY_SHEET_FILE", sheet)
+        head = images._load_party_dossier()
+        for needle in ("MUST be looked up in the",
+                       "knowledge base BEFORE you write it",
+                       "Lexikon",
+                       "NEVER assign a species or a",
+                       "ONE array of tool calls in a SINGLE decision turn"):
+            assert needle in head, needle
+
     def test_missing_sheet_degrades_to_a_lookup_instruction(self, monkeypatch, tmp_path):
         monkeypatch.setattr(images, "_PARTY_SHEET_FILE", tmp_path / "absent.md")
         s = images._load_rewrite_system()
@@ -814,6 +833,24 @@ class TestRewriteSystemPolicy:
         assert "never silently drop any" in s
         # negations stay OUT of the positive prompt (negative prompt handles them)
         assert "Never write negations" in s
+
+    def test_named_npc_rule_batching_and_amounts(self):
+        # Everything the tricky group prompts exposed, now stated as policy: a
+        # NAMED character outside the dossier is looked up before being written
+        # (Frey and Alisa came out as invented fox-folk / hare-folk until this
+        # rule existed); the lookups go out as ONE batched array because the
+        # agent loop has only a few decision turns and one search per turn runs
+        # out before the model can write; and an amount in the request is a fact
+        # about the scene, not lettering to paint (a render once drew a pouch
+        # labeled "70 Gold").
+        s = images._load_rewrite_system()
+        for needle in ("every NAMED character the Party dossier does not list is "
+                       "looked up before you write it",
+                       "ONE array of tool calls in a SINGLE decision turn",
+                       "never assign a species or a colouring to a named NPC from "
+                       "imagination",
+                       "NOT lettering to render"):
+            assert needle in s, needle
 
     def test_character_style_lines_never_copied_into_prompt(self):
         s = images._load_rewrite_system()

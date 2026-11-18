@@ -117,6 +117,16 @@ Bubo and Romi — the model had been told to look the party up and its lookup fa
 The answer is only accepted as a prompt if it opens with the base style sentence; a reply
 that is really a plan ("I need to look up the Player Characters sheet…") gets ONE
 corrective retry and otherwise degrades to painting your raw request instead of the plan.
+The dossier covers the PARTY only, so a named NPC it does not list is looked up in the
+knowledge base first — as ONE batched array of tool calls in a single decision turn, since
+the agent loop has only a few turns and one search per turn runs out of budget before the
+model can write (live evidence: with the party fixed but no NPC rule, "Boss Frey" and the
+freed merchant "Alisa Pennygleam" came out as invented fox-folk and hare-folk; with the
+rule, the rewrite found the vault's actual lizard merchant **Spleck** and his blue-and-yellow
+wagon). What the vault does NOT yet hold is NPC appearance data — its `Lexikon: Personen`
+entries record roles and bounties, not species or colours — so recurring NPCs stay partly
+invented until the vault carries Visual Anchors for them. An amount in a request ('a bag
+with 70 gold') describes the scene and is not lettering to paint.
 GPU-split under the hood (#42, 2026-11): the rewrite runs on the CHAT backend
 (Strata on the 5070) while the 4070 is still in `rag` mode; only then the bot
 switches the 4070 into `image` mode (stop reranker/embedder + load the diffusion

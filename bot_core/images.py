@@ -429,8 +429,16 @@ def _load_party_dossier() -> str:
         "The player characters, read from the vault right now. Each Visual Anchor",
         "is given in FULL: when that character is in the image, copy their anchor",
         "VERBATIM from here — do not rephrase it, do not shorten it, and do not use",
-        "a tool call to look it up. Use tools only for what is NOT listed here",
-        "(NPCs, places, items, events). Anyone not listed is not a party member.",
+        "a tool call to look it up. Anyone not listed is NOT a party member.",
+        "",
+        "Everything ELSE the request names (an NPC, a merchant, a bandit, a",
+        "monster, a place, an item) has no entry here and MUST be looked up in the",
+        "knowledge base BEFORE you write it: the session logs carry 'Lexikon:",
+        "Personen' rosters that name recurring NPCs and state their species, colours",
+        "and gear, and monsters come from the rules. NEVER assign a species or a",
+        "colour to a named NPC from imagination. Batch it: emit every lookup you",
+        "need as ONE array of tool calls in a SINGLE decision turn — the loop only",
+        "has a few turns, so one search per turn runs out of budget.",
     ]
     for name, desc, anchor in entries:
         a = anchor
