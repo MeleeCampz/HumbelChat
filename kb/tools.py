@@ -393,25 +393,80 @@ def _stem(name: str) -> str:
     return s
 
 
+def _path_stems(name: str) -> list[str]:
+    """Lowercased path segments, final segment extension-stripped.
+
+    'humblewood/HumbleWood/Characters/Player Characters.md' →
+    ['humblewood', 'humblewood', 'characters', 'player characters']
+    """
+    segs = [s.lower() for s in (name or "").replace("\\", "/").strip("/").split("/")
+            if s]
+    if segs:
+        segs[-1] = _stem(segs[-1])
+    return segs
+
+
 def _file_matches(file_part: str, file: str) -> bool:
     """Match a chunk's file part against the model's file argument.
 
-    Display names are BARE filenames (no directory prefix), but the model
-    may pass a path it inferred from content or search context — so also
-    accept a basename match (case-insensitive). Fuzzy fallback (#42,
-    2026-10-28): bare stems WITHOUT the extension ('Player Characters')
-    resolve case/extension-insensitively — EXACT stem equality only, so
-    similarly named files never cross-match.
+    Names are path-shaped since R1 (review 2026-11), but the model names a
+    file however the policy or a search hit presented it: a bare stem
+    ('Player Characters'), a bare name with extension, a path fragment, or a
+    deeper path than the index shows. Two rules, both EXACT-segment (never a
+    substring): the file's LAST segment equals the argument's last segment, or
+    the argument's segments line up with a trailing run of the indexed path.
+    So similarly named files never cross-match — 'Player Character' ≠ 'Player
+    Characters.md' — and a directory name ('Characters') never resolves to a
+    file.
+
+    Regression fixed here (found 2026-11-18 investigating group-image rewrites):
+    the old fuzzy branch compared the argument stem against `_stem(file_part)`,
+    which since R1 is the WHOLE PATH — so the bare stem this repo's own rewrite
+    policy tells the model to use ('read the Player Characters sheet ONCE')
+    never matched, and group rewrites got 'No chunk found' instead of the
+    Visual Anchors they were told to copy.
     """
     f = (file or "").strip()
     if not f:
         return False
     if file_part == f or file_part.endswith(f"/{f}"):
         return True
-    if pathlib.Path(file_part).name.lower() == pathlib.Path(f).name.lower():
+    want, have = _path_stems(f), _path_stems(file_part)
+    if not want or not have:
+        return False
+    # File identity is its LAST segment: either side may be shorter than the
+    # other (the model may pass a deeper path than the display name shows).
+    if want[-1] == have[-1]:
         return True
-    arg_stems = {_stem(f), _stem(pathlib.Path(f).name)}
-    return _stem(file_part) in arg_stems
+    if len(want) > len(have):
+        return False
+    off = len(have) - len(want)
+    return all(have[off + k] == want[k] for k in range(len(want)))
+
+
+def _near_file_names(file: str, parts: set[str], limit: int = 4) -> list[str]:
+    """Indexed files the failed file argument most plausibly meant.
+
+    Turns 'No chunk found' into something the model can ACT on. The argument
+    came from the policy or an earlier hit, so naming the real paths makes the
+    next call succeed instead of sending the model off to invent characters
+    from truncated search snippets (observed live 2026-11-18). Substring
+    scoring is deliberate: this is a suggestion list, never a matcher.
+    """
+    toks = [t for t in _path_stems(file) if t]
+    if not toks:
+        return []
+    scored: list[tuple[int, int, str]] = []
+    for p in parts:
+        low = p.lower()
+        score = sum(1 for t in toks if t in low)
+        if not score:
+            continue
+        if _stem(pathlib.Path(low).name) in toks:
+            score += 4  # the file's own name is what the argument asked for
+        scored.append((-score, len(p), p))
+    scored.sort()
+    return [p for _, _, p in scored[:limit]]
 
 
 def _single_file_on_disk(file_part: str) -> bool:
@@ -513,8 +568,10 @@ async def _tool_read_section(file: str, section: str | None = None) -> str:
         return "The knowledge base index is unavailable right now."
 
     matches: list[tuple[str, str]] = []
+    seen_parts: set[str] = set()   # file parts seen, used by the no-match hint
     for name, content in _retrieval_chunks(idx):
-        file_part = name.split(" [")[0] if " [" in name else name
+        file_part = name.split(" [", 1)[0]
+        seen_parts.add(file_part)
         if not _file_matches(file_part, file):
             continue
         if section:
@@ -547,8 +604,14 @@ async def _tool_read_section(file: str, section: str | None = None) -> str:
             return _cap(folder_text)
 
     if not matches:
-        return f"No chunk found for file={file!r}" + (f" section~{section!r}"
-                                                      if section else "")
+        # A dead end here costs the whole request. The policy names sheets by
+        # their human name, so a miss is usually a naming problem, not a
+        # missing file: name the closest indexed files so one retry succeeds.
+        near = _near_file_names(file, seen_parts)
+        hint = (" — closest indexed files; re-read with one of these EXACT "
+                "names: " + ", ".join(near)) if near else ""
+        return f"No chunk found for file={file!r}" + hint + (
+            f" section~{section!r}" if section else "")
     parts = []
     for name, content in matches[:3]:
         parts.append(f"### {name}\n{content}")

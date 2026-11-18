@@ -463,7 +463,7 @@ no new VRAM):
 | Tool | Answers | Notes |
 |---|---|---|
 | `search_kb(query, scope?)` | "tell me about X" — ranked relevance snippets | hybrid dense+BM25 (legs run concurrently), reranked when the cross-encoder is up; lexical failure degrades to dense-only |
-| `read_section(file, section?)` | full text of one chunk or a whole session folder | basename matching tolerates path-style args; bare names resolve across files/folders |
+| `read_section(file, section?)` | full text of one chunk or a whole session folder | matches a bare stem, a name with extension, a path fragment or the full indexed path — exact SEGMENT equality, so 'Player Character' never resolves 'Player Characters.md' and a folder name never resolves to a file; a miss names the closest indexed files |
 | `list_sections(file? \| dir?)` | outline of a file's sections / a folder's documents | for navigation before reading |
 | `find_in_kb(term)` | "which/all X" — COMPLETE exact-presence list with per-location counts | pure CPU scan (~0.7 s cold over the full index); top-k ranking structurally cannot answer enumeration, so this tool exists |
 | `list_sessions()` | chronological roster: ordinal, date, title, content teaser | fixes ordinal-reference questions ("session 3") without reading anything |

@@ -531,6 +531,96 @@ def _party_index():
     return chunks
 
 
+def _party_path_index():
+    """The SAME sheet in the name shape production actually uses.
+
+    Since R1 (review 2026-11) retrieval names are path-shaped, which is what
+    the tools iterate over — the bare-name shape above only ever exercised the
+    legacy fallback.
+    """
+    base = "humblewood/HumbleWood/Characters/Player Characters.md"
+    chunks = []
+    for char in _PARTY:
+        chunks.append((f"{base} [{char}]", f"{char}: species line, pronouns."))
+        chunks.append((f"{base} [{char} -> Visual Anchor]",
+                       f"> {char} visual anchor text."))
+    return chunks
+
+
+class _FakePathIdx(_FakeIdx):
+    """Fake index that exposes the path-shaped iterator kb.tools prefers."""
+
+    def iter_retrieval_chunks(self):
+        return iter(self._chunks)
+
+
+def _point_at_party(monkeypatch, tmp_path, index):
+    async def _ensure(kb_path):
+        return _FakeStore(_FakePathIdx(index))
+
+    import kb.retrievers as R
+    monkeypatch.setattr(R, "_ensure_index_store", _ensure)
+    monkeypatch.setattr("config.settings.KB_PATH",
+                        str(_kb_root_with(tmp_path, "Player Characters.md")))
+
+
+def test_file_matches_accepts_every_way_a_model_names_a_file():
+    """One rule, every naming style — and no cross-matching.
+
+    Regression (2026-11-18, live group-image rewrites): the fuzzy branch
+    compared the argument stem against the WHOLE path stem, so the bare stem
+    the rewrite policy tells the model to use ('read the Player Characters
+    sheet ONCE') never matched a path-shaped name. Every group rewrite then
+    got 'No chunk found' instead of the Visual Anchors it was told to copy,
+    and started inventing party members.
+    """
+    fp = "humblewood/HumbleWood/Characters/Player Characters.md"
+    for arg in ("Player Characters", "player characters", "PLAYER CHARACTERS.MD",
+                "player characters.markdown",
+                "Characters/Player Characters",
+                "HumbleWood/Characters/Player Characters.md",
+                "humblewood/HumbleWood/Characters/Player Characters.md"):
+        assert tools._file_matches(fp, arg), arg
+    for arg in ("Player Character", "Characters", "Character Sheets", "notes",
+                "humblewood", ""):
+        assert not tools._file_matches(fp, arg), arg
+
+
+@pytest.mark.asyncio
+async def test_read_section_bare_stem_matches_path_shaped_names(
+        fake_store, tmp_path, monkeypatch):
+    """The live failure, now covered: 'Player Characters' resolves against
+    path-shaped retrieval names and returns EVERY anchor in one shot."""
+    _point_at_party(monkeypatch, tmp_path, _party_path_index())
+    for arg in ("Player Characters", "player characters",
+                "Characters/Player Characters",
+                "humblewood/HumbleWood/Characters/Player Characters.md"):
+        out = await tools.execute_tool("read_section", {"file": arg})
+        for char in _PARTY:
+            assert f"> {char} visual anchor text." in out, arg
+
+
+@pytest.mark.asyncio
+async def test_read_section_no_match_names_the_real_files(
+        fake_store, tmp_path, monkeypatch):
+    """A dead end used to send the model off to improvise from snippets; the
+    error now names the indexed files it most likely meant."""
+    _point_at_party(monkeypatch, tmp_path, _party_path_index())
+    out = await tools.execute_tool("read_section", {"file": "Player Character"})
+    assert out.startswith("No chunk found")
+    assert "closest indexed files" in out
+    assert "humblewood/HumbleWood/Characters/Player Characters.md" in out
+
+
+@pytest.mark.asyncio
+async def test_read_section_directory_argument_is_not_a_file(
+        fake_store, tmp_path, monkeypatch):
+    """'Characters' is a folder, never the sheet."""
+    _point_at_party(monkeypatch, tmp_path, _party_path_index())
+    out = await tools.execute_tool("read_section", {"file": "Characters"})
+    assert out.startswith("No chunk found")
+
+
 def _kb_root_with(tmp_path, *filenames):
     for fn in filenames:
         (tmp_path / fn).write_text("x", encoding="utf-8")

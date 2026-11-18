@@ -39,6 +39,17 @@ not estimated; the scripts in §7 reproduce them.
 
 **Status 2026-11-11: FIXED — fix series 2026-11-10/11 (§20): tools now match `dir`/`file` against `retrieval_name()`/`source_file` via the new `iter_retrieval_chunks()`; `iter_chunks()` docstring corrected; tool ARGS logged (§18 step 8).**
 
+**Follow-up 2026-11-18 — FIXED (live group-image rewrites): the same rename broke
+`read_section` in the OTHER direction. Its fuzzy branch compared the argument stem
+against the WHOLE path stem, so the bare name the image-rewrite policy tells the
+model to read ('Player Characters') no longer resolved — every group rewrite got
+`No chunk found for file='Player Characters'` and then invented party members. Both
+sides now share one exact-segment rule (`_file_matches`); a miss names the closest
+indexed files so the model retries instead of improvising; and the party's Visual
+Anchors are additionally injected into the rewrite system prompt straight from the
+sheet (`bot_core.images._load_party_dossier`). Covered by
+`tests/test_kb_tools.py::test_file_matches_accepts_every_way_a_model_names_a_file`**
+
 `kb/tools.py:658` matches the `dir` argument against the **file part of the chunk display
 name**:
 
