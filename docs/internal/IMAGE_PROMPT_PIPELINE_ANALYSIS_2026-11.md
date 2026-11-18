@@ -512,3 +512,135 @@ the extra concrete action in the scene sentence.
 iterations run out the loop adds one **forced final** completion over the gathered
 transcript. The enforced lookup pass is a SECOND loop with its own bounds — which is why
 one rewrite can log seven completions.
+
+---
+
+## 15. The rewrite PROMPT itself, measured against the prompt it replaced (2026-11-19)
+
+§1–§14 fixed the code around the model. This pass went at the prompt the model reads —
+and the honest headline is that **the A/B changed nothing about coverage**, while
+teaching three things that turned out to be missing from the code.
+
+### 15.1 What the prompt is made of (measured as sent)
+
+| component | before | after |
+|---|---|---|
+| `prompts/image_plan_system.md` (the JSON contract + rules) | 4,635 | 5,245 |
+| campaign rules injected from the vault note | 1,658 | 1,977 |
+| party roster rendered from the sheet | 3,359 | 3,359 |
+| tool addendum (`tool_prompt_block`) | 3,427 | 3,094 |
+| the request as delivered | 139 | 160 |
+| **system + user total** | **13,184** | **13,801** (+4.7 %) |
+
+The vault note grew (the beast-folk rule was rewritten: 480 → 802 chars) and its
+**611-char human-facing header stopped being injected** — "Edit freely — changes apply
+to the next image an image request agent generates from this vault. The bot re-reads
+this file before every image request." is guidance for the person holding the vault,
+not for the model, and it had been going into the system prompt on every rewrite. The
+addendum shrank because the image loop no longer inherits the chat path's paragraphs.
+
+**The contradiction that was removed**: the addendum said *"When you have enough
+information, answer in plain text (no JSON) and the result is delivered to the user
+instead."* — directly under the contract demanding a `<image_plan>` JSON block, and
+under a paragraph claiming tool results are *"already attached to this conversation as
+user messages"* (a chat-path fact: in the agent loop they arrive as `tool` messages).
+Answer shape is now said by code, per loop: `tool_prompt_block(answer_instruction=…)`
+with the image path passing its own instruction, and `mention_attached_context=False`.
+
+Three more prompt changes, each from a failure seen in a plan dump:
+
+- **`<request>…</request>` tagging** (§7's instruction-following finding: a labelled
+  zone earns higher compliance than raw text).
+- **The contract's example no longer names the campaign.** It described `Frey` (an
+  invented NPC look) and *used a real party member, Trixy, as the worked override
+  example*. Rewritten with fictional names — Pell Wicker, Orin Vek, Sable Rin — under
+  a header that says the names are invented and none of them may be copied.
+- **`<previous_image_plan>` memory**: a follow-up in the same channel ("same one, but
+  with metal armour") previously saw only its own sentence. The last plan composed for
+  that channel is replayed (≤512 chars, 12 channels, in-process, tool-free — same
+  shape as `session_images`'s session hint). Proven live: the second request named no
+  character and the composer still painted 7 figures, Seta Onix among them.
+
+### 15.2 The A/B: 12 rewrites, both prompts, order reversed in round 2
+
+| request | new prompt | old prompt |
+|---|---|---|
+| bandit ambush (8 names + a "70 gold" amount) | figs 8, 8 · chars 3587, 3596 · tools 7, 2 | figs 8, 8 · chars 3551, 3575 · tools 7, 11 |
+| black pudding (2 NPCs + creature) | figs 7, 7 · chars 3591, 3577 · tools 5, 5 | figs 7, 7 · chars 3555, 3580 · tools 6, 5 |
+| single figure + outfit override | figs 1, 1 · chars 1194, 1185 · tools 0, 0 | figs 1, 1 · chars 1403, 1167 · tools 0, 0 |
+| **aggregates (n=6 each)** | median 49.7 s · 6.5 turns · 3.5 tools · 3582 chars · 5 budget cuts | median 79.1 s · 7.5 turns · 5.5 tools · 3553 chars · 5 budget cuts |
+
+**Figure counts, budget cuts and collective handling are identical between variants in
+every pair.** The wall-time gap is a half-second-per-turn difference in tool turns
+under a shared GPU-offline queue and is not a claim: the spread inside each variant
+(10.8–130.2 s) is larger than the gap between them. What the prompt shape changed is
+*what the model writes into the plan*, measured next.
+
+### 15.3 The one behavioural difference measured: the old example was a ready-made answer
+
+Same request ("…die befreite Händlerin Alisa Pennygleam … Boss Frey und seinen
+Banditen"), plans dumped from both variants:
+
+- **old prompt**: `"name": "Boss Frey", "look": "heavy-set badger-folk bandit leader,
+  dark grey fur with pale shoulder stripes, flat snout, pointed ears, scarred brow,
+  patched black coat, serrated cleaver", "source": "…/SESSION_01_DerAnfang/notes.md"`,
+  plus `"Alisa Pennygleam": "plump squirrel-folk peddler, russet fur, cream belly, big
+  amber eyes, round wire spectacles, patchwork travelling coat, bushy striped tail"`.
+  The first six words are copied out of the contract's own example. Neither vault
+  passage describes either character.
+- **new prompt**: `"name": "Frey", "look": ""`, with Alisa and the bandit crew pushed
+  into `entities` — no invented appearance anywhere in the plan.
+
+Both variants' *final prompts* were clean, because the species gate caught both
+inventions — the fix chain holds. But the prompt was pointing at the failure: an
+example that supplies a plausible NPC look is an example the model reuses for a live
+NPC the vault never describes.
+
+### 15.4 What the run exposed that no code enforced (all three now enforced)
+
+1. **Species claims about a CROWD were unpoliced.** The gate checked `look` clauses
+   and figure `species` fields; a scene sentence saying `"two lanky weasel-folk
+   bandits with pointed ears, long snouts and russet fur, wearing patched leather
+   coats and carrying jagged cleavers"` and an entity line `"two rat-folk bandit
+   lackeys with jagged cleavers and iron-shod boots"` sailed through. Same rule, now
+   applied to the scene sentence and the entity line: a `-folk` compound must be
+   traceable to retrieved text *that names these characters*, and the request's own
+   words are always allowed (the composer exists to stop the model inventing campaign
+   facts, not to argue with the person running the table). Live after: no species word
+   survives anywhere in either composed prompt; "bandit" survives 4×.
+2. **An NPC's name drifted.** The plan wrote `"name": "Frey"` for the character the
+   request and every session log call **Boss Frey**, so the prompt painted `Frey:`.
+   Renamed when three facts agree: the request names the character, the material the
+   loop read attaches a word to that name, **and the vault never writes the plan's form
+   bare**. That third test is what the first live run got wrong — it renamed "Alisa
+   Pennygleam" to **"Händlerin Alisa Pennygleam"**, because a session note says "die
+   befreite Händlerin Alisa Pennygleam" (German capitalises every noun; a merchant is
+   not part of her name). The vault writes her name bare a dozen times, so the rename
+   is now refused.
+3. **Party members were abbreviated in the scene sentence.** One composed prompt had
+   figure lines reading `Seta Onix … Romi Stachelpfote … Trixy Smoldersome` and a scene
+   sentence reading `Seta, Bubo, Romi, Colum, Trixy` — the same §4 mechanism (a name the
+   renderer has not been told about is a name it paints on its own). Now the sheet's
+   spelling is applied wherever the name appears — scene, entity lines, and poses —
+   including a leading-token abbreviation, but only when no two sheet entries share
+   that prefix.
+
+Live composed scene after all three: *"In a dim misty forest clearing, Seta Onix, Romi
+Stachelpfote, Bubo Krallensturm, Colum Bidae, Trixy Smoldersome and Marvin stand
+confronting boss Frey; Alisa Pennygleam clutches a heavy leather coin pouch close to
+her chest."* — with `plan abbreviated 'Bubo' for 'Bubo Krallensturm', …` logged as a
+warning, so the user can see the guarantee firing.
+
+### 15.5 Still not enforced (the completeness gap, restated with data)
+
+Across the 12 A/B rewrites and the live verification, the request's own crowd —
+"Boss Frey und seinen Banditen" — reached the prompt as *a phrase in the scene
+sentence* every time, and as *named figures* only when the model happened to enumerate
+them (one run produced `"First Bandit"`, `"Second Bandit"` and 10 figures). Nothing in
+the pipeline compares the actors the REQUEST names against the cast the plan chose.
+That guarantee needs a reading of the request's own nouns, which is the part of this
+problem that has not been built. Also open: the enforced lookup pass returned no plan
+once (`keeping the first (Frey, Alisa Pennygleam painted by name)`) — the fallback
+works, but those two stay ungrounded.
+
+Tests: 1477 → **1502** (14 prompt-shape tests, 11 species/name/spelling tests).

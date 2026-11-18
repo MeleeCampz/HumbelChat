@@ -88,3 +88,22 @@ tracks it — a thinking model spends part of the output cap on thinking and wil
 otherwise truncate the plan. Do not gate the effort on `agent_loop`'s per-turn
 `thinking` flag: a plan answer comes out of a decision turn, so gating it there
 makes the setting inert (that was the state until it was measured).
+
+The rewrite's ANSWER SHAPE is said by code, per loop, and the image path must not
+inherit the chat path's wording (`tool_prompt_block(answer_instruction=…,
+mention_attached_context=False)` in `kb/tools.py`, threaded through
+`run_agent_loop`). Two contradictions were measured in the shipped prompt: the
+addendum demanded "plain text (no JSON)" directly under a contract demanding a
+`<image_plan>` block, and it called tool results "attached user messages" (a
+chat-path fact). Likewise the vault note's human-facing "Edit freely — changes
+apply…" header is stripped before injection (`_strip_editor_preamble`), and the
+contract's worked example uses invented names (Pell Wicker / Orin Vek / Sable Rin)
+— with real campaign names in it, the model copied the example's invented NPC look
+verbatim into a live plan. Name and species fidelity is enforced as code: a plan
+abbreviation is painted with the form the vault uses only when the vault never
+writes the plan's form bare (`request_spelling`), sheet spellings replace
+abbreviations in the scene, entity lines and poses, and a `-folk` claim about a
+crowd is stripped unless retrieved text about those characters backs it — the
+request's own words always win. §15 of the analysis doc has the measurements and
+states what is still NOT enforced: nothing compares the actors the REQUEST names
+against the cast the plan paints.
