@@ -400,6 +400,30 @@ _species_variants = {w: frozenset(variants) for variants in _SPECIES for w in va
 _all_species = frozenset(_species_variants)
 
 
+def _name_keys(name: str) -> list[str]:
+    return [k for k in {name,
+                        name.split()[-1] if " " in name else "",
+                        name.split()[0]} if len(k) >= 4]
+
+
+def _named_blocks(retrieved: str, keys: Sequence[str]) -> list[str]:
+    """The retrieved blocks that contain at least one of ``keys``.
+
+    Sections, not just paragraphs: a heading stays with its body, so a character's
+    own section counts and the next section (another character, or an unrelated
+    D&D entry) does not.
+    """
+    if not retrieved:
+        return []
+    keys = [k for k in keys if len(k) >= 4]
+    if not keys:
+        return [retrieved]
+    blocks: list[str] = []
+    for part in re.split(r"\n\s*\n", retrieved):
+        blocks.extend(re.split(r"\n(?=#{1,4} )", part))
+    return [b for b in blocks if any(k.lower() in b.lower() for k in keys)]
+
+
 def evidence_about(name: str, retrieved: str) -> str:
     """The retrieved material that is ABOUT this character.
 
@@ -410,36 +434,25 @@ def evidence_about(name: str, retrieved: str) -> str:
     look look backed. Retrieved material arrives in blocks (one search hit or
     one file read per block); only the blocks naming the character count.
     """
-    if not retrieved:
-        return ""
-    keys = [k for k in {name, name.split()[-1] if " " in name else "",
-                        name.split()[0]} if len(k) >= 4]
-    if not keys:
-        return retrieved
-    # Sections, not just paragraphs: a heading stays with its body, so a
-    # character's own section counts and the next section (another character, or
-    # an unrelated D&D entry) does not.
-    blocks: list[str] = []
-    for part in re.split(r"\n\s*\n", retrieved):
-        blocks.extend(re.split(r"\n(?=#{1,4} )", part))
-    keep = [b for b in blocks
-            if any(k.lower() in b.lower() for k in keys)]
-    return "\n".join(keep)
+    return "\n".join(_named_blocks(retrieved, _name_keys(name)))
 
 
-def invented_species(look: str, retrieved: str) -> list[str]:
+def invented_species(look: str, retrieved: str,
+                     allow: Iterable[str] = ()) -> list[str]:
     """Species the description claims that nothing retrieved mentions.
 
     Generic words (beast-folk, anthropomorphic) name no species and are not
     policed. A specific one is a fact claim, and the vault has its own notions
-    of who is a badger-folk.
+    of who is a badger-folk. ``allow`` carries species the CALLER vouches for —
+    the party's own anchors, and words the user typed themselves.
     """
     if not retrieved:
         return []
     hay = _norm(retrieved)
+    allowed = {_norm(a) for a in allow}
     bad = []
     for token in set(re.findall(r"[a-z\u00e4\u00f6\u00fc]+", _norm(look))):
-        if token not in _all_species:
+        if token not in _all_species or token in allowed:
             continue
         if any(re.search(r"\b" + re.escape(v) + r"\b", hay)
                for v in _species_variants[token]):
@@ -448,9 +461,112 @@ def invented_species(look: str, retrieved: str) -> list[str]:
     return sorted(bad)
 
 
+# A species claim was policed only inside a figure's `look`. Measured live
+# (analysis §15): the same ambush request that produced an invented badger-folk
+# Boss Frey also produced "two lanky weasel-folk bandits with pointed ears, long
+# snouts and russet fur" and "two rat-folk bandit lackeys" in `entities` — the
+# crowd descriptions were never checked, and a small scene keeps the entity line
+# instead of budget-dropping it. Only the `-folk` compounds are policed: "a giant
+# rat blocking the corridor" names a creature, which is what `entities` is FOR,
+# while "weasel-folk bandits" is a claim about WHO they are.
+_SPECIES_COMPOUND_SUFFIXES = ("folk", "folks", "kin", "people", "volk")
+_SPECIES_COMPOUND = re.compile(
+    r"\b(" + "|".join(sorted(_all_species, key=len, reverse=True)) + r")"
+    r"[\-\u2011 ]?(?:" + "|".join(_SPECIES_COMPOUND_SUFFIXES) + r")\b",
+    re.IGNORECASE)
+
+# Words too general to locate the passage a claim came from.
+_SEGMENT_STOP = frozenset(
+    """scene scenes image images picture pictures character characters figure
+    figures people person persons group groups party several many some other
+    such about inside outside behind before during while through towards toward
+    wearing holding carrying standing walking with them themselves every all
+    foreground background lighting palette mood styleRequest request""".split())
+
+
+def _segment_keys(text: str) -> list[str]:
+    """The distinctive nouns of a sentence, used to find where it came from.
+
+    Singular stems are included so "bandits" finds a vault passage that says
+    "bandit crew". A vault that names the crowd only in German ("Banditen") is
+    not found, and the species claim is then STRIPPED — the safe direction: the
+    crowd is still painted, the composer just refuses to decide what species it
+    is.
+    """
+    out: set[str] = set()
+    for w in re.findall(r"[a-z\u00e4\u00f6\u00fc]{4,}", _norm(text)):
+        if w in _SEGMENT_STOP or w in _all_species:
+            continue
+        out.add(w)
+        if w.endswith("s") and len(w) > 4:
+            out.add(w[:-1])
+    return sorted(out)[:12]
+
+
+def request_species(text: str) -> set[str]:
+    """Species the USER named. Their own campaign is their own authority.
+
+    "Paint Boss Frey as a badger-folk" is not the model inventing a species, and
+    dropping it would be the composer arguing with the person holding the reins.
+    """
+    out: set[str] = set()
+    for token in re.findall(r"[a-z\u00e4\u00f6\u00fc]+", _norm(text)):
+        if token in _all_species:
+            out.add(token)
+    return out
+
+
+def unbacked_species(text: str, retrieved: str,
+                     request_text: str = "") -> list[str]:
+    """`-folk` claims in a sentence nothing retrieved supports.
+
+    Backing is proximity, exactly as for a named character: the retrieved block
+    has to name BOTH the species and something the sentence itself names ("two
+    lanky weasel-folk bandits" needs a block about bandits that says weasel). A
+    vault chunk about a badger-shaped magic sword does not back weasel-folk
+    bandits, and the party's anchors are vault text about the party, not about a
+    crowd.
+    """
+    claims = [m.group(1).lower() for m in _SPECIES_COMPOUND.finditer(text or "")]
+    if not claims:
+        return []
+    allowed = request_species(request_text)
+    keys = _segment_keys(text)
+    hay = [_norm(b) for b in _named_blocks(retrieved, keys)]
+    out: list[str] = []
+    for token in dict.fromkeys(claims):
+        if token in allowed or token in out:
+            continue
+        if any(any(re.search(r"\b" + re.escape(v) + r"\b", h)
+                   for v in _species_variants.get(token, (token,)))
+               for h in hay):
+            continue
+        out.append(token)
+    return out
+
+
+def strip_species(text: str, tokens: Sequence[str]) -> str:
+    """Remove the claimed species compounds without breaking the sentence."""
+    out = text
+    for token in tokens:
+        variants = sorted(_species_variants.get(token, (token,)),
+                          key=len, reverse=True)
+        pat = re.compile(
+            r"\b(?:" + "|".join(re.escape(v) for v in variants) + r")"
+            r"[\-\u2011 ]?(?:" + "|".join(_SPECIES_COMPOUND_SUFFIXES) + r")\b"
+            r"[ ,]*", re.IGNORECASE)
+        out = pat.sub("", out)
+    out = re.sub(r"\s{2,}", " ", out)
+    out = re.sub(r"\s+([,;.!])", r"\1", out)
+    # "the weasel-folk" alone would leave "the" attached to nothing.
+    out = re.sub(r"\s*\b(?:the|a|an|some|his|her|their)\s*(?=[,;.!?]|$)", "", out,
+                 flags=re.IGNORECASE)
+    return out.strip(" ,;")
+
+
 def verify_look(figure: Figure, read_paths: Sequence[str] | None,
                 snippet_paths: Iterable[str] | None,
-                retrieved: str) -> tuple[bool, str]:
+                retrieved: str, request_text: str = "") -> tuple[bool, str]:
     """May this NPC's `look` be painted? Three grounds, not equally strong.
 
     * The rewrite OPENED the file it cites: it had the section in front of it and
@@ -477,7 +593,8 @@ def verify_look(figure: Figure, read_paths: Sequence[str] | None,
                           "nothing — painted unverified")
         return False, ("`look` without a `source` — the vault records NPC roles, "
                        "never appearances")
-    bad = invented_species(figure.look, evidence_about(figure.name, retrieved))
+    bad = invented_species(figure.look, evidence_about(figure.name, retrieved),
+                           allow=request_species(request_text))
     if bad:
         return False, ("describes it as " + "/".join(bad) + "-folk, which nothing "
                        "retrieved ABOUT THIS CHARACTER says — the vault never "
@@ -1128,6 +1245,105 @@ def promote_named_entities(plan: ImagePlan) -> tuple[ImagePlan, list[str]]:
     return replace(plan, figures=figures, entities=entities), notes
 
 
+def request_spelling(name: str, request_text: str, backing_text: str = "") -> str:
+    """The name the campaign uses, when the plan abbreviated it.
+
+    Measured live (§15): the plan wrote `"name": "Frey"` for a character the
+    request and every session log call **Boss Frey**, so the prompt painted
+    "Frey:" — a different string from the one the party plays, the vault files,
+    and every earlier image used.
+
+    Three facts decide it, no shape-guessing:
+
+    1. the request names this character (so an abbreviated bystander the model
+       invented cannot be renamed onto some vault character of the same name),
+    2. the material the loop actually read attaches a word to that name —
+       "Boss Frey", "Sable Rin",
+    3. and it **never writes the plan's form bare**: every occurrence of "Frey" in
+       the notes is part of "Boss Frey".
+
+    Test 3 is what separates a name from a title noun. The first live run of this
+    guarantee renamed "Alisa Pennygleam" to "Händlerin Alisa Pennygleam", because
+    a session note really does say "die befreite Händlerin Alisa Pennygleam" —
+    German capitalises every noun, and a merchant is not part of her name. The
+    vault writes her name bare a dozen times, so the bare form IS her name and the
+    rename was refused.
+    """
+    if not name or not backing_text:
+        return ""
+    esc = re.escape(name)
+    name_re = r"(?<![A-Za-zÀ-ÿ])" + esc + r"(?![A-Za-zÀ-ÿ])"
+    if not re.search(name_re, request_text or "", re.I):
+        return ""
+    CAPWORD = r"[A-ZÄÖÜ][A-Za-zÀ-ÿ'’-]+"
+    total = 0
+    attached: list[tuple[str, list[str]]] = []   # (name as written, the words attached)
+    for m in re.finditer(name_re, backing_text, re.I):
+        total += 1
+        tail = re.search(r"(?:" + CAPWORD + r" +){1,2}$", backing_text[:m.start()])
+        if tail:
+            attached.append((m.group(0),
+                             re.findall(CAPWORD, tail.group(0))))
+    if not attached or total - len(attached) > 0:
+        return ""      # the vault writes the plan's form on its own: no drift
+    forms: dict[str, int] = {}
+    for written, words in attached:
+        for n in (1, 2):
+            if len(words) >= n:
+                cand = " ".join(words[-n:]) + " " + written
+                forms[cand] = forms.get(cand, 0) + 1
+    if not forms:
+        return ""
+    best = sorted(forms.items(), key=lambda kv: (-kv[1], len(kv[0])))[0][0]
+    return best if len(best) > len(name) else ""
+
+
+def _apply_names(text: str, renames: dict[str, str]) -> str:
+    """Rename mentions in a sentence without double-prefixing the correct ones."""
+    for old, new in renames.items():
+        # Mentions that ALREADY carry the new name are shielded behind a sentinel,
+        # so "Boss Frey" cannot become "Boss Boss Frey".
+        shielded = re.subn(
+            r"(?<![A-Za-zÀ-ÿ])" + re.escape(new) + r"(?![A-Za-zÀ-ÿ])",
+            "\x00", text, flags=re.I)[0]
+        text = re.sub(r"(?<![A-Za-zÀ-ÿ])" + re.escape(old) + r"(?![A-Za-zÀ-ÿ])",
+                      new, shielded).replace("\x00", new)
+    return text
+
+
+def campaign_names(plan: ImagePlan, request_text: str, *,
+                   anchors: dict[str, Anchor] | None = None,
+                   retrieved: str = "") -> tuple[ImagePlan, list[str]]:
+    """Rename plan figures to the spelling the campaign actually uses."""
+    if not request_text:
+        return plan, []
+    backing = "\n".join([retrieved or ""] + list((anchors or {}).keys()))
+    renames: dict[str, str] = {}
+    notes: list[str] = []
+    for f in plan.figures:
+        nm = str(getattr(f, "name", "") or "").strip()
+        if not nm or nm in renames:
+            continue
+        better = request_spelling(nm, request_text, backing)
+        if better:
+            renames[nm] = better
+            notes.append(f"plan named {nm!r}, the request and the vault name "
+                         f"{better!r} — painted with the campaign's name")
+    if not renames:
+        return plan, notes
+
+    def _apply(text: str) -> str:
+        return _apply_names(text, renames)
+
+    figures = [replace(f, name=renames.get(
+        str(getattr(f, "name", "") or "").strip(),
+        str(getattr(f, "name", "") or "")),
+        pose=_apply(str(getattr(f, "pose", "") or ""))) for f in plan.figures]
+    return replace(plan, figures=figures,
+                   scene=_apply(plan.scene),
+                   entities=[_apply(e) for e in plan.entities]), notes
+
+
 def compose_prompt(
     plan: ImagePlan,
     anchors: dict[str, Anchor],
@@ -1139,6 +1355,7 @@ def compose_prompt(
     read_paths: Iterable[str] | None = None,
     snippet_paths: Iterable[str] | None = None,
     retrieved: str = "",
+    request_text: str = "",
 ) -> Composed:
     """Assemble the final prompt from the plan + the vault anchors.
 
@@ -1150,6 +1367,9 @@ def compose_prompt(
     cut.
     """
     warnings: list[str] = []
+    plan, renamed = campaign_names(plan, request_text, anchors=anchors,
+                                   retrieved=retrieved)
+    warnings.extend(renamed)
     plan, promoted = promote_named_entities(plan)
     warnings.extend(promoted)
     figures = [f for f in (_as_figure(x) for x in plan.figures) if f is not None]
@@ -1175,7 +1395,8 @@ def compose_prompt(
             ungrounded.append(f.name)
             keep.append((f, a))
             continue
-        ok, why = verify_look(f, read_paths, snippet_paths, retrieved)
+        ok, why = verify_look(f, read_paths, snippet_paths, retrieved,
+                              request_text)
         if why:
             warnings.append(f"{f.name}: {why}")
         if ok:
@@ -1186,6 +1407,38 @@ def compose_prompt(
         # copy, so the plan the log shows is the plan the model wrote.
         keep.append((replace(f, look=""), None))
     resolved = keep
+
+    # The sheet's spelling of a party member, EVERYWHERE — not only in the figure
+    # line. Measured live (§15): the figure lines said "Seta Onix, Romi
+    # Stachelpfote" while the scene sentence in the same prompt said "Seta, Bubo,
+    # Romi, Colum, Trixy". The renderer reads both, and a name that looks
+    # different from the one already described is a name that gets painted again.
+    spelling = {f.name: a.name for f, a in resolved
+                if a is not None and a.name != f.name}
+    # …and the same for a name the SCENE abbreviated on its own: the plan listed
+    # "Romi Stachelpfote" correctly but wrote "Romi" in the sentence. A leading
+    # token of a sheet name is only substituted when no other sheet entry starts
+    # with it, so an ambiguous short name is left alone rather than guessed.
+    for f, a in resolved:
+        if a is None:
+            continue
+        toks = a.name.split()
+        for n in range(1, len(toks)):
+            pref = " ".join(toks[:n])
+            if any(o != a.name and _norm(o).startswith(_norm(pref) + " ")
+                   for o in anchors):
+                continue
+            spelling.setdefault(pref, a.name)
+    if spelling:
+        plan = replace(plan, scene=_apply_names(plan.scene, spelling),
+                       entities=[_apply_names(e, spelling) for e in plan.entities])
+        resolved = [(replace(f, name=a.name, pose=_apply_names(f.pose, spelling)), a)
+                    if a is not None else (replace(f, pose=_apply_names(f.pose,
+                                                                        spelling)), a)
+                    for f, a in resolved]
+        warnings.append("plan abbreviated " + ", ".join(
+            f"{o!r} for {spelling[o]!r}" for o in sorted(spelling))
+            + " — the sheet's spelling is used wherever the name appears")
 
     # The foreground is for the characters the party actually plays. A plan that
     # listed bandits before the party (measured in the live dry run) would otherwise
@@ -1226,6 +1479,16 @@ def compose_prompt(
         warnings.append(f"scene sentence ran to {len(words)} words — trimmed to the "
                         f"contract's {_MAX_SCENE_WORDS}; the anchor lines are what "
                         "the model paints the characters from")
+    # A species claim in the SCENE is policed too (analysis §15): the crowd
+    # descriptions were the last unpoliced place an invented species could reach
+    # the renderer, and a scene sentence is never budget-dropped.
+    bad_scene = unbacked_species(scene, retrieved, request_text)
+    if bad_scene and strip_species(scene, bad_scene):
+        scene = strip_species(scene, bad_scene)
+        warnings.append(f"scene sentence claimed {'/'.join(bad_scene)}-folk — "
+                        "nothing retrieved about those beings says so, and the "
+                        "request did not say it either; the species is stripped "
+                        "and the crowd is painted by what it is called")
     if is_collective(scene):
         names = [a.name if a is not None else f.name for f, a in resolved]
         scene2, hits = replace_collectives(scene, names)
@@ -1264,10 +1527,19 @@ def compose_prompt(
 
     entity_line = ""
     if plan.entities:
-        ents = ", ".join(e.rstrip(". ") for e in plan.entities)
+        ents: list[str] = []
+        for e in plan.entities:
+            bad_e = unbacked_species(e, retrieved, request_text)
+            if bad_e and strip_species(e, bad_e):
+                warnings.append(f"entities claimed {'/'.join(bad_e)}-folk — nothing "
+                                "retrieved about them says so, and the request did "
+                                "not say it either; the species is stripped")
+                ents.append(strip_species(e, bad_e).rstrip(". "))
+            else:
+                ents.append(e.rstrip(". "))
         # A POSITIVE label: "Not characters, but present…" is a negation, and the
         # renderer does not read the distinction.
-        entity_line = f"Also in the scene: {ents}."
+        entity_line = f"Also in the scene: {', '.join(ents)}."
 
     renders: list[_FigureRender] = []
     for i, (f, a) in enumerate(resolved):

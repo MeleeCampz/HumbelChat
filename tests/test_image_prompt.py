@@ -623,7 +623,7 @@ def test_the_scene_word_cap_is_enforced():
 def test_the_plan_contract_file_is_loaded_with_the_roster_injected():
     system = images._load_plan_system()
     assert "<image_plan>" in system
-    assert "exactly ONE roster field" in system
+    assert "exactly ONE field" in system
     if not images._PARTY_SHEET_FILE.exists():
         pytest.skip("vault party sheet not present (data/ is gitignored)")
     # The roster is the REAL vault sheet, with its field labels visible so the
@@ -907,3 +907,197 @@ def test_the_plural_verb_fix_is_generated_from_stems_not_a_short_hand_list():
         out, _ = ip.replace_collectives(f"the party {verb} the shrine",
                                         ["Seta Onix", "Marvin"])
         assert out == f"Seta Onix and Marvin {want} the shrine", out
+
+
+# ── 10. The crowd sentences were the last unpoliced place a species could leak ─
+
+_CROWD = "Two lanky weasel-folk bandits block the path while Seta Onix draws her bow"
+
+
+def test_a_species_claim_about_a_crowd_is_stripped_from_the_scene_sentence():
+    """Measured live 2026-11-19 (analysis §15): the same ambush request that
+    invented a badger-folk Boss Frey also wrote "two lanky weasel-folk bandits"
+    and "two rat-folk bandit lackeys". The species gate only looked at a figure's
+    `look`, so the crowd claims went through unchecked — and in a small scene the
+    entity line is not budget-dropped. A creature noun about WHO the bandits are
+    is as much a fact claim as a species claim about a named character."""
+    plan = _plan(_CROWD, [{"name": "Seta Onix", "pose": "drawing her bow"}])
+    c = ip.compose_prompt(
+        plan, _anchors(), BASE,
+        read_paths=["SessionLogs/SESSION_01/notes.md"],
+        retrieved="Boss Frey, der Bandit, überfiel die Gruppe an der Old Bridge.")
+    assert "weasel" not in c.prompt, c.prompt
+    assert "Two lanky bandits block the path" in c.prompt, c.prompt   # the crowd survives
+    assert any("weasel" in w for w in c.warnings), c.warnings
+
+
+def test_a_species_claim_about_a_crowd_is_stripped_from_the_entity_line_too():
+    plan = _plan("Seta Onix draws her bow",
+                 [{"name": "Seta Onix", "pose": "drawing her bow"}],
+                 entities=["two rat-folk bandit lackeys with rusty hatchets"])
+    c = ip.compose_prompt(
+        plan, _anchors(), BASE,
+        read_paths=["SessionLogs/SESSION_01/notes.md"],
+        retrieved="Boss Frey führt seine two bandits an der Old Bridge.")
+    assert "rat-folk" not in c.prompt, c.prompt
+    assert "Also in the scene: two bandit lackeys with rusty hatchets." in c.prompt
+    assert any("rat" in w for w in c.warnings), c.warnings
+
+
+def test_a_crowd_species_the_vault_really_does_name_survives():
+    """Backing is proximity in the OTHER direction too: the retrieved block has to
+    name both the species and something the sentence itself names."""
+    plan = _plan(_CROWD, [{"name": "Seta Onix", "pose": "drawing her bow"}])
+    c = ip.compose_prompt(
+        plan, _anchors(), BASE,
+        read_paths=["SessionLogs/SESSION_02/notes.md"],
+        retrieved="### Die Banditen\nBoss Frey leads his bandit crew: two wiry "
+                  "weasel-folk cutthroats with rusty hatchets.")
+    assert "weasel-folk bandits" in c.prompt, c.prompt
+    assert not any("weasel" in w for w in c.warnings), c.warnings
+
+
+def test_a_badger_in_an_unrelated_chunk_still_does_not_back_a_weasel_crowd():
+    """The gate must not become "any creature word anywhere in context"."""
+    plan = _plan(_CROWD, [{"name": "Seta Onix", "pose": "drawing her bow"}])
+    c = ip.compose_prompt(
+        plan, _anchors(), BASE,
+        read_paths=["DnDRules/item.md"],
+        retrieved="### Claymore of the Great Badger *(uncommon)*\n"
+                  "This weighty blade carries the strength of the mighty badger.")
+    assert "weasel" not in c.prompt, c.prompt
+
+
+def test_a_species_the_request_itself_named_is_never_stripped():
+    """The composer exists to stop the MODEL inventing campaign facts. "Paint the
+    bandits as weasel-folk" is the user saying it: dropping it would be the bot
+    arguing with the person running the table."""
+    plan = _plan(_CROWD, [{"name": "Seta Onix", "pose": "drawing her bow"}])
+    c = ip.compose_prompt(plan, _anchors(), BASE, read_paths=[], retrieved="",
+                          request_text="mal die two weasel-folk banditen im Wald")
+    assert "weasel-folk bandits" in c.prompt, c.prompt
+    assert not any("weasel" in w for w in c.warnings), c.warnings
+
+
+def test_a_species_the_request_named_survives_a_figure_look_too():
+    plan = _plan("Boss Frey blocks the path", [{
+        "name": "Boss Frey", "pose": "blocking the path",
+        "look": "weasel-folk bandit with a rusty hatchet",
+        "source": "SessionLogs/SESSION_01/notes.md"}])
+    c = ip.compose_prompt(
+        plan, _anchors(), BASE,
+        read_paths=["Humblewood/HumbleWood/SessionLogs/SESSION_01/notes.md"],
+        retrieved="Boss Frey, der Bandit, überfiel die Gruppe.",
+        request_text="paint boss frey as a weasel-folk bandit")
+    assert "weasel-folk bandit" in c.prompt, c.prompt
+    assert not any("species" in w for w in c.warnings), c.warnings
+
+
+# ── 11. A name the plan abbreviated is painted with the name the campaign uses ─
+
+def test_a_plan_abbreviation_is_painted_with_the_name_the_request_uses():
+    """Measured live 2026-11-19: the plan wrote "name": "Frey" for the character
+    the request and the vault both call Boss Frey, so the prompt said "Frey:" —
+    a different string from the one the party plays and every earlier image used.
+    The signal is factual (the request contains the longer name, and so does what
+    the loop retrieved), not a guess about what a name looks like."""
+    plan = _plan("Frey snarls forward while Seta Onix draws her bow",
+                 [{"name": "Seta Onix", "pose": "drawing her bow"},
+                  {"name": "Frey", "pose": "snarling forward"}])
+    c = ip.compose_prompt(
+        plan, _anchors(), BASE,
+        retrieved="Boss Frey, der Bandit, überfiel die Gruppe an der Old Bridge.",
+        request_text="Boss Frey stellt sich der Gruppe in den Weg")
+    assert "Boss Frey: snarling forward" in c.prompt, c.prompt
+    assert "Boss Frey snarls forward" in c.prompt, c.prompt
+    assert c.figures == 2 and c.prompt.count("Boss Frey") == 2, c.prompt
+    assert any("campaign's name" in w for w in c.warnings), c.warnings
+
+
+def test_a_name_spelling_rename_merges_a_plan_that_listed_the_same_person_twice():
+    plan = _plan("Boss Frey snarls forward",
+                 [{"name": "Boss Frey", "pose": "snarling forward"},
+                  {"name": "Frey", "pose": "blocking the path"}])
+    c = ip.compose_prompt(plan, _anchors(), BASE,
+                          retrieved="Boss Frey, der Bandit.",
+                          request_text="Boss Frey blockt den Weg")
+    assert c.figures == 1, c.prompt
+
+
+def test_a_capitalised_german_noun_in_front_of_a_name_is_not_read_as_part_of_it():
+    """German capitalises every noun, so "die befreite Händlerin Alisa Pennygleam"
+    offers "Händlerin Alisa" as a longer name. It is only accepted when the vault
+    writes the name that way too."""
+    plan = _plan("Alisa Pennygleam clutches a coin bag",
+                 [{"name": "Alisa Pennygleam", "pose": "clutching a coin bag"}])
+    c = ip.compose_prompt(
+        plan, _anchors(), BASE,
+        retrieved="Alisa Pennygleam, eine Händlerin aus Clearwater.",
+        request_text="die befreite Händlerin Alisa Pennygleam klammert den Beutel")
+    assert "Händlerin Alisa" not in c.prompt, c.prompt
+    assert not any("campaign's name" in w for w in c.warnings), c.warnings
+
+
+def test_no_rename_when_the_plan_already_uses_the_campaign_name():
+    plan = _plan("Boss Frey snarls forward",
+                 [{"name": "Boss Frey", "pose": "snarling forward"}])
+    c = ip.compose_prompt(plan, _anchors(), BASE,
+                          retrieved="Boss Frey, der Bandit.",
+                          request_text="Boss Frey blockt den Weg")
+    assert not any("campaign's name" in w for w in c.warnings), c.warnings
+
+
+def test_a_vault_title_noun_is_not_a_name_when_the_vault_writes_the_name_bare():
+    """The first live run of this guarantee renamed "Alisa Pennygleam" to
+    "Händlerin Alisa Pennygleam", because the session note really does say
+    "die befreite Händlerin Alisa Pennygleam" — a merchant, in German, where every
+    noun is capitalised. The vault writes her name bare a dozen times, so the
+    bare form is her name and the title is not: the rename requires that the
+    material read NEVER writes the plan's form on its own."""
+    backing = ("Alisa Pennygleam sold maps in Clearwater. Alisa Pennygleam owed "
+               "money to Boss Frey. The vault of Alisa Pennygleam was emptied. "
+               "Alisa Pennygleam travelled with the party. die befreite Händlerin "
+               "Alisa Pennygleam wurde an der Old Bridge überfallen.")
+    plan = _plan("Alisa Pennygleam clutches a coin bag",
+                 [{"name": "Alisa Pennygleam", "pose": "clutching a coin bag"}])
+    c = ip.compose_prompt(
+        plan, _anchors(), BASE, retrieved=backing,
+        request_text="die befreite Händlerin Alisa Pennygleam klammert den Beutel")
+    assert "Händlerin Alisa" not in c.prompt, c.prompt
+    assert not any("campaign's name" in w for w in c.warnings), c.warnings
+
+
+def test_a_name_the_vault_never_writes_bare_is_renamed_to_the_form_it_uses():
+    """The other side of the same rule: Boss Frey is only ever "Boss Frey"."""
+    backing = ("Boss Frey blocked the Old Bridge. Boss Frey took the toll from "
+               "travellers. Boss Frey threatened the merchants of Clearwater.")
+    plan = _plan("Frey blocks the road", [{"name": "Frey", "pose": "blocking the road"}])
+    c = ip.compose_prompt(plan, _anchors(), BASE, retrieved=backing,
+                          request_text="boss frey stellt sich der Gruppe in den Weg")
+    assert "Boss Frey: blocking the road" in c.prompt, c.prompt
+
+
+def test_a_party_member_abbreviated_in_the_scene_takes_the_sheet_spelling_there_too():
+    """Measured live 2026-11-19 (§15): the figure lines of one prompt said "Seta
+    Onix, Romi Stachelpfote, Trixy Smoldersome" while its scene sentence said
+    "Seta, Bubo, Romi, Colum, Trixy". The renderer reads the whole prompt, and a
+    name that looks different from the one already described is a name it paints
+    again — the same shape as the collective-subject failure, in short form."""
+    plan = _plan("Seta, Romi and Marvin hold the path while a bandit blocks it",
+                 [{"name": "Seta", "pose": "drawing her bow"},
+                  {"name": "Romi Stachelpfote", "pose": "planting her horn"},
+                  {"name": "Marvin", "pose": "rolling forward beside Romi"}])
+    c = _compose(plan)
+    scene = c.prompt.split(". Exactly")[0]
+    assert "Seta Onix" in scene and "Romi Stachelpfote" in scene, scene
+    assert "Trixy" not in scene, scene
+    assert any("sheet's spelling" in w for w in c.warnings), c.warnings
+    assert c.figures == 3, c.prompt
+
+
+def test_the_sheet_spelling_reaches_a_pose_that_names_another_member():
+    plan = _plan("Marvin rolls forward while Trixy works the bellows",
+                 [{"name": "Marvin", "pose": "standing alert beside Trixy"},
+                  {"name": "Trixy", "pose": "working the bellows"}])
+    c = _compose(plan)
+    assert "beside Trixy Smoldersome" in c.prompt, c.prompt
