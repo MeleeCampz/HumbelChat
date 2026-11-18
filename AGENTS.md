@@ -102,8 +102,11 @@ contract's worked example uses invented names (Pell Wicker / Orin Vek / Sable Ri
 verbatim into a live plan. Name and species fidelity is enforced as code: a plan
 abbreviation is painted with the form the vault uses only when the vault never
 writes the plan's form bare (`request_spelling`), sheet spellings replace
-abbreviations in the scene, entity lines and poses, and a `-folk` claim about a
-crowd is stripped unless retrieved text about those characters backs it — the
-request's own words always win. §15 of the analysis doc has the measurements and
-states what is still NOT enforced: nothing compares the actors the REQUEST names
-against the cast the plan paints.
+abbreviations in the scene, entity lines and poses, and a `-folk` claim is refused
+only when the material about THOSE characters names a different species — invention
+for a character the vault never describes is ALLOWED and logged as the bot's own
+guess (the table's ruling: nobody in this world is a person, so a bare role word
+must not be painted as one), with `IMAGE_ANIMAL_FLOOR` stating the animal-folk rule
+in the style sentence where the budget ladder never cuts it. §15–§16 of the analysis
+doc carry the measurements and what is still NOT enforced: nothing compares the
+actors the REQUEST names against the cast the plan paints.

@@ -62,11 +62,12 @@ name, species or place from this example belongs to the campaign.
   inventing. `look` = visible appearance in max 25 words (build, colours, gear)
   written from what you actually retrieved; `source` = the exact "file" value it
   came from. Rules creatures come from the rulebooks.
-  If the vault holds no appearance, OMIT `look` and name the figure in the scene
-  instead — and then name NO species either: call a character badger-folk,
-  fox-folk or anything else only if what you retrieved says it ABOUT THAT
-  CHARACTER. An invented species paints someone the campaign does not have; an
-  unnamed one paints fine.
+  If the vault holds no appearance, OMIT `look` and name the figure in the scene or
+  `entities` instead — and name a SPECIES there in the world's terms ("two rat-folk
+  bandits block the path"): nothing in this world is a person, and a bare role word
+  ("bandits", "a merchant") gets painted as one. A species the vault states for THAT
+  character always wins and is never replaced; a species you invent is painted and
+  reported to the table as the bot's own guess.
 - **modify** — ONLY when the request deliberately changes one aspect of a party
   member ("Seta in metal armour instead of her cloak", "Colum without his cape",
   "Marvin with a red paint job"). Name exactly ONE field and replace it with a

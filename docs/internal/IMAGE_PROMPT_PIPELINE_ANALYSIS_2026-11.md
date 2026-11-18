@@ -644,3 +644,71 @@ once (`keeping the first (Frey, Alisa Pennygleam painted by name)`) — the fall
 works, but those two stay ungrounded.
 
 Tests: 1477 → **1502** (14 prompt-shape tests, 11 species/name/spelling tests).
+
+---
+
+## 16. The species rule was pointed the wrong way (table owner's ruling, 2026-11-19)
+
+Asked what to do with the name/species work, the answer came back as a rule about the
+world rather than about the pipeline: **"we only want animals in the final output. So if
+there are 'bandits' I want them in the final picture. For those unspecified characters,
+inventing a species that makes sense in the setting is OK."**
+
+That reverses the direction of the gate built in §15. It policed *invention*; the failure
+it prevented (an undescribed bandit painted with no species) is the failure the renderer
+commits by painting **people**.
+
+### 16.1 What the gate decides now
+
+`species_verdict()` returns two lists instead of one:
+
+| case | before (§15) | now |
+|---|---|---|
+| vault says these characters are rat-folk, plan says weasel-folk | stripped | **stripped** (unchanged — the vault's canon wins) |
+| nothing describes them, plan says weasel-folk | stripped | **kept**, and logged as the bot's own guess |
+| species found only in a block about someone else (a badger-shaped magic sword) | stripped | still not allowed to *name* them; if the block about **them** names a different animal, that one wins |
+| the request itself says "as a badger-folk" | kept | kept (the composer does not argue with the table) |
+
+Proximity still decides *whose* evidence counts (`evidence_about`, `_named_blocks`) — only
+inverted: an absence is now permission rather than refusal. A contradicted look is still
+dropped whole, so a wrong species cannot smuggle the rest of an invented description in.
+
+Reported rather than silent: `Boss Frey: given a species (badger) the vault does not name
+— kept, because an animal-folk guess is what keeps humans out of the picture`, for scene
+sentences, entity lines and figure looks alike. An invented species is canon the table
+should know the bot invented.
+
+### 16.2 The animal-folk floor
+
+`IMAGE_ANIMAL_FLOOR` — one sentence, appended to the **style** line, which the budget
+ladder is not allowed to cut: *"Every figure in this image is an anthropomorphic
+animal-folk character of this world."*
+
+Unconditional on purpose. Deciding which entries in `entities` are beings and which are
+wagons is the shape-guessing this pipeline has already refused twice (§15), and the world
+rule is unconditional in the vault too. Cost measured: 80 characters, ~7 % of a
+single-figure prompt's 1,194, and it survives a hard cap of 320 characters while mood,
+palette and quirks are cut around it.
+
+### 16.3 What got looser, stated plainly
+
+Test `test_a_species_claim_needs_backing_even_when_the_file_was_opened` (§10's drift
+catch) had to be rewritten: Boss Frey's `"heavy-set badger-folk bandit chief with a flat
+snout and a cutlass at his hip"`, cited to a session note the rewrite really did open, is
+now **painted**. The species claim no longer blocks it, and an opened file is still
+believed outright. What still protects the campaign is the ordering: the vault's own
+species wins, a contradicted look is dropped whole, a figure with no citation at all is
+painted by name only, and every invention is logged.
+
+Vault note (`Image Generation Policy.md`) and the plan contract
+(`prompts/image_plan_system.md`) were rewritten to the same rule — "give every creature
+you describe a species; the vault's wins; a bare role word paints a person" — because the
+prompt and the note previously told the model the opposite of what the code now allows.
+
+Tests: 1502 → **1508** (net; 6 rewritten to the new policy, 6 added: contradiction-wins,
+guess-kept for a crowd, guess-kept for an undescribed NPC, unrelated-chunk guard,
+floor-present, floor-survives-budget, floor-switchable-off, vault-backed-not-reported).
+
+**Still not built**: the floor guarantees that whatever is painted is animal-folk. It does
+not guarantee that the actors the *request* names are in the frame — "seinen Banditen"
+reaching the image is still the model's choice, not a code property.
