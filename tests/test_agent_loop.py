@@ -446,3 +446,40 @@ async def test_batch_runs_calls_concurrently(monkeypatch):
     # Three 50 ms calls in parallel ≈ one call's time (allow scheduler slack).
     assert elapsed < 0.12, f"batch took {elapsed:.3f}s — not parallel?"
     assert sorted(started) == ["a.md", "b.md", "c.md"]
+
+
+def test_a_repeated_identical_tool_call_is_refused_not_re_run():
+    """Measured: a 145 s rewrite in which the tools themselves took 4 s — the
+    model re-read the SAME section three times. Each repeat costs a whole
+    model turn, so the second identical call is refused with a pointer to the
+    result it already has."""
+    import bot_core.agent_loop as al
+
+    calls = []
+
+    async def complete(messages, model=None, **kw):
+        calls.append(messages)
+        if len(calls) == 1:
+            return ('{"tool": "find_in_kb", "args": {"term": "Frey"}}')
+        if len(calls) == 2:
+            return ('{"tool": "find_in_kb", "args": {"term": "Frey"}}')
+        return "answered"
+
+    async def execute(name, args):
+        return "Boss Frey: bandit boss of the Clearwater pass"
+
+    old_exec = al.execute_tool
+    al.execute_tool = execute
+    try:
+        out, meta = asyncio.run(al.run_agent_loop(
+            complete=complete, model="m",
+            system_prompt="sys", user_message="who is Boss Frey?"))
+    finally:
+        al.execute_tool = old_exec
+
+    assert out == "answered"
+    assert len(meta.tool_calls) == 2, meta.tool_calls
+    dupes = [d for d in meta.tool_calls_detail if d.get("duplicate")]
+    assert len(dupes) == 1, meta.tool_calls_detail
+    refused = [m for m in calls[-1] if m.get("role") == "tool"]
+    assert "already made this exact call" in refused[-1]["content"]

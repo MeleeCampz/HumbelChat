@@ -150,6 +150,10 @@ class AgentTurnMeta:
     fallback: bool = False
     fallback_reason: str = ""
     gathered_context: str = ""   # best-so-far context (search + reads)
+    # (name, canonical-args) of every call already run in THIS loop. A repeat
+    # costs a full model turn and returns content the model already has — see
+    # the refusal below.
+    seen_calls: set[tuple[str, str]] = field(default_factory=set)
 
 
 # Forced-answer messages repeat the gathered context INLINE so the model
@@ -354,6 +358,34 @@ async def run_agent_loop(
             batch = calls[:remaining_calls]
             skipped = len(calls) - len(batch)
 
+            # A repeated identical call is almost always the model forgetting
+            # it already has the answer — and the repeat costs a FULL model
+            # turn (measured: a 145 s rewrite that re-read the same section
+            # three times, while the tools themselves took 4 s). Refuse the
+            # duplicate instead of running it: the message costs nothing and
+            # sends the model on to what it actually needs.
+            seen = meta.seen_calls
+            fresh: list[tuple[str, dict[str, Any]]] = []
+            dupes: list[tuple[str, dict[str, Any]]] = []
+            for cname, cargs in batch:
+                key = (cname, json.dumps(cargs, sort_keys=True,
+                                         ensure_ascii=False))
+                (dupes if key in seen else fresh).append((cname, cargs))
+            for cname, cargs in dupes:
+                meta.tool_calls.append(cname)
+                meta.tool_calls_detail.append({
+                    "tool": cname, "args": cargs, "result_chars": 0,
+                    "tool_error": False, "duplicate": True,
+                })
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": f"call_{len(meta.tool_calls)}",
+                    "content": ("You already made this exact call and its "
+                                "result is above — use it. Search for "
+                                "something else, or answer."),
+                })
+            batch = fresh
+
             # Independent, read-only tools — run the WHOLE BATCH in parallel
             # (wall clock ≈ slowest call, not the sum). Every failure is
             # data for the model, never fatal.
@@ -371,6 +403,8 @@ async def run_agent_loop(
 
             results = await asyncio.gather(*(_run_one(c) for c in batch))
             for (cname, cargs), result in zip(batch, results):
+                seen.add((cname, json.dumps(cargs, sort_keys=True,
+                                           ensure_ascii=False)))
                 meta.tool_calls.append(cname)
                 meta.tool_calls_detail.append({
                     "tool": cname,
