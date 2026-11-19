@@ -938,9 +938,23 @@ async def _rewrite_composed(text: str, complete,
         worth = [n for n in composed.ungrounded
                  if any(part.lower() in text.lower() for part in n.split()
                         if len(part) >= 4)]
+        # What the composer NOTICED but did not fix (analysis §17.3). The composer
+        # no longer rewrites the plan's language — it hands the problems back, and
+        # this is the turn that hands them back: the model that wrote the plan sees
+        # its own sentence, the disagreement, and the request it was answering.
+        fixable = [f for f in composed.findings if f.fixable]
+        for f in composed.findings:
+            log.info("composer finding: %s", f.as_line())
+        ask: list[str] = []
         if worth:
-            log.info("rewrite: %s named without a verified appearance — one "
-                     "lookup pass before composing again", ", ".join(worth))
+            ask.append(_LOOKUP_NUDGE.replace("{{NAMES}}", ", ".join(worth)))
+        if fixable:
+            ask.append(image_prompt.finding_feedback(fixable))
+        if worth or fixable:
+            log.info("rewrite: %d finding(s)%s — one correction pass before "
+                     "composing again", len(fixable),
+                     (f", {', '.join(worth)} painted by name with no verified "
+                      "appearance") if worth else "")
             retry_out, retry_meta = await run_agent_loop(
                 complete=complete,
                 model=DEFAULT_MODEL,
@@ -948,8 +962,7 @@ async def _rewrite_composed(text: str, complete,
                     {"role": "system", "content": system},
                     {"role": "user", "content": msg},
                     {"role": "assistant", "content": out},
-                    {"role": "user", "content": _LOOKUP_NUDGE.replace(
-                        "{{NAMES}}", ", ".join(worth))},
+                    {"role": "user", "content": "\n\n".join(ask)},
                 ],
                 answer_instruction=_IMAGE_ANSWER_INSTRUCTION,
                 mention_attached_context=False,
@@ -978,6 +991,9 @@ async def _rewrite_composed(text: str, complete,
                         log.warning("composer budget: %s", w)
                     else:
                         log.warning("composer: %s", w)
+                for f in composed.findings:
+                    log.info("composer finding (after the correction pass): %s",
+                             f.as_line())
                 log.info("image prompt recomposed after the lookup pass: %d "
                          "char(s), %d figure(s), %d tool call(s) in the lookup",
                          len(composed.prompt), composed.figures,

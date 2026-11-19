@@ -117,13 +117,16 @@ FLOOR = ("Every figure in this image is an anthropomorphic animal-folk character
          "of this world")
 
 
-def _compose(plan, anchors=None, *, budget=100000, foreground=4, floor=FLOOR):
+def _compose(plan, anchors=None, *, budget=100000, foreground=4, floor=FLOOR,
+             retrieved="", request_text="", read_paths=None):
     return ip.compose_prompt(plan, anchors or _anchors(), BASE,
                              foreground=foreground,
                              budget_kwargs={"base": 1100, "per_figure": 420,
                                             "hard_cap": budget},
                              animal_floor=floor,
-                             animal_floor_living=prompt_profile.living_variant(floor))
+                             animal_floor_living=prompt_profile.living_variant(floor),
+                             retrieved=retrieved, request_text=request_text,
+                             read_paths=read_paths)
 
 
 def _content(c):
@@ -249,14 +252,76 @@ def test_a_party_member_named_two_way_is_one_figure():
     assert "Exactly 1 named figure" in c.prompt
 
 
+def _finding(c, code, subject=None):
+    """One finding the composer must have reported (and NOT fixed)."""
+    hits = [f for f in c.findings if f.code == code
+            and (subject is None or f.subject == subject)]
+    assert hits, f"no {code} finding: " + "; ".join(
+        f.as_line() for f in c.findings)
+    return hits[0]
+
+
+def test_the_composer_reports_instead_of_rewriting():
+    """The one test that says what the 2026-11-19 redesign IS.
+
+    A plan with four known problems: a collective subject, a species the vault
+    contradicts, a negation in a pose and a parenthetical note about the bot. Every
+    one of them used to be edited out of the plan's own text. Now every one of them
+    reaches the prompt as the model wrote it, and every one is named back to the
+    model instead.
+    """
+    plan = _plan("the whole party faces two weasel-folk bandits (vault guess)",
+                 [{"name": "Seta Onix", "pose": "drawing her bow with no quiver"}],
+                 retrieved="")
+    c = ip.compose_prompt(
+        plan, _anchors(), BASE, animal_floor=FLOOR,
+        retrieved="### Die Banditen\nBanditen: three rat-folk cutthroats.",
+        budget_kwargs={"base": 1100, "per_figure": 420, "hard_cap": 100000})
+    codes = {f.code for f in c.findings}
+    assert {"collective_subject", "species_contradicted", "negation_clause",
+            "meta_comment"} <= codes, sorted(codes)
+    low = c.prompt.lower()
+    for fragment in ("the whole party", "weasel-folk", "no quiver", "vault guess"):
+        assert fragment in low, f"{fragment} was edited out of the prompt"
+    assert all(f.fixable for f in c.findings if f.code in codes)
+
+
+def test_a_budget_cut_is_a_fact_not_a_finding_the_model_can_argue_with():
+    """`fixable` separates "reword your plan" from "the frame has a size limit"."""
+    plan = _plan("Seta Onix draws her bow",
+                 [{"name": "Seta Onix", "pose": "drawing her bow"}])
+    c = _compose(plan, budget=200)
+    assert c.cuts, "the budget ladder must still report what it spent"
+    assert not any(f.fixable and "budget" in f.detail for f in c.findings)
+
+
+def test_the_correction_turn_gets_a_message_it_can_act_on():
+    findings = ip.lint_plan(
+        _plan("the whole upright party squares off against a badger-folk bandit",
+              [{"name": "Seta Onix", "pose": "nocking an arrow"}]), _anchors())
+    text = ip.finding_feedback(findings)
+    assert "<image_plan>" in text
+    assert "collective_subject" in text
+    assert "Do not describe the picture in prose" in text
+    assert ip.finding_feedback([]) == ""
+
+
 def test_collective_subject_is_reported_and_never_painted():
     """Failure 6 (measured twice): the scene named the cast AND the anchors
-    followed, which is how an unnamed crowd gets painted."""
+    followed, which is how an unnamed crowd gets painted.
+
+    Retired 2026-11-19 (§17.3): the composer used to swap the crowd noun for a
+    generated name list. It now reports the shape and the rewrite model fixes its
+    own sentence — a name list invented by a regex was a second sentence nobody
+    asked for, and it had its own bugs (§13).
+    """
     plan = _plan("the whole upright party squares off against a badger-folk bandit",
                  [{"name": "Seta Onix", "pose": "nocking an arrow"}])
     c = _compose(plan)
-    assert any("collectively" in w for w in c.warnings)
-    assert "party" not in _content(c).lower().replace("cattle tiefling", "")
+    f = _finding(c, "collective_subject", "scene")
+    assert "whole upright party" in f.detail, f.detail
+    assert "the whole upright party" in c.prompt.lower(), \
+        "the model's sentence is left alone"
     assert "Exactly 1 named figure" in c.prompt
 
 
@@ -416,11 +481,14 @@ def test_split_never_breaks_inside_parentheses():
                                              "short (but sturdy) frame"]}
 
 
-def test_negation_in_a_pose_is_dropped_not_written():
+def test_a_negation_in_a_pose_is_reported_not_silently_dropped():
+    """Our own layers still never write a negation. A negation the MODEL wrote is
+    no longer deleted on its way past — it comes back as a finding (§17.3)."""
     c = _compose(_plan("Colum stands", [{"name": "Colum Bidae",
                                          "pose": "standing with no cloak on"}]))
-    assert "no cloak" not in c.prompt
-    assert any("negation in the pose" in w for w in c.warnings)
+    f = _finding(c, "negation_clause", "Colum Bidae")
+    assert "no cloak" in c.prompt
+    assert "paints the item anyway" in f.detail
 
 
 def test_negation_detection_covers_the_german_requests():
@@ -711,7 +779,8 @@ def test_a_look_citing_a_search_snippet_must_be_traceable_to_it():
 def test_an_opened_file_is_believed_even_when_the_wording_does_not_match():
     """The vault is half German: a look written in English from a German section
     is a translation, not an invention, so the wording test never applies to a
-    file the rewrite actually opened."""
+    file the rewrite actually opened. Provenance is still enforced in code —
+    that is a filesystem fact, not a reading of prose."""
     retrieved = ('8 hit(s): [{"file": "humblewood/CampainNotes/07.10.2026.md", '
                  '"snippet": "die Echse (Händler) mit ihrem blau-gelben Wagen"}]')
     plan = _plan("die Echse beside her wagon",
@@ -720,12 +789,13 @@ def test_an_opened_file_is_believed_even_when_the_wording_does_not_match():
                    "source": "CampainNotes/07.10.2026.md"}])
     out = ip.compose_prompt(plan, {}, BASE,
                             read_paths=["CampainNotes/07.10.2026.md"],
-                            snippet_paths=[], retrieved=retrieved)
+                            snippet_paths=[], retrieved=retrieved,
+                            animal_floor=FLOOR)
     assert "lizard merchant" in out.prompt
     # The species word is the composer's own reading of a German name ("die Echse")
-    # and the vault never states it as a species — kept under the animal-folk
-    # policy, and said out loud so the vault can be corrected.
-    assert any("the vault does not name" in w for w in out.warnings), out.warnings
+    # and the vault never states it as a species — painted, and REPORTED, so the
+    # vault can be corrected and the table can see what the bot invented.
+    assert any(f.code == "species_unbacked" for f in out.findings), out.findings
 
 
 def test_an_undescribed_npc_keeps_the_species_the_model_gave_it():
@@ -733,20 +803,20 @@ def test_an_undescribed_npc_keeps_the_species_the_model_gave_it():
     output … for those unspecified characters inventing a species that makes sense
     in the setting is OK." Boss Frey is a vault character with no appearance notes,
     and the file the rewrite cited WAS opened, so his badger-folk look is painted —
-    which is precisely what the gate used to refuse, and what the animal-folk floor
-    needs: a bandit painted as a human is the failure this pipeline must not have."""
+    a bandit painted as a human is the failure this pipeline must not have."""
     plan = _plan("Boss Frey blocks the path", [{
         "name": "Boss Frey", "pose": "snarling forward",
         "look": "heavy-set badger-folk bandit chief with a flat snout and a "
                 "cutlass at his hip",
         "source": "SessionLogs/SESSION_01_DerAnfang/notes.md"}])
     c = ip.compose_prompt(
-        plan, _anchors(), BASE,
+        plan, _anchors(), BASE, animal_floor=FLOOR,
         read_paths=["Humblewood/HumbleWood/SessionLogs/SESSION_01_DerAnfang/notes.md"],
         retrieved=RETRIEVED_FREY)
     assert "badger-folk bandit chief" in c.prompt, c.prompt
     assert "Boss Frey: snarling forward" in c.prompt
-    assert any("badger" in w and "does not name" in w for w in c.warnings), c.warnings
+    f = _finding(c, "species_unbacked", "Boss Frey")
+    assert "badger" in f.detail
 
 
 def test_a_look_from_a_file_the_rewrite_read_is_kept():
@@ -791,10 +861,10 @@ def test_the_party_holds_the_foreground_even_if_the_plan_listed_npc_first():
     assert any("reordered" in w for w in c.warnings)
 
 
-def test_a_scene_that_re_enumerates_the_cast_is_cut():
+def test_a_scene_that_re_enumerates_the_cast_is_reported():
     """A name mentioned three times is a character painted twice (§4.2's
-    'a second Colum in the background'). Bare repeats in an enumeration go;
-    a mention carrying the character's own action stays."""
+    'a second Colum in the background'). The cut is retired: the mention is the
+    model's sentence, so it is reported and the correction turn rewrites it."""
     plan = _plan("In a clearing, Seta Onix aims her bow at Boss Frey while Romi "
                  "Stachelpfote advances; bandits surround Seta Onix, Romi "
                  "Stachelpfote, Bubo Krallensturm, Marvin",
@@ -805,10 +875,12 @@ def test_a_scene_that_re_enumerates_the_cast_is_cut():
                   {"name": "Boss Frey", "pose": "blocking the path"}])
     c = _compose(plan, anchors=_anchors())
     scene = c.prompt.split("Exactly")[0]
-    for name in ("Romi Stachelpfote", "Bubo Krallensturm", "Marvin"):
-        assert scene.count(name) == 1, f"{name} still repeated in the scene"
-    assert "aims her bow" in scene, "the action-bearing mention must survive"
-    assert any("re-enumerated the cast" in w for w in c.warnings)
+    reported = {f.subject for f in c.findings if f.code == "duplicate_mention"}
+    assert reported, [f.as_line() for f in c.findings]
+    for name in reported:
+        assert name in scene and scene.count(name) > 1, \
+            f"{name} was reported but the prompt does not repeat it"
+    assert "aims her bow" in scene, "the sentence is not touched at all"
 
 
 RETRIEVED_FREY = ("Boss Frey, der Bandit, überfiel die Gruppe an der Old Bridge und "
@@ -877,29 +949,33 @@ This weighty blade carries the strength of the mighty badger."""
     assert any("badger" in w for w in c.warnings)
 
 
-def test_a_character_hidden_in_entities_is_painted_and_counted_as_a_figure():
-    """Measured on the live bandit request: the model wrote "Boss Frey and his
-    bandit crew" into the scene text, so the count line said 6 named figures while
-    eight named beings were in the prompt — the shape that paints an extra crowd.
-    The name becomes a figure, the crew stays an entity, and the name joins the
-    lookup pass."""
+def test_a_named_character_left_in_entities_is_reported():
+    """Measured on the live bandit request: the model filed BOSS FREY and ALISA
+    PENNYGLEAM under "Also in the scene" objects, so the count line said fewer
+    figures than the prompt named — the shape that paints an extra crowd.
+
+    Retired 2026-11-19 (§17.3): promoting them meant deciding, from a regex, that
+    a word is a character rather than a place or a thing. The bot now checks the
+    one signal that needs no guessing — the USER named them — and asks for a
+    figure line. Meanwhile the count line still counts the figure lines it printed.
+    """
     plan = _plan("Boss Frey and Alisa Pennygleam stand before them; the party "
                  "faces them",
                  [{"name": "Seta Onix", "pose": "drawing her bow"},
                   {"name": "Marvin", "pose": "raising a pincer"}],
                  entities=["Boss Frey and his bandit crew", "Alisa Pennygleam"])
-    c = _compose(plan)
-    # No pose and nothing retrieved: the name is painted, with nothing invented
-    # to go with it.
-    assert "Boss Frey" in c.prompt and "Alisa Pennygleam" in c.prompt
-    assert "Boss Frey: standing before them" in c.prompt, c.prompt
-    assert "Alisa Pennygleam: standing before them" in c.prompt, c.prompt
-    assert "bandit crew" in c.prompt              # the crowd stays a crowd
-    assert "face them" in c.prompt, "a collective replaced by a list needs the ' \
-        'plural verb"
-    assert "Exactly 4 named figures" in c.prompt, c.prompt
-    assert "Boss Frey" in c.ungrounded and "Alisa Pennygleam" in c.ungrounded
-    assert any("painted as a figure" in w for w in c.warnings), c.warnings
+    c = _compose(plan, request_text="Boss Frey und Alisa Pennygleam stellen sich "
+                                   "der Gruppe")
+    reported = [f for f in c.findings if f.code == "entity_named_not_painted"]
+    text = " | ".join(f.subject + " :: " + f.detail for f in reported)
+    assert "Boss Frey" in text and "Alisa Pennygleam" in text, text
+    assert len(reported) == 2, [f.as_line() for f in c.findings]
+    # Nothing was promoted and nothing was removed — the plan's own structure is
+    # what the renderer sees, and the disagreement is what the model gets back.
+    assert "Also in the scene: Boss Frey and his bandit crew, Alisa Pennygleam." \
+        in c.prompt, c.prompt
+    assert "Boss Frey and Alisa Pennygleam stand before them" in c.prompt, c.prompt
+    assert "Exactly 2 named figures" in c.prompt, c.prompt
 
 
 def test_a_place_name_in_entities_is_not_painted_as_a_character():
@@ -912,72 +988,31 @@ def test_a_place_name_in_entities_is_not_painted_as_a_character():
     assert "Winnowing Reach" in c.prompt   # still in the scene sentence
 
 
-def test_one_entity_naming_two_characters_promotes_both():
-    plan = _plan("Boss Frey and Alisa Pennygleam stand before the party",
-                 [{"name": "Marvin", "pose": "raising a pincer"}],
-                 entities=["Boss Frey and Alisa Pennygleam"])
-    c = _compose(plan)
-    # The scene's collective is swapped for the names; in a FIGURE LINE the same
-    # phrase is removed instead (the name is already that line's subject), and the
-    # preposition it governed goes with it rather than dangling.
-    assert "Boss Frey: standing" in c.prompt, c.prompt
-    assert "Alisa Pennygleam: standing" in c.prompt, c.prompt
-    assert "the party" not in c.prompt, c.prompt
-    assert "Exactly 3 named figures" in c.prompt, c.prompt
-    assert not any("Also in the scene" in p for p in [c.prompt]), c.prompt
-    assert any("crowd word" in w for w in c.warnings), c.warnings
-
-
 # ── 9. A replacement must not re-name someone the sentence already names ─────
-
-def test_a_replacement_does_not_re_name_a_character_the_sentence_already_names():
-    """Measured live 2026-11-19: "the party confronts Boss Frey and his bandits"
-    came out as "…Boss Frey and Alisa Pennygleam confronts Boss Frey and his
-    bandits" — one sentence naming the same character twice, which is an
-    invitation to paint him twice. A name already in the sentence is not inserted.
-    """
-    out, hits = ip.replace_collectives(
-        "the party confronts Boss Frey and his bandits in a forest clearing",
-        ["Seta Onix", "Marvin", "Boss Frey", "Alisa Pennygleam"])
-    assert hits == 1
-    assert out.count("Boss Frey") == 1, out
-    assert out.startswith("Seta Onix, Marvin and Alisa Pennygleam confront "), out
-
-
-def test_the_plural_verb_fix_is_generated_from_stems_not_a_short_hand_list():
-    """The hand-written verb list always lacked the verb the live request used."""
-    for verb, want in (("confronts", "confront"), ("watches", "watch"),
-                       ("blocks", "block"), ("chases", "chase"),
-                       ("clutches", "clutch"), ("aims", "aim")):
-        out, _ = ip.replace_collectives(f"the party {verb} the shrine",
-                                        ["Seta Onix", "Marvin"])
-        assert out == f"Seta Onix and Marvin {want} the shrine", out
-
 
 # ── 10. The crowd sentences were the last unpoliced place a species could leak ─
 
 _CROWD = "Two lanky weasel-folk bandits block the path while Seta Onix draws her bow"
 
 
-def test_a_species_the_vault_denies_for_a_crowd_is_stripped_from_the_scene_sentence():
+def test_a_species_the_vault_denies_for_a_crowd_is_reported_not_swapped():
     """Measured live 2026-11-19 (analysis §15): the same ambush request that
-    invented a badger-folk Boss Frey also wrote "two lanky weasel-folk bandits" and
-    "two rat-folk bandit lackeys" — crowd descriptions were the last place a species
-    reached the renderer unchecked. Since the ruling of 2026-11-19 the gate polices
-    DISAGREEMENT: a vault that says the crew are rat-folk refuses a weasel-folk
-    crowd, and the crowd is still painted by what it is called."""
+    invented a badger-folk Boss Frey also wrote "two lanky weasel-folk bandits".
+
+    The vault says rat-folk. Until 2026-11-19 the composer deleted "weasel-folk"
+    and pasted "rat-folk" into the model's sentence — which is how a merchant's
+    lizard ended up on a bandit crew (round 10, §17). The disagreement is now
+    reported with both animals named, which is what the model needs to fix it.
+    """
     plan = _plan(_CROWD, [{"name": "Seta Onix", "pose": "drawing her bow"}])
     c = ip.compose_prompt(
-        plan, _anchors(), BASE,
+        plan, _anchors(), BASE, animal_floor=FLOOR,
         read_paths=["SessionLogs/SESSION_01/notes.md"],
         retrieved="### Die Banditen\nBoss Frey führt seine Banditen: two rat-folk "
                   "cutthroats an der Old Bridge.")
-    assert "weasel" not in c.prompt, c.prompt
-    # The vault does not merely object to "weasel-folk", it offers an animal:
-    # "two rat-folk cutthroats". Substitution paints THAT animal — a bare
-    # "bandits" is what the renderer turns into people.
-    assert "Two lanky rat-folk bandits block the path" in c.prompt, c.prompt
-    assert any("weasel" in w and "rat" in w for w in c.warnings), c.warnings
+    assert "weasel-folk" in c.prompt, "the sentence is the model's, not the regex's"
+    f = _finding(c, "species_contradicted", "scene")
+    assert "weasel" in f.detail and "rat" in f.detail, f.detail
 
 
 def test_a_crowd_nobody_describes_keeps_a_species_that_fits_the_world():
@@ -987,26 +1022,27 @@ def test_a_crowd_nobody_describes_keeps_a_species_that_fits_the_world():
     say what they really are."""
     plan = _plan(_CROWD, [{"name": "Seta Onix", "pose": "drawing her bow"}])
     c = ip.compose_prompt(
-        plan, _anchors(), BASE,
+        plan, _anchors(), BASE, animal_floor=FLOOR,
         read_paths=["SessionLogs/SESSION_01/notes.md"],
         retrieved="Boss Frey, der Bandit, überfiel die Gruppe an der Old Bridge.")
     assert "weasel-folk bandits" in c.prompt, c.prompt
-    assert any("weasel" in w and "does not name" in w for w in c.warnings), c.warnings
+    f = _finding(c, "species_unbacked", "scene")
+    assert "weasel" in f.detail
 
 
-def test_a_species_the_vault_denies_is_stripped_from_the_entity_line_too():
+def test_a_species_the_vault_denies_is_reported_in_the_entity_line_too():
     plan = _plan("Seta Onix draws her bow",
                  [{"name": "Seta Onix", "pose": "drawing her bow"}],
                  entities=["two weasel-folk bandit lackeys with rusty hatchets"])
     c = ip.compose_prompt(
-        plan, _anchors(), BASE,
+        plan, _anchors(), BASE, animal_floor=FLOOR,
         read_paths=["SessionLogs/SESSION_01/notes.md"],
         retrieved="### Die Banditen\nBoss Frey führt seine bandit crew: two rat-folk "
                   "lackeys an der Old Bridge.")
-    assert "weasel" not in c.prompt, c.prompt
-    assert ("Also in the scene: two rat-folk bandit lackeys with rusty hatchets."
+    assert ("Also in the scene: two weasel-folk bandit lackeys with rusty hatchets."
             in c.prompt), c.prompt
-    assert any("weasel" in w and "rat" in w for w in c.warnings), c.warnings
+    f = _finding(c, "species_contradicted", "entities")
+    assert "weasel" in f.detail and "rat" in f.detail, f.detail
 
 
 def test_a_crowd_species_the_vault_really_does_name_survives():
@@ -1063,33 +1099,41 @@ def test_a_species_the_request_named_survives_a_figure_look_too():
 
 # ── 11. A name the plan abbreviated is painted with the name the campaign uses ─
 
-def test_a_plan_abbreviation_is_painted_with_the_name_the_request_uses():
+def test_a_plan_that_wrote_a_name_short_is_told_the_campaigns_spelling():
     """Measured live 2026-11-19: the plan wrote "name": "Frey" for the character
     the request and the vault both call Boss Frey, so the prompt said "Frey:" —
     a different string from the one the party plays and every earlier image used.
-    The signal is factual (the request contains the longer name, and so does what
-    the loop retrieved), not a guess about what a name looks like."""
+
+    Report, not rename: the three facts are the request, the retrieved material and
+    the plan's own name, and the model that read the request can write the spelling
+    itself. Renaming from outside was another rewrite the table never asked for.
+    """
     plan = _plan("Frey snarls forward while Seta Onix draws her bow",
                  [{"name": "Seta Onix", "pose": "drawing her bow"},
                   {"name": "Frey", "pose": "snarling forward"}])
     c = ip.compose_prompt(
-        plan, _anchors(), BASE,
+        plan, _anchors(), BASE, animal_floor=FLOOR,
         retrieved="Boss Frey, der Bandit, überfiel die Gruppe an der Old Bridge.",
         request_text="Boss Frey stellt sich der Gruppe in den Weg")
-    assert "Boss Frey: snarling forward" in c.prompt, c.prompt
-    assert "Boss Frey snarls forward" in c.prompt, c.prompt
-    assert c.figures == 2 and c.prompt.count("Boss Frey") == 2, c.prompt
-    assert any("campaign's name" in w for w in c.warnings), c.warnings
+    f = _finding(c, "name_form", "Frey")
+    assert "Boss Frey" in f.detail
+    assert "Frey: snarling forward" in c.prompt, c.prompt
 
 
-def test_a_name_spelling_rename_merges_a_plan_that_listed_the_same_person_twice():
+def test_a_plan_that_listed_one_person_twice_is_told_so():
+    """Without an external rename, "Boss Frey" and "Frey" are two figure lines.
+    That is reported rather than silently merged: the merge itself used to rewrite
+    the plan's cast, and a plan that really means two different bandits must not
+    have one deleted by a regex."""
     plan = _plan("Boss Frey snarls forward",
                  [{"name": "Boss Frey", "pose": "snarling forward"},
                   {"name": "Frey", "pose": "blocking the path"}])
-    c = ip.compose_prompt(plan, _anchors(), BASE,
+    c = ip.compose_prompt(plan, _anchors(), BASE, animal_floor=FLOOR,
                           retrieved="Boss Frey, der Bandit.",
                           request_text="Boss Frey blockt den Weg")
-    assert c.figures == 1, c.prompt
+    f = _finding(c, "same_person_listed_twice")
+    assert "Boss Frey" in f.detail and "Frey" in f.detail
+    assert c.figures == 2, "nothing is merged — the model decides who is who"
 
 
 def test_a_capitalised_german_noun_in_front_of_a_name_is_not_read_as_part_of_it():
@@ -1135,40 +1179,34 @@ def test_a_vault_title_noun_is_not_a_name_when_the_vault_writes_the_name_bare():
     assert not any("campaign's name" in w for w in c.warnings), c.warnings
 
 
-def test_a_name_the_vault_never_writes_bare_is_renamed_to_the_form_it_uses():
-    """The other side of the same rule: Boss Frey is only ever "Boss Frey"."""
-    backing = ("Boss Frey blocked the Old Bridge. Boss Frey took the toll from "
-               "travellers. Boss Frey threatened the merchants of Clearwater.")
-    plan = _plan("Frey blocks the road", [{"name": "Frey", "pose": "blocking the road"}])
-    c = ip.compose_prompt(plan, _anchors(), BASE, retrieved=backing,
-                          request_text="boss frey stellt sich der Gruppe in den Weg")
-    assert "Boss Frey: blocking the road" in c.prompt, c.prompt
-
-
-def test_a_party_member_abbreviated_in_the_scene_takes_the_sheet_spelling_there_too():
+def test_a_party_member_abbreviated_in_the_scene_is_reported():
     """Measured live 2026-11-19 (§15): the figure lines of one prompt said "Seta
-    Onix, Romi Stachelpfote, Trixy Smoldersome" while its scene sentence said
-    "Seta, Bubo, Romi, Colum, Trixy". The renderer reads the whole prompt, and a
-    name that looks different from the one already described is a name it paints
-    again — the same shape as the collective-subject failure, in short form."""
+    Onix, Romi Stachelpfote" while its scene sentence said "Seta, Bubo, Romi,
+    Colum, Trixy". The renderer reads the whole prompt, and a name that looks
+    different from the one already described is a name it paints again.
+
+    The FIGURE LINES still take the sheet's spelling (that is identity: "Seta" and
+    "Seta Onix" must dedupe to one figure). The sentence is reported."""
     plan = _plan("Seta, Romi and Marvin hold the path while a bandit blocks it",
                  [{"name": "Seta", "pose": "drawing her bow"},
                   {"name": "Romi Stachelpfote", "pose": "planting her horn"},
                   {"name": "Marvin", "pose": "rolling forward beside Romi"}])
     c = _compose(plan)
-    scene = c.prompt.split(". Exactly")[0]
-    assert "Seta Onix" in scene and "Romi Stachelpfote" in scene, scene
-    assert "Trixy" not in scene, scene
-    assert any("sheet's spelling" in w for w in c.warnings), c.warnings
+    assert "Seta, Romi and Marvin hold the path" in c.prompt, c.prompt
+    assert "Seta Onix: drawing her bow" in c.prompt, c.prompt
+    reported = {(f.subject, f.detail) for f in c.findings if f.code == "name_spelling"}
+    assert any("Seta Onix" in d for _, d in reported), reported
     assert c.figures == 3, c.prompt
 
 
-def test_the_sheet_spelling_reaches_a_pose_that_names_another_member():
+def test_a_pose_that_named_another_member_shortly_is_reported():
     plan = _plan("Marvin rolls forward while Trixy works the bellows",
                  [{"name": "Marvin", "pose": "standing alert beside Trixy"},
                   {"name": "Trixy", "pose": "working the bellows"}])
     c = _compose(plan)
-    assert "beside Trixy Smoldersome" in c.prompt, c.prompt
+    f = _finding(c, "name_spelling", "Marvin")
+    assert "Trixy Smoldersome" in f.detail
+    assert "beside Trixy" in c.prompt, "the pose is the model's wording"
 
 
 # ── 12. Nobody in this world is a person (table owner's ruling, 2026-11-19) ──
@@ -1270,36 +1308,39 @@ def test_an_in_world_species_name_is_not_reported_as_an_invention():
 
 # ── Round 2 of the evaluation run (§17): what the D-set prompts showed.
 
-
-
-def test_a_note_about_the_pipeline_is_stripped_from_paintable_text():
+def test_a_note_about_the_pipeline_is_reported_not_cut_out():
     """A live scene sentence read: 'Boss Frey, a badger-folk bandit chief
     (species from the bot's own guess)'. The contract asks for a report, and the
-    model wrote the report where the renderer would paint it."""
+    model wrote the report where the renderer would paint it.
+
+    Retired 2026-11-19 (§17.3): stripping parentheticals was a regex deciding which
+    bracket was commentary and which was a description. The finding says it out loud
+    and the model removes its own note."""
     plan = ip.ImagePlan(scene="Boss Frey, a bandit chief (species from the bot's "
                               "own guess), stands alone",
                         figures=[ip.Figure(name="Boss Frey", pose="standing alone")])
-    c = ip.compose_prompt(plan, _anchors(), BASE)
-    assert "bot's own guess" not in c.prompt, c.prompt
-    assert "(" not in c.prompt.split("Exactly")[0], c.prompt
-    assert any("note about the pipeline" in w for w in c.warnings), c.warnings
-    assert "Boss Frey" in c.prompt, c.prompt   # the character is not what was cut
+    c = ip.compose_prompt(plan, _anchors(), BASE, animal_floor=FLOOR)
+    assert "bot's own guess" in c.prompt
+    f = _finding(c, "meta_comment", "scene")
+    assert "bot's own guess" in f.detail
 
 
-def test_a_species_claim_hidden_in_a_figure_name_is_still_policed():
+def test_a_species_claim_hidden_in_a_figure_name_is_still_reported():
     """A live run produced figures named 'crow-folk bandit 1' and 2. A species
     smuggled into a NAME is the same claim, and the renderer cannot tell a name
-    from a description."""
+    from a description — so the name is painted unchanged and the claim is called
+    out for the correction turn."""
     plan = ip.ImagePlan(
         scene="two bandits bar the path",
         figures=[ip.Figure(name="crow-folk bandit 1", pose="holding a cudgel"),
                  ip.Figure(name="crow-folk bandit 2", pose="holding an axe")])
     retrieved = ("### Die Banditen\nDie Banditen sind rat-folk "
                  "Schurken an der Old Bridge.")
-    c = ip.compose_prompt(plan, _anchors(), BASE, retrieved=retrieved,
-                          request_text="seine Banditen")
-    assert "crow-folk" not in c.prompt, c.prompt
-    assert any("figure NAME" in w for w in c.warnings), c.warnings
+    c = ip.compose_prompt(plan, _anchors(), BASE, animal_floor=FLOOR,
+                          retrieved=retrieved, request_text="seine Banditen")
+    names = {f.subject for f in c.findings if f.code == "species_contradicted"}
+    assert {"crow-folk bandit 1", "crow-folk bandit 2"} <= names, c.findings
+    assert "crow-folk bandit 1" in c.prompt, c.prompt
 
 
 def test_the_budget_never_cuts_a_crowd_the_request_itself_named():
@@ -1328,10 +1369,11 @@ def test_the_budget_never_cuts_a_crowd_the_request_itself_named():
 def test_a_species_in_an_unrelated_rules_list_is_not_evidence_about_the_crowd():
     """A live round retagged 'two weasel-folk bandits' as LIZARD-folk bandits.
 
-    The retrieved material contained the PHB's find-familiar list ("Bat, Cat,
-    Frog, Hawk, Lizard, Octopus, Owl, Rat, Raven, Spider, Weasel") in the same
-    chunk as the ambush notes. A species that far from the crowd word says
-    nothing about the crowd, and a distant species must not outvote a nearby one.
+    The retrieved material contained the PHB's find-familiar list ("Bat, Cat, Frog,
+    Hawk, Lizard, Octopus, Owl, Rat, Raven, Spider, Weasel") in the same chunk as
+    the ambush notes. The proximity rule survives — it is what makes the REPORT
+    truthful: the disagreement has to be quoted with the animal the vault actually
+    puts next to the bandits.
     """
     plan = ip.ImagePlan(
         scene="two weasel-folk bandits bar the path",
@@ -1341,26 +1383,26 @@ def test_a_species_in_an_unrelated_rules_list_is_not_evidence_about_the_crowd():
                  "### Find Familiar\nYou gain a Spirit in an animal form you "
                  "choose: Bat, Cat, Frog, Hawk, Lizard, Octopus, Owl, Rat, Raven, "
                  "Spider, Weasel, or another Beast.")
-    c = ip.compose_prompt(plan, _anchors(), BASE, retrieved=retrieved,
-                          request_text="seine Banditen")
-    assert "lizard" not in c.prompt, c.prompt
-    assert "weasel-folk" not in c.prompt, c.prompt
-    assert "rat-folk bandits" in c.prompt, c.prompt
-    assert any("rat" in w for w in c.warnings), c.warnings
+    c = ip.compose_prompt(plan, _anchors(), BASE, animal_floor=FLOOR,
+                          retrieved=retrieved, request_text="seine Banditen")
+    f = _finding(c, "species_contradicted", "scene")
+    assert "lizard" not in f.detail, f.detail
+    assert "rat" in f.detail, f.detail
 
 
-def test_a_pose_cannot_carry_a_collective_object():
+def test_a_pose_carrying_a_collective_object_is_reported():
     """Round 6 of the evaluation run: 'Boss Frey: snarling forward, sabre leveled
-    at the party' — the guarantee bans crowd nouns anywhere in the prompt, and in
-    a figure line the fix is removal, not name insertion (§4.2)."""
+    at the party' — a cast member named twice is a character painted twice (§4.2).
+    The composer used to delete the crowd word; the pose is left as written and the
+    disagreement is reported instead."""
     plan = _plan("Boss Frey bars the forest path",
                  [{"name": "Boss Frey", "pose": "snarling forward, sabre leveled at "
                                                "the party"},
                   {"name": "Seta Onix", "pose": "drawing her bow"}])
     c = _compose(plan)
-    assert "the party" not in c.prompt, c.prompt
-    assert "Boss Frey: snarling forward, sabre leveled" in c.prompt, c.prompt
-    assert any("crowd word" in w for w in c.warnings), c.warnings
+    f = _finding(c, "collective_in_figure", "Boss Frey")
+    assert "the party" in f.detail
+    assert "Boss Frey: snarling forward, sabre leveled at the party" in c.prompt
 
 
 # ── Whose animal is it? (rounds 4–7 of the evaluation run, §17) ─────────────
@@ -1402,8 +1444,11 @@ def test_a_species_glued_to_someone_elses_name_is_not_evidence_about_our_crowd()
     assert "hedgehog-folk merchant" in composed.prompt
 
 
-def test_the_vaults_animal_is_still_borrowed_when_no_one_else_is_named():
-    """The other side of the same rule: a crowd the vault describes keeps its animal."""
+def test_a_crowd_the_vault_describes_its_animal_is_disagreed_with_out_loud():
+    """The vault has an animal for this crew and the plan picked another one. It is
+    no longer borrowed into the prompt: the report names both, because the only
+    thing that made borrowing safe — knowing WHICH beings a sentence is about — is
+    exactly the judgement this pipeline gave up (§17)."""
     anchors = _anchors()
     composed = ip.compose_prompt(
         ip.ImagePlan(scene="Two squirrel-folk bandits bar the path",
@@ -1411,11 +1456,13 @@ def test_the_vaults_animal_is_still_borrowed_when_no_one_else_is_named():
                      figures=[ip.Figure(name="Boss Frey",
                                         look="a bandit chief in a black coat",
                                         source="HumbleWood/Characters/Boss Frey.md")]),
-        anchors, BASE, read_paths=["HumbleWood/Characters/Boss Frey.md"],
+        anchors, BASE, animal_floor=FLOOR,
+        read_paths=["HumbleWood/Characters/Boss Frey.md"],
         retrieved=RETRIEVED_BANDIT_RATS, request_text="Mal Boss Frey und seine Banditen",
         budget_kwargs={"base": 1100, "per_figure": 420, "hard_cap": 100000})
-    assert "rat-folk bandits" in composed.prompt
-    assert "squirrel" not in composed.prompt
+    assert "squirrel-folk bandits" in composed.prompt
+    codes = {(f.code, f.subject) for f in composed.findings}
+    assert ("species_contradicted", "scene") in codes, composed.findings
 
 
 def test_an_animal_from_a_rules_paragraph_is_not_evidence_about_a_crowd():
@@ -1454,12 +1501,12 @@ def test_the_vault_spelling_of_a_crowd_answers_the_plans_spelling():
 
     A vault statement counts as being ABOUT the crowd when its crowd word matches
     the plan's on its STEM — "bandits" answering "Banditen" — otherwise the vault's
-    own animal would never be reachable at all.
+    own animal would never be reachable at all. Detection survives; the rewriting
+    built on top of it does not (§17.3).
     """
     ev = ip.crowd_evidence_spans("bandits", RETRIEVED_BANDIT_RATS)
     strip, _ = ip.species_verdict("two squirrel-folk bandits bar the path", ev)
     assert list(strip) == ["squirrel"]
-    assert ip.species_replacement("two squirrel-folk bandits bar the path", ev) == "rat"
 
 
 def test_a_bare_animal_word_is_a_species_claim_too():
@@ -1487,15 +1534,3 @@ def test_a_lowercase_word_is_not_someone_being_named():
     assert ip._stray_name("lizard merchant Spleck sells potions",
                           ["Alisa Pennygleam"], ["merchant"]) == "Spleck"
 
-
-
-def test_the_animal_that_is_said_more_often_wins_when_number_cannot_tell_them_apart():
-    """Attestation order, and why the choice is reproducible.
-
-    Before this rule the candidate list was a set sorted by length, so two candidates
-    of equal length could flip between runs — the prompt changed with no code change.
-    """
-    ev = "three rat-folk cutthroats block the path, rat-folk cutthroats everywhere"
-    assert ip.species_replacement("two squirrel-folk bandits bar the path",
-                                  ev) == "rat"
-    assert ip._attested(ev, "rat") == 2

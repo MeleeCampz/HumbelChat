@@ -775,3 +775,32 @@ vault instead of on regex, and a finding costs one extra model turn (~10–60 s)
 when something is flagged. What it buys: the composer stops silently editing the
 table's canon in ways the table never asked for, and the same code runs against a
 DarkSun or Greyhawk vault without adding that setting's vocabulary to Python.
+
+## 17.4 — After the deletion: what the three layers actually do (live re-runs, 2026-11-19)
+
+The scripted layer is gone. The same four hard requests, live model, no GPU, after
+the campaign profile landed and the findings turn was wired:
+
+| request | what came out | cost |
+|---|---|---|
+| group + named NPC | 6 figures, 4+3, every name in its own sentence, Boss Frey as an entity line with a **grounded** look, his two thugs badger-folk | 54–63 s |
+| override + group | 7 figures: Seta in crimson plate cuirass (override), Romi bare-backed, Bubo with a lantern, Spleck with her wagon **as an object** and her lizard-folk look, Marvin as an automaton | 60–87 s |
+| machine + crowd | 2–3 figures, machine floor line in force, cart as an object, the two thieves kept (a look citing a **search snippet only** was dropped and reported) | 34–52 s |
+| species conflict | 8–9 figures, 4+4/5, Boss Frey **lizard-folk** (the user's own word — exempt), two bandits promoted by the model into figure lines | 50–54 s |
+
+No crowd noun anywhere; no invented retag of a party member; the count line matches
+the figure lines every time. **The rewrites cost the same as before the deletion**
+(34–87 s, one or two model turns) — so the scripted layer was not buying speed either.
+
+What the composer still guarantees by code: layout, the count line, dedupe, no
+negation in clauses it assembles, identity spelling on the figure lines, provenance
+of an NPC look, foreground ordering, the budget ladder and its report.
+
+What it now only *reports*: species claims, collective subjects, name spellings,
+meta-notes, repeated mentions, a character filed as an object. Those go back to the
+model as one turn (`finding_feedback`), and the second plan is what gets painted.
+
+Open measurement for the next visit: with the anchors consolidated the prompts sit at
+3,574–3,597 chars against the profile's `max=3600`, so the ladder is now compressing
+13 clauses per image. **`max=` is a profile edit** — no code change needed to find out
+whether the model holds 9 figures at 4,200.

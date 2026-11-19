@@ -329,6 +329,44 @@ class TestRewritePrompt:
         assert client.chat.completions.create.call_count == 3
         assert "bear-folk bandit chief with a silver tooth" in out
 
+    async def test_a_collective_scene_sentence_comes_back_as_a_finding(self,
+                                                                       monkeypatch):
+        """Analysis §17.3, end to end: the composer does not rewrite the plan's
+        sentence. It reports the shape, one correction turn puts that report in
+        front of the model that wrote it, and the SECOND plan's sentence is what
+        gets painted.
+
+        The failure this replaces was scripted: a regex generated a name list to
+        replace "die ganze Gruppe", and that generated sentence had its own bugs
+        (§13) — the cast was named twice in one sentence, which is exactly the
+        shape that paints a character twice.
+        """
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(side_effect=[
+            self._resp('<image_plan>\n{"scene": "die ganze Gruppe stellt sich '
+                       'Boss Frey in den Weg", "figures": [{"name": "Seta Onix", '
+                       '"pose": "drawing her bow"}, {"name": "Boss Frey", "pose": '
+                       '"brandishing an axe"}], "lighting": "dappled forest '
+                       'light"}\n</image_plan>'),
+            self._resp('<image_plan>\n{"scene": "Seta Onix and Marvin stand '
+                       'against Boss Frey on the Old Bridge", "figures": '
+                       '[{"name": "Seta Onix", "pose": "drawing her bow"}, '
+                       '{"name": "Marvin", "pose": "rolling forward"}, '
+                       '{"name": "Boss Frey", "pose": "brandishing an axe"}], '
+                       '"lighting": "dappled forest light"}\n</image_plan>'),
+        ])
+        monkeypatch.setattr(images, "_chat_client", lambda: client)
+        out = await images.rewrite_prompt("die ganze Gruppe stellt sich Boss Frey")
+        users = [m.content if hasattr(m, "content") else m["content"]
+                 for call in client.chat.completions.create.call_args_list
+                 for m in call.kwargs["messages"] if m["role"] == "user"]
+        assert client.chat.completions.create.call_count == 2, "exactly one turn back"
+        assert any("collective_subject" in u for u in users), users[-1]
+        assert "Do not describe the picture in prose" in users[-1]
+        assert "die ganze Gruppe" not in out, out
+        assert "Seta Onix and Marvin stand against Boss Frey" in out, out
+        assert "Exactly 3 named figures" in out, out
+
     async def test_a_lookup_that_finds_nothing_still_paints_the_name(self, monkeypatch):
         """One corrective pass, then the policy's fallback: name + pose."""
         import bot_core.agent_loop as agent_loop
