@@ -367,6 +367,40 @@ class TestRewritePrompt:
         assert "Seta Onix and Marvin stand against Boss Frey" in out, out
         assert "Exactly 3 named figures" in out, out
 
+    async def test_a_correction_that_makes_the_plan_worse_is_not_painted(self,
+                                                                         monkeypatch):
+        """Live 2026-11-19, round 15: the first plan said "Boss Frey, a bandit chief,
+        stands alone in a moonlit clearing" — one open finding, the description sitting
+        in the scene instead of in the figure's `look`. It was asked to move it.
+
+        The plan that came back fixed that and said, in the sentence the renderer
+        paints: "Boss Frey stands alone in a moonlit clearing (species unknown to the
+        vault) holding no weapon" — a meta aside the model would paint as text, a
+        negation (which paints the thing it names), and a figure with no description
+        left at all. Two problems answered with three.
+
+        The composer has both plans composed. It paints the one with fewer open
+        findings, and says so in the log.
+        """
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(side_effect=[
+            self._resp('<image_plan>\n{"scene": "Boss Frey, a bandit chief, stands '
+                       'alone in a moonlit clearing", "figures": [{"name": "Boss Frey", '
+                       '"pose": "gripping a heavy axe"}], "lighting": "cold moonlight"}'
+                       '\n</image_plan>'),
+            self._resp('<image_plan>\n{"scene": "Boss Frey stands alone in a moonlit '
+                       'clearing (species unknown to the vault) holding no weapon", '
+                       '"figures": [{"name": "Boss Frey", "pose": "standing"}], '
+                       '"lighting": "cold moonlight"}\n</image_plan>'),
+        ])
+        monkeypatch.setattr(images, "_chat_client", lambda: client)
+        out = await images.rewrite_prompt("Boss Frey allein im Mondlicht")
+        assert client.chat.completions.create.call_count == 2
+        assert "a bandit chief" in out, out          # the FIRST plan is what got painted
+        assert "unknown to the vault" not in out, out
+        assert "no weapon" not in out, out
+        assert "Exactly 1 named figure" in out, out
+
     async def test_a_lookup_that_finds_nothing_still_paints_the_name(self, monkeypatch):
         """One corrective pass, then the policy's fallback: name + pose."""
         import bot_core.agent_loop as agent_loop

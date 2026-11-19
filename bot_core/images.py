@@ -1028,7 +1028,7 @@ async def _rewrite_composed(text: str, complete,
                 gathered = "\n\n".join(g for g in
                                        (meta.gathered_context,
                                         retry_meta.gathered_context) if g)
-                composed = image_prompt.compose_prompt(
+                revised = image_prompt.compose_prompt(
                     retry, anchors, profile.style,
                     foreground=profile.foreground_figures,
                     budget_kwargs=_budget_kwargs(profile),
@@ -1037,19 +1037,34 @@ async def _rewrite_composed(text: str, complete,
                     retrieved=_vault_evidence(gathered), request_text=text,
                     animal_floor=profile.animal_floor,
                     animal_floor_living=profile.animal_floor_living)
-                for w in composed.warnings:
+                for w in revised.warnings:
                     if w.startswith("budget "):
                         log.warning("composer budget: %s", w)
                     else:
                         log.warning("composer: %s", w)
-                for f in composed.findings:
+                for f in revised.findings:
                     log.info("composer finding (after the correction pass): %s",
                              f.as_line())
-                log.info("image prompt recomposed after the lookup pass: %d "
-                         "char(s), %d figure(s), %d tool call(s) in the lookup",
-                         len(composed.prompt), composed.figures,
-                         len(retry_meta.tool_calls))
-                final_plan = retry
+                # Round 15 (live, 2026-11-19): asked to move a description into a
+                # `look` field, the model answered with a NEW plan whose scene said
+                # "Boss Frey, a heavyset badger-folk bandit chief (species not stated
+                # in the vault)" — a meta aside the renderer would paint, a "not" in
+                # the paintable sentence, and a species finding on top. Two problems
+                # answered with four. The composer has BOTH plans in hand, so it
+                # compares them and paints the one with fewer open findings.
+                before = sum(1 for f in composed.findings if f.fixable)
+                after = sum(1 for f in revised.findings if f.fixable)
+                if after > before:
+                    log.warning("rewrite: the correction pass answered with a plan "
+                                "that composes WORSE (%d open finding(s) → %d) — "
+                                "painting the first plan instead", before, after)
+                else:
+                    composed = revised
+                    final_plan = retry
+                    log.info("image prompt recomposed after the lookup pass: %d "
+                             "char(s), %d figure(s), %d tool call(s) in the lookup",
+                             len(composed.prompt), composed.figures,
+                             len(retry_meta.tool_calls))
 
         _remember_plan(memory_key, final_plan)
         log.info(
