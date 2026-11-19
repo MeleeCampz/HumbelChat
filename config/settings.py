@@ -159,10 +159,12 @@ IMAGE_PROMPT_FOREGROUND_FIGURES: int = _safe_int(
 # Every figure in a generated image is animal-folk in this world; this line is the
 # floor under a cast member the vault gives no species for, so an undescribed bandit
 # is not painted as a person (table owner's ruling 2026-11-19). It rides in the style
-# sentence, which the composer's budget ladder never cuts. Empty string disables it.
-IMAGE_ANIMAL_FLOOR: str = os.getenv(
-    "IMAGE_ANIMAL_FLOOR",
-    "Every figure in this image is an anthropomorphic animal-folk character of this world")
+# sentence, which the composer's budget ladder never cuts.
+# The WORDING is campaign text and does not live here: it is the `animal_floor` line
+# of <KB_PATH>/Campaign Prompt Profile.md (docs/campaign-profile.md). This is only
+# the override for a deployment that wants a different wording than its profile has,
+# and an empty value disables the line entirely.
+IMAGE_ANIMAL_FLOOR: str = os.getenv("IMAGE_ANIMAL_FLOOR", "").strip()
 IMAGE_GEN_TIMEOUT_S: float = _safe_float(os.getenv("IMAGE_GEN_TIMEOUT_S"), 600.0)
 IMAGE_LOAD_TIMEOUT_S: float = _safe_float(os.getenv("IMAGE_LOAD_TIMEOUT_S"), 300.0)
 # (Image-backend base WITHOUT the /v1 suffix — Studio's management API

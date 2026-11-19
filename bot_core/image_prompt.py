@@ -32,6 +32,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+
+from bot_core import prompt_profile
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -142,16 +144,21 @@ NO_LETTERING_TAIL = "No text, lettering, logos or watermarks."
 # must still be painted as one rather than as a person. The anchors carry their own
 # species; this line is the floor under everyone else, and it rides in the style
 # sentence, which the budget ladder is not allowed to cut.
-_ANIMAL_FLOOR = ("Every figure in this image is an anthropomorphic animal-folk "
-                 "character of this world")
+# The wording of both floor lines comes from the campaign profile
+# (<KB_PATH>/Campaign Prompt Profile.md); the composer holds no fallback sentence for
+# a campaign it does not know. Empty means the prompt gets no floor line.
 # …with one exception the vault states outright: Marvin is a Steel Defender, a
 # machine. "Every figure is animal-folk" next to "brass-and-steel automaton" is a
 # contradiction the renderer resolves by painting whichever it reads last, so the
 # floor says LIVING whenever someone in the frame is described as a machine. The
 # switch is made from the sheet's own wording, never from a guess about a name.
-_ANIMAL_FLOOR_LIVING = _ANIMAL_FLOOR.replace("Every figure", "Every living figure")
 _MACHINE_WORDS = ("automaton", "construct", "machine", "golem", "robot", "robotic",
                   "clockwork", "defender", "android", "homunculus")
+
+
+def _living_floor(floor: str) -> str:
+    """`Every figure …` -> `Every living figure …` when no variant was profiled."""
+    return prompt_profile.living_variant(floor)
 
 
 def is_machine(*texts: str) -> bool:
@@ -1966,7 +1973,8 @@ def compose_prompt(
     snippet_paths: Iterable[str] | None = None,
     retrieved: str = "",
     request_text: str = "",
-    animal_floor: str = _ANIMAL_FLOOR,
+    animal_floor: str = "",
+    animal_floor_living: str = "",
 ) -> Composed:
     """Assemble the final prompt from the plan + the vault anchors.
 
@@ -2226,7 +2234,7 @@ def compose_prompt(
     if animal_floor and any(is_machine(a.desc if a else "", f.look, f.source,
                                        *(a.fields.values() if a else ()))
                            for f, a in resolved):
-        animal_floor = _ANIMAL_FLOOR_LIVING
+        animal_floor = (animal_floor_living or _living_floor(animal_floor))
     # Nobody in this world is a person (the table owner's ruling, 2026-11-19): the
     # floor line rides in the style sentence, which the budget ladder never cuts,
     # so a character or crowd the vault gives no species for is still painted

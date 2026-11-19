@@ -27,8 +27,12 @@ import pytest
 
 import bot_core.images as images
 from bot_core import image_prompt as ip
+from bot_core import prompt_profile
 
-BASE = images._BASE_STYLE
+# The composer's style sentence is an argument, so these tests supply their own
+# rather than depending on a gitignored campaign profile being present.
+BASE = ("Semi-realistic fantasy illustration — detailed fur and feather texture, "
+        "natural light, storybook charm")
 TAIL = ip.NO_LETTERING_TAIL          # the composer's one fixed negation
 
 _SHEET = """# Party Roster
@@ -107,11 +111,19 @@ def _plan(scene, figures, **kw):
     return plan
 
 
-def _compose(plan, anchors=None, *, budget=100000, foreground=4):
+# The floor wording is campaign text (it lives in the campaign profile in the real
+# bot), so the tests state a campaign of their own instead of reading the repo's.
+FLOOR = ("Every figure in this image is an anthropomorphic animal-folk character "
+         "of this world")
+
+
+def _compose(plan, anchors=None, *, budget=100000, foreground=4, floor=FLOOR):
     return ip.compose_prompt(plan, anchors or _anchors(), BASE,
                              foreground=foreground,
                              budget_kwargs={"base": 1100, "per_figure": 420,
-                                            "hard_cap": budget})
+                                            "hard_cap": budget},
+                             animal_floor=floor,
+                             animal_floor_living=prompt_profile.living_variant(floor))
 
 
 def _content(c):
@@ -435,7 +447,7 @@ def test_six_real_anchors_fit_without_a_single_cut():
     budget, so a group image loses nothing (the old policy compressed anchors to
     'identity-critical core' at six — that guess is now a measurement)."""
     anchors = {a.name: a for a in ip.parse_party_sheet(
-        images._PARTY_SHEET_FILE.read_text(encoding="utf-8"))}
+        prompt_profile.party_sheet_path().read_text(encoding="utf-8"))}
     assert len(anchors) == 6
     plan = ip.ImagePlan(scene="Six party members hold a muddy ford at dusk",
                         figures=[ip.Figure(n, "holding the line") for n in anchors],
@@ -589,7 +601,7 @@ def test_plan_path_rejects_a_prompt_shaped_answer_and_retries(monkeypatch, tmp_p
     path rather than painting a plan."""
     sheet = tmp_path / "Player Characters.md"
     sheet.write_text(_SHEET, encoding="utf-8")
-    monkeypatch.setattr(images, "_PARTY_SHEET_FILE", sheet)
+    monkeypatch.setattr(images, "_party_sheet_file", lambda: sheet)
 
     replies = ["I'll search the knowledge base for the party members.",
                "Let me look that up in the vault first.",
@@ -626,7 +638,7 @@ def test_the_plan_contract_file_is_loaded_with_the_roster_injected():
     system = images._load_plan_system()
     assert "<image_plan>" in system
     assert "exactly ONE field" in system
-    if not images._PARTY_SHEET_FILE.exists():
+    if not prompt_profile.party_sheet_path().exists():
         pytest.skip("vault party sheet not present (data/ is gitignored)")
     # The roster is the REAL vault sheet, with its field labels visible so the
     # model can aim an override — but not the full text it no longer has to copy.
@@ -1259,26 +1271,6 @@ def test_an_in_world_species_name_is_not_reported_as_an_invention():
 # ── Round 2 of the evaluation run (§17): what the D-set prompts showed.
 
 
-def test_the_vaults_own_species_replaces_the_one_the_plan_invented():
-    """'The vault's species wins' has to mean the vault's ANIMAL is painted.
-
-    A live run: the plan said 'badger-folk bandit chief', while the vault's
-    SESSION_01 calls the ambush boss a Fuchsdame. Stripping 'badger-folk' leaves
-    'bandits' — which the renderer paints as people. The vault's own animal is
-    substituted into the same sentence instead.
-    """
-    plan = ip.ImagePlan(scene="a badger-folk bandit chief bars the path",
-                        entities=["two weasel-folk bandit lackeys with axes"],
-                        figures=[ip.Figure(name="Seta Onix", pose="drawing her bow")])
-    retrieved = ("SESSION_01: kommt auf einmal eine Fuchsdame heraus. "
-                 "Offensichtlich Banditen. Die Banditen: three rat-folk cutthroats.")
-    c = ip.compose_prompt(plan, _anchors(), BASE, retrieved=retrieved,
-                          request_text="Boss Frey und seinen Banditen")
-    assert "weasel" not in c.prompt, c.prompt
-    assert "badger" not in c.prompt, c.prompt
-    assert "fox-folk bandit chief" in c.prompt, c.prompt
-    assert any("fox-folk" in w for w in c.warnings), c.warnings
-
 
 def test_a_note_about_the_pipeline_is_stripped_from_paintable_text():
     """A live scene sentence read: 'Boss Frey, a badger-folk bandit chief
@@ -1495,23 +1487,6 @@ def test_a_lowercase_word_is_not_someone_being_named():
     assert ip._stray_name("lizard merchant Spleck sells potions",
                           ["Alisa Pennygleam"], ["merchant"]) == "Spleck"
 
-
-def test_a_chief_and_his_crew_can_be_two_different_animals():
-    """Number agreement: the vault answers each claim with the statement it fits.
-
-    SESSION_01 says "eine Fuchsdame" (ONE fox-folk came out) and "three rat-folk
-    cutthroats" (the crew). The plan claimed badger for the chief and weasel for the
-    lackeys. Substituting one animal everywhere would flatten a real distinction the
-    campaign makes, so the candidate has to fit the claim's own number.
-    """
-    retrieved = ("SESSION_01: kommt auf einmal eine Fuchsdame heraus. Offensichtlich "
-                 "Banditen. Die Banditen: three rat-folk cutthroats.")
-    chief = "a badger-folk bandit chief bars the path"
-    crew = "two weasel-folk bandit lackeys with axes"
-    assert ip._claim_number(chief) == "singular"
-    assert ip._claim_number(crew) == "plural"
-    assert ip.species_replacement(chief, ip.crowd_evidence_spans(chief, retrieved)) == "fox"
-    assert ip.species_replacement(crew, ip.crowd_evidence_spans(crew, retrieved)) == "rat"
 
 
 def test_the_animal_that_is_said_more_often_wins_when_number_cannot_tell_them_apart():

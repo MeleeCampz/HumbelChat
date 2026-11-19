@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import bot_core.images as images
+from bot_core import prompt_profile
 from commands.generate_image_command import handle_generate_image_command
 
 
@@ -247,7 +248,7 @@ class TestRewritePrompt:
         # The lookup happened, and the composed prompt opens with the style
         # sentence and states the figure count (both are now code guarantees).
         assert executed == ["search_kb"]
-        assert out.startswith(images._BASE_STYLE)
+        assert out.startswith(images._base_style())
         assert "Exactly 1 named figure" in out
         assert "Marvin" in out
 
@@ -446,14 +447,18 @@ class TestPromptShapeGuard:
     def _resp(content: str):
         return MagicMock(choices=[MagicMock(message=MagicMock(content=content))])
 
-    def test_base_style_constant_matches_the_policy_file(self):
-        """The guard and the policy must not drift apart (the policy is the
-        source of truth the model is told to follow VERBATIM)."""
+    def test_the_campaign_profile_style_matches_the_policy_file(self):
+        """The profile's style sentence and the vault's own policy must not drift
+        apart (the policy is the source of truth the model is told to follow
+        VERBATIM, and the composer pastes the profile's wording)."""
+        style = images._base_style()
+        if not style:
+            pytest.skip("no style sentence in the campaign profile")
         policy = images._POLICY_FILE.read_text(encoding="utf-8")
-        assert images._BASE_STYLE in policy
+        assert style in policy
 
     def test_real_prompts_pass(self):
-        base = images._BASE_STYLE
+        base = images._base_style()
         assert images.looks_like_image_prompt(base)
         assert images.looks_like_image_prompt(base + ". Colum stands on a log.")
         # live model habit: stray space before the period
@@ -478,13 +483,13 @@ class TestPromptShapeGuard:
         client = MagicMock()
         client.chat.completions.create = AsyncMock(side_effect=[
             self._resp("I need to look up the Player Characters sheet first."),
-            self._resp(images._BASE_STYLE + ". Colum and Seta face a bandit; Colum "
+            self._resp(images._base_style() + ". Colum and Seta face a bandit; Colum "
                        "lunges, Seta nocks an arrow."),
         ])
         monkeypatch.setattr(images, "_chat_client", lambda: client)
         complete = images._make_completer(client)
         out = await images._rewrite_prose("die ganze Gruppe", complete)
-        assert out.startswith(images._BASE_STYLE)
+        assert out.startswith(images._base_style())
         # the retry restates the request and says no lookup is needed
         sent = client.chat.completions.create.call_args_list[1].kwargs["messages"]
         assert sent[-1]["content"].startswith("Your previous answer was not an image prompt")
@@ -502,8 +507,9 @@ class TestPromptShapeGuard:
 
 
 def _parse_party_sheet_safe():
-    """Read the monkeypatched sheet and parse it (test helper)."""
-    return images._parse_party_sheet(images._PARTY_SHEET_FILE.read_text(encoding="utf-8"))
+    """Read the sheet the test points at (patched or the campaign profile's) and
+    parse it."""
+    return images._parse_party_sheet(images._party_sheet_file().read_text(encoding="utf-8"))
 
 
 class TestPartyDossier:
@@ -543,12 +549,12 @@ A squirrel.
     def _point_at(self, monkeypatch, tmp_path, text=None):
         sheet = tmp_path / "Player Characters.md"
         sheet.write_text(text if text is not None else self._SHEET, encoding="utf-8")
-        monkeypatch.setattr(images, "_PARTY_SHEET_FILE", sheet)
+        monkeypatch.setattr(images, "_party_sheet_file", lambda: sheet)
         return sheet
 
     def test_parses_names_species_line_and_anchor(self, monkeypatch, tmp_path):
         self._point_at(monkeypatch, tmp_path)
-        entries = images._parse_party_sheet(images._PARTY_SHEET_FILE.read_text(encoding="utf-8"))
+        entries = images._parse_party_sheet(images._party_sheet_file().read_text(encoding="utf-8"))
         assert [e[0] for e in entries] == ["Colum Bidae", "Romi Stachelpfote"]
         assert entries[0][1].startswith("Birdfolk (blue tit)")
         assert entries[1][2] == ("A small anthropomorphic hedgehog monk: taupe "
@@ -576,7 +582,7 @@ A squirrel.
         sheet.write_text(
             "# Colum Bidae\n## Visual Anchor\n> A small plump blue-tit warlock "
             "bird, blue wings.\n\n", encoding="utf-8")
-        monkeypatch.setattr(images, "_PARTY_SHEET_FILE", sheet)
+        monkeypatch.setattr(images, "_party_sheet_file", lambda: sheet)
         head = images._load_party_dossier()
         for needle in ("MUST be looked up in the",
                        "knowledge base BEFORE you write it",
@@ -586,7 +592,7 @@ A squirrel.
             assert needle in head, needle
 
     def test_missing_sheet_degrades_to_a_lookup_instruction(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(images, "_PARTY_SHEET_FILE", tmp_path / "absent.md")
+        monkeypatch.setattr(images, "_party_sheet_file", lambda: tmp_path / "absent.md")
         s = images._load_rewrite_system()
         assert "No party dossier available" in s
         assert "{{PARTY_DOSSIER}}" not in s

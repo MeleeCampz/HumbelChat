@@ -32,7 +32,7 @@ from typing import Any, Callable
 import httpx
 from openai import APIStatusError, AsyncOpenAI, OpenAIError
 
-from bot_core import image_prompt
+from bot_core import image_prompt, prompt_profile
 from bot_core.agent_loop import looks_like_tool_call_fragment, run_agent_loop
 from bot_core.ai_client import _create_with_reasoning_fallback
 from bot_core.errors import extract_reply_text
@@ -42,7 +42,6 @@ from config.settings import (
     GPU_HEAL_ON_START,
     GPU_SWITCH_URL,
     IMAGE_DEFAULT_SIZE,
-    IMAGE_ANIMAL_FLOOR,
     IMAGE_GEN_TIMEOUT_S,
     IMAGE_GGUF_FILENAME,
     IMAGE_GPU_IDS,
@@ -53,10 +52,6 @@ from config.settings import (
     IMAGE_MODE_HOLD_S,
     IMAGE_MODEL,
     IMAGE_NEGATIVE_PROMPT,
-    IMAGE_PROMPT_BASE_CHARS,
-    IMAGE_PROMPT_CHARS_PER_FIGURE,
-    IMAGE_PROMPT_FOREGROUND_FIGURES,
-    IMAGE_PROMPT_MAX_CHARS,
     IMAGE_REASONING_EFFORT,
     IMAGE_REWRITE_MAX_TOKENS,
     INFER_API_KEY,
@@ -367,20 +362,22 @@ _FALLBACK_POLICY = (
 # "die ganze Gruppe" produced a badger named Bramble and an antlered elf named
 # Elara, Colum as a raven and Trixy as a tabby cat, and dropped Seta, Bubo and
 # Romi entirely.
-_PARTY_SHEET_FILE = Path(KB_PATH) / "humblewood" / "HumbleWood" / "Characters" \
-    / "Player Characters.md"
+# Which sheet holds the Visual Anchors, and which style sentence every prompt
+# opens with, are no longer Python constants: they are lines in
+# <KB_PATH>/Campaign Prompt Profile.md (docs/campaign-profile.md), so a second
+# campaign setting is a second profile file and not a code change.
+def _party_sheet_file() -> Path | None:
+    return prompt_profile.party_sheet_path()
 
-# The base style sentence the policy makes the model open with VERBATIM. Used
-# as the structural check that a rewrite is a PROMPT and not narration — and
-# kept in sync with prompts/image_rewrite_system.md by a test.
-# Scale lives here rather than in six Visual Anchors: "small" per character costs
-# 6 x 60 characters of prompt and the renderer still defaults to human proportions
-# for a bipedal animal. Wording taken from the sheet's own Appearance notes
-# ("fully upright and low to the ground", "A small plump blue-tit bird").
-_BASE_STYLE = ("Semi-realistic fantasy illustration — detailed fur and feather "
-               "texture, natural light, storybook charm; the animal-folk of this "
-               "world are small creatures, upright and low to the ground, sized "
-               "like the animals they are")
+
+def _base_style() -> str:
+    """The style sentence the policy makes the model open with VERBATIM.
+
+    Also the structural check that a rewrite is a PROMPT and not narration. An
+    empty profile line means the campaign has no fixed opening, and then there is
+    nothing to check — see `_looks_like_prompt`.
+    """
+    return prompt_profile.load().style
 
 _MAX_ANCHOR_CHARS = 900   # a Visual Anchor runs ~550; a runaway quote must not
 # monopolise the system prompt (it is truncated with a warning instead)
@@ -430,8 +427,11 @@ def _parse_party_sheet(raw: str) -> list[tuple[str, str, str]]:
 
 def _load_party_dossier() -> str:
     """The party roster + every Visual Anchor, re-read on EVERY rewrite."""
+    sheet = _party_sheet_file()
+    if sheet is None:
+        return ""
     try:
-        raw = _PARTY_SHEET_FILE.read_text(encoding="utf-8")
+        raw = sheet.read_text(encoding="utf-8")
     except OSError as exc:
         log.warning("party sheet unreadable (%s) — no party dossier injected", exc)
         return ""
@@ -488,9 +488,15 @@ def looks_like_image_prompt(text: str) -> bool:
     n = _norm_prompt(text)
     if not n:
         return False
-    if n.startswith(_norm_prompt(_BASE_STYLE)):
+    style = _norm_prompt(_base_style())
+    if not style:
+        # No style sentence configured for this campaign, so there is no opening
+        # phrase to key on. Rejecting everything would turn a profile without a
+        # style line into a bot that never paints.
         return True
-    head = _norm_prompt(_BASE_STYLE.split(" — ")[0])
+    if n.startswith(style):
+        return True
+    head = _norm_prompt(_base_style().split(" — ")[0])
     return bool(head) and head in n[:220]
 
 
@@ -704,8 +710,11 @@ def _load_anchors() -> dict[str, image_prompt.Anchor]:
     Re-reading is deliberate: a Visual Anchor the user edits in Obsidian must
     take effect on the next image, not the next bot restart.
     """
+    sheet = _party_sheet_file()
+    if sheet is None:
+        return {}
     try:
-        raw = _PARTY_SHEET_FILE.read_text(encoding="utf-8")
+        raw = sheet.read_text(encoding="utf-8")
     except OSError as exc:
         log.warning("party sheet unreadable (%s) — no anchors for the composer", exc)
         return {}
@@ -842,10 +851,11 @@ def _vault_evidence(gathered: str) -> str:
     return "\n".join(kept)
 
 
-def _budget_kwargs() -> dict[str, int]:
-    return {"base": IMAGE_PROMPT_BASE_CHARS,
-            "per_figure": IMAGE_PROMPT_CHARS_PER_FIGURE,
-            "hard_cap": IMAGE_PROMPT_MAX_CHARS}
+def _budget_kwargs(profile: prompt_profile.Profile | None = None) -> dict[str, int]:
+    p = profile or prompt_profile.load()
+    return {"base": p.base_chars,
+            "per_figure": p.chars_per_figure,
+            "hard_cap": p.max_chars}
 
 
 async def _rewrite_composed(text: str, complete,
@@ -857,6 +867,9 @@ async def _rewrite_composed(text: str, complete,
     """
     system = _load_plan_system()
     anchors = _load_anchors()
+    profile = prompt_profile.load()
+    for w in profile.warnings:
+        log.warning("campaign profile (%s): %s", profile.source, w)
     prior = _previous_plan_block(memory_key)
     base_msg = _wrap_request(text)
     first_msg = f"{prior}\n\n{base_msg}" if prior else base_msg
@@ -892,9 +905,9 @@ async def _rewrite_composed(text: str, complete,
                 "rewrite produced no plan block: " + out[:80].replace("\n", " "))
         final_plan = plan
         composed = image_prompt.compose_prompt(
-            plan, anchors, _BASE_STYLE,
-            foreground=IMAGE_PROMPT_FOREGROUND_FIGURES,
-            budget_kwargs=_budget_kwargs(),
+            plan, anchors, profile.style,
+            foreground=profile.foreground_figures,
+            budget_kwargs=_budget_kwargs(profile),
             # An NPC appearance is only painted when it came from a file THIS
             # rewrite read. The live dry run caught the model writing a confident
             # "large badger-folk with grey-black fur" for Boss Frey — a character
@@ -909,7 +922,8 @@ async def _rewrite_composed(text: str, complete,
             # spelling a campaign name really has ("Frey" painted for "Boss Frey"
             # was measured live, analysis §15).
             request_text=text,
-            animal_floor=IMAGE_ANIMAL_FLOOR)
+            animal_floor=profile.animal_floor,
+            animal_floor_living=profile.animal_floor_living)
         for w in composed.warnings:
             if w.startswith("budget "):
                 log.warning("composer budget: %s", w)
@@ -951,13 +965,14 @@ async def _rewrite_composed(text: str, complete,
                                        (meta.gathered_context,
                                         retry_meta.gathered_context) if g)
                 composed = image_prompt.compose_prompt(
-                    retry, anchors, _BASE_STYLE,
-                    foreground=IMAGE_PROMPT_FOREGROUND_FIGURES,
-                    budget_kwargs=_budget_kwargs(),
+                    retry, anchors, profile.style,
+                    foreground=profile.foreground_figures,
+                    budget_kwargs=_budget_kwargs(profile),
                     read_paths=opened,
                     snippet_paths=_snippet_paths_from(gathered, opened),
                     retrieved=_vault_evidence(gathered), request_text=text,
-                    animal_floor=IMAGE_ANIMAL_FLOOR)
+                    animal_floor=profile.animal_floor,
+                    animal_floor_living=profile.animal_floor_living)
                 for w in composed.warnings:
                     if w.startswith("budget "):
                         log.warning("composer budget: %s", w)
