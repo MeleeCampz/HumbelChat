@@ -1662,10 +1662,47 @@ def test_an_identity_override_leads_the_block_like_the_field_it_replaces():
 
 
 def test_a_figure_with_no_identity_at_all_still_leads_with_its_pose():
-    """The composer does not invent an identity to lead with: Boss Frey has none
-    here, so his block stays pose-first rather than gaining a guess the vault never
-    made — and the absence is reported (§18.6)."""
+    """The ladder cannot invent an identity to lead with: Boss Frey has none here, so
+    his block stays pose-first rather than gaining a guess the vault never made."""
     plan = _plan("Boss Frey blocks the path", [{"name": "Boss Frey",
                                                 "pose": "snarling forward"}])
     c = _compose(plan)
     assert "Boss Frey: snarling forward" in c.prompt, c.prompt
+
+
+def test_a_description_left_in_the_scene_sentence_is_reported_as_out_of_reach():
+    """Measured live 2026-11-19 (§18): "Boss Frey, a badger-folk bandit chief, stands
+    alone in a mossy forest clearing" arrived together with `"look": ""`, so his figure
+    line went out as "Boss Frey: raising a heavy battle axe overhead" — the description
+    existed in the prompt, just not where the renderer reads it.
+
+    Carrying it across would be editing the model's language. Pointing at it is not.
+    """
+    plan = _plan("Boss Frey, a badger-folk bandit chief, stands alone under the moon",
+                 [{"name": "Boss Frey", "pose": "raising a heavy battle axe"}])
+    c = _compose(plan)
+    codes = [f.code for f in c.findings]
+    assert "identity_left_in_scene" in codes, c.findings
+    f = next(f for f in c.findings if f.code == "identity_left_in_scene")
+    assert f.subject == "Boss Frey"
+    assert "badger-folk bandit chief" in f.detail, f.detail
+    assert f.code in ip.FIXABLE_CODES
+    assert "figure_ungrounded" not in codes, (
+        "the plan did describe him — in the wrong field, which is a different complaint")
+
+
+def test_a_name_the_plan_described_nowhere_is_still_reported_plainly():
+    plan = _plan("Boss Frey blocks the path", [{"name": "Boss Frey",
+                                                "pose": "snarling forward"}])
+    c = _compose(plan)
+    codes = [f.code for f in c.findings]
+    assert codes == ["figure_ungrounded"], c.findings
+
+
+def test_a_scene_description_is_not_hunted_for_where_there_is_none():
+    """_scene_description returns "" rather than a guess: a name followed by a verb is
+    not a description, and an apposition that only repeats the name says nothing."""
+    assert ip._scene_description("Boss Frey blocks the path", "Boss Frey") == ""
+    assert ip._scene_description("Bubo, an owl archmage, raises his staff",
+                                 "Bubo") == "an owl archmage"
+    assert ip._scene_description("Seta, Seta and Romi hold the gate", "Seta") == ""

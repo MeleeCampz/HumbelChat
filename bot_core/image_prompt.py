@@ -657,8 +657,7 @@ def crowd_evidence_spans(text: str, retrieved: str,
             # …and only when the name is attached to it, not merely in the same
             # breath: "Winnowing Reach: three rat-folk cutthroats" names a place,
             # and the colon says so. Breaking on punctuation keeps the vault's
-            # good evidence ("three rat-folk cutthroats") intact.
-            # "Attached" means close and in the same breath. "lizard merchant
+            # good evidence ("three rat-folk cutthroats") intact. "lizard merchant
             # Spleck" is a species belonging to Spleck; "Boss Frey führt seine
             # Banditen: two rat-folk cutthroats" is a species belonging to the
             # bandits, with a name merely further up the line.
@@ -1327,7 +1326,8 @@ FIXABLE_CODES = frozenset({
     "collective_in_entity", "duplicate_mention", "name_spelling",
     "species_contradicted", "species_unbacked", "species_conflict",
     "negation_clause", "entity_named_not_painted", "figure_ungrounded",
-    "look_unverified", "name_form", "same_person_listed_twice",
+    "identity_left_in_scene", "look_unverified", "name_form",
+    "same_person_listed_twice",
 })
 
 
@@ -1378,9 +1378,37 @@ def _collective_phrase(text: str) -> str:
     return " ".join(keep + [phrase])
 
 
+def _scene_description(scene: str, name: str) -> str:
+    """The description a plan hung on *name* inside the scene sentence, if any.
+
+    "Boss Frey, a badger-folk bandit chief, stands alone under the moon" →
+    "a badger-folk bandit chief". Bracket-walking again: a name, a comma, text, a
+    comma. No reading of the text, and it never invents a description — a name with
+    no apposition returns "".
+    """
+    for m in re.finditer(re.escape(name) + r"\s*,", scene):
+        i = m.end()
+        while i < len(scene) and scene[i] == " ":
+            i += 1
+        depth = 0
+        for j in range(i, len(scene)):
+            ch = scene[j]
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                if depth == 0:
+                    break
+                depth -= 1
+            elif ch == "," and depth == 0:
+                desc = scene[i:j].strip()
+                if desc and name.lower() not in desc.lower():
+                    return desc
+                break
+    return ""
+
+
 def _introductions(text: str, name: str) -> int:
     """Mentions of *name* that INTRODUCE the character, not ones that lean on them.
-
     "…perches on Trixy Smoldersome's shoulder" says where another figure is; it does
     not bring Trixy into the frame a second time. A genitive after the name is the
     mechanical signal for that, and it is arithmetic on punctuation rather than a
@@ -1507,11 +1535,27 @@ def lint_plan(plan: ImagePlan, anchors: dict[str, Anchor], *,
                         f"{token}-folk is an invention: nothing in what was retrieved "
                         "describes this character's species"))
         if not f.look and not f.source and match_anchor(f.name, anchors) is None:
-            add(Finding("figure_ungrounded", f.name,
-                        "no Visual Anchor and no `look` — this name is painted with "
-                        "no appearance at all; look it up or drop the figure"))
+            # A description the plan DID write — in the scene sentence — while the
+            # figure's own line went out as a bare pose. Measured live 2026-11-19
+            # (§18): the request for Boss Frey alone produced "Boss Frey, a badger-folk
+            # bandit chief, stands alone in a mossy forest clearing" together with
+            # `"look": ""`, and his figure line was "Boss Frey: raising a heavy battle
+            # axe overhead". The composer does not carry a description from one field
+            # to another — that is language editing — but it can point at it.
+            said = _scene_description(plan.scene, f.name)
+            if said:
+                add(Finding("identity_left_in_scene", f.name,
+                            f"you described {f.name} as {said!r} in the scene sentence "
+                            f"but its figure has no `look`, so its own line is painted "
+                            f"without that description — put it in this figure's `look` "
+                            f"field, with where you found it in `source`"))
+            else:
+                add(Finding("figure_ungrounded", f.name,
+                            "no Visual Anchor and no `look` — this name is painted "
+                            "with no appearance at all; look it up or drop the figure"))
 
     for e in plan.entities:
+        ev_ent = crowd_evidence_spans(e, retrieved, names + list(anchors))
         for note in _meta_comments(e):
             add(Finding("meta_comment", "entities",
                         f"{note!r} inside an entity entry"))
@@ -1523,14 +1567,12 @@ def lint_plan(plan: ImagePlan, anchors: dict[str, Anchor], *,
             add(Finding("negation_clause", "entities",
                         f"{e!r} says what an object is NOT; a renderer paints the "
                         "thing it names — describe it positively"))
-        claim = contradicted_species(e, crowd_evidence_spans(
-            e, retrieved, names + list(anchors)), request_species(request_text))
+        claim = contradicted_species(e, ev_ent, request_species(request_text))
         if claim:
-            said = _said_animals(vault_animals(e, retrieved))
             add(Finding("species_contradicted", "entities",
                         f"{e!r} claims {'/'.join(claim)}-folk while the material "
-                        f"about those beings says {said} — fix the claim or name "
-                        "where yours came from"))
+                        f"about those beings says {_said_animals(ev_ent)} — fix the "
+                        "claim or name where yours came from"))
 
     if has_negation(plan.scene):
         add(Finding("negation_clause", "scene",
@@ -1553,16 +1595,14 @@ def lint_plan(plan: ImagePlan, anchors: dict[str, Anchor], *,
                     "the scene enumerates this name again, and the figure line already "
                     "describes them — a name said three times is a character painted "
                     "twice"))
-    claim_scene = contradicted_species(
-        plan.scene, crowd_evidence_spans(plan.scene, retrieved,
-                                         names + list(anchors)),
-        request_species(request_text))
+    ev_scene = crowd_evidence_spans(plan.scene, retrieved, names + list(anchors))
+    claim_scene = contradicted_species(plan.scene, ev_scene,
+                                       request_species(request_text))
     if claim_scene:
-        said = _said_animals(vault_animals(plan.scene, retrieved))
         add(Finding("species_contradicted", "scene",
                     f"the scene claims {'/'.join(claim_scene)}-folk while the "
-                    f"material about those beings says {said} — fix the claim or "
-                    "name where yours came from"))
+                    f"material about those beings says {_said_animals(ev_scene)} — "
+                    "fix the claim or name where yours came from"))
     for token in species_guesses(plan.scene, retrieved, request_text):
         add(Finding("species_unbacked", "scene",
                     f"{token}-folk is claimed in the scene sentence and the vault "
@@ -1655,8 +1695,16 @@ def _request_names(request_text: str) -> list[str]:
     return out
 
 
-def _said_animals(animals: Sequence[str]) -> str:
-    return ", ".join(animals) if animals else "nothing about their species"
+def _said_animals(evidence: str) -> str:
+    """Quote what the evidence the verdict ALREADY READ says about the species.
+
+    Round 14 (live, 2026-11-19): a finding told the model "the material about those
+    beings says nothing about their species" while the verdict that produced it had
+    just read a span containing "birdfolk". Two functions re-deriving the evidence
+    differently produce a report that contradicts its own ruling. Both sides of a
+    finding now read one string.
+    """
+    return ", ".join(sorted(_species_named_in(evidence))) or "nothing about their species"
 
 
 def vault_animals(text: str, retrieved: str) -> tuple[str, ...]:
@@ -1759,7 +1807,7 @@ def _figure_text(fr: _FigureRender, protect: set[str]) -> str:
     """One figure's block: what it IS, then what it is DOING, then the rest.
 
     The order is measured, not styled (analysis §18). The same eight characters,
-    the same Visual Anchors in full, the same words in a prompt of exactly the same
+    the same full Visual Anchors, the same words in a prompt of exactly the same
     length — only the identity clause's position moved — and every render that put
     the pose first lost a character (5 of 5), while every render that put the
     identity first painted all of them (4 of 4, p = 0.008). A diffusion model
