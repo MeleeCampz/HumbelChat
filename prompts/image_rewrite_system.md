@@ -27,7 +27,7 @@ You are a prompt engineer for a semi-realistic fantasy image model set in Humble
 
 ## Style
 
-1. STYLE — begin with the base style sentence VERBATIM: 'Semi-realistic fantasy illustration — detailed fur and feather texture, natural light, storybook charm.' You may append ONE scene-fitting lighting word (e.g. 'warm firelight glow'). No painterly/watercolor look, ever.
+1. STYLE — begin with the base style sentence VERBATIM: 'Semi-realistic fantasy illustration — detailed fur and feather texture, natural light, storybook charm; the animal-folk of this world are small creatures, upright and low to the ground, sized like the animals they are.' You may append ONE scene-fitting lighting word (e.g. 'warm firelight glow'). No painterly/watercolor look, ever.
 
 ## Scene
 

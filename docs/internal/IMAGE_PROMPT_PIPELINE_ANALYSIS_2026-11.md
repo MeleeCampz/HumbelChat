@@ -712,3 +712,66 @@ floor-present, floor-survives-budget, floor-switchable-off, vault-backed-not-rep
 **Still not built**: the floor guarantees that whatever is painted is animal-folk. It does
 not guarantee that the actors the *request* names are in the frame — "seinen Banditen"
 reaching the image is still the model's choice, not a code property.
+
+## 17. Ten evaluation rounds, and why the scripted language rules are being retired (2026-11-19)
+
+`/tmp/d_run_rewrite.py` runs the same five live requests through the full rewrite
++ composer stack and re-evaluates the output after every code change. Rounds 1–10,
+`/tmp/d_run/round{1,2,7,8,9,10}.json`.
+
+| round | what the prompts got wrong | what was changed |
+|---|---|---|
+| 1 | a negation survived the tail; the name-mentioned-twice check counted any repeat; a collective subject slipped through; the entity crowd was budget-cut out | entity protection, check() split into scene-vs-figure accounting |
+| 2 | "the party" still reached a pose line | pose-line collective check |
+| 4–5 | **frog-folk bandits** — a D&D familiar-list chunk answered a crowd question | bare animal words only count where they modify a crowd word |
+| 6 | **lizard** answering a bandit question via "lizard merchant Spleck" | `_stray_name`: species glued to a name belongs to that name |
+| 7 | "birdfolk-folk"; hedgehog leaking from Romi's anchor into the bandits | double-suffix guard; `_frame_species()` exclusion |
+| 8 | the agent's OWN search query ("Frey species badger rat lizard") read back as vault evidence | `images._vault_evidence()` strips tool-call echoes |
+| 9 | a chief and his crew flattened to one animal; choice flipped between runs | number agreement + attestation counting |
+| 10 | **bear-folk** from "regal **bear**ing" (a window sliced a word in half); the merchant's lizard stamped on the bandits in the same sentence | whole-word window growth; `_claim_supported` (per-claim gate, not yet wired) |
+
+### 17.1 The measurement that matters: none of these were model failures
+
+Every defect above was a **text-matching** defect in code: a window boundary, a stem
+match across languages, a capital-as-name detector (German capitalises every noun), a
+tool-call echo, an adjacency window reaching the wrong sentence. Ten rounds produced
+ten patches, and each patch fixed one live case while leaving the class intact. The
+vocabulary itself had to absorb `dame`, `mann`, `leute`, `wesen`, `frau`, `weib` —
+Humblewood's German compounds — which is not a guarantee, it is a campaign.
+
+### 17.2 Separating the guarantees that are arithmetic from the ones that are reading
+
+| class | guarantee | mechanism | keep? |
+|---|---|---|---|
+| structure | plan is JSON; figure-count line; style sentence first; foreground ordering; per-figure budget ladder; typed anchor fields + overrides; our own layers write no negations; no lettering tail | schema + arithmetic | **yes** |
+| provenance | this look cites a file the loop opened; this claim came only from a search snippet; this figure cites nothing | filesystem facts | **yes** |
+| language judgement | which species a crew is, whether a crowd noun names the cast, whether a name is abbreviated, whether a parenthetical is pipeline commentary, whether a mention is a duplicate | ~40 regexes + word lists | **no — becomes a lint report** |
+| campaign text in code | `_ANIMAL_FLOOR`, the scale sentence, `_BASE_STYLE`, `_COLLECTIVE_PATTERNS`, `_GENERIC_SPECIES`, the party-sheet path | constants | **no — moves to a profile** |
+
+### 17.3 The decision (owner's ruling, 2026-11-19)
+
+> "I am not a big fan of the scripted enforcement. Using code to judge natural
+> language is always a possible pain point. I want this bot to be usable in another
+> campaign setting; currently we do a lot of overfitting."
+
+Chosen architecture:
+
+1. **Campaign profile (data)** — style sentence, animal-folk floor, negative tail,
+   budget numbers, foreground count, party-sheet path. Read from the vault / profile
+   file, not from `bot_core/`. A new campaign is a new file, not a code change.
+2. **Composer (code)** — assembly and structure only: counts, ordering, budget,
+   overrides, provenance verification. It **never rewrites prose**. It emits findings.
+3. **Rewrite model (LLM)** — owns species, appearance consistency, name spelling and
+   phrasing, with the vault in front of it, and gets the findings back as **one
+   correction turn** before the prompt is finalised.
+
+What is deleted rather than kept-and-gated: species strip/substitute,
+`replace_collectives`, `drop_collectives`, `drop_bare_repeat_mentions`,
+`campaign_names`/`request_spelling`, `strip_meta_asides`. They survive as *finding
+codes* the model is asked to fix.
+
+What this costs honestly: species correctness now depends on the model plus the
+vault instead of on regex, and a finding costs one extra model turn (~10–60 s) only
+when something is flagged. What it buys: the composer stops silently editing the
+table's canon in ways the table never asked for, and the same code runs against a
+DarkSun or Greyhawk vault without adding that setting's vocabulary to Python.

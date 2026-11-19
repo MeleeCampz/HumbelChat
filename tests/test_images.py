@@ -1685,3 +1685,21 @@ class TestStartupHeal:
         monkeypatch.setattr(images, "_switch_gpu_mode",
                             AsyncMock(side_effect=images.ImageGenError("helper down")))
         await images.heal_gpu_mode_on_start()  # must not raise
+
+
+def test_a_search_query_is_not_vault_evidence():
+    """The model's own words cannot confirm a species (round 8, analysis §17).
+
+    The gathered context stores each tool call as `[search_kb {"query": …}]` plus
+    its hits. Feeding that whole string to the composer as "what the campaign says"
+    let a live run retag Boss Frey as lizard-folk from a query string — the model
+    asking "is he a lizard?" came back as evidence that he is.
+    """
+    gathered = ('[search_kb {"query": "Frey species beast-folk badger rat lizard", '
+                '"scope": "lore"}]\n2 hit(s):\n'
+                '[{"file": "HumbleWood/Session/SESSION_01.md", '
+                '"preview": "eine Fuchsdame kommt heraus"}]')
+    ev = images._vault_evidence(gathered)
+    assert "lizard" not in ev
+    assert "Fuchsdame" in ev          # the hits themselves stay
+    assert "search_kb" not in ev

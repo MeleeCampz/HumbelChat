@@ -373,8 +373,14 @@ _PARTY_SHEET_FILE = Path(KB_PATH) / "humblewood" / "HumbleWood" / "Characters" \
 # The base style sentence the policy makes the model open with VERBATIM. Used
 # as the structural check that a rewrite is a PROMPT and not narration — and
 # kept in sync with prompts/image_rewrite_system.md by a test.
+# Scale lives here rather than in six Visual Anchors: "small" per character costs
+# 6 x 60 characters of prompt and the renderer still defaults to human proportions
+# for a bipedal animal. Wording taken from the sheet's own Appearance notes
+# ("fully upright and low to the ground", "A small plump blue-tit bird").
 _BASE_STYLE = ("Semi-realistic fantasy illustration — detailed fur and feather "
-               "texture, natural light, storybook charm")
+               "texture, natural light, storybook charm; the animal-folk of this "
+               "world are small creatures, upright and low to the ground, sized "
+               "like the animals they are")
 
 _MAX_ANCHOR_CHARS = 900   # a Visual Anchor runs ~550; a runaway quote must not
 # monopolise the system prompt (it is truncated with a warning instead)
@@ -727,7 +733,11 @@ def _load_roster_block() -> str:
     lines = [f"fields you may override: {', '.join(image_prompt.ANCHOR_FIELDS)} "
              "(outfit = clothing, signature = carried/built-in items)", ""]
     for a in anchors.values():
-        lines.append(f"- {a.name}" + (f" — {a.desc}" if a.desc else ""))
+        # "Pronouns: she/her" is not something an image can paint, and it cost 6 x 18
+        # characters of the rewrite's system prompt while the model was deciding how
+        # to draw the cast. It stays in the sheet, where the chat path reads it.
+        desc = re.sub(r"\s*Pronouns:\s*[^.)]*[.)]?\s*", " ", a.desc).strip(" ;")
+        lines.append(f"- {a.name}" + (f" — {desc}" if desc else ""))
         if a.typed:
             for f in image_prompt.ANCHOR_FIELDS:
                 v = a.fields.get(f, "")
@@ -809,6 +819,29 @@ def _snippet_paths_from(gathered: str, opened: Sequence[str]) -> list[str]:
     return out
 
 
+_CALL_ECHO = re.compile(
+    r"^\[(search_kb|read_file|list_files|update_kb|delete_kb|kb_stats|kb_permissions)"
+    r"\s+\{")
+
+
+def _vault_evidence(gathered: str) -> str:
+    """The material the loop READ, without the questions it asked.
+
+    The agent's gathered context records each call as `[search_kb {"query": …}]`
+    followed by the hits. The query line is the model's own words, and the species
+    gate reads evidence as a statement about the campaign — so a model that searched
+    "Frey species beast-folk badger rat lizard" had, a second later, "vault
+    evidence" that Boss Frey is a lizard. Round 8 of the evaluation run (§17) caught
+    exactly that: the retag fired on a string no campaign file contains.
+    """
+    kept: list[str] = []
+    for line in (gathered or "").splitlines():
+        if _CALL_ECHO.match(line.strip()):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def _budget_kwargs() -> dict[str, int]:
     return {"base": IMAGE_PROMPT_BASE_CHARS,
             "per_figure": IMAGE_PROMPT_CHARS_PER_FIGURE,
@@ -871,7 +904,7 @@ async def _rewrite_composed(text: str, complete,
             read_paths=_read_paths_from(meta.tool_calls_detail),
             snippet_paths=_snippet_paths_from(
                 meta.gathered_context, _read_paths_from(meta.tool_calls_detail)),
-            retrieved=meta.gathered_context,
+            retrieved=_vault_evidence(meta.gathered_context),
             # The request's own words: which species the USER named, and the
             # spelling a campaign name really has ("Frey" painted for "Boss Frey"
             # was measured live, analysis §15).
@@ -923,7 +956,7 @@ async def _rewrite_composed(text: str, complete,
                     budget_kwargs=_budget_kwargs(),
                     read_paths=opened,
                     snippet_paths=_snippet_paths_from(gathered, opened),
-                    retrieved=gathered, request_text=text,
+                    retrieved=_vault_evidence(gathered), request_text=text,
                     animal_floor=IMAGE_ANIMAL_FLOOR)
                 for w in composed.warnings:
                     if w.startswith("budget "):

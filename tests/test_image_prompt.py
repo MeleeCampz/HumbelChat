@@ -496,8 +496,10 @@ def test_compression_spends_the_least_distinctive_clause_first():
                 "signature": "a small leather spell pouch with bone clasps"})}
     plan = ip.ImagePlan(scene="Colum stands in a hall",
                         figures=[ip.Figure("Colum Bidae", "standing")])
-    c = _compose(plan, anchors=anchors, budget=400)
-    assert any("body]" in cut for cut in c.cuts)
+    # Budget tight enough to force compression, wide enough that the fixed
+    # overhead (style + floor + count lines) is not what eats it.
+    c = _compose(plan, anchors=anchors, budget=560)
+    assert any("body]" in cut for cut in c.cuts), c.cuts
     assert "clause number 0" not in c.prompt, "the first (least distinctive) goes"
     assert "spell pouch" in c.prompt, "a signature item is the last thing cut"
     assert "Colum Bidae" in c.prompt
@@ -903,10 +905,15 @@ def test_one_entity_naming_two_characters_promotes_both():
                  [{"name": "Marvin", "pose": "raising a pincer"}],
                  entities=["Boss Frey and Alisa Pennygleam"])
     c = _compose(plan)
-    assert "Boss Frey: standing before" in c.prompt, c.prompt
-    assert "Alisa Pennygleam: standing before" in c.prompt, c.prompt
+    # The scene's collective is swapped for the names; in a FIGURE LINE the same
+    # phrase is removed instead (the name is already that line's subject), and the
+    # preposition it governed goes with it rather than dangling.
+    assert "Boss Frey: standing" in c.prompt, c.prompt
+    assert "Alisa Pennygleam: standing" in c.prompt, c.prompt
+    assert "the party" not in c.prompt, c.prompt
     assert "Exactly 3 named figures" in c.prompt, c.prompt
     assert not any("Also in the scene" in p for p in [c.prompt]), c.prompt
+    assert any("crowd word" in w for w in c.warnings), c.warnings
 
 
 # ── 9. A replacement must not re-name someone the sentence already names ─────
@@ -954,8 +961,11 @@ def test_a_species_the_vault_denies_for_a_crowd_is_stripped_from_the_scene_sente
         retrieved="### Die Banditen\nBoss Frey führt seine Banditen: two rat-folk "
                   "cutthroats an der Old Bridge.")
     assert "weasel" not in c.prompt, c.prompt
-    assert "Two lanky bandits block the path" in c.prompt, c.prompt   # the crowd survives
-    assert any("weasel" in w for w in c.warnings), c.warnings
+    # The vault does not merely object to "weasel-folk", it offers an animal:
+    # "two rat-folk cutthroats". Substitution paints THAT animal — a bare
+    # "bandits" is what the renderer turns into people.
+    assert "Two lanky rat-folk bandits block the path" in c.prompt, c.prompt
+    assert any("weasel" in w and "rat" in w for w in c.warnings), c.warnings
 
 
 def test_a_crowd_nobody_describes_keeps_a_species_that_fits_the_world():
@@ -982,8 +992,9 @@ def test_a_species_the_vault_denies_is_stripped_from_the_entity_line_too():
         retrieved="### Die Banditen\nBoss Frey führt seine bandit crew: two rat-folk "
                   "lackeys an der Old Bridge.")
     assert "weasel" not in c.prompt, c.prompt
-    assert "Also in the scene: two bandit lackeys with rusty hatchets." in c.prompt
-    assert any("weasel" in w for w in c.warnings), c.warnings
+    assert ("Also in the scene: two rat-folk bandit lackeys with rusty hatchets."
+            in c.prompt), c.prompt
+    assert any("weasel" in w and "rat" in w for w in c.warnings), c.warnings
 
 
 def test_a_crowd_species_the_vault_really_does_name_survives():
@@ -1180,7 +1191,7 @@ def test_the_animal_floor_line_can_be_switched_off():
     c = ip.compose_prompt(plan, _anchors(), BASE, animal_floor="",
                           budget_kwargs={"base": 1100, "per_figure": 420,
                                          "hard_cap": 100000})
-    assert "animal-folk" not in c.prompt, c.prompt
+    assert "Every figure in this image is an anthropomorphic" not in c.prompt, c.prompt
 
 
 def test_a_species_claim_that_agrees_with_the_vault_is_never_reported_as_a_guess():
@@ -1198,3 +1209,318 @@ def test_a_species_claim_that_agrees_with_the_vault_is_never_reported_as_a_guess
                   "handelt mit Fellen.")
     assert "fox-folk" in c.prompt
     assert not any("does not name" in w for w in c.warnings), c.warnings
+
+
+def test_the_animal_floor_line_yields_to_a_figure_the_sheet_calls_a_machine():
+    """The floor line and Marvin cannot both be absolute. His sheet line says
+    'steampunk magical construct' and his Visual Anchor says automaton — a fact read
+    from the vault, not a guess about what a name looks like — so the floor becomes
+    'every LIVING figure', which agrees with a brass automaton instead of arguing
+    with it."""
+    anchors = {"Marvin": ip.Anchor("Marvin", desc="Steel Defender, a steampunk "
+                                  "magical construct",
+                                   fields={"species": "A small brass-and-steel "
+                                          "steampunk automaton",
+                                          "body": "teacup-shaped metal body with "
+                                                  "feline ears",
+                                          "face": "two large glowing blue eyes"})}
+    plan = _plan("Marvin carries a lantern", [{"name": "Marvin",
+                                              "pose": "carrying a lantern"}])
+    c = _compose(plan, anchors=anchors)
+    assert "Every living figure in this image is an anthropomorphic animal-folk" in c.prompt
+    assert "Every figure in this image is an anthropomorphic" not in c.prompt
+    assert "steampunk automaton" in c.prompt
+
+
+def test_the_floor_line_stays_absolute_when_no_one_is_a_machine():
+    plan = _plan("Seta Onix draws her bow", [{"name": "Seta Onix",
+                                             "pose": "drawing her bow"}])
+    c = _compose(plan)
+    assert "Every figure in this image is an anthropomorphic animal-folk" in c.prompt
+    assert "living" not in c.prompt.split("On a")[0]
+
+
+def test_an_in_world_species_name_is_not_reported_as_an_invention():
+    """The sheet calls Seta a "Quokka-like mammal (in-world name: Jerbeen)" and Bubo
+    a "Strig (owl)". A vault that names its own species must not be policed as if
+    the model invented it."""
+    plan = _plan("Bubo Krallensturm reads the map", [{
+        "name": "Bubo Krallensturm", "pose": "reading a map",
+        "look": "a strig archmage with a snow-white facial disc",
+        "source": "Characters/Player Characters.md"}])
+    c = ip.compose_prompt(
+        plan, _anchors(), BASE,
+        read_paths=["Humblewood/HumbleWood/Characters/Player Characters.md"],
+        retrieved="Bubo Krallensturm, Strig (owl), Cleric (Night Domain).")
+    assert "strig archmage" in c.prompt, c.prompt
+    assert not any("does not name" in w for w in c.warnings), c.warnings
+
+
+# ── Round 2 of the evaluation run (§17): what the D-set prompts showed.
+
+
+def test_the_vaults_own_species_replaces_the_one_the_plan_invented():
+    """'The vault's species wins' has to mean the vault's ANIMAL is painted.
+
+    A live run: the plan said 'badger-folk bandit chief', while the vault's
+    SESSION_01 calls the ambush boss a Fuchsdame. Stripping 'badger-folk' leaves
+    'bandits' — which the renderer paints as people. The vault's own animal is
+    substituted into the same sentence instead.
+    """
+    plan = ip.ImagePlan(scene="a badger-folk bandit chief bars the path",
+                        entities=["two weasel-folk bandit lackeys with axes"],
+                        figures=[ip.Figure(name="Seta Onix", pose="drawing her bow")])
+    retrieved = ("SESSION_01: kommt auf einmal eine Fuchsdame heraus. "
+                 "Offensichtlich Banditen. Die Banditen: three rat-folk cutthroats.")
+    c = ip.compose_prompt(plan, _anchors(), BASE, retrieved=retrieved,
+                          request_text="Boss Frey und seinen Banditen")
+    assert "weasel" not in c.prompt, c.prompt
+    assert "badger" not in c.prompt, c.prompt
+    assert "fox-folk bandit chief" in c.prompt, c.prompt
+    assert any("fox-folk" in w for w in c.warnings), c.warnings
+
+
+def test_a_note_about_the_pipeline_is_stripped_from_paintable_text():
+    """A live scene sentence read: 'Boss Frey, a badger-folk bandit chief
+    (species from the bot's own guess)'. The contract asks for a report, and the
+    model wrote the report where the renderer would paint it."""
+    plan = ip.ImagePlan(scene="Boss Frey, a bandit chief (species from the bot's "
+                              "own guess), stands alone",
+                        figures=[ip.Figure(name="Boss Frey", pose="standing alone")])
+    c = ip.compose_prompt(plan, _anchors(), BASE)
+    assert "bot's own guess" not in c.prompt, c.prompt
+    assert "(" not in c.prompt.split("Exactly")[0], c.prompt
+    assert any("note about the pipeline" in w for w in c.warnings), c.warnings
+    assert "Boss Frey" in c.prompt, c.prompt   # the character is not what was cut
+
+
+def test_a_species_claim_hidden_in_a_figure_name_is_still_policed():
+    """A live run produced figures named 'crow-folk bandit 1' and 2. A species
+    smuggled into a NAME is the same claim, and the renderer cannot tell a name
+    from a description."""
+    plan = ip.ImagePlan(
+        scene="two bandits bar the path",
+        figures=[ip.Figure(name="crow-folk bandit 1", pose="holding a cudgel"),
+                 ip.Figure(name="crow-folk bandit 2", pose="holding an axe")])
+    retrieved = ("### Die Banditen\nDie Banditen sind rat-folk "
+                 "Schurken an der Old Bridge.")
+    c = ip.compose_prompt(plan, _anchors(), BASE, retrieved=retrieved,
+                          request_text="seine Banditen")
+    assert "crow-folk" not in c.prompt, c.prompt
+    assert any("figure NAME" in w for w in c.warnings), c.warnings
+
+
+def test_the_budget_never_cuts_a_crowd_the_request_itself_named():
+    """The D run proved this gap: 'Boss Frey und seinen Banditen' came out with
+    no bandits in the frame at all — the entity line was the budget's first
+    casualty."""
+    long_anchor = ("deep purple fur covering her entire body, digitigrade cloven "
+                   "hooves, long curved goat-like horns, glowing amber eyes, "
+                   "rectangular dark glasses, dark green cloak with a deep emerald "
+                   "hood, studded leather armor beneath, a longbow with an elegant "
+                   "antler-like design resting on her back")
+    plan = ip.ImagePlan(
+        scene="bandits bar the forest path",
+        entities=["two rat-folk bandits with crude axes", "a mossy old bridge"],
+        figures=[ip.Figure(name="Seta Onix", pose="drawing her bow",
+                           look=long_anchor)])
+    c = ip.compose_prompt(plan, _anchors(), BASE,
+                          budget_kwargs={"base": 300, "per_figure": 120,
+                                         "hard_cap": 1000},
+                          request_text="Boss Frey und seinen Banditen")
+    assert "bandit" in c.prompt, c.prompt
+    assert "mossy old bridge" not in c.prompt, c.prompt
+    assert any("trimmed to what the request named" in w for w in c.warnings), c.warnings
+
+
+def test_a_species_in_an_unrelated_rules_list_is_not_evidence_about_the_crowd():
+    """A live round retagged 'two weasel-folk bandits' as LIZARD-folk bandits.
+
+    The retrieved material contained the PHB's find-familiar list ("Bat, Cat,
+    Frog, Hawk, Lizard, Octopus, Owl, Rat, Raven, Spider, Weasel") in the same
+    chunk as the ambush notes. A species that far from the crowd word says
+    nothing about the crowd, and a distant species must not outvote a nearby one.
+    """
+    plan = ip.ImagePlan(
+        scene="two weasel-folk bandits bar the path",
+        figures=[ip.Figure(name="Seta Onix", pose="drawing her bow")])
+    retrieved = ("### Die Banditen\nBanditen überfallen die Straße bei Winnowing "
+                 "Reach: three rat-folk cutthroats mit Äxten.\n\n"
+                 "### Find Familiar\nYou gain a Spirit in an animal form you "
+                 "choose: Bat, Cat, Frog, Hawk, Lizard, Octopus, Owl, Rat, Raven, "
+                 "Spider, Weasel, or another Beast.")
+    c = ip.compose_prompt(plan, _anchors(), BASE, retrieved=retrieved,
+                          request_text="seine Banditen")
+    assert "lizard" not in c.prompt, c.prompt
+    assert "weasel-folk" not in c.prompt, c.prompt
+    assert "rat-folk bandits" in c.prompt, c.prompt
+    assert any("rat" in w for w in c.warnings), c.warnings
+
+
+def test_a_pose_cannot_carry_a_collective_object():
+    """Round 6 of the evaluation run: 'Boss Frey: snarling forward, sabre leveled
+    at the party' — the guarantee bans crowd nouns anywhere in the prompt, and in
+    a figure line the fix is removal, not name insertion (§4.2)."""
+    plan = _plan("Boss Frey bars the forest path",
+                 [{"name": "Boss Frey", "pose": "snarling forward, sabre leveled at "
+                                               "the party"},
+                  {"name": "Seta Onix", "pose": "drawing her bow"}])
+    c = _compose(plan)
+    assert "the party" not in c.prompt, c.prompt
+    assert "Boss Frey: snarling forward, sabre leveled" in c.prompt, c.prompt
+    assert any("crowd word" in w for w in c.warnings), c.warnings
+
+
+# ── Whose animal is it? (rounds 4–7 of the evaluation run, §17) ─────────────
+
+RETRIEVED_LIZARD_MERCHANT = (
+    "HumbleWood Session 5 Trunk Market: Romi leaves, lizard merchant Spleck "
+    "sells potions.")
+RETRIEVED_BANDIT_RATS = (
+    "SESSION_01: Boss Frey führt seine Banditen: three rat-folk cutthroats an "
+    "der Old Bridge.")
+
+
+def _crowd_case(scene, retrieved, look, request, *, source):
+    anchors = _anchors()
+    return ip.compose_prompt(
+        ip.ImagePlan(scene=scene,
+                     figures=[ip.Figure(name="Alisa Pennygleam", look=look,
+                                        source=source)]),
+        anchors, BASE,
+        read_paths=[source], retrieved=retrieved, request_text=request,
+        budget_kwargs={"base": 1100, "per_figure": 420, "hard_cap": 100000})
+
+
+def test_a_species_glued_to_someone_elses_name_is_not_evidence_about_our_crowd():
+    """Spleck is the vault's lizard merchant. Alisa Pennygleam is not Spleck.
+
+    Round 5 of the evaluation run: the request said "Händlerin Alisa Pennygleam am
+    Tisch", the retrieved notes said "lizard merchant Spleck", and the composer
+    retagged her hedgehog-folk as lizard-folk off a ROLE word she merely shares
+    with him. A species attached to a NAME belongs to that individual.
+    """
+    composed = _crowd_case(
+        "The hedgehog-folk merchant Alisa Pennygleam clutches the coin pouch",
+        RETRIEVED_LIZARD_MERCHANT,
+        "a hedge-folk merchant in a quilted coat",
+        "Mal die Szene mit Händlerin Alisa Pennygleam am Tisch",
+        source="HumbleWood/Characters/Alisa Pennygleam.md")
+    assert "lizard" not in composed.prompt
+    assert "hedgehog-folk merchant" in composed.prompt
+
+
+def test_the_vaults_animal_is_still_borrowed_when_no_one_else_is_named():
+    """The other side of the same rule: a crowd the vault describes keeps its animal."""
+    anchors = _anchors()
+    composed = ip.compose_prompt(
+        ip.ImagePlan(scene="Two squirrel-folk bandits bar the path",
+                     entities=["squirrel-folk cutthroats"],
+                     figures=[ip.Figure(name="Boss Frey",
+                                        look="a bandit chief in a black coat",
+                                        source="HumbleWood/Characters/Boss Frey.md")]),
+        anchors, BASE, read_paths=["HumbleWood/Characters/Boss Frey.md"],
+        retrieved=RETRIEVED_BANDIT_RATS, request_text="Mal Boss Frey und seine Banditen",
+        budget_kwargs={"base": 1100, "per_figure": 420, "hard_cap": 100000})
+    assert "rat-folk bandits" in composed.prompt
+    assert "squirrel" not in composed.prompt
+
+
+def test_an_animal_from_a_rules_paragraph_is_not_evidence_about_a_crowd():
+    """Round 3: the PHB's find-familiar list shared a chunk with the ambush.
+
+    "Bat, Cat, Frog, Hawk, Lizard, Octopus, Owl, Rat, Raven, Spider, Weasel" is a
+    D&D rules paragraph about familiar options. Chunk membership is not a statement
+    about the beings standing on the Old Bridge.
+    """
+    ev = ip.crowd_evidence_spans(
+        "two weasel-folk bandits",
+        "HumbleWood Session 1: die Banditen überfallen die Party an der Old Bridge. "
+        "PHB find familiar options: Bat, Cat, Frog, Hawk, Lizard, Rat, Raven, "
+        "Spider, Weasel.")
+    strip, guess = ip.species_verdict("two weasel-folk bandits", ev)
+    assert not strip
+    assert "weasel" in (guess or ())
+
+
+def test_a_wanted_poster_names_two_bandits_without_naming_the_whole_crew():
+    """Round 4/7: a poster gives two individuals species; the crew has none.
+
+    "Poster von zwei gesuchten Banditen: Luma die Taubenwesen … Corwurm der Lucky."
+    Two named beings are described, which is not a species statement about every
+    bandit, so the plan's guess stays rather than being generalised onto the crew.
+    """
+    ev = ip.crowd_evidence_spans(
+        "bandits", "Poster von zwei gesuchten Banditen: Luma die Taubenwesen, "
+                   "Godfather. Corwurm der Lucky.")
+    strip, _ = ip.species_verdict("two weasel-folk bandits bar the path", ev)
+    assert not strip
+
+
+def test_the_vault_spelling_of_a_crowd_answers_the_plans_spelling():
+    """German session logs and English plans talk about the same bandits.
+
+    A vault statement counts as being ABOUT the crowd when its crowd word matches
+    the plan's on its STEM — "bandits" answering "Banditen" — otherwise the vault's
+    own animal would never be reachable at all.
+    """
+    ev = ip.crowd_evidence_spans("bandits", RETRIEVED_BANDIT_RATS)
+    strip, _ = ip.species_verdict("two squirrel-folk bandits bar the path", ev)
+    assert list(strip) == ["squirrel"]
+    assert ip.species_replacement("two squirrel-folk bandits bar the path", ev) == "rat"
+
+
+def test_a_bare_animal_word_is_a_species_claim_too():
+    """Both claim shapes are policed: the "-folk" compound and a bare animal noun.
+
+    The vault's "lizard merchant" is a species statement in a shape the compound
+    regex never matched. The compound regex alone would have called the plan's
+    hedgehog claim unchallenged; the vault's animal is only invisible from the
+    other side of the rule (a name owns it), which the first test of this group
+    covers.
+    """
+    ev = ip.crowd_evidence_spans("merchant", "lizard merchant in the market square")
+    strip, _ = ip.species_verdict("the hedgehog-folk merchant Alisa Pennygleam", ev)
+    assert list(strip) == ["hedgehog"]
+
+
+def test_a_lowercase_word_is_not_someone_being_named():
+    """Round 7: "three rat-folk cutthroats" was read as a character called Three.
+
+    The NAME side of the glue test has to look like a name, while the ROLE side has
+    to match the vault's German spellings in any case.
+    """
+    assert ip._stray_name("three rat-folk cutthroats block the path",
+                          ["Boss Frey"], ["bandit", "cutthroat"]) is None
+    assert ip._stray_name("lizard merchant Spleck sells potions",
+                          ["Alisa Pennygleam"], ["merchant"]) == "Spleck"
+
+
+def test_a_chief_and_his_crew_can_be_two_different_animals():
+    """Number agreement: the vault answers each claim with the statement it fits.
+
+    SESSION_01 says "eine Fuchsdame" (ONE fox-folk came out) and "three rat-folk
+    cutthroats" (the crew). The plan claimed badger for the chief and weasel for the
+    lackeys. Substituting one animal everywhere would flatten a real distinction the
+    campaign makes, so the candidate has to fit the claim's own number.
+    """
+    retrieved = ("SESSION_01: kommt auf einmal eine Fuchsdame heraus. Offensichtlich "
+                 "Banditen. Die Banditen: three rat-folk cutthroats.")
+    chief = "a badger-folk bandit chief bars the path"
+    crew = "two weasel-folk bandit lackeys with axes"
+    assert ip._claim_number(chief) == "singular"
+    assert ip._claim_number(crew) == "plural"
+    assert ip.species_replacement(chief, ip.crowd_evidence_spans(chief, retrieved)) == "fox"
+    assert ip.species_replacement(crew, ip.crowd_evidence_spans(crew, retrieved)) == "rat"
+
+
+def test_the_animal_that_is_said_more_often_wins_when_number_cannot_tell_them_apart():
+    """Attestation order, and why the choice is reproducible.
+
+    Before this rule the candidate list was a set sorted by length, so two candidates
+    of equal length could flip between runs — the prompt changed with no code change.
+    """
+    ev = "three rat-folk cutthroats block the path, rat-folk cutthroats everywhere"
+    assert ip.species_replacement("two squirrel-folk bandits bar the path",
+                                  ev) == "rat"
+    assert ip._attested(ev, "rat") == 2
