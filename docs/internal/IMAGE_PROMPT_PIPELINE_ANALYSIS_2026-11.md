@@ -804,3 +804,159 @@ Open measurement for the next visit: with the anchors consolidated the prompts s
 3,574–3,597 chars against the profile's `max=3600`, so the ladder is now compressing
 13 clauses per image. **`max=` is a profile edit** — no code change needed to find out
 whether the model holds 9 figures at 4,200.
+
+## 18. The renderer reads a figure block in order, and the order was wrong (2026-11-19)
+
+The complaint that started this: **"bubo is not visible in the first image"** and
+**"in the second one he and trixy merged into one character"** — Round 13, painted
+with the three-layer design working correctly. Both prompts named Bubo Krallensturm,
+both gave his Visual Anchor in full, both had 8 and 7 figure lines. Nothing was
+missing from the plan.
+
+### 18.1 It is not a token ceiling
+
+Prompts were measured with the renderer's own tokenizer (`Qwen/Qwen3-VL-8B-Instruct`,
+the text encoder Qwen-Image 2.1 ships), and a ladder was painted at 2/4/6/8/10/12
+figures (`2026-11-19_ceiling/`):
+
+| figures | tokens | painted |
+|---|---|---|
+| 2, 4, 6, 8 | 184 → 587 | every one ✔ |
+| 8 (Round 13 prompt) | 855 | **7 — Bubo absent** |
+| 10 (descriptor-first) | 701 | 9 — Marvin absent |
+| 12 (descriptor-first) | 810 | **all 12** ✔ |
+| 12 (shipped shape) | 921 | 13 — one character painted twice |
+
+Eight figures at 587 tokens is clean; eight at 855 loses one; twelve at 810 is clean.
+**Length does not predict which figure disappears.** Qwen-Image 2.1 is also not
+truncated at 1024 tokens the way Qwen-Image 1.0 was.
+
+### 18.2 It is not the amount of detail
+
+One real plan (request 01, 8 figures), the six Visual Anchors complete, the **budget
+ladder switched off so nothing was cut** (`2026-11-19_shape_ab/SHAPES.md`):
+
+| variant | tokens | what differs | result |
+|---|---|---|---|
+| shipped, ladder ON (control) | 859 | 12 clauses cut | 7/8 — Bubo absent |
+| **P1** — same shape, nothing cut | 925 | nothing | **7/8 — Bubo STILL absent** |
+| P2 — identity bound to the name, name-free scene | 889 | two shape changes at once | 8/8 |
+| P3 — every character name removed | 846 | names only | 7/8 — Bubo lost **and his star robe migrated onto Romi** |
+| P4 — P2 without the row-lead phrases | 869 | row leads only | 6/8 — Marvin and Alisa absent |
+
+Cutting nothing did not bring Bubo back. Removing names made things worse and moved
+his clothing onto somebody else. More detail is not the lever.
+
+### 18.3 Six runs, one change at a time
+
+The two candidates were run twice each (the renderer is not seeded) and the two
+sub-changes they combine were pulled apart (`REPEAT.md`):
+
+| run | shape | Bubo | all figures |
+|---|---|---|---|
+| R1a, R1b | shipped shape, nothing cut | **absent in both** | 7/8, 7/8 |
+| R2a, R2b | identity bound to name + name-free scene + new row lead | present in both | 8/8, 7/8 |
+| **R5** | shipped scene, shipped row lead, **species moved before the pose** | present | **8/8** |
+| R6 | shipped blocks, scene stops naming the cast | **absent** | 6/8 |
+
+R5 keeps the shipped name-list scene **and** the shipped `Behind them, smaller and
+softer,` lead and paints the whole cast — so neither of those is the culprit, and a
+name-free scene alone (R6) fixes nothing.
+
+### 18.4 Confirmation: the same words, a different order
+
+`confirm_paint.py` takes **`compose_prompt`'s own output** and moves the identity
+clause to the front of each block, asserting the two prompts have the **same word
+multiset** (`sorted(re.findall(r"[\w-]+", …))`) and the same length — 3868 chars /
+925 tokens in both arms for request 01, 3691 / 868 for request 02:
+
+```
+shipped   : Bubo Krallensturm: staff planted, crescent finial flaring light,
+            a small owl archmage-cleric, robed from the neck down, …
+candidate : Bubo Krallensturm: a small owl archmage-cleric, robed from the
+            neck down, staff planted, crescent finial flaring light, …
+```
+
+| arm | runs | whole cast painted | Bubo |
+|---|---|---|---|
+| shipped shape | Round 13 01, P1, R1a, R1b, R6 | **0 of 5** | absent in all 5 |
+| identity first | R5, C1, C2, C3 | **4 of 4** | present in all 4 (staff, crescent-and-orb finial, indigo star robe, crescent pendant) |
+
+Fisher exact on 4-of-4 against 0-of-5: **p = 1/126 = 0.008**. The second request
+(black pudding) points the same way: its control lost the owl entirely and painted
+his staff into Trixy's hands, while `D2_identity_first_02` has Bubo holding his own
+crescent staff.
+
+What the experiment also settled, by accident (the first harness attempt introduced
+every character twice, and **still did not paint two bodies**): a character named
+twice in a prompt is not automatically painted twice — the risk is that the second
+introduction **supresses** the first. That is why "one introduction per character"
+survives as a report and not as a rewrite.
+
+### 18.5 The change
+
+`bot_core/image_prompt.py::_figure_text` now assembles a block as
+**identity → pose → the rest**, where identity is the `species` field or, for a
+figure with no anchor, the verified `look`:
+
+```python
+identity_field = next((f for f in _IDENTITY_FIELDS if fr.fields.get(f)), "")
+clauses = list(fr.fields.get(identity_field, []))
+if fr.pose:
+    clauses.append(fr.pose)
+for f in (*ANCHOR_FIELDS, *(k for k in fr.fields if k not in ANCHOR_FIELDS)):
+    if f != identity_field:
+        clauses.extend(fr.fields.get(f, []))
+```
+
+The budget ladder is untouched — it decides *which* clauses survive, this decides the
+order the survivors are said in. A `species` override inherits the position
+(`test_an_identity_override_leads_the_block_like_the_field_it_replaces`), a figure
+with no identity at all keeps its pose first rather than being given a guess
+(`test_a_figure_with_no_identity_at_all_still_leads_with_its_pose`), and one test
+reads the composed prompt back into blocks and asserts the sheet's own species line
+is the first thing said after every name.
+
+Live rewrite re-run (same five requests, no GPU): every block of every prompt now
+opens with its identity — `Bubo Krallensturm: A small owl archmage-cleric, robed from
+the neck down, raising the crescent staff at the doorway, …`. Zero extra tokens, zero
+extra model turns.
+
+### 18.6 What that re-run then exposed, and the three fixes it forced
+
+The composer's *reports* were next to fail, twice:
+
+1. **A finding that contradicted its own evidence.** A scene finding said *"the
+   material about those beings says nothing about their species"* while the verdict
+   that produced it had read a span containing "birdfolk": `lint_plan` ran
+   `crowd_evidence_spans(…, names + anchors)` for the ruling and
+   `vault_animals(…, retrieved)` — a different call, different filtering — for the
+   quotation. One string is now computed per claim and read by both sides
+   (`_said_animals(evidence)` takes the evidence itself).
+2. **A description stranded in the scene sentence.** Boss Frey is not in the party
+   sheet, the model wrote `"look": ""`, and the prompt said
+   `Boss Frey: raising a heavy battle axe overhead` — while its scene sentence said
+   *"Boss Frey, a badger-folk bandit chief, stands alone …"*. Carrying that
+   description across would be editing the model's language, so it is reported:
+   `identity_left_in_scene` quotes the apposition back (`_scene_description`, bracket
+   walking: name, comma, text, comma) and asks for it in the figure's own `look`.
+3. **A correction pass that made the plan worse.** Asked to move that description,
+   the model answered with a plan containing a meta aside the renderer would have
+   painted — `(species not stated in the vault)` — plus a `not`, plus a species
+   finding: two problems answered with four. `_rewrite_composed` now composes both
+   plans and paints the one with **fewer open findings**, and logs the substitution.
+
+Suite after all of it: **1536 passed**.
+
+### 18.7 What this did not fix
+
+* `D2_identity_first_02` has Bubo correct but paints **Seta and Romi as one figure**
+  (one body carrying the bow, the quiver, the rose and the horn). The identity-first
+  order reduces introductions competing for one body; it does not make them impossible.
+* Nothing yet compares **the actors the request names** against **the cast the plan
+  paints** (§15.5 remains the open gap).
+* Boss Frey, Alisa Pennygleam and Benner Seridan have **no appearance in the vault**.
+  The composer reports them every time; the fix is typing `> look:` lines in
+  `Player Characters.md`, which is the table owner's edit, not code.
+* The prompt still sits at 3,580–3,600 chars against the profile's `max=3600`, so the
+  ladder cuts 4–18 clauses per image. `max=` is a profile edit, still untested at 4,200.
