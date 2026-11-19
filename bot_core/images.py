@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import re
 import time
@@ -829,8 +830,11 @@ def _snippet_paths_from(gathered: str, opened: Sequence[str]) -> list[str]:
 
 
 _CALL_ECHO = re.compile(
-    r"^\[(search_kb|read_file|list_files|update_kb|delete_kb|kb_stats|kb_permissions)"
-    r"\s+\{")
+    r"^\[(search_kb|find_in_kb|read_section|read_file|list_files|update_kb|"
+    r"delete_kb|kb_stats|kb_permissions)\s+\{")
+
+#: A tool-call echo line, and the file it asked to open (for read_section).
+_CALL_FILE = re.compile(r'''\[\w+\s+\{.*?"file"\s*:\s*"([^"]+)"''', re.DOTALL)
 
 
 def _vault_evidence(gathered: str) -> str:
@@ -844,11 +848,58 @@ def _vault_evidence(gathered: str) -> str:
     exactly that: the retag fired on a string no campaign file contains.
     """
     kept: list[str] = []
+    skip_read = False
     for line in (gathered or "").splitlines():
-        if _CALL_ECHO.match(line.strip()):
+        st = line.strip()
+        if _CALL_ECHO.match(st):
+            # Reading the party sheet is not evidence about anybody else in the
+            # frame: the whole line after it is a player character's own species.
+            hit = _CALL_FILE.search(st)
+            skip_read = bool(hit and _is_sheet(hit.group(1)))
+            continue
+        if skip_read:
+            continue
+        if '"file"' in st and "hit" in st:
+            trimmed = _drop_sheet_hits(st)
+            if trimmed:
+                kept.append(trimmed)
             continue
         kept.append(line)
     return "\n".join(kept)
+
+
+def _is_sheet(path: str) -> bool:
+    """Is this the party roster sheet (the one whose species lines are OURS)?"""
+    sheet = _party_sheet_file()
+    if not sheet or not path:
+        return False
+    tail = sheet.name.lower()
+    return path.rstrip("/").rsplit("/", 1)[-1].lower() == tail
+
+
+def _drop_sheet_hits(line: str) -> str:
+    """Rebuild a search-hit line without the party sheet among its hits.
+
+    A hit list is JSON, so this is parsing, not interpretation. When it cannot be
+    parsed the line is kept as-is — dropping evidence the bot did read is the more
+    expensive mistake.
+    """
+    head, _, payload = line.partition("hit(s):")
+    if not payload.strip():
+        return line
+    try:
+        hits = json.loads(payload.strip())
+    except Exception:
+        return line
+    if not isinstance(hits, list):
+        return line
+    left = [h for h in hits
+            if not _is_sheet(str((h or {}).get("file") or ""))]
+    if len(left) == len(hits):
+        return line
+    if not left:
+        return ""
+    return f"{head}hit(s):{json.dumps(left, ensure_ascii=False)}"
 
 
 def _budget_kwargs(profile: prompt_profile.Profile | None = None) -> dict[str, int]:

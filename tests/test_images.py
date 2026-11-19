@@ -1747,3 +1747,47 @@ def test_a_search_query_is_not_vault_evidence():
     assert "lizard" not in ev
     assert "Fuchsdame" in ev          # the hits themselves stay
     assert "search_kb" not in ev
+
+
+def test_the_party_sheet_is_never_evidence_about_everybody_else():
+    """Round 12, request 4: the plan wrote the vault's own 'two rat-folk bandits'
+    and was told that disagrees with the campaign — because the retrieved material
+    contains the PARTY SHEET ('Birdfolk (blue tit)') and a bounty line naming a
+    bandit called Luma. Our own species lines are not evidence about other beings,
+    and the party sheet is text the bot injects for identity, not something it read
+    about the bandits.
+
+    This is provenance arithmetic (which file a hit came from), which is what the
+    composer layer is for; judging which sentence 'is about' whom is not.
+    """
+    gathered = (
+        '[search_kb {"query": "bandits tavern"}]\n'
+        '8 hit(s): [{"file": "humblewood/HumbleWood/Characters/Player Characters.md", '
+        '"snippet": "Colum Bidae — Birdfolk (blue tit), Warlock"}, {"file": '
+        '"humblewood/HumbleWood/SessionLogs/SESSION_06/notes.md", "snippet": '
+        '"two rat-folk bandits barred the road"}]\n\n'
+        '[read_section {"file": "humblewood/HumbleWood/Characters/Player '
+        'Characters.md", "section": "Colum Bidae"}]\nColum Bidae\n'
+        'Birdfolk (blue tit), Warlock. Pronouns: he/him.\n\n'
+        '[find_in_kb {"term": "Alisa Pennygleam"}]\n'
+        'Alisa Pennygleam was rescued near Winnowing Reach.'
+    )
+    ev = images._vault_evidence(gathered)
+    assert "two rat-folk bandits barred the road" in ev
+    assert "Alisa Pennygleam was rescued" in ev
+    assert "Birdfolk" not in ev, ev
+    assert "Colum Bidae" not in ev, ev
+    assert "find_in_kb" not in ev            # the agent's own words are not evidence
+
+
+def test_an_agent_query_line_never_becomes_campaign_evidence_again(monkeypatch):
+    """read_section and find_in_kb were missing from the echo pattern, so their
+    call lines — the model's own wording — stayed in the evidence the species gate
+    reads as a statement about the campaign."""
+    gathered = ('[find_in_kb {"term": "Frey beast-folk badger lizard"}]\n'
+                'Frey appears in SESSION_05.\n'
+                '[read_section {"file": "a/b/notes.md", "section": "Lexikon"}]\n'
+                'Boss Frey führt zwei rat-folk Banditen.')
+    ev = images._vault_evidence(gathered)
+    assert "badger" not in ev and "lizard" not in ev, ev
+    assert "rat-folk" in ev

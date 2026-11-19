@@ -1378,6 +1378,27 @@ def _collective_phrase(text: str) -> str:
     return " ".join(keep + [phrase])
 
 
+def _introductions(text: str, name: str) -> int:
+    """Mentions of *name* that INTRODUCE the character, not ones that lean on them.
+
+    "…perches on Trixy Smoldersome's shoulder" says where another figure is; it does
+    not bring Trixy into the frame a second time. A genitive after the name is the
+    mechanical signal for that, and it is arithmetic on punctuation rather than a
+    reading of the sentence — which is the line this file holds itself to.
+    """
+    if not name:
+        return 0
+    return sum(1 for m in re.finditer(r"(?<![a-z])" + re.escape(name) + r"(?![a-z])",
+                                      text)
+               if not re.match(r"^\s*(?:'s|’s|s\b)", text[m.end():]))
+
+
+def _negated_words(text: str) -> tuple[str, ...]:
+    return tuple(m.group(0) for m in re.finditer(
+        r"(?<![a-z])(?:no|not|without|never|avoid|devoid|instead of)(?![a-z])",
+        _norm(text or "")))
+
+
 def _repeat_mentions(scene: str, names: Sequence[str]) -> list[str]:
     """Names the scene sentence says more than once, where a figure line already
     describes them.
@@ -1396,15 +1417,14 @@ def _repeat_mentions(scene: str, names: Sequence[str]) -> list[str]:
         full = _norm(name)
         if not full:
             continue
-        hits = len(re.findall(r"(?<![a-z])" + re.escape(full) + r"(?![a-z])", low))
+        hits = _introductions(low, full)
         # Count each mention ONCE: the full name is blanked before its short form is
         # counted, or "Boss Frey" reads as a second mention of Frey and every party
         # member with a distinctive surname looks over-described.
         rest = re.sub(r"(?<![a-z])" + re.escape(full) + r"(?![a-z])", " @ ", low)
         short = _norm(name.split()[-1])
         if short != full:
-            hits += len(re.findall(r"(?<![a-z@])" + re.escape(short) + r"(?![a-z])",
-                                   rest))
+            hits += _introductions(rest, short)
         if hits > 1:
             out.append(name)
     return sorted(set(out))
@@ -1512,6 +1532,11 @@ def lint_plan(plan: ImagePlan, anchors: dict[str, Anchor], *,
                         f"about those beings says {said} — fix the claim or name "
                         "where yours came from"))
 
+    if has_negation(plan.scene):
+        add(Finding("negation_clause", "scene",
+                    f"the scene sentence says what to leave OUT "
+                    f"({', '.join(_negated_words(plan.scene))!r}); a renderer paints "
+                    "the thing a sentence names — describe the frame positively"))
     if is_collective(plan.scene):
         add(Finding("collective_subject", "scene",
                     f"the scene names the cast collectively ({_collective_phrase(plan.scene)!r}) "
@@ -1540,9 +1565,10 @@ def lint_plan(plan: ImagePlan, anchors: dict[str, Anchor], *,
                     "name where yours came from"))
     for token in species_guesses(plan.scene, retrieved, request_text):
         add(Finding("species_unbacked", "scene",
-                    f"{token}-folk is given to a crowd the vault does not describe — "
-                    "kept, because a species guess is what keeps humans out of the "
-                    "frame, but it is canon the bot invented"))
+                    f"{token}-folk is claimed in the scene sentence and the vault "
+                    "states no species for those beings — kept, because a species "
+                    "guess is what keeps humans out of the frame, but it is canon "
+                    "the bot invented"))
 
     for f in plan.figures:
         if not isinstance(f, Figure) or match_anchor(f.name, anchors):
@@ -1581,7 +1607,10 @@ def lint_plan(plan: ImagePlan, anchors: dict[str, Anchor], *,
     for e in plan.entities:
         if not isinstance(e, str):
             continue
-        hit = next((n for n in asked if n in _norm(e)), None)
+        # The SAME spelling, case included. "70 Gold" is capitalized because German
+        # capitalizes nouns, not because the user named a character called Gold.
+        hit = next((n for n in asked if n in _norm(e)
+                    and _exact_form(request_text, n) in e), None)
         if not hit or any(hit in _norm(f.name) for f in plan.figures
                           if isinstance(f, Figure)):
             continue
@@ -1590,6 +1619,19 @@ def lint_plan(plan: ImagePlan, anchors: dict[str, Anchor], *,
                     "a named character needs a figure line with a pose, not a line "
                     "in the scene dressing"))
     return findings
+
+
+def _exact_form(request_text: str, lowered: str) -> str:
+    """How the request actually wrote that name ("Boss Frey", not "boss frey").
+
+    Sliced out of the request's own text, so the composer compares spellings
+    instead of deciding what a name means.
+    """
+    if not lowered:
+        return ""
+    m = re.search(r"(?<![\wÄÖÜß-])" + re.escape(lowered) + r"(?![\wÄÖÜß-])",
+                  request_text or "", re.IGNORECASE)
+    return request_text[m.start():m.end()] if m else ""
 
 
 def _request_names(request_text: str) -> list[str]:

@@ -261,6 +261,57 @@ def _finding(c, code, subject=None):
     return hits[0]
 
 
+
+def test_a_name_used_to_say_where_another_figure_stands_is_not_a_second_figure():
+    """Round 12, request 3: 'Trixy Smoldersome stands upright in plate armour while
+    Colum Bidae perches on Trixy Smoldersome's shoulder' was reported as Trixy
+    painted twice. The genitive says the second mention places COLUM — it does not
+    bring Trixy into the frame again, and a false report costs a model turn."""
+    c = _compose(_plan("Trixy Smoldersome stands upright while Colum Bidae perches "
+                       "on Trixy Smoldersome's shoulder",
+                       [{"name": "Trixy Smoldersome", "pose": "standing upright"},
+                        {"name": "Colum Bidae", "pose": "perched on her shoulder"}]))
+    assert not [f for f in c.findings if f.code == "duplicate_mention"], c.findings
+    # The shape the rule was written for still is reported.
+    c2 = _compose(_plan("Seta Onix draws her bow; bandits surround Seta Onix, Romi "
+                        "Stachelpfote, Marvin",
+                        [{"name": "Seta Onix", "pose": "drawing her bow"},
+                         {"name": "Romi Stachelpfote", "pose": "advancing"},
+                         {"name": "Marvin", "pose": "standing"}]))
+    assert {f.subject for f in c2.findings if f.code == "duplicate_mention"} == \
+        {"Seta Onix"}, c2.findings
+
+
+def test_a_negation_in_the_scene_sentence_is_reported_like_one_in_a_pose():
+    """Round 12, request 5 reached the renderer with '… in one clawed hand; no one
+    else is near.' Poses and entities were policed; the scene line was not, and the
+    renderer paints what a sentence names."""
+    c = _compose(_plan("Boss Frey stands alone on the path, axe low; no one else "
+                       "is near", [{"name": "Boss Frey", "pose": "standing alone"}]))
+    f = _finding(c, "negation_clause", "scene")
+    assert "no" in f.detail
+    assert "no one else is near" in c.prompt, "reported, not deleted"
+
+
+def test_the_users_own_words_are_matched_as_written_not_as_lowercased_words():
+    """Round 12, request 1 reported 'the user asked for gold' for a plan whose
+    entity line was 'a bulging leather pouch of seventy gold coins'. German
+    capitalizes nouns: `70 Gold` is an amount, not a character. The match is now
+    case-sensitive against the request's own spelling."""
+    plan = _plan("Seta Onix draws her bow",
+                 [{"name": "Seta Onix", "pose": "drawing her bow"}],
+                 entities=["a bulging leather pouch of seventy gold coins",
+                           "Boss Frey and his bandit crew"])
+    c = _compose(plan, request_text="… die befreite Händlerin Alisa Pennygleam "
+                                    "klammert den Beutel mit 70 Gold")
+    reported = [f.subject for f in c.findings
+                if f.code == "entity_named_not_painted"]
+    assert reported == [], reported
+    c2 = _compose(plan, request_text="Boss Frey stellt sich der Gruppe")
+    assert [f.subject for f in c2.findings
+            if f.code == "entity_named_not_painted"] == \
+        ["Boss Frey and his bandit crew"], c2.findings
+
 def test_the_composer_reports_instead_of_rewriting():
     """The one test that says what the 2026-11-19 redesign IS.
 
