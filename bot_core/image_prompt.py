@@ -1756,11 +1756,27 @@ def _join(clauses: list[str], protect: set[str]) -> str:
 
 
 def _figure_text(fr: _FigureRender, protect: set[str]) -> str:
-    clauses: list[str] = [fr.pose] if fr.pose else []
-    # ANCHOR_FIELDS order for the party six (face before outfit etc.), then any
-    # other bucket — an unanchored figure's looked-up `look` lives there.
+    """One figure's block: what it IS, then what it is DOING, then the rest.
+
+    The order is measured, not styled (analysis §18). The same eight characters,
+    the same Visual Anchors in full, the same words in a prompt of exactly the same
+    length — only the identity clause's position moved — and every render that put
+    the pose first lost a character (5 of 5), while every render that put the
+    identity first painted all of them (4 of 4, p = 0.008). A diffusion model
+    decides WHAT to draw before it decides what the figure is busy with; a block
+    that opens with "staff planted, crescent finial flaring light" is an
+    instruction about a staff, and the owl it belongs to goes unpainted.
+
+    The budget ladder is untouched by this: it cuts clauses out of `fields`, and
+    this function only decides the order the survivors are said in.
+    """
+    identity_field = next((f for f in _IDENTITY_FIELDS if fr.fields.get(f)), "")
+    clauses: list[str] = list(fr.fields.get(identity_field, []))
+    if fr.pose:
+        clauses.append(fr.pose)
     for f in (*ANCHOR_FIELDS, *(k for k in fr.fields if k not in ANCHOR_FIELDS)):
-        clauses.extend(fr.fields.get(f, []))
+        if f != identity_field:
+            clauses.extend(fr.fields.get(f, []))
     clauses.extend(fr.extra)
     desc = _join(clauses, protect)
     return f"{fr.prefix}{fr.name}: {desc}." if desc else f"{fr.prefix}{fr.name}."

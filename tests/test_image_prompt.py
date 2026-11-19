@@ -865,7 +865,10 @@ def test_an_undescribed_npc_keeps_the_species_the_model_gave_it():
         read_paths=["Humblewood/HumbleWood/SessionLogs/SESSION_01_DerAnfang/notes.md"],
         retrieved=RETRIEVED_FREY)
     assert "badger-folk bandit chief" in c.prompt, c.prompt
-    assert "Boss Frey: snarling forward" in c.prompt
+    # Identity leads the block, pose follows it (analysis §18).
+    assert "Boss Frey: heavy-set badger-folk bandit chief" in c.prompt, c.prompt
+    assert (c.prompt.index("badger-folk bandit chief")
+            < c.prompt.index("snarling forward")), c.prompt
     f = _finding(c, "species_unbacked", "Boss Frey")
     assert "badger" in f.detail
 
@@ -1244,7 +1247,11 @@ def test_a_party_member_abbreviated_in_the_scene_is_reported():
                   {"name": "Marvin", "pose": "rolling forward beside Romi"}])
     c = _compose(plan)
     assert "Seta, Romi and Marvin hold the path" in c.prompt, c.prompt
-    assert "Seta Onix: drawing her bow" in c.prompt, c.prompt
+    # The figure line takes the SHEET spelling, and its identity clause leads the
+    # block with the pose following it (analysis §18).
+    assert "Seta Onix: shoosuva" in c.prompt, c.prompt
+    assert (c.prompt.index("Seta Onix: shoosuva")
+            < c.prompt.index("drawing her bow")), c.prompt
     reported = {(f.subject, f.detail) for f in c.findings if f.code == "name_spelling"}
     assert any("Seta Onix" in d for _, d in reported), reported
     assert c.figures == 3, c.prompt
@@ -1585,3 +1592,80 @@ def test_a_lowercase_word_is_not_someone_being_named():
     assert ip._stray_name("lizard merchant Spleck sells potions",
                           ["Alisa Pennygleam"], ["merchant"]) == "Spleck"
 
+
+
+def _blocks(prompt: str, names) -> dict[str, str]:
+    """One figure's block text, read out of the composed prompt.
+
+    A block starts at its own `Name: ` label and ends at the next label or at the
+    tail sentence. `compose_prompt` writes those labels, so this is reading its
+    output, not guessing at it.
+    """
+    out: dict[str, str] = {}
+    for i, n in enumerate(names):
+        start = prompt.index(f"{n}: ")
+        nxt = [prompt.index(f"{m}: ", start + 1) for m in names[i + 1:]]
+        nxt.append(prompt.index(ip.NO_LETTERING_TAIL))
+        out[n] = prompt[start:min(nxt)]
+    return out
+
+
+def test_what_a_figure_is_leads_its_block_before_what_it_is_doing():
+    """Measured 2026-11-19 (analysis §18): the identity clause goes first.
+
+    Eight characters, their Visual Anchors complete, the same words in prompts of
+    EXACTLY the same length — only the identity clause's position differed. Every
+    render whose block opened with the pose lost a figure (5 of 5: Bubo absent from
+    four prompts that named him, the owl absent outright from a fifth, where his
+    staff was painted into the raccoon's hands). Every render whose block opened
+    with the identity painted the whole cast (4 of 4; Fisher exact p = 0.008). The
+    fix is one clause order, not more detail: cutting nothing at all did NOT bring
+    Bubo back.
+
+    A diffusion model decides WHAT to draw before what that thing is busy with. A
+    block opening "Bubo Krallensturm: staff planted, crescent finial flaring light,
+    a small owl archmage-cleric…" is an instruction about a staff.
+    """
+    plan = _plan("Sable Rin holds the gate while Pell Wicker ropes the cart", [
+        {"name": "Seta Onix", "pose": "drawing her longbow"},
+        {"name": "Colum Bidae", "pose": "crackling blue sparks between his claws"},
+        {"name": "Marvin", "pose": "rolling forward beside Seta"},
+    ])
+    c = _compose(plan)
+    blocks = _blocks(c.prompt, ["Seta Onix", "Colum Bidae", "Marvin"])
+    anchors = _anchors()
+    poses = {"Seta Onix": "drawing her longbow",
+             "Colum Bidae": "crackling blue sparks between his claws",
+             "Marvin": "rolling forward beside Seta"}
+    for name, pose in poses.items():
+        # The identity leads — the sheet's own species line, not a copy this test
+        # retypes by hand (Marvin's "NOT an animal" tail is dropped by the machine
+        # rule, so the first clause is what has to lead).
+        head = anchors[name].fields["species"].split(",")[0].strip()
+        block = blocks[name]
+        assert head in block, f"{name}: {block[:150]}"
+        assert block.split(": ", 1)[1].startswith(head), block[:150]
+        assert block.index(head) < block.index(pose), (
+            f"{name}'s pose is said before its identity: {block[:150]}")
+
+
+def test_an_identity_override_leads_the_block_like_the_field_it_replaces():
+    """A `modify` on `species` replaces the identity, so it inherits the position."""
+    plan = _plan("Trixy Smoldersome faces the raiders alone", [{
+        "name": "Trixy Smoldersome", "pose": "planting her lantern horn",
+        "modify": {"species": "a fox-folk courier"}}])
+    c = _compose(plan)
+    block = _blocks(c.prompt, ["Trixy Smoldersome"])["Trixy Smoldersome"]
+    assert block.split(": ", 1)[1].startswith("a fox-folk courier"), block[:160]
+    assert "planting her lantern horn" in block
+    assert block.index("a fox-folk courier") < block.index("planting her lantern horn")
+
+
+def test_a_figure_with_no_identity_at_all_still_leads_with_its_pose():
+    """The composer does not invent an identity to lead with: Boss Frey has none
+    here, so his block stays pose-first rather than gaining a guess the vault never
+    made — and the absence is reported (§18.6)."""
+    plan = _plan("Boss Frey blocks the path", [{"name": "Boss Frey",
+                                                "pose": "snarling forward"}])
+    c = _compose(plan)
+    assert "Boss Frey: snarling forward" in c.prompt, c.prompt
