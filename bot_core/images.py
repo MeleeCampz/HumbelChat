@@ -54,6 +54,7 @@ from config.settings import (
     IMAGE_MODEL,
     IMAGE_NEGATIVE_PROMPT,
     IMAGE_REASONING_EFFORT,
+    IMAGE_REWRITE_LOOKUP_WAIT_S,
     IMAGE_REWRITE_MAX_TOKENS,
     INFER_API_KEY,
     INFER_URL,
@@ -909,8 +910,89 @@ def _budget_kwargs(profile: prompt_profile.Profile | None = None) -> dict[str, i
             "hard_cap": p.max_chars}
 
 
+async def _correction_pass(*, complete, system: str, msg: str, out: str,
+                          ask: list[str], worth: list[str], meta, composed,
+                          plan, anchors, profile, text: str,
+                          on_phase: Callable[[str], Any] | None = None):
+    """One corrective turn, then a second composition — with the card restored.
+
+    The model that wrote the plan sees its own sentence and the composer's report
+    (``finding_feedback``) plus the lookup nudge, answers a new plan, and the
+    composer compares the two plans by open findings and keeps the better one.
+
+    The turn runs inside :class:`_LookupWindow`: when the fix needs the vault and
+    the 4070 is painting, this waits for the window to close instead of searching
+    with the reranker and embedder stopped.
+
+    Returns ``(composed, plan)`` — the pair to paint, which is the FIRST plan
+    unchanged when the pass produced nothing usable or something worse.
+    """
+    async with _LookupWindow(_needs_vault_fix(worth, composed.findings),
+                             on_phase) as window:
+        retry_out, retry_meta = await run_agent_loop(
+            complete=complete,
+            model=DEFAULT_MODEL,
+            initial_messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": msg},
+                {"role": "assistant", "content": out},
+                {"role": "user", "content": "\n\n".join(ask)},
+            ],
+            answer_instruction=_IMAGE_ANSWER_INSTRUCTION,
+            mention_attached_context=False,
+        )
+    retry = image_prompt.extract_plan(retry_out or "")
+    if retry is None:
+        log.warning("rewrite: the lookup pass returned no plan — keeping "
+                    "the first (%s painted by name)", ", ".join(worth))
+        return composed, plan
+    opened = (_read_paths_from(meta.tool_calls_detail)
+              + _read_paths_from(retry_meta.tool_calls_detail))
+    gathered = "\n\n".join(g for g in
+                           (meta.gathered_context,
+                            retry_meta.gathered_context) if g)
+    revised = image_prompt.compose_prompt(
+        retry, anchors, profile.style,
+        foreground=profile.foreground_figures,
+        budget_kwargs=_budget_kwargs(profile),
+        read_paths=opened,
+        snippet_paths=_snippet_paths_from(gathered, opened),
+        retrieved=_vault_evidence(gathered), request_text=text,
+        animal_floor=profile.animal_floor,
+        animal_floor_living=profile.animal_floor_living)
+    for w in revised.warnings:
+        if w.startswith("budget "):
+            log.warning("composer budget: %s", w)
+        else:
+            log.warning("composer: %s", w)
+    for f in revised.findings:
+        log.info("composer finding (after the correction pass): %s", f.as_line())
+    # Round 15 (live, 2026-11-19): asked to move a description into a
+    # `look` field, the model answered with a NEW plan whose scene said
+    # "Boss Frey, a heavyset badger-folk bandit chief (species not stated
+    # in the vault)" — a meta aside the renderer would paint, a "not" in
+    # the paintable sentence, and a species finding on top. Two problems
+    # answered with four. The composer has BOTH plans in hand, so it
+    # compares them and paints the one with fewer open findings.
+    before = sum(1 for f in composed.findings if f.fixable)
+    after = sum(1 for f in revised.findings if f.fixable)
+    if after > before:
+        log.warning("rewrite: the correction pass answered with a plan "
+                    "that composes WORSE (%d open finding(s) → %d) — "
+                    "painting the first plan instead", before, after)
+        return composed, plan
+    log.info("image prompt recomposed after the lookup pass: %d "
+             "char(s), %d figure(s), %d tool call(s) in the lookup%s",
+             len(revised.prompt), revised.figures,
+             len(retry_meta.tool_calls),
+             " (after waiting for the card to stop painting)"
+             if window.waited else "")
+    return revised, retry
+
+
 async def _rewrite_composed(text: str, complete,
-                            memory_key: Any = None) -> str:
+                            memory_key: Any = None,
+                            on_phase: Callable[[str], Any] | None = None) -> str:
     """Plan the image with the chat model, then COMPOSE the prompt in code.
 
     Raises ImageGenError when no usable plan comes back; rewrite_prompt then
@@ -1006,65 +1088,10 @@ async def _rewrite_composed(text: str, complete,
                      "composing again", len(fixable),
                      (f", {', '.join(worth)} painted by name with no verified "
                       "appearance") if worth else "")
-            retry_out, retry_meta = await run_agent_loop(
-                complete=complete,
-                model=DEFAULT_MODEL,
-                initial_messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": msg},
-                    {"role": "assistant", "content": out},
-                    {"role": "user", "content": "\n\n".join(ask)},
-                ],
-                answer_instruction=_IMAGE_ANSWER_INSTRUCTION,
-                mention_attached_context=False,
-            )
-            retry = image_prompt.extract_plan(retry_out or "")
-            if retry is None:
-                log.warning("rewrite: the lookup pass returned no plan — keeping "
-                            "the first (%s painted by name)", ", ".join(worth))
-            else:
-                opened = (_read_paths_from(meta.tool_calls_detail)
-                          + _read_paths_from(retry_meta.tool_calls_detail))
-                gathered = "\n\n".join(g for g in
-                                       (meta.gathered_context,
-                                        retry_meta.gathered_context) if g)
-                revised = image_prompt.compose_prompt(
-                    retry, anchors, profile.style,
-                    foreground=profile.foreground_figures,
-                    budget_kwargs=_budget_kwargs(profile),
-                    read_paths=opened,
-                    snippet_paths=_snippet_paths_from(gathered, opened),
-                    retrieved=_vault_evidence(gathered), request_text=text,
-                    animal_floor=profile.animal_floor,
-                    animal_floor_living=profile.animal_floor_living)
-                for w in revised.warnings:
-                    if w.startswith("budget "):
-                        log.warning("composer budget: %s", w)
-                    else:
-                        log.warning("composer: %s", w)
-                for f in revised.findings:
-                    log.info("composer finding (after the correction pass): %s",
-                             f.as_line())
-                # Round 15 (live, 2026-11-19): asked to move a description into a
-                # `look` field, the model answered with a NEW plan whose scene said
-                # "Boss Frey, a heavyset badger-folk bandit chief (species not stated
-                # in the vault)" — a meta aside the renderer would paint, a "not" in
-                # the paintable sentence, and a species finding on top. Two problems
-                # answered with four. The composer has BOTH plans in hand, so it
-                # compares them and paints the one with fewer open findings.
-                before = sum(1 for f in composed.findings if f.fixable)
-                after = sum(1 for f in revised.findings if f.fixable)
-                if after > before:
-                    log.warning("rewrite: the correction pass answered with a plan "
-                                "that composes WORSE (%d open finding(s) → %d) — "
-                                "painting the first plan instead", before, after)
-                else:
-                    composed = revised
-                    final_plan = retry
-                    log.info("image prompt recomposed after the lookup pass: %d "
-                             "char(s), %d figure(s), %d tool call(s) in the lookup",
-                             len(composed.prompt), composed.figures,
-                             len(retry_meta.tool_calls))
+            composed, final_plan = await _correction_pass(
+                complete=complete, system=system, msg=msg, out=out, ask=ask,
+                worth=worth, meta=meta, composed=composed, plan=final_plan,
+                anchors=anchors, profile=profile, text=text, on_phase=on_phase)
 
         _remember_plan(memory_key, final_plan)
         log.info(
@@ -1079,12 +1106,19 @@ async def _rewrite_composed(text: str, complete,
     raise ImageGenError("rewrite produced no plan")  # unreachable
 
 
-async def rewrite_prompt(text: str, memory_key: Any = None) -> str:
+async def rewrite_prompt(text: str, memory_key: Any = None,
+                         on_phase: Callable[[str], Any] | None = None) -> str:
     """Turn a short user request into the prompt the image model gets.
 
     Runs on the chat backend (its own card) while rag mode is live — call this
     BEFORE ensure_image_mode(): the rewrite's KB tools include the reranker,
     which a mode switch takes offline.
+
+    ``on_phase`` (optional) is called with a phase name when the rewrite PAUSES
+    for something outside itself: "awaiting_lookup" when a lookup has to wait for
+    a live painting window to close (the fix is reading the vault and dense
+    retrieval is skipped while the card paints — see _LookupWindow). Callers use
+    it to tell the user instead of going silent.
 
     Two paths, in order (#84 — analysis doc §9.3):
     1. **plan + composer** — the model answers with an `<image_plan>` block (a
@@ -1110,7 +1144,8 @@ async def rewrite_prompt(text: str, memory_key: Any = None) -> str:
     client = _chat_client()
     complete = _make_completer(client)
     try:
-        return await _rewrite_composed(text, complete, memory_key)
+        return await _rewrite_composed(text, complete, memory_key,
+                                       on_phase=on_phase)
     except ImageGenError as exc:
         log.warning("composed rewrite unavailable (%s) — falling back to the "
                     "prose rewrite path", str(exc)[:160])
@@ -1181,6 +1216,136 @@ _gen_lock = asyncio.Lock()  # one generation at a time (mode switches +
                           # diffusion jobs are card-global state)
 
 
+# ── A lookup that arrives mid-painting waits for the card ─────────────
+# The rewrite runs on the CHAT card, but its KB tools run on the 4070: while a
+# painting window is open the dense leg is skipped (RAG_IMAGE_MODE_LEXICAL_ONLY)
+# and the reranker is stopped outright (live 2026-11-19: a second /image rewrote
+# at 15:00:54, inside the first one's window that opened at 15:00:35 —
+# "Retrieval GPU mode: rag → image (dense leg skipped while image)").
+#
+# So a rewrite whose fix is READING the vault must not answer with lexical-only
+# guesses. But it must not idle either: the window restores rag mode on its way
+# out anyway, so queueing behind it is free. Findings the model fixes from its
+# own words (a collective subject, a repeated name, a meta aside) never wait —
+# they need no retrieval, and making them wait would just cost the user time.
+_VAULT_FIX_CODES = frozenset({
+    "figure_ungrounded", "look_unverified", "species_contradicted",
+    "species_unbacked", "species_conflict", "identity_left_in_scene",
+})
+
+
+def _card_is_painting() -> bool:
+    """True while kb.retrievers knows the 4070 is in image mode — the state where
+    the embedder and reranker are stopped and a KB search is lexical-only."""
+    try:
+        from kb.retrievers import get_gpu_mode
+        return get_gpu_mode() == "image"
+    except Exception:  # noqa: BLE001 — a mode probe must never break a rewrite
+        return False
+
+
+def _needs_vault_fix(worth: list[str], findings) -> str:
+    """Why this rewrite needs the sidecars live ("" when it does not)."""
+    if worth:
+        return "named with no verified appearance: " + ", ".join(worth)
+    codes = sorted({f.code for f in findings if f.code in _VAULT_FIX_CODES})
+    if codes:
+        return "fix is reading the vault: " + ", ".join(codes)
+    return ""
+
+
+def _release_late(task: "asyncio.Task[bool]") -> None:
+    """An acquire that landed AFTER the wait gave up hands the lock straight back."""
+    try:
+        if not task.cancelled() and task.result():
+            _gen_lock.release()
+            log.debug("rewrite: a late generation-lock acquisition was released")
+    except Exception as e:  # noqa: BLE001 — best-effort by design
+        log.debug("late generation-lock release failed: %s", e)
+
+
+class _LookupWindow:
+    """Async context manager: hold a lookup pass behind a live painting window.
+
+    Entered UNCONDITIONALLY (a no-op unless a vault fix is needed while the card
+    is in image mode), so the call site reads as one shape:
+
+        async with _LookupWindow(_needs_vault_fix(...), on_phase):
+            retry_out, retry_meta = await run_agent_loop(...)
+
+    Three states, in the order they are checked:
+    1. card painting inside one of OUR generation windows → queue behind it. By
+       the time the lock is ours the window's own rag restore has run (or a
+       held window is open, which we then end — a lookup needs rag mode).
+    2. card in image mode with NO window of ours → someone else put it there
+       (a manual `scripts/gpu_switch.sh image`). Not ours to end: running
+       someone else's diffusion model off the card because a lookup was wanted
+       is not this bot's call, so the lookup runs degraded and the log says why.
+    3. the window outlives IMAGE_REWRITE_LOOKUP_WAIT_S → proceed degraded
+       (lexical-only) rather than hold the user's request hostage.
+
+    Scope: this wraps the CORRECTION pass, not the model's first turn. That first
+    turn's thinking overlaps the painting window for free (the GPU is idle while
+    the chat model reasons), and the composer's report of ungrounded names is
+    precisely what brings a lookup back here, where the sidecars are live.
+    """
+
+    def __init__(self, reason: str, on_phase: Callable[[str], Any] | None = None):
+        self._reason = reason
+        self._on_phase = on_phase
+        self._held = False
+        self.waited = False          # a window was actually waited out
+
+    async def __aenter__(self) -> "_LookupWindow":
+        if not self._reason or not _card_is_painting():
+            return self
+        if not _gen_lock.locked():
+            log.warning("rewrite: %s — the card is in image mode OUTSIDE a "
+                        "generation window, so the lookup runs lexical-only "
+                        "(scripts/gpu_switch.sh rag restores the sidecars)",
+                        self._reason)
+            return self
+        log.info("rewrite: %s — the card is painting, so the lookup waits for "
+                 "that window to close (its rag restore brings the reranker and "
+                 "embedder back)", self._reason)
+        await _emit_phase(self._on_phase, "awaiting_lookup")
+        acquire = asyncio.ensure_future(_gen_lock.acquire())
+        try:
+            # shield(): the timeout must cancel the WAIT, never the acquisition —
+            # a cancelled acquire is how a lock gets left held.
+            await asyncio.wait_for(asyncio.shield(acquire),
+                                   timeout=IMAGE_REWRITE_LOOKUP_WAIT_S)
+        except (asyncio.TimeoutError, TimeoutError):
+            acquire.add_done_callback(_release_late)
+            log.warning("rewrite: the painting window did not close within %.0f s "
+                        "(IMAGE_REWRITE_LOOKUP_WAIT_S) — running the lookup "
+                        "degraded (lexical-only)", IMAGE_REWRITE_LOOKUP_WAIT_S)
+            return self
+        except asyncio.CancelledError:
+            acquire.add_done_callback(_release_late)
+            raise
+        self._held = True
+        self.waited = True
+        if _card_is_painting():
+            # The window either armed an IMAGE_MODE_HOLD_S hold or its restore
+            # failed. A lookup needs rag mode, so end it now — the generation
+            # that follows re-switches, and it re-switches from a clean state.
+            try:
+                log.info("rewrite: still image mode after the window closed — "
+                         "restoring rag before the lookup")
+                await _switch_gpu_mode("rag")
+            except Exception as e:  # noqa: BLE001 — degraded beats stuck
+                log.warning("rewrite: restoring rag for the lookup failed (%s) "
+                            "— running the lookup lexical-only", e)
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        if self._held:
+            self._held = False
+            _gen_lock.release()
+        return False
+
+
 def resolve_size(raw: str | None) -> int | None:
     """Parse an optional ``--size`` flag value; clamp to [256, IMAGE_MAX_SIZE].
     Returns None → caller uses IMAGE_DEFAULT_SIZE."""
@@ -1196,7 +1361,8 @@ def resolve_size(raw: str | None) -> int | None:
 
 
 async def prepare_prompt(text: str, raw: bool = False,
-                         memory_key: Any = None) -> str:
+                         memory_key: Any = None,
+                         on_phase: Callable[[str], Any] | None = None) -> str:
     """Final prompt for the image backend: rewrite via the chat model unless
     ``raw`` (verbatim passthrough).  A failed rewrite degrades to the raw
     text (never blocks a generation over a rewrite hiccup).
@@ -1204,6 +1370,8 @@ async def prepare_prompt(text: str, raw: bool = False,
     Shared by the live path and the dry-run mode (#65b) so both see exactly
     what would be sent. ``memory_key`` (usually ``(guild_id, channel_id)``)
     lets a follow-up request in the same channel see the previous plan.
+    ``on_phase`` forwards to :func:`rewrite_prompt` (progress for a wait the
+    rewrite cannot avoid).
     """
     text = (text or "").strip()
     if not text:
@@ -1211,7 +1379,7 @@ async def prepare_prompt(text: str, raw: bool = False,
     if raw:
         return text
     try:
-        return await rewrite_prompt(text, memory_key)
+        return await rewrite_prompt(text, memory_key, on_phase=on_phase)
     except ImageGenError as exc:
         log.warning("prompt rewrite failed (%s) — using the raw prompt", exc)
         return text

@@ -96,9 +96,21 @@ async def handle_generate_image_command(
     #    tools include the reranker — a mode switch would take it offline).
     #    The channel is the memory key: "again, but with torches" is an edit of
     #    the frame this channel just painted, not a fresh request.
+    def _prep_phase(name: str):
+        # A rewrite that needs a vault lookup while the card is PAINTING the
+        # previous image waits for that window (the search sidecars are stopped
+        # during it and come back with it). Say so: a silent pause reads as a
+        # stalled bot.
+        if name == "awaiting_lookup":
+            return _progress("📖 Waiting for the image now painting to finish — "
+                             "this prompt needs a vault lookup, and the search "
+                             "sidecars are down while the card paints…")
+        return None
+
     final_prompt = await prepare_prompt(
         prompt, raw=raw,
-        memory_key=(interaction.guild_id, interaction.channel_id))
+        memory_key=(interaction.guild_id, interaction.channel_id),
+        on_phase=_prep_phase)
 
     # Dry run (#65b): show exactly what would be sent — no mode switch, no image.
     if dry_run:

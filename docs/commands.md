@@ -147,7 +147,8 @@ restore). Chat stays available throughout (different card). Size is capped
 Config-gated: with `IMAGE_MODEL` empty the command replies with a "not
 configured" hint. See the image section in `.env` (`IMAGE_MODEL`,
 `IMAGE_GGUF_FILENAME`, `IMAGE_INFER_URL`, `IMAGE_GPU_IDS`, `GPU_SWITCH_URL`,
-`IMAGE_MODE_HOLD_S`, `IMAGE_DEFAULT_SIZE`, `IMAGE_MAX_SIZE`).
+`IMAGE_MODE_HOLD_S`, `IMAGE_REWRITE_LOOKUP_WAIT_S`, `IMAGE_DEFAULT_SIZE`,
+`IMAGE_MAX_SIZE`).
 Debug trail (#66): every phase logs to `logs/dev.log` (DEBUG) — the raw user
 request, rewrite iterations + tool calls + a 200-char preview of the result,
 the FULL final prompt and negative prompt actually sent to the backend, load
@@ -160,6 +161,19 @@ add attachments); only if that edit fails does the image go out as a separate
 reply. The stalls are the GPU-mode switch windows (stop RAG → load image →
 paint → unload → restart RAG); with `IMAGE_MODE_HOLD_S` > 0 the switch-back is
 deferred and back-to-back generations skip it entirely.
+
+Back-to-back `/image` calls: a rewrite is NOT locked to a painting window (it
+runs on the chat model, and its tool calls include the reranker — which a mode
+switch takes offline), so the second request's rewrite lands INSIDE the first
+request's painting window, where `RAG_IMAGE_MODE_LEXICAL_ONLY` skips the dense
+leg and the reranker is stopped outright. When the composer reports a finding
+whose fix is READING the vault (a named figure with no verified appearance, a
+contradicted species, a description left in the scene sentence), that lookup
+waits for the window to close — the rag restore that ends the window brings the
+sidecars back, so the wait costs nothing the pipeline was not paying anyway —
+and the progress message says why (`IMAGE_REWRITE_LOOKUP_WAIT_S` caps it). A
+finding the model fixes from its own words (a collective subject, a repeated
+name, a meta aside) never waits.
 
 ### `/roll_items`
 

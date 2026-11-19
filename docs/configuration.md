@@ -213,6 +213,7 @@ back to `rag` mode happens in a `finally` after every painting window.
 | `GPU_SWITCH_TIMEOUT_S` | Switch request timeout (covers stop + load + health) | `420` |
 | `GPU_HEAL_ON_START` | Bot startup restores rag mode if a crash left the 4070 image-side (idempotent; `false` opts out) | `true` |
 | `IMAGE_MODE_HOLD_S` | Hold window after a generation the **bot** switched for: the rag switch-back is deferred, back-to-back generations skip switch+load (a manual-mode window earns no hold) | `0` |
+| `IMAGE_REWRITE_LOOKUP_WAIT_S` | How long a prompt rewrite that needs a **vault lookup** waits when the 4070 is painting: dense retrieval is skipped in image mode, so the lookup queues behind the generation window (its rag restore brings the reranker and embedder back). Past this cap it runs lexical-only. Findings the model fixes from its own words never wait. | `900` |
 | `IMAGE_DEFAULT_SIZE` / `IMAGE_MAX_SIZE` | Painting square (working set grows with resolution) | `1024` / `2048` |
 | `IMAGE_GEN_TIMEOUT_S` / `IMAGE_LOAD_TIMEOUT_S` | Per-image request / model-load readiness deadlines | `600` / `300` |
 | `IMAGE_NEGATIVE_PROMPT` | What the model steers away from (user-requested text is NOT suppressed) | built-in default |

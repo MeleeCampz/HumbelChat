@@ -121,6 +121,13 @@ GPU_HEAL_ON_START: bool = _safe_bool(os.getenv("GPU_HEAL_ON_START"), True)
 # Keep "image" mode this long after a generation so back-to-back
 # /generate_image calls skip the double switch (0 = switch back immediately).
 IMAGE_MODE_HOLD_S: float = _safe_float(os.getenv("IMAGE_MODE_HOLD_S"), 0.0)
+# A prompt rewrite that needs a VAULT lookup while the card is painting waits
+# this long for the generation window to close — the switch back to rag mode
+# that ends the window brings the reranker and embedder back, so the lookup
+# costs no extra wall clock. Past this point it runs degraded (lexical-only)
+# rather than waiting forever. See bot_core/images.py::_LookupWindow.
+IMAGE_REWRITE_LOOKUP_WAIT_S: float = _safe_float(
+    os.getenv("IMAGE_REWRITE_LOOKUP_WAIT_S"), 900.0)
 GPU_SWITCH_TIMEOUT_S: float = _safe_float(os.getenv("GPU_SWITCH_TIMEOUT_S"), 420.0)
 # Negative prompt for the diffusion model (what to steer AWAY from). Mirrors
 # the hard rules of the rewrite system prompt (no humans / no modern objects)

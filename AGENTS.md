@@ -22,6 +22,14 @@ Two physical cards, two backends — **never mix them up**:
   (no half-switched card).
 - **Prompt rewriting ALWAYS happens before the switch** (the rewrite's KB agent
   tools include the reranker, which the switch takes offline).
+- **…but a rewrite is not locked to a painting window**, so back-to-back `/image`
+  calls land a rewrite INSIDE the previous generation's window, where dense
+  retrieval is skipped and the reranker is stopped. A correction/lookup pass whose
+  fix is reading the vault queues behind `_gen_lock` and runs once rag mode is
+  back (`bot_core/images.py::_LookupWindow`, `IMAGE_REWRITE_LOOKUP_WAIT_S`);
+  findings the model fixes from its own words never wait. Do not "simplify" this
+  by moving the rewrite under `_gen_lock` — that would put the model's thinking
+  time inside the exclusive GPU window.
 - **Everything runs in Docker on the host**, not in this sandbox: the bot
   container, the RAG sidecars, the gpu-switch helper *and* the Unsloth Studio
   container. The sandbox can only reach them over the network

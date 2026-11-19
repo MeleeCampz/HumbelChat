@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
+import logging
 import time
 
 import httpx
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 
@@ -1510,12 +1512,19 @@ class TestCommandHandler:
         await handle_generate_image_command(inter, prompt="verbatim bird", raw=True)
         prepared.assert_awaited_once_with(
             "verbatim bird", raw=True,
-            memory_key=(inter.guild_id, inter.channel_id))
+            memory_key=(inter.guild_id, inter.channel_id),
+            on_phase=ANY)
         assert generated == ["verbatim bird"]
         # ONE message: the final answer (text + image) landed in place on the
         # progress message — no separate reply.
         assert len(followups) == 1
         assert followups[0]["content"].startswith("🎨")
+        # The PREP callback is wired too: a rewrite that must wait for a painting
+        # window says so on the progress message instead of going silent.
+        prep_phase = prepared.await_args.kwargs["on_phase"]
+        await prep_phase("awaiting_lookup")
+        assert any("vault lookup" in e for e in followups[0]["edits"]), \
+            followups[0]["edits"]
         assert "attachments" in followups[0]
 
     async def test_prepare_prompt_used_when_not_raw(self, monkeypatch):
@@ -1825,3 +1834,215 @@ def test_an_agent_query_line_never_becomes_campaign_evidence_again(monkeypatch):
     ev = images._vault_evidence(gathered)
     assert "badger" not in ev and "lizard" not in ev, ev
     assert "rat-folk" in ev
+
+
+class TestDeferredLookup:
+    """Live 2026-11-19: the second of three /image calls rewrote at 15:00:54,
+    INSIDE the first one's painting window (opened 15:00:35 — "Retrieval GPU
+    mode: rag → image (dense leg skipped while image)"), so its KB search would
+    have run with the reranker and the embedder stopped.
+
+    The rewrite's lookup pass now queues behind the generation window instead.
+    The rag restore that ends the window brings the sidecars back, so the wait
+    costs nothing the pipeline was not paying anyway — and the lookup gets real
+    retrieval. A finding the model fixes from its own words never waits.
+    """
+
+    @staticmethod
+    def _resp(content: str):
+        return MagicMock(choices=[MagicMock(message=MagicMock(content=content))])
+
+    @staticmethod
+    def _plan(scene: str, figures: list[dict]) -> str:
+        return ('<image_plan>\n' + json.dumps(
+            {"scene": scene, "figures": figures,
+             "lighting": "dappled forest light"}) + '\n</image_plan>')
+
+    @staticmethod
+    async def _paint_window(events: list[str], hold_s: float) -> None:
+        """Stand in for generate_image(): holds the lock, then restores rag."""
+        async with images._gen_lock:
+            events.append("painting")
+            await asyncio.sleep(hold_s)
+            events.append("window-closed")
+
+    def _client(self, events: list[str], plans: list[str]):
+        """A chat backend that records WHICH turn happens when."""
+        n = {"i": 0}
+
+        async def create(*a, **kw):
+            n["i"] += 1
+            events.append(f"model-turn-{n['i']}")
+            return self._resp(plans[n["i"] - 1])
+
+        client = MagicMock()
+        client.chat.completions.create = create
+        return client
+
+    # Plan 1 carries a fixable finding the fix for is READING the vault: the
+    # figure has no anchor and no look, and the plan's only description of him
+    # was left in the scene sentence (identity_left_in_scene).
+    _BOSS = ('Boss Frey, a heavy-set bandit chief in a patched coat, blocks the '
+             'group on the Old Bridge',
+             [{"name": "Boss Frey", "pose": "brandishing an axe"}])
+    # Plan 2: the aside is gone out of the paintable sentence, the crowd noun too.
+    _BOSS_FIXED = ('Boss Frey blocks the party on the torch-lit Old Bridge',
+                   [{"name": "Boss Frey", "pose": "brandishing an axe"}])
+
+    async def test_a_lookup_needed_mid_paint_waits_for_the_window(self, monkeypatch,
+                                                                  caplog):
+        """The lookup pass must not answer with lexical-only guesses."""
+        import kb.retrievers as retrievers
+        monkeypatch.setattr(retrievers, "_gpu_mode", "image")
+        events: list[str] = []
+        window = asyncio.create_task(self._paint_window(events, 0.08))
+        await asyncio.sleep(0.02)                      # the window takes the lock
+        assert images._gen_lock.locked()
+
+        async def fake_switch(mode):                   # no switcher in tests
+            monkeypatch.setattr(retrievers, "_gpu_mode", "rag")
+            events.append(f"switch-{mode}")
+        monkeypatch.setattr(images, "_switch_gpu_mode", fake_switch)
+        monkeypatch.setattr(images, "_chat_client", lambda: self._client(
+            events, [self._plan(*self._BOSS), self._plan(*self._BOSS_FIXED)]))
+        phases: list[str] = []
+        with caplog.at_level(logging.INFO, logger="bot.bot_core.images"):
+            out = await images.prepare_prompt(
+                "Boss Frey blockiert die Gruppe auf dem Weg", on_phase=phases.append)
+        await window
+
+        assert events.index("window-closed") < events.index("model-turn-2"), events
+        assert "switch-rag" in events and (
+            events.index("switch-rag") < events.index("model-turn-2")), events
+        assert "the card is painting, so the lookup waits" in caplog.text
+        assert "awaiting_lookup" in phases, "the pause was silent"
+        assert "torch-lit" in out, out
+        assert not images._gen_lock.locked()
+
+    async def test_a_finding_the_model_fixes_itself_never_waits(self, monkeypatch,
+                                                                caplog):
+        """A collective subject needs no retrieval: making it queue behind a
+        painting window would only make the user wait for nothing."""
+        import kb.retrievers as retrievers
+        monkeypatch.setattr(retrievers, "_gpu_mode", "image")
+        switched: list[str] = []
+
+        async def fake_switch(mode):
+            switched.append(mode)
+        monkeypatch.setattr(images, "_switch_gpu_mode", fake_switch)
+        events: list[str] = ["painting"]
+
+        async def hold_forever():
+            async with images._gen_lock:
+                await asyncio.sleep(5)
+        window = asyncio.create_task(hold_forever())
+        await asyncio.sleep(0.02)
+        monkeypatch.setattr(images, "_chat_client", lambda: self._client(
+            events, [self._plan("die ganze Gruppe chillt am Lagerfeuer",
+                                [{"name": "Seta Onix", "pose": "nudging a boot"},
+                                 {"name": "Marvin", "pose": "rolling forward"}]),
+                     self._plan("Seta Onix and Marvin chill at the campfire",
+                                [{"name": "Seta Onix", "pose": "nudging a boot"},
+                                 {"name": "Marvin", "pose": "rolling forward"}])]))
+        with caplog.at_level(logging.INFO, logger="bot.bot_core.images"):
+            out = await asyncio.wait_for(
+                images.rewrite_prompt("die ganze Gruppe chillt am Lagerfeuer"),
+                timeout=10)
+        assert images._gen_lock.locked(), "the rewrite took the card it did not need"
+        window.cancel()
+        await asyncio.gather(window, return_exceptions=True)
+
+        assert "collective_subject" in caplog.text
+        assert events[-1] == "model-turn-2", events
+        assert switched == [], switched
+        assert "the card is painting, so the lookup waits" not in caplog.text
+        assert "Exactly 2 named figures" in out, out
+
+    async def test_a_window_that_outlasts_the_wait_runs_the_lookup_degraded(
+            self, monkeypatch, caplog):
+        """Waiting forever is worse than a lexical-only lookup: the cap releases
+        the request, and the late lock acquisition is handed back."""
+        import kb.retrievers as retrievers
+        monkeypatch.setattr(retrievers, "_gpu_mode", "image")
+        monkeypatch.setattr(images, "IMAGE_REWRITE_LOOKUP_WAIT_S", 0.05)
+        events: list[str] = []
+        window = asyncio.create_task(self._paint_window(events, 0.5))
+        await asyncio.sleep(0.02)
+        async def fake_switch(mode):
+            events.append(f"switch-{mode}")
+        monkeypatch.setattr(images, "_switch_gpu_mode", fake_switch)
+        monkeypatch.setattr(images, "_chat_client", lambda: self._client(
+            events, [self._plan(*self._BOSS), self._plan(*self._BOSS_FIXED)]))
+        with caplog.at_level(logging.WARNING, logger="bot.bot_core.images"):
+            out = await images.rewrite_prompt("Boss Frey blockiert die Gruppe")
+        assert "IMAGE_REWRITE_LOOKUP_WAIT_S" in caplog.text
+        assert "model-turn-2" in events, events          # ran without waiting
+        assert "torch-lit" in out, out
+        await window
+        assert events.index("model-turn-2") < events.index("window-closed"), events
+        assert "switch-rag" not in events, events        # the card was left alone
+        await asyncio.sleep(0.05)
+        assert not images._gen_lock.locked(), "the late acquisition stayed held"
+
+    async def test_an_image_mode_the_bot_did_not_open_is_not_touched(self, monkeypatch,
+                                                                     caplog):
+        """A manual `gpu_switch.sh image` window is someone else's card state:
+        the lookup runs lexical-only rather than unloading their model."""
+        import kb.retrievers as retrievers
+        monkeypatch.setattr(retrievers, "_gpu_mode", "image")
+
+        async def forbidden_switch(mode):
+            raise AssertionError(f"the rewrite switched the card to {mode}")
+        monkeypatch.setattr(images, "_switch_gpu_mode", forbidden_switch)
+        assert not images._gen_lock.locked()
+        monkeypatch.setattr(images, "_chat_client", lambda: self._client(
+            [], [self._plan(*self._BOSS), self._plan(*self._BOSS_FIXED)]))
+        with caplog.at_level(logging.WARNING, logger="bot.bot_core.images"):
+            out = await images.rewrite_prompt("Boss Frey blockiert die Gruppe")
+        assert "OUTSIDE a generation window" in caplog.text
+        assert "torch-lit" in out, out
+
+    async def test_two_back_to_back_rewrites_queue_behind_the_same_window(
+            self, monkeypatch, caplog):
+        """The live shape: three /image calls in a row. The second rewrites while
+        the first paints, its lookup waits, rag is restored, and the lock comes
+        back exactly once — no leak, no double-hold."""
+        import kb.retrievers as retrievers
+        monkeypatch.setattr(retrievers, "_gpu_mode", "image")
+        events: list[str] = []
+        window = asyncio.create_task(self._paint_window(events, 0.12))
+        await asyncio.sleep(0.02)
+
+        async def fake_switch(mode):
+            events.append(f"switch-{mode}")
+            monkeypatch.setattr(retrievers, "_gpu_mode", "rag")
+        monkeypatch.setattr(images, "_switch_gpu_mode", fake_switch)
+        monkeypatch.setattr(images, "_chat_client", lambda: self._client(
+            events, [self._plan(*self._BOSS), self._plan(*self._BOSS_FIXED),
+                     self._plan(*self._BOSS), self._plan(*self._BOSS_FIXED)]))
+        with caplog.at_level(logging.INFO, logger="bot.bot_core.images"):
+            outs = await asyncio.gather(
+                images.rewrite_prompt("Boss Frey blockiert die Gruppe auf der Brücke"),
+                images.rewrite_prompt("Boss Frey blockiert die zweite Gruppe"))
+        await window
+        turns = sorted(e for e in events
+                       if e in ("model-turn-2", "model-turn-4"))
+        assert len(turns) == 2, events
+        assert all(events.index(t) > events.index("window-closed")
+                   for t in turns), events
+        assert all("torch-lit" in o for o in outs), outs
+        assert not images._gen_lock.locked(), "a lookup window leaked the lock"
+
+    async def test_a_lookup_that_needs_nothing_never_opens_the_window(self, monkeypatch,
+                                                                      caplog):
+        """rag mode live → the correction pass runs exactly as before, no wait."""
+        import kb.retrievers as retrievers
+        monkeypatch.setattr(retrievers, "_gpu_mode", "rag")
+        events: list[str] = []
+        monkeypatch.setattr(images, "_chat_client", lambda: self._client(
+            events, [self._plan(*self._BOSS), self._plan(*self._BOSS_FIXED)]))
+        with caplog.at_level(logging.INFO, logger="bot.bot_core.images"):
+            out = await images.rewrite_prompt("Boss Frey blockiert die Gruppe")
+        assert "the card is painting, so the lookup waits" not in caplog.text
+        assert not images._gen_lock.locked()
+        assert "torch-lit" in out, out
