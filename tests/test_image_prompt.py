@@ -1042,6 +1042,36 @@ def test_a_place_name_in_entities_is_not_painted_as_a_character():
     assert "Winnowing Reach" in c.prompt   # still in the scene sentence
 
 
+def test_a_place_the_user_named_is_still_a_place_and_not_an_unpainted_person():
+    """Live 2026-11-20: the Old Bridge request produced
+    `entity_named_not_painted [the weathered mossy stone arch of the Old Bridge] —
+    the user asked for 'old bridge' and this files them under objects`, a report
+    that asked the correction turn to give a stone arch a pose. Naming a place in
+    the request is not naming a character: the test is whether the plan USES the
+    name as the entry ("Boss Frey and his bandit crew") or only mentions it inside
+    a description of something else."""
+    plan = _plan("Boss Frey bars the way across the Old Bridge", [{"name": "Marvin",
+                 "pose": "rolling to a halt"}],
+                 entities=["the weathered mossy stone arch of the Old Bridge",
+                           "sputtering torches on iron brackets"])
+    c = _compose(plan, request_text="Boss Frey stellt sich der Gruppe auf der "
+                                    "Old Bridge")
+    reported = [f.subject for f in c.findings
+                if f.code == "entity_named_not_painted"]
+    assert reported == [], reported
+    # The guard is position, not vocabulary: the same place name filed AS the entry
+    # is still reported — with nothing in the entry to tell a place from a person,
+    # that residual is the price of keeping the real case (a character lost to the
+    # props) caught. It costs a correction turn, never an image.
+    c2 = _compose(_plan("the party faces them at the crossing",
+                        [{"name": "Marvin", "pose": "rolling to a halt"}],
+                        entities=["Old Bridge", "Boss Frey and his bandit crew"]),
+                 request_text="Boss Frey auf der Old Bridge")
+    assert [f.subject for f in c2.findings
+            if f.code == "entity_named_not_painted"] == [
+        "Old Bridge", "Boss Frey and his bandit crew"]
+
+
 # ── 9. A replacement must not re-name someone the sentence already names ─────
 
 # ── 10. The crowd sentences were the last unpoliced place a species could leak ─
@@ -1399,6 +1429,143 @@ def test_a_species_claim_hidden_in_a_figure_name_is_still_reported():
     names = {f.subject for f in c.findings if f.code == "species_contradicted"}
     assert {"crow-folk bandit 1", "crow-folk bandit 2"} <= names, c.findings
     assert "crow-folk bandit 1" in c.prompt, c.prompt
+
+
+def test_a_species_in_a_figure_name_that_the_vault_never_discusses_is_not_a_contradiction():
+    """The table owner's ruling (2026-11-19) allows an animal-folk guess for a
+    character the vault never describes — that guess is what keeps a HUMAN out of the
+    frame. Until 2026-11-20 every species word inside a figure NAME was filed as
+    `species_contradicted` with the words "the material does not back", which is the
+    ALLOWED case wearing the refused case's label, and it sent the correction turn to
+    rename a figure out of the very guess the animal floor requires. The name is now
+    read with the same verdict a `look` gets.
+    """
+    plan = _plan("two bandits bar the ford", [{"name": "rat-folk bandit",
+                 "pose": "holding a cudgel"}, {"name": "weasel-folk bandit",
+                 "pose": "holding an axe"}])
+    c = _compose(plan, retrieved="SESSION_01: the toll crew blocks the Old Bridge.",
+                 request_text="seine Banditen")
+    contra = [f.subject for f in c.findings if f.code == "species_contradicted"]
+    assert contra == [], [f.as_line() for f in c.findings]
+    unbacked = {f.subject for f in c.findings if f.code == "species_unbacked"}
+    assert {"rat-folk bandit", "weasel-folk bandit"} <= unbacked, c.findings
+    assert "rat-folk bandit" in c.prompt and "weasel-folk bandit" in c.prompt, c.prompt
+
+
+# A search result arrives as ONE line: `[{"file": …, "snippet": …}, {"file": …}]`, so
+# the block that "names Boss Frey" is the blob — and the blob holds Bubo's owl, a
+# blue tit's own sheet and a deer-folk bounty, none of them about him.
+_BLOB = ('[{"file": "humblewood/…/SESSION_01_DerAnfang/notes.md", "section": "Full '
+         'Document", "snippet": "Session 01: Ashbarrow fire, Frey bandits, Alisa '
+         'Pennygleam rescue. A wolf track leads into the forest, and at the wood edge '
+         'the party heals a wounded wolf."}, {"file": "humblewood/…/Player '
+         'Characters.md", "section": "Bubo Krallensturm -> Appearance", "snippet": '
+         '"An owl, upright and robed, snow-white facial disc, amber eyes."}, '
+         '"4 location(s) contain Frey"}, {"file": "…/SESSION_05/notes.md", '
+         '"section": "Lexikon: Personen / Banditen", "snippet": "Godfather: Ein Luma, '
+         'der 400 Gold Kopfgeld kostet."}]')
+
+
+def test_an_animal_elsewhere_in_the_same_blob_is_not_evidence_about_the_character():
+    """The bug §18's fix depends on: measured live 2026-11-20, the material kept for
+    "Boss Frey" was 6,453 chars and the species words harvested out of it were owl,
+    reh, tit — another character's sheet, a bounty posted in Session 5 and a
+    blue tit's entry. `verify_look` read that as the vault calling Frey something
+    else and DROPPED the look the rewrite had genuinely opened the file for, so the
+    figure went into the prompt with no identity at all: the shape §18 measures the
+    renderer dropping or merging into a neighbour.
+
+    A species fact about a character now has to sit in the same phrase as their
+    name. The period is a wall, so the wolf three sentences down stays out.
+    """
+    assert sorted(ip._species_named_in(ip.evidence_about("Boss Frey", _BLOB))) == [
+        "owl", "wolf"], "the block reading is still contaminated — that is the point"
+    plan = _plan("Boss Frey bars the crossing",
+                 [{"name": "Boss Frey", "pose": "striding to the bridge centre",
+                   "look": "heavy-set badger-folk bandit chief with a hatchet",
+                   "source": "humblewood/…/SESSION_01_DerAnfang/notes.md"}])
+    c = _compose(plan, retrieved=_BLOB, request_text="Boss Frey auf der Old Bridge",
+                 read_paths=["humblewood/…/SESSION_01_DerAnfang/notes.md"])
+    codes = [f.code for f in c.findings]
+    assert "look_unverified" not in codes and "species_contradicted" not in codes, \
+        [f.as_line() for f in c.findings]
+    assert "badger-folk" in c.prompt, c.prompt
+    # …and said out loud as what it is: a species the vault never states.
+    f = _finding(c, "species_unbacked", "Boss Frey")
+    assert "badger" in f.detail and "invention" in f.detail, f.detail
+
+
+def test_a_vault_bullet_that_describes_the_character_after_a_colon_counts():
+    """The vault's own shape for a character entry is "- **Name**: what they are".
+    Cutting the phrase at the colon would call the vault silent about them and let
+    any invented species through."""
+    retrieved = ("### Lexikon: Personen / Banditen\n- **Frey**: rat-folk bandit "
+                 "chief of the Old Bridge toll crew")
+    plan = _plan("the party faces the toll crew",
+                 [{"name": "Boss Frey", "pose": "standing at the toll gate",
+                   "look": "a sly fox-folk bandit chief",
+                   "source": "humblewood/…/SESSION_05/notes.md"}])
+    c = _compose(plan, retrieved=retrieved, request_text="Boss Frey",
+                 read_paths=["humblewood/…/SESSION_05/notes.md"])
+    f = _finding(c, "species_contradicted", "Boss Frey")
+    assert "rat" in f.detail and "fox" in f.detail, f.detail
+    assert "fox-folk" not in c.prompt, c.prompt
+
+
+def test_a_comma_apposition_about_the_character_counts_as_evidence():
+    """"Boss Frey, a badger-folk bandit chief, bars the bridge" is one phrase and the
+    vault describing him inside it is a statement about him."""
+    retrieved = ("SESSION_01: Boss Frey, a badger-folk bandit chief, bars the "
+                 "crossing; his crew keeps the toll.")
+    plan = _plan("the crew keeps the toll", [{"name": "Boss Frey",
+                 "pose": "striding forward", "look": "a fox-folk bandit chief",
+                 "source": "SESSION_1"}])
+    c = _compose(plan, retrieved=retrieved, request_text="Boss Frey",
+                 read_paths=["SESSION_1"])
+    assert _finding(c, "species_contradicted", "Boss Frey").detail.count("badger") \
+        >= 1, c.findings
+
+
+def test_a_species_word_three_sentences_away_is_not_his_species():
+    """The wall the widened unit must keep: one blob line, a name, and an animal that
+    belongs to nothing in the scene (the wounded wolf the party healed)."""
+    retrieved = ("SESSION_01 notes: Der Name vom Boss ist Frey. Gehört zur "
+                 "Banditen-Koalition. Am Waldrand heilt Bubo einen verletzten Wolf.")
+    ev = ip.species_evidence_about("Boss Frey", retrieved)
+    assert sorted(ip._species_named_in(ev)) == [], ev
+
+
+def test_each_party_member_gets_their_own_species_and_nobody_elses():
+    """Read as a whole sheet, every PC's section names somebody else's animal too, so
+    a look override checked against "the material about Colum" used to see the whole
+    roster. The override is now answered by COLUM's own sheet line — and an override
+    that contradicts it is refused by it, not by a stranger's entry.
+    """
+    sheet = _SHEET
+    assert sorted(ip._species_named_in(ip.evidence_about("Colum Bidae", sheet))) != [
+        "tit"], "the block reading names other people's animals"
+    own = ip.species_evidence_about("Colum Bidae", sheet)
+    assert "jackalwere" not in own and "shoosuva" not in own, own
+
+    # His own sheet vouches for his species…
+    c = _compose(_plan("Colum Bidae flits over the fire",
+                       [{"name": "Colum Bidae", "pose": "flitting",
+                         "look": "a plump blue tit warlock",
+                         "source": "Player Characters"}]),
+                 retrieved=sheet, request_text="Colum", read_paths=["Player Characters"])
+    codes = [f.code for f in c.findings]
+    assert "species_contradicted" not in codes and "look_unverified" not in codes, \
+        [f.as_line() for f in c.findings]
+    assert "blue tit" in c.prompt, c.prompt
+
+    # …and the same sheet refuses an override that calls a blue tit something else.
+    c2 = _compose(_plan("Colum Bidae flits over the fire",
+                        [{"name": "Colum Bidae", "pose": "flitting",
+                          "look": "a sly fox-folk warlock",
+                          "source": "Player Characters"}]),
+                  retrieved=sheet, request_text="Colum", read_paths=["Player Characters"])
+    f = _finding(c2, "species_contradicted", "Colum Bidae")
+    assert "fox" in f.detail and ("tit" in f.detail or "birdfolk" in f.detail), f.detail
 
 
 def test_the_budget_never_cuts_a_crowd_the_request_itself_named():

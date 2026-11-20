@@ -960,3 +960,103 @@ Suite after all of it: **1536 passed**.
   `Player Characters.md`, which is the table owner's edit, not code.
 * The prompt still sits at 3,580–3,600 chars against the profile's `max=3600`, so the
   ladder cuts 4–18 clauses per image. `max=` is a profile edit, still untested at 4,200.
+
+## 19. The evidence was attributed to the wrong character (live dump, 2026-11-20)
+
+§18.7 said the remaining defects were data gaps. They were not all data gaps. The
+deferred-lookup probes (§18.6) kept reporting `figure_ungrounded [Boss Frey]` even
+when the rewrite had opened files for him, and the explanation turned out to be
+**evidence attribution** — the composer handing the species check text that was not
+about the character it named.
+
+`/tmp/evidence_audit.py` captures the exact `retrieved` string the composer is given
+and runs the composer's own functions over it. One live rewrite of *"Boss Frey stellt
+sich der Gruppe auf der Old Bridge in BURGGRUND…"*:
+
+| `retrieved` kept "about Boss Frey" | value |
+|---|---|
+| characters | 6,453 (47 lines) |
+| characters actually naming him | 460 |
+| his name appearing in the block | 23 times |
+| other names inside the same block | 9 (Alisa Pennygleam, Bubo, Benner Seridan, Seta, Romi, Trixy, Marvin, Luma, Meadowin) |
+| species words harvested from it | **owl, reh, tit** |
+
+None of those three animals belong to him. `owl` came from Bubo Krallensturm's own
+Appearance section, `tit` from Colum Bidae's Visual Anchor, `reh` from a bounty posted
+in Session 5 (`Godfather: Ein Luma…`). A search result arrives as **one line** —
+`[{"file": …, "snippet": …}, {"file": …}]` — and `evidence_about` splits on blank
+lines, so a JSON array of six hits is one block. "the block that names them" is then
+just "the blob", and the blob is the whole search.
+
+**What it destroyed.** `verify_look`'s contradiction gate reads
+`contradicted_species(look, evidence_about(name, retrieved))`, so a rewrite that had
+read about Boss Frey and written `look: "stocky badger-folk bandit chief"` lost its
+look: `look_unverified … material about THIS character says birdfolk, reh, wolf — that
+look names their species`. The figure then reached the prompt with nothing but its
+name, which is exactly the shape §18 measures the renderer dropping or merging into a
+neighbour. One false species attribution bought a second, worse defect.
+
+**The fix** (`species_evidence_about`): a species fact about a character has to sit in
+the same **phrase** as their name.
+
+* a section whose HEADING names them counts, heading to bottom, sub-headings included;
+* otherwise only the phrase around each occurrence — cut at `. ; ! ?` and quotes,
+  extended across one `:` or `,` because that is how a description attaches to a name
+  (`- **Frey**: rat-folk bandit chief`, `Boss Frey, a badger-folk bandit chief`);
+* the period is a wall: "…Frey bandits, Alisa Pennygleam rescue. A wolf track leads
+  into the forest, and at the wood edge the party heals a wounded wolf" no longer says
+  Frey is a wolf.
+
+Same rewrite, same dump:
+
+| character | old species words | new species words |
+|---|---|---|
+| Boss Frey | owl, reh, tit | — (the vault never states his species) |
+| Alisa Pennygleam | owl, tit | — |
+| Benner Seridan | owl, reh, tit | — |
+| Bubo Krallensturm | owl, tit | **owl** (his own sheet) |
+
+`evidence_about` stays what it was for `figure_ungrounded` and
+`crowd_evidence_spans`, where "near him" is the right question and no fact is being
+read out of it.
+
+### 19.1 A species inside a figure NAME was using the wrong verdict
+
+The live dump named two figures `badger-folk bandit 1` and `badger-folk bandit 2` and
+the old code reported `species_contradicted … the material does not back it, a `-folk`
+is a claim about their kind and this world has no humans`. That is the ALLOWED case
+wearing the refused case's label: §16 allows an animal-folk guess for a being the vault
+never describes, and the composer's own rule for a `look` says the same. The label
+matters because it is what the correction turn is told to fix, so the model was being
+asked to rename figures out of the guess the animal floor exists to force. A name claim
+is now read by the same `species_verdict` a `look` gets, with the claim's ROLE sentence
+as extra evidence — `crow-folk bandit` is contradicted when the vault calls that bandit
+crew `rat-folk` (the vault describes a character through their crew), and reported as
+`species_unbacked` when the vault never discusses them.
+
+### 19.2 A place the user named became a character the plan "left unpainted"
+
+Live: `entity_named_not_painted [the weathered mossy stone arch of the Old Bridge] —
+the user asked for 'old bridge' and this files them under objects`. The entity line
+DRESSED the scene with the bridge; `_request_names` saw the user's own words and
+`e.split(",", 1)[0] in asked` matched a substring inside a description, so the composer
+demanded that a stone arch be given a pose. The test is position: the plan uses the name
+as the entry (`Boss Frey and his bandit crew`) or only mentions it inside something
+else's description. Fixed; the character case is unchanged.
+
+Residual, stated rather than hidden: an entity entry that is a **bare** requested name
+(`Old Bridge` alone) is still reported, because nothing in the entry distinguishes a
+place from a person. It costs a correction turn, never an image.
+
+### 19.3 What the live re-run says after the fix
+
+Same request, same files, one rewrite: `species_contradicted` and `look_unverified` are
+gone, and the identical claim is reported truthfully —
+
+> `species_unbacked [scene]`: badger-folk is claimed in the scene sentence and the
+> vault states no species for those beings — kept, because a species guess is what
+> keeps humans out of the frame, but it is canon the bot invented
+
+Still open from this run: `identity_left_in_scene [Boss Frey]` — the model again put his
+description in the scene sentence instead of the figure's `look`, so his block is
+painted with a pose and no identity. Reporting it has not made the model stop doing it.

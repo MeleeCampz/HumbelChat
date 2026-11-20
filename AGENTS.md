@@ -118,3 +118,16 @@ must not be painted as one), with `IMAGE_ANIMAL_FLOOR` stating the animal-folk r
 in the style sentence where the budget ladder never cuts it. §15–§16 of the analysis
 doc carry the measurements and what is still NOT enforced: nothing compares the
 actors the REQUEST names against the cast the plan paints.
+
+**Species evidence is read phrase by phrase, never block by block** (measured
+2026-11-20, §19): a search result arrives as ONE JSON line, so "the block that names
+Boss Frey" used to be the whole blob — his species came out as owl, reh and tit from
+Bubo's sheet, Colum's anchor and a Session 5 bounty, and `verify_look` answered that
+"contradiction" by dropping a look the rewrite had genuinely opened the file for, which
+is the figure-with-no-identity shape §18 measures the renderer dropping. Use
+`species_evidence_about` (heading-owned sections, else the phrase around the name, one
+step across `:` or `,`, period as a wall) whenever a FACT is read out of retrieved text;
+`evidence_about` stays for "near him" questions only. A PC's OWN anchor species line is
+their evidence. An entity line the request named is a missed character only when the
+plan USES the name as the entry — `entity_named_not_painted` fired on "the weathered
+mossy stone arch of the Old Bridge" until that was fixed.
