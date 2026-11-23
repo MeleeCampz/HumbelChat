@@ -177,14 +177,21 @@ def _gathered_reappend(meta: AgentTurnMeta) -> str:
 
 
 def _agent_system_addendum(answer_instruction: str | None = None,
-                           mention_attached_context: bool = True) -> str:
+                           mention_attached_context: bool = True,
+                           max_iterations: int | None = None,
+                           max_tool_calls: int | None = None) -> str:
     from config.settings import RAG_AGENT_MAX_ITERATIONS, RAG_AGENT_MAX_TOOL_CALLS
 
+    iters = max_iterations if max_iterations is not None else RAG_AGENT_MAX_ITERATIONS
+    calls = max_tool_calls if max_tool_calls is not None else RAG_AGENT_MAX_TOOL_CALLS
+    # The limits are SAID to the model, so they must be the limits this loop will
+    # actually apply — a caller that overrides one here and not there tells the
+    # model a rule the harness then breaks.
     return (
         tool_prompt_block(answer_instruction=answer_instruction,
                           mention_attached_context=mention_attached_context)
-        + f"\n(Hard limits: at most {RAG_AGENT_MAX_ITERATIONS} tool turns and "
-          f"{RAG_AGENT_MAX_TOOL_CALLS} tool calls total — then you MUST "
+        + f"\n(Hard limits: at most {iters} tool turns and "
+          f"{calls} tool calls total — then you MUST "
           "answer with the information you have.)"
     )
 
@@ -209,6 +216,9 @@ async def run_agent_loop(
     initial_messages: list[dict[str, Any]] | None = None,
     answer_instruction: str | None = None,
     mention_attached_context: bool = True,
+    budget_seconds: float | None = None,
+    max_iterations: int | None = None,
+    max_tool_calls: int | None = None,
 ) -> tuple[str, AgentTurnMeta]:
     """Run the bounded loop; ALWAYS returns ``(answer_text, meta)``.
 
@@ -217,6 +227,14 @@ async def run_agent_loop(
     message list (e.g. the fast path's budget-trimmed prompt), which is used
     verbatim with only the tool-protocol addendum appended to its system
     message.
+
+    ``budget_seconds`` / ``max_iterations`` override the RAG defaults for THIS
+    loop only. The image rewrite needs its own pair (§21): it is the one agent
+    path whose turns are ANSWERS a reasoning model writes at
+    `IMAGE_REASONING_EFFORT` (measured ~50 s median at medium), while the chat
+    loop's 45 s was tuned for turns that only pick tools — sharing it made a
+    live image rewrite hit the wall-clock fallback with nothing slow except the
+    model's own thinking (probe 3, 2026-11-20).
     """
     from config.settings import (
         RAG_AGENT_BUDGET_SECONDS,
@@ -225,10 +243,16 @@ async def run_agent_loop(
     )
 
     meta = AgentTurnMeta()
+    iterations = (max_iterations if max_iterations is not None
+                  else RAG_AGENT_MAX_ITERATIONS)
+    calls_cap = (max_tool_calls if max_tool_calls is not None
+                 else RAG_AGENT_MAX_TOOL_CALLS)
+    addendum_args = dict(max_iterations=iterations, max_tool_calls=calls_cap)
     if initial_messages is not None:
         messages: list[dict[str, Any]] = [dict(m) for m in initial_messages]
         addendum = _agent_system_addendum(answer_instruction,
-                                          mention_attached_context)
+                                          mention_attached_context,
+                                          **addendum_args)
         if messages and messages[0].get("role") == "system":
             base = str(messages[0].get("content") or "")
             messages[0]["content"] = (base + "\n\n" if base else "") + addendum
@@ -236,7 +260,7 @@ async def run_agent_loop(
         messages = [
             {"role": "system",
              "content": system_prompt + "\n\n" + _agent_system_addendum(
-                 answer_instruction, mention_attached_context)},
+                 answer_instruction, mention_attached_context, **addendum_args)},
         ]
         if history_block:
             messages.append({"role": "user", "content": history_block})
@@ -246,7 +270,8 @@ async def run_agent_loop(
                           f"{user_message}")
         messages.append({"role": "user", "content": first_user})
 
-    deadline = time.monotonic() + RAG_AGENT_BUDGET_SECONDS
+    deadline = time.monotonic() + (budget_seconds if budget_seconds is not None
+                                   else RAG_AGENT_BUDGET_SECONDS)
     gathered: list[str] = [initial_context] if initial_context else []
 
     def _note_gathered(tool_line: str, result: str) -> None:
@@ -309,7 +334,7 @@ async def run_agent_loop(
                          "budget; please try asking again.")
 
     try:
-        for iteration in range(1, RAG_AGENT_MAX_ITERATIONS + 1):
+        for iteration in range(1, iterations + 1):
             meta.iterations = iteration
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -352,7 +377,7 @@ async def run_agent_loop(
 
             # ── Valid tool call(s) → execute (global cap) ───────────────
             messages.append({"role": "assistant", "content": turn_text})
-            remaining_calls = RAG_AGENT_MAX_TOOL_CALLS - len(meta.tool_calls)
+            remaining_calls = calls_cap - len(meta.tool_calls)
             if remaining_calls <= 0:
                 messages.append({
                     "role": "user",

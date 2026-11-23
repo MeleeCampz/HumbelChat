@@ -182,6 +182,14 @@ and the progress message says why (`IMAGE_REWRITE_LOOKUP_WAIT_S` caps it). A
 finding the model fixes from its own words (a collective subject, a repeated
 name, a meta aside) never waits.
 
+Two clocks are involved and the wait consumes neither: the wait has its own cap
+(default 180 s — the patience of someone watching one message, not a card
+timeout), and the agent loop that runs after it starts a fresh deadline, sized for
+a rewrite rather than shared with chat RAG (`IMAGE_REWRITE_AGENT_BUDGET_SECONDS`,
+120 s, versus `RAG_AGENT_BUDGET_SECONDS`, 45 s — a rewrite's final turn is a plan a
+reasoning model writes, not a tool pick). Worst case for one `/image` is therefore
+rewrite budget + wait + lookup budget + `IMAGE_GEN_TIMEOUT_S`.
+
 ### `/roll_items`
 
 ```

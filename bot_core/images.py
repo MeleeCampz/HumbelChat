@@ -54,6 +54,7 @@ from config.settings import (
     IMAGE_MODEL,
     IMAGE_NEGATIVE_PROMPT,
     IMAGE_REASONING_EFFORT,
+    IMAGE_REWRITE_AGENT_BUDGET_SECONDS,
     IMAGE_REWRITE_LOOKUP_WAIT_S,
     IMAGE_REWRITE_MAX_TOKENS,
     INFER_API_KEY,
@@ -953,6 +954,10 @@ async def _correction_pass(*, complete, system: str, msg: str, out: str,
             ],
             answer_instruction=_IMAGE_ANSWER_INSTRUCTION,
             mention_attached_context=False,
+            # Its own wall clock: this turn answers with a corrected PLAN, written
+            # by a reasoning model at IMAGE_REASONING_EFFORT, after a lookup. The
+            # chat loop's 45 s is not that shape.
+            budget_seconds=IMAGE_REWRITE_AGENT_BUDGET_SECONDS,
         )
     retry = image_prompt.extract_plan(retry_out or "")
     if retry is None:
@@ -1032,6 +1037,7 @@ async def _rewrite_composed(text: str, complete,
             # roster PREVIEW in view, and it discourages exactly the lookups a
             # missing NPC appearance needs.
             mention_attached_context=False,
+            budget_seconds=IMAGE_REWRITE_AGENT_BUDGET_SECONDS,
         )
         out = (out or "").strip()
         if meta.fallback and any(
@@ -1178,6 +1184,7 @@ async def _rewrite_prose(text: str, complete) -> str:
                 model=DEFAULT_MODEL,
                 system_prompt=system,
                 user_message=msg,
+                budget_seconds=IMAGE_REWRITE_AGENT_BUDGET_SECONDS,
             )
             out = (out or "").strip().strip('"')
             if not out:

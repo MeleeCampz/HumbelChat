@@ -1151,3 +1151,53 @@ mislabels over the D-run, and produced at least three wrong verdicts that droppe
 verified look or burned a lookup turn (§19). Removing them costs the mislabels and buys
 back the wrong verdicts, the campaign coupling, and ~700 lines of reading prose in a
 module whose job is assembling text.
+
+## 21. Two clocks: the lookup wait, and the loop that runs after it (2026-11-22)
+
+§14 fixed WHERE a mid-painting lookup runs. Two probes then measured how long it may
+take, and the numbers disagreed with the knobs as written.
+
+### 21.1 What the probes measured
+
+Live against the real chat model, the real KB tools and the running sidecars; only the
+GPU switch simulated (`images._switcher_enabled = lambda: False`), so the code under
+test still believed the card was painting:
+
+| measurement | value |
+|---|---|
+| wait a real back-to-back pair actually needed | **3 s** (window opened 56 s in, closed 59 s) |
+| `search_kb` round trip in rag mode | 4.95 / 5.80 / 6.53 s |
+| `search_kb` round trip during image mode (lexical-only) | 0.96 / 1.00 s |
+| a rewrite that hit the agent loop's cap | `agent fallback (decision turn timed out)` at **45 s**, with zero tool calls pending |
+
+The last row is the finding. The cap is `RAG_AGENT_BUDGET_SECONDS=45`, which is the
+CHAT loop's budget — tuned for decision turns that only pick tools. An image rewrite's
+last turn is different work: it WRITES a plan at `IMAGE_REASONING_EFFORT` (measured
+~52 s median at medium, §12). A 45 s cap can be consumed entirely by one answer the
+model is thinking, and the loop then answers from a single-turn summary of a
+conversation it barely had. The tools were never the slow part: 1–6.5 s per round trip
+against a 45 s budget.
+
+### 21.2 The two knobs
+
+- **`IMAGE_REWRITE_LOOKUP_WAIT_S`: 900 s → 180 s.** The first draft bounded the wait by
+  "as long as a card could plausibly be painting". The wait is paid by a person watching
+  one Discord message, and the measured need was 3 s. Past the cap the lookup runs
+  lexical-only, which still finds the sheet — what it loses is the reranker's ordering.
+  A lookup that needs minutes of waiting is a lookup the vault should have answered with
+  an appearance line (§16).
+- **`IMAGE_REWRITE_AGENT_BUDGET_SECONDS` (new, 120 s)**, passed as `run_agent_loop`'s
+  `budget_seconds` at all three image-rewrite call sites (plan pass, correction/lookup
+  pass, prose fallback). Chat RAG keeps its 45 s. `run_agent_loop` also gained
+  `max_iterations` / `max_tool_calls` overrides, and those flow into the system
+  addendum that ANNOUNCES the limits — an override that moved the applied cap but not
+  the announced one would make the harness break a rule it had just told the model.
+
+The wait consumes neither budget: `_LookupWindow` closes before `run_agent_loop`
+computes its deadline, so a rewrite that waited 180 s still gets its full 120 s to
+think. That is deliberate — a shared clock would make the wait cap silently shrink the
+lookup's own budget, and the two are unrelated waits.
+
+Worst case for one `/image`, stated so nobody has to derive it:
+120 (rewrite) + 180 (wait) + 120 (lookup) + 600 (`IMAGE_GEN_TIMEOUT_S`) = 1020 s, and
+the progress message narrates the waiting part.

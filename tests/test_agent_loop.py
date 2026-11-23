@@ -483,3 +483,81 @@ def test_a_repeated_identical_tool_call_is_refused_not_re_run():
     assert len(dupes) == 1, meta.tool_calls_detail
     refused = [m for m in calls[-1] if m.get("role") == "tool"]
     assert "already made this exact call" in refused[-1]["content"]
+
+
+class TestPerLoopCaps:
+    """The image rewrite is not a chat-RAG turn and must not share its caps.
+
+    Measured live 2026-11-20 (probe 3): an image rewrite hit the agent loop's wall
+    clock with nothing slow but the model's own thinking — a `search_kb` round trip
+    measured 5-6.5 s, while the plan answer is written at IMAGE_REASONING_EFFORT
+    (~52 s median at medium, §12). The 45 s cap was tuned for turns that only pick
+    tools. `budget_seconds` / `max_iterations` / `max_tool_calls` let one caller
+    state its own caps without re-tuning the chat path.
+    """
+
+    @staticmethod
+    def _slow(script, delay):
+        class _Slow:
+            def __init__(self):
+                self.script = list(script)
+                self.calls = 0
+
+            async def __call__(self, messages, model, *, thinking):
+                self.calls += 1
+                item = self.script.pop(0) if self.script else (
+                    "Fallback answer over the transcript.")
+                await asyncio.sleep(delay)
+                return item
+        return _Slow()
+
+    @pytest.mark.asyncio
+    async def test_budget_seconds_replaces_the_wall_clock_for_this_loop(self):
+        # One 0.5 s decision turn with tools queued, under a 0.3 s cap: the next
+        # iteration starts already out of budget.
+        comp = self._slow(['{"tool": "search_kb", "args": {"query": "x"}}',
+                           "second"], 0.5)
+        answer, meta = await agent_loop.run_agent_loop(
+            complete=comp, model="test-model", system_prompt="PERSONA",
+            user_message="q", budget_seconds=0.3,
+            answer_instruction="ANSWER with the facts")
+        assert meta.fallback is True
+        assert meta.fallback_reason == "wall-clock budget exceeded"
+
+    @pytest.mark.asyncio
+    async def test_the_same_script_finishes_under_the_rag_default(self):
+        """Control for the test above: nothing about the script is slow — only the
+        cap changed. (The fixture sets RAG_AGENT_BUDGET_SECONDS=30.)"""
+        comp = self._slow(['{"tool": "search_kb", "args": {"query": "x"}}',
+                           "Plate armor is AC 18 (equipment.md [Equipment])."],
+                          0.05)
+        answer, meta = await agent_loop.run_agent_loop(
+            complete=comp, model="test-model", system_prompt="PERSONA",
+            user_message="q")
+        assert meta.fallback is False
+        assert "AC 18" in answer
+
+    @pytest.mark.asyncio
+    async def test_the_caps_told_to_the_model_are_the_caps_applied(self):
+        """The addendum ANNOUNCES the limits, so an override has to move the
+        announcement too — otherwise the harness breaks a rule it just stated."""
+        comp = _ScriptedComplete([
+            '{"tool": "search_kb", "args": {"query": "a"}}',
+            "Plate armor is AC 18 (equipment.md [Equipment]).",
+        ])
+        answer, meta = await agent_loop.run_agent_loop(
+            complete=comp, model="test-model", system_prompt="PERSONA",
+            user_message="q", max_iterations=1, max_tool_calls=7)
+        said = comp.calls[0][0][0]["content"]
+        assert "at most 1 tool turns and 7 tool calls total" in said
+        assert meta.iterations == 1
+        assert meta.tool_calls == ["search_kb"]
+        # One decision turn only: the answer came from the forced final turn.
+        assert len(comp.calls) == 2
+
+        # The default announcement is untouched when nothing overrides it.
+        comp2 = _ScriptedComplete(["Plate armor is AC 18 (equipment.md)."])
+        await agent_loop.run_agent_loop(complete=comp2, model="test-model",
+                                        system_prompt="PERSONA", user_message="q")
+        assert "at most 2 tool turns and 4 tool calls total" in (
+            comp2.calls[0][0][0]["content"])

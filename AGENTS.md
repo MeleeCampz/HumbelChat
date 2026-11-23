@@ -30,6 +30,21 @@ Two physical cards, two backends — **never mix them up**:
   findings the model fixes from its own words never wait. Do not "simplify" this
   by moving the rewrite under `_gen_lock` — that would put the model's thinking
   time inside the exclusive GPU window.
+- **Two separate clocks, and the wait consumes neither** (`run_agent_loop`
+  `budget_seconds`, analysis §21): the wait is bounded by
+  `IMAGE_REWRITE_LOOKUP_WAIT_S` (180 s — a person watching one Discord message,
+  not a card timeout; the measured wait for a real back-to-back pair was 3 s),
+  and the loop that runs afterwards starts a FRESH `deadline`, so lowering one
+  must never "explain" the other. An image rewrite runs on
+  `IMAGE_REWRITE_AGENT_BUDGET_SECONDS` (120 s), NOT the chat loop's
+  `RAG_AGENT_BUDGET_SECONDS` (45 s): the chat cap was tuned for decision turns
+  that only PICK tools, while a rewrite's last turn WRITES a plan at
+  `IMAGE_REASONING_EFFORT` (~52 s median at medium) after a 5-6.5 s search round
+  trip — sharing the cap made a live rewrite end in `decision turn timed out`
+  with nothing slow but the model's own thinking. `run_agent_loop` also takes
+  `max_iterations`/`max_tool_calls`, and it feeds those SAME numbers into the
+  system addendum that announces the limits to the model: never override one
+  without the other.
 - **Everything runs in Docker on the host**, not in this sandbox: the bot
   container, the RAG sidecars, the gpu-switch helper *and* the Unsloth Studio
   container. The sandbox can only reach them over the network

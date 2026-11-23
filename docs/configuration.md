@@ -213,7 +213,8 @@ back to `rag` mode happens in a `finally` after every painting window.
 | `GPU_SWITCH_TIMEOUT_S` | Switch request timeout (covers stop + load + health) | `420` |
 | `GPU_HEAL_ON_START` | Bot startup restores rag mode if a crash left the 4070 image-side (idempotent; `false` opts out) | `true` |
 | `IMAGE_MODE_HOLD_S` | Hold window after a generation the **bot** switched for: the rag switch-back is deferred, back-to-back generations skip switch+load (a manual-mode window earns no hold) | `0` |
-| `IMAGE_REWRITE_LOOKUP_WAIT_S` | How long a prompt rewrite that needs a **vault lookup** waits when the 4070 is painting: dense retrieval is skipped in image mode, so the lookup queues behind the generation window (its rag restore brings the reranker and embedder back). Past this cap it runs lexical-only. Findings the model fixes from its own words never wait. | `900` |
+| `IMAGE_REWRITE_LOOKUP_WAIT_S` | How long a prompt rewrite that needs a **vault lookup** waits when the 4070 is painting: dense retrieval is skipped in image mode, so the lookup queues behind the generation window (its rag restore brings the reranker and embedder back). Past this cap it runs lexical-only. Findings the model fixes from its own words never wait. The measured wait for a real back-to-back pair was 3 s; the cap is the pathological case, and a degraded lexical lookup still finds the sheet — it just loses the reranker's ordering. | `180` |
+| `IMAGE_REWRITE_AGENT_BUDGET_SECONDS` | Wall-clock cap for an **image rewrite's** agent loop, separate from `RAG_AGENT_BUDGET_SECONDS`: its answer turn is a plan a reasoning model writes at `IMAGE_REASONING_EFFORT` (~52 s median at medium), while the chat loop's turns only pick tools. Applies to the plan pass, the lookup/correction pass and the prose fallback. | `120` |
 | `IMAGE_DEFAULT_SIZE` / `IMAGE_MAX_SIZE` | Painting square (working set grows with resolution) | `1024` / `2048` |
 | `IMAGE_GEN_TIMEOUT_S` / `IMAGE_LOAD_TIMEOUT_S` | Per-image request / model-load readiness deadlines | `600` / `300` |
 | `IMAGE_NEGATIVE_PROMPT` | What the model steers away from (user-requested text is NOT suppressed) | built-in default |
@@ -251,7 +252,7 @@ in parallel. Off by default — zero overhead when off.
 |---|---|---|
 | `RAG_AGENT_MODE` | `off` (fast path only) / `auto` (trigger: top rerank score below gate, enumeration phrasing, or "search the knowledge base") / `always` (every turn) | `off` |
 | `RAG_AGENT_SCORE_GATE` | `auto` trigger threshold on the top rerank score (CRAG-style; calibrated: true hits ≥ 0.65, negatives ≤ 0.36) | `0.55` |
-| `RAG_AGENT_BUDGET_SECONDS` | Wall-clock cap per agent turn (primary governor) | `45` |
+| `RAG_AGENT_BUDGET_SECONDS` | Wall-clock cap per agent turn (primary governor) — **chat RAG only**; image rewrites use `IMAGE_REWRITE_AGENT_BUDGET_SECONDS` | `45` |
 | `RAG_AGENT_MAX_ITERATIONS` | Decision-turn cap (hard safety net) | `2` |
 | `RAG_AGENT_MAX_TOOL_CALLS` | Total tool-call cap across the turn (hard safety net; cheap CPU tools + parallel batches make the budget the binding constraint) | `6` |
 | `RAG_AGENT_SEARCH_TOP_K` | Snippet count for the agent's `search_kb` | `8` |

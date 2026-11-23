@@ -2076,3 +2076,105 @@ class TestDeferredLookup:
         assert "the card is painting, so the lookup waits" not in caplog.text
         assert not images._gen_lock.locked()
         assert "torch-lit" in out, out
+
+
+class TestRewriteLoopCaps:
+    """§21: an image rewrite is not a chat RAG turn, so it does not run on the
+    chat loop's caps.
+
+    Live probe 3 (2026-11-20): the correction loop ended in
+    `agent fallback (decision turn timed out)` with a 45 s budget while the only
+    slow thing was the model composing an answer — the measured tool round trips
+    were 4.9-6.5 s in rag mode, ~1 s in image mode. `RAG_AGENT_BUDGET_SECONDS`
+    was tuned for decision turns that only PICK tools; the rewrite's last turn
+    WRITES a plan at IMAGE_REASONING_EFFORT (~52 s median at medium, §12). The
+    image paths now state their own budget, and all three of them say it.
+    """
+
+    @staticmethod
+    def _plan(scene: str, figures: list[dict]) -> str:
+        return ('<image_plan>\n' + json.dumps(
+            {"scene": scene, "figures": figures,
+             "lighting": "dappled forest light"}) + '\n</image_plan>')
+
+    def _spy(self, monkeypatch, replies: list[str]):
+        """Stand in for the agent loop, recording the caps each caller asked for."""
+        import bot_core.agent_loop as agent_loop
+        seen: list[dict] = []
+
+        async def fake_loop(**kwargs):
+            seen.append(kwargs)
+            meta = agent_loop.AgentTurnMeta()
+            meta.tool_calls_detail = []
+            # A caller may loop more times than there are scripted answers (the
+            # plan path retries once, a fixable finding opens the correction
+            # pass) — the LAST scripted answer repeats, because this test is
+            # about the caps each call states, not about how many calls happen.
+            return replies[min(len(seen) - 1, len(replies) - 1)], meta
+
+        monkeypatch.setattr(images, "run_agent_loop", fake_loop)
+        # The client is built before the loop runs; nothing here may reach for
+        # real credentials.
+        monkeypatch.setattr(images, "_chat_client", lambda: MagicMock())
+        return seen
+
+    async def test_the_plan_path_states_its_own_wall_clock(self, monkeypatch):
+        seen = self._spy(monkeypatch, [self._plan(
+            "Romi stirs a pot by the fire", [{"name": "Romi", "pose": "stirring"}])])
+        out = await images.rewrite_prompt("Romi stirring a pot")
+        assert "Romi" in out
+        assert seen, "the plan path ran no agent loop"
+        # (This plan earns a composer finding, so the correction pass runs too —
+        # the point of the test is that EVERY image-rewrite loop states the cap.)
+        assert all(k.get("budget_seconds") == images.IMAGE_REWRITE_AGENT_BUDGET_SECONDS
+                   for k in seen), [k.get("budget_seconds") for k in seen]
+
+    async def test_the_lookup_correction_pass_states_it_too(self, monkeypatch):
+        """The loop that waits for the card also gets the fresh budget — the wait
+        is NOT paid out of it (it has its own cap, IMAGE_REWRITE_LOOKUP_WAIT_S)."""
+        seen = self._spy(monkeypatch, [
+            self._plan("Boss Frey, a scarred bandit chief, blocks the Old Bridge",
+                       [{"name": "Boss Frey", "pose": "brandishing an axe"}]),
+            self._plan("Boss Frey blocks the party on the torch-lit Old Bridge",
+                       [{"name": "Boss Frey", "pose": "brandishing an axe"}]),
+        ])
+        out = await images.rewrite_prompt("Boss Frey blocks the Old Bridge")
+        assert "Boss Frey" in out
+        assert len(seen) == 2, "the correction pass did not run"
+        assert all(k["budget_seconds"] == images.IMAGE_REWRITE_AGENT_BUDGET_SECONDS
+                   for k in seen)
+
+    async def test_the_prose_fallback_states_it_too(self, monkeypatch):
+        seen = self._spy(monkeypatch, [
+            "not a plan at all",                       # plan path yields nothing
+            # The prose fallback's output must look like a finished prompt, which
+            # means it opens with the style sentence the fallback was loaded with.
+            images._opening_style() + " A hedgehog cleric kneels by a moss-covered"
+            " shrine, warm lantern light, no text in the frame.",
+        ])
+
+        async def no_plan(*a, **kw):
+            raise images.ImageGenError("no plan")
+
+        monkeypatch.setattr(images, "_rewrite_composed", no_plan)
+        out = await images.rewrite_prompt("a cleric kneeling by a shrine")
+        assert "shrine" in out
+        assert seen, "the prose fallback ran no agent loop"
+        assert seen[-1]["budget_seconds"] == (
+            images.IMAGE_REWRITE_AGENT_BUDGET_SECONDS)
+
+    def test_the_image_budget_is_not_the_chat_budget(self):
+        """One number cannot serve both: the chat loop's cap is a decision-turn
+        budget, the rewrite's is a decision budget PLUS a reasoning-model answer
+        turn. Equal values would mean the knob is decorative."""
+        from config.settings import IMAGE_REWRITE_AGENT_BUDGET_SECONDS, RAG_AGENT_BUDGET_SECONDS
+        assert IMAGE_REWRITE_AGENT_BUDGET_SECONDS > RAG_AGENT_BUDGET_SECONDS
+
+    def test_the_lookup_wait_cap_is_a_persons_patience_not_a_card_timeout(self):
+        """900 s was the first draft and it was wrong: the wait is paid by someone
+        watching one Discord message, and the measured wait for a real
+        back-to-back pair was 3 s. It must stay under a generation window's worth
+        of patience (IMAGE_GEN_TIMEOUT_S is the painting deadline)."""
+        from config.settings import IMAGE_GEN_TIMEOUT_S, IMAGE_REWRITE_LOOKUP_WAIT_S
+        assert IMAGE_REWRITE_LOOKUP_WAIT_S <= 300 < IMAGE_GEN_TIMEOUT_S
+

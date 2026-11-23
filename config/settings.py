@@ -126,8 +126,28 @@ IMAGE_MODE_HOLD_S: float = _safe_float(os.getenv("IMAGE_MODE_HOLD_S"), 0.0)
 # that ends the window brings the reranker and embedder back, so the lookup
 # costs no extra wall clock. Past this point it runs degraded (lexical-only)
 # rather than waiting forever. See bot_core/images.py::_LookupWindow.
+#
+# 180 s, not the 900 s the mechanism was first written with: the wait is paid
+# by a person watching one Discord message, and a generation window plus the
+# model's own turns already fill most of it. Measured live (probe 1, S2): the
+# wait a real back-to-back pair actually needed was 3 s — a lookup that has to
+# wait the whole cap is a lookup that would be better served by the vault note
+# carrying the appearance. Degraded is not failed: lexical search still returns
+# the sheet, without the reranker's ordering.
 IMAGE_REWRITE_LOOKUP_WAIT_S: float = _safe_float(
-    os.getenv("IMAGE_REWRITE_LOOKUP_WAIT_S"), 900.0)
+    os.getenv("IMAGE_REWRITE_LOOKUP_WAIT_S"), 180.0)
+# The agent-loop wall clock for an IMAGE rewrite, separate from the chat RAG
+# loop's RAG_AGENT_BUDGET_SECONDS (45 s). The two paths are not comparable:
+# the chat loop's turns pick tools, the rewrite's last turn is an ANSWER a
+# reasoning model writes at IMAGE_REASONING_EFFORT (measured ~52 s median at
+# medium on the live backend, §12), and a batched NPC lookup adds a tool round
+# trip on top. Sharing the 45 s made a live rewrite hit the wall-clock fallback
+# with nothing slow but the model's own thinking (probe 3, 2026-11-20): the loop
+# ended early and the plan came out of a single-turn summary. This is a cap on
+# a pathological backend, not a licence to think longer — a normal rewrite lands
+# well inside it.
+IMAGE_REWRITE_AGENT_BUDGET_SECONDS: float = _safe_float(
+    os.getenv("IMAGE_REWRITE_AGENT_BUDGET_SECONDS"), 120.0)
 GPU_SWITCH_TIMEOUT_S: float = _safe_float(os.getenv("GPU_SWITCH_TIMEOUT_S"), 420.0)
 # Negative prompt for the diffusion model (what to steer AWAY from). Mirrors
 # the hard rules of the rewrite system prompt (no humans / no modern objects)
