@@ -1330,3 +1330,21 @@ def test_a_scene_description_is_not_hunted_for_where_there_is_none():
     assert ip._scene_description("Bubo, an owl archmage, raises his staff",
                                  "Bubo") == "an owl archmage"
     assert ip._scene_description("Seta, Seta and Romi hold the gate", "Seta") == ""
+
+def test_the_plan_contract_asks_for_a_species_word_without_promising_a_checker():
+    """Two different things the plan prompt used to say in one sentence.
+
+    "Name a SPECIES, a bare role word is painted as a person" is a fact about the
+    renderer (§15/§16 measured it) and stays — it is language guidance for the model.
+    "A species the vault states always wins and is never replaced; an invented one is
+    reported as the bot's own guess" described a CHECKER that §20 deleted. A prompt may
+    not promise behaviour the code no longer performs: the table would read the
+    guarantee into a log line that never appears.
+    """
+    raw = images._PLAN_FILE.read_text(encoding="utf-8")
+    assert "SPECIES WORD" in raw
+    assert "paints a bare role word as a person" in raw
+    for retired in ("always wins and is never replaced",
+                    "reported to the table as the bot's own guess",
+                    "species the vault states"):
+        assert retired not in raw, retired

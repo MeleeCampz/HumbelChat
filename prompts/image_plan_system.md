@@ -63,11 +63,10 @@ name, species or place from this example belongs to the campaign.
   written from what you actually retrieved; `source` = the exact "file" value it
   came from. Rules creatures come from the rulebooks.
   If the vault holds no appearance, OMIT `look` and name the figure in the scene or
-  `entities` instead — and name a SPECIES there in the world's terms ("two rat-folk
-  bandits block the path"): nothing in this world is a person, and a bare role word
-  ("bandits", "a merchant") gets painted as one. A species the vault states for THAT
-  character always wins and is never replaced; a species you invent is painted and
-  reported to the table as the bot's own guess.
+  `entities` instead, using only what the vault DOES say about it — a role, a kit, a
+  size, a name. Give it a SPECIES WORD while you are there ("two rat-folk bandits block
+  the path"): a bare role word ("bandits", "a merchant", "guards") is not one, and the
+  renderer paints a bare role word as a person. Say no more than you read.
 - **modify** — ONLY when the request deliberately changes one aspect of a party
   member ("Seta in metal armour instead of her cloak", "Colum without his cape",
   "Marvin with a red paint job"). Name exactly ONE field and replace it with a
