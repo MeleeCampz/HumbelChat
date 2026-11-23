@@ -521,15 +521,18 @@ class TestPromptShapeGuard:
     def _resp(content: str):
         return MagicMock(choices=[MagicMock(message=MagicMock(content=content))])
 
-    def test_the_campaign_profile_style_matches_the_policy_file(self):
-        """The profile's style sentence and the vault's own policy must not drift
-        apart (the policy is the source of truth the model is told to follow
-        VERBATIM, and the composer pastes the profile's wording)."""
-        style = images._base_style()
-        if not style:
-            pytest.skip("no style sentence in the campaign profile")
+    def test_the_policy_file_has_no_style_sentence_of_its_own(self):
+        """The fallback policy used to paste the style sentence a second time, which
+        meant a profile edit and the policy file could drift apart — the model was
+        told to copy VERBATIM a sentence the composer no longer used. The file now
+        carries the `{{OPENING_STYLE}}` placeholder and no wording of its own, so the
+        Campaign Prompt Profile is the only source."""
         policy = images._POLICY_FILE.read_text(encoding="utf-8")
-        assert style in policy
+        assert "{{OPENING_STYLE}}" in policy
+        assert "Semi-realistic fantasy illustration" not in policy
+        style = images._base_style()
+        if style:
+            assert style not in policy
 
     def test_real_prompts_pass(self):
         base = images._base_style()
@@ -661,7 +664,7 @@ A squirrel.
         for needle in ("MUST be looked up in the",
                        "knowledge base BEFORE you write it",
                        "Lexikon",
-                       "NEVER assign a species or a",
+                       "NEVER invent an appearance for a named NPC",
                        "ONE array of tool calls in a SINGLE decision turn"):
             assert needle in head, needle
 
@@ -1173,7 +1176,34 @@ class TestRewritePolicyLoading:
     def test_missing_vault_note_falls_back_to_default(self, monkeypatch, tmp_path):
         monkeypatch.setattr(images, "_CHAR_RULES_FILE", tmp_path / "absent.md")
         s = images._load_rewrite_system()
-        assert "Googly eyes are NOT a species trait" in s  # built-in default
+        # The default is a neutral marker, not another campaign's rules: the built-in
+        # used to inject "Googly eyes … belong ONLY to Colum Bidae", which is
+        # Humblewood canon living in Python (retired 2026-11-22, analysis §20).
+        assert "character-rules note is missing" in s
+        assert "belong ONLY to Colum Bidae" not in s
+
+    def test_the_opening_style_sentence_comes_from_the_profile(self, monkeypatch):
+        """Neither rewrite path carries a style sentence in the repo."""
+        def fake_load():
+            return images.prompt_profile.Profile(
+                style="ZZZ_STYLE_SENTENCE", world_rule="ZZZ_WORLD_RULE",
+                negative_prompt="", party_sheet="", base_chars=1100,
+                chars_per_figure=420, max_chars=3600, foreground_figures=4,
+                source="<test>")
+        monkeypatch.setattr(images.prompt_profile, "load", fake_load)
+        assert images._opening_style() == "ZZZ_STYLE_SENTENCE. ZZZ_WORLD_RULE"
+        s = images._load_rewrite_system()
+        assert "ZZZ_STYLE_SENTENCE. ZZZ_WORLD_RULE" in s
+        assert "Semi-realistic fantasy illustration" not in s
+
+    def test_a_profile_with_no_world_rule_gets_no_such_sentence(self, monkeypatch):
+        def fake_load():
+            return images.prompt_profile.Profile(
+                style="ZZZ_STYLE_ONLY", world_rule="", negative_prompt="",
+                party_sheet="", base_chars=1100, chars_per_figure=420,
+                max_chars=3600, foreground_figures=4, source="<test>")
+        monkeypatch.setattr(images.prompt_profile, "load", fake_load)
+        assert images._opening_style() == "ZZZ_STYLE_ONLY"
 
     def test_missing_repo_file_falls_back_to_builtin_policy(self, monkeypatch, tmp_path):
         monkeypatch.setattr(images, "_POLICY_FILE", tmp_path / "absent.md")
@@ -1825,8 +1855,8 @@ def test_the_party_sheet_is_never_evidence_about_everybody_else():
 
 def test_an_agent_query_line_never_becomes_campaign_evidence_again(monkeypatch):
     """read_section and find_in_kb were missing from the echo pattern, so their
-    call lines — the model's own wording — stayed in the evidence the species gate
-    reads as a statement about the campaign."""
+    call lines — the model's own wording — stayed in the evidence, where a guess the
+    model asked about would read back to it as a statement the campaign makes."""
     gathered = ('[find_in_kb {"term": "Frey beast-folk badger lizard"}]\n'
                 'Frey appears in SESSION_05.\n'
                 '[read_section {"file": "a/b/notes.md", "section": "Lexikon"}]\n'

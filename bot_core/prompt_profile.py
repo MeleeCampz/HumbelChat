@@ -6,7 +6,9 @@ The prompt composer used to carry the campaign inside it: the style sentence, th
 animal-folk floor line, the negative tail, the path of the party sheet and the
 species vocabulary were constants in `bot_core/image_prompt.py` / `bot_core/images.py`.
 That meant a second campaign setting needed a code change, and it meant the table's
-own words were being edited by the wrong layer.
+own words were being edited by the wrong layer. The species vocabulary is gone from
+the code outright (2026-11-20, analysis §20) — what a world's beings ARE is campaign
+data, and it reaches the prompt as the one sentence below.
 
 Everything here is the table's wording, read from a file the table can edit:
 
@@ -15,16 +17,19 @@ Everything here is the table's wording, read from a file the table can edit:
 Typed lines, same shape as a Visual Anchor:
 
     > style: Semi-realistic fantasy illustration — detailed fur and feather texture…
-    > animal_floor: Every figure in this image is an anthropomorphic animal-folk…
-    > animal_floor_living: Every living figure in this image is …
+    > world_rule: Every figure in this image is an anthropomorphic animal-folk…
     > negative: humans, watermark, signature, modern objects, extra limbs
     > party_sheet: humblewood/HumbleWood/Characters/Player Characters.md
     > budget: base=1100 per_figure=420 max=3600 foreground=4
 
 Precedence: an environment variable that is actually set wins over the file, the
-file wins over the neutral default. A file with no `animal_floor` line simply gets
-no floor line — the code does not hold a fallback sentence for a campaign it does
-not know.
+file wins over the neutral default. A file with no `world_rule` line simply gets no
+such sentence — the code does not hold a fallback sentence for a campaign it does not
+know, and it holds no opinion about who is an animal, a human or a machine: a
+Humblewood profile and a human-world profile are the same code with different text.
+
+`world_rule` is said verbatim, once, in the style sentence, where the budget ladder
+never cuts it. Nothing reads it or reasons about it.
 
 `load()` re-reads the file on every call, for the same reason `_load_anchors()`
 re-reads the party sheet: an edit made in Obsidian applies to the next image, not
@@ -44,17 +49,22 @@ from config import settings
 log = logging.getLogger(__name__)
 
 #: Field names the profile understands. An unknown one is reported, never ignored.
-KNOWN_FIELDS = ("style", "animal_floor", "animal_floor_living", "negative",
-                "party_sheet", "budget")
+KNOWN_FIELDS = ("style", "world_rule", "negative", "party_sheet", "budget")
+
+#: The names a profile written before 2026-11-20 uses. `animal_floor` is the same
+#: single sentence under its old name; `animal_floor_living` was the machine-aware
+#: variant of it, which no longer exists — the two lines are read as one, the
+#: `animal_floor` wording winning when both are present, so an old file keeps
+#: working untouched instead of silently losing its sentence.
+_LEGACY_FIELDS = {"animal_floor": "world_rule", "animal_floor_living": "world_rule"}
 
 _PROFILE_NAME = "Campaign Prompt Profile.md"
 
 #: Structural defaults. Deliberately not campaign prose: no style sentence, no
-#: animal-folk floor, no party sheet. A campaign that wants them writes them.
+#: world rule sentence, no party sheet. A campaign that wants them writes them.
 _DEFAULTS: dict[str, Any] = {
     "style": "",
-    "animal_floor": "",
-    "animal_floor_living": "",
+    "world_rule": "",
     "party_sheet": "",
     "base_chars": settings.IMAGE_PROMPT_BASE_CHARS,
     "chars_per_figure": settings.IMAGE_PROMPT_CHARS_PER_FIGURE,
@@ -66,7 +76,7 @@ _DEFAULTS: dict[str, Any] = {
 # already an env-backed setting and keeps working unchanged.
 _ENV_FOR_FIELD = {
     "style": "IMAGE_PROMPT_STYLE",
-    "animal_floor": "IMAGE_ANIMAL_FLOOR",
+    "world_rule": "IMAGE_WORLD_RULE",
     "negative": "IMAGE_NEGATIVE_PROMPT",
     "party_sheet": "IMAGE_PARTY_SHEET",
     "base_chars": "IMAGE_PROMPT_BASE_CHARS",
@@ -78,14 +88,16 @@ _ENV_FOR_FIELD = {
 _BUDGET_KEYS = {"base": "base_chars", "per_figure": "chars_per_figure",
                 "max": "max_chars", "foreground": "foreground_figures"}
 
+#: Same story for the environment: a deployment that set the old name keeps working.
+_LEGACY_ENV = {"world_rule": "IMAGE_ANIMAL_FLOOR"}
+
 
 @dataclass(frozen=True)
 class Profile:
     """The strings and numbers the composer is allowed to take from outside code."""
 
     style: str
-    animal_floor: str
-    animal_floor_living: str
+    world_rule: str
     negative_prompt: str
     party_sheet: str          # path relative to KB_PATH, "" = no anchors
     base_chars: int
@@ -126,7 +138,8 @@ def _read_file(path: Path) -> dict[str, str]:
         if not m:
             continue
         key, value = m.group(1).strip().lower(), m.group(2).strip()
-        if key in KNOWN_FIELDS and value:
+        key = _LEGACY_FIELDS.get(key, key)
+        if key in KNOWN_FIELDS and value and key not in out:
             out[key] = value
     return out
 
@@ -162,8 +175,7 @@ def load() -> Profile:
         break
 
     values: dict[str, Any] = dict(_DEFAULTS)
-    for key in ("style", "animal_floor", "animal_floor_living", "negative",
-                "party_sheet"):
+    for key in ("style", "world_rule", "negative", "party_sheet"):
         if key in fields:
             values[key if key != "negative" else "negative_prompt"] = fields[key]
 
@@ -176,6 +188,8 @@ def load() -> Profile:
     for key, env_name in _ENV_FOR_FIELD.items():
         raw = os.getenv(env_name)
         if raw is None:
+            legacy = _LEGACY_ENV.get(key)
+            raw = os.getenv(legacy) if legacy else None
             continue
         target = "negative_prompt" if key == "negative" else key
         if target in ("base_chars", "chars_per_figure", "max_chars",
@@ -192,12 +206,10 @@ def load() -> Profile:
         warnings.append(f"profile fields ignored (unknown): {', '.join(sorted(unknown))}")
 
     negative = values.get("negative_prompt") or settings.IMAGE_NEGATIVE_PROMPT
-    living = values["animal_floor_living"] or living_variant(values["animal_floor"])
 
     return Profile(
         style=values["style"],
-        animal_floor=values["animal_floor"],
-        animal_floor_living=living,
+        world_rule=values["world_rule"],
         negative_prompt=negative,
         party_sheet=values["party_sheet"],
         base_chars=int(values["base_chars"]),
@@ -207,25 +219,6 @@ def load() -> Profile:
         source=source,
         warnings=tuple(warnings),
     )
-
-
-def living_variant(floor: str) -> str:
-    """The machine-aware wording of a floor line, derived from the table's own text.
-
-    "Every figure in this image is an anthropomorphic animal-folk character" becomes
-    "Every living figure …" — needed because a vault may describe a construct in the
-    same frame, and a floor line that claims EVERY figure is animal-folk contradicts
-    the anchor. If the wording cannot be found, the original line is kept unchanged
-    rather than invented.
-    """
-    if not floor:
-        return ""
-    for head in ("Every figure", "All figures", "Every character"):
-        if head in floor:
-            return floor.replace(head, head.replace("Every ", "Every living ")
-                                if head.startswith("Every ")
-                                else head.replace("All ", "All living "), 1)
-    return floor
 
 
 def party_sheet_path(profile: Profile | None = None) -> Path | None:

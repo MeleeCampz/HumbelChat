@@ -334,23 +334,20 @@ _CHAR_RULES_FILE = Path(KB_PATH) / "humblewood" / "HumbleWood" \
 # (per-character facts live on the sheets themselves; only cross-cutting rules
 # belong in the note, and its googly-eyes rule is mirrored here).
 _DEFAULT_CHARACTER_RULES = (
-    "Googly eyes are NOT a species trait and belong ONLY to Colum Bidae: "
-    "never give any other character googly eyes, and if he is not in the "
-    "image do not mention googly eyes at all."
+    "(the vault's character-rules note is missing — follow the request, the party "
+    "dossier and the campaign profile, and invent nothing about a named character)"
 )
 
-# Last-resort policy if the repo file is missing from the image entirely.
+# Last-resort policy if the repo file is missing from the image entirely. Like every
+# other fallback here it carries no campaign prose: the opening style sentence comes
+# from the Campaign Prompt Profile, through {{OPENING_STYLE}}.
 _FALLBACK_POLICY = (
-    "You are a prompt engineer for a semi-realistic fantasy image model set "
-    "in Humblewood (D&D 5e world). Rewrite the user's request into ONE rich "
-    "prompt: [STYLE] base style 'Semi-realistic fantasy illustration — "
-    "detailed fur and feather texture, natural light, storybook charm'; "
-    "[SCENE] setting/action ≤45 words; [CHARACTERS] one line per character, "
-    "D&D player characters (bipedal animal adventurers, no humans), reuse "
-    "each character's Visual Anchor verbatim when their sheet has one, at "
-    "most 5 characters; [LIGHTING] ≤15 words. Total under 1300 characters "
-    "(2000 for 3+ characters). No negations in the prompt; include user-"
-    "requested text VERBATIM.\n"
+    "You are a prompt engineer for an image model. Rewrite the user's request into "
+    "ONE rich prompt: [STYLE] open with this sentence VERBATIM: {{OPENING_STYLE}}; "
+    "[SCENE] setting/action in at most 45 words, closing with 'Exactly N named "
+    "figures in this image.'; [CHARACTERS] one line per character, each character's "
+    "Visual Anchor reused verbatim when their sheet has one; [LIGHTING] at most "
+    "15 words. No negations in the prompt; include user-requested text VERBATIM.\n"
     "Character rules: {{CHARACTER_RULES}}\n"
     "Party dossier: {{PARTY_DOSSIER}}\n"
     "Ground campaign specifics with the knowledge-base tools before writing."
@@ -451,9 +448,9 @@ def _load_party_dossier() -> str:
         "Everything ELSE the request names (an NPC, a merchant, a bandit, a",
         "monster, a place, an item) has no entry here and MUST be looked up in the",
         "knowledge base BEFORE you write it: the session logs carry 'Lexikon:",
-        "Personen' rosters that name recurring NPCs and state their species, colours",
-        "and gear, and monsters come from the rules. NEVER assign a species or a",
-        "colour to a named NPC from imagination. Batch it: emit every lookup you",
+        "Personen' rosters that name recurring NPCs and describe them, and",
+        "monsters come from the rules. NEVER invent an appearance for a named NPC.",
+        "Batch it: emit every lookup you",
         "need as ONE array of tool calls in a SINGLE decision turn — the loop only",
         "has a few turns, so one search per turn runs out of budget.",
     ]
@@ -534,9 +531,25 @@ def _load_rewrite_system() -> str:
                     "default", exc)
         char_rules = _DEFAULT_CHARACTER_RULES
     return (policy
+            .replace("{{OPENING_STYLE}}", _opening_style())
             .replace("{{CHARACTER_RULES}}", char_rules)
             .replace("{{PARTY_DOSSIER}}", _load_party_dossier() or _NO_DOSSIER)
             .strip())
+
+
+def _opening_style() -> str:
+    """Style sentence + the campaign's own sentence about its beings.
+
+    The same opening the composer writes (`compose_prompt` prepends
+    `base_style` then `world_rule`), so the prose fallback and the plan path open a
+    prompt identically — and neither has campaign wording baked into the repo.
+    """
+    profile = prompt_profile.load()
+    style = (profile.style or "").rstrip(". ")
+    rule = (profile.world_rule or "").rstrip(". ")
+    if style and rule:
+        return f"{style}. {rule}"
+    return style or rule
 
 
 
@@ -958,8 +971,7 @@ async def _correction_pass(*, complete, system: str, msg: str, out: str,
         read_paths=opened,
         snippet_paths=_snippet_paths_from(gathered, opened),
         retrieved=_vault_evidence(gathered), request_text=text,
-        animal_floor=profile.animal_floor,
-        animal_floor_living=profile.animal_floor_living)
+        world_rule=profile.world_rule)
     for w in revised.warnings:
         if w.startswith("budget "):
             log.warning("composer budget: %s", w)
@@ -1051,12 +1063,10 @@ async def _rewrite_composed(text: str, complete,
             snippet_paths=_snippet_paths_from(
                 meta.gathered_context, _read_paths_from(meta.tool_calls_detail)),
             retrieved=_vault_evidence(meta.gathered_context),
-            # The request's own words: which species the USER named, and the
-            # spelling a campaign name really has ("Frey" painted for "Boss Frey"
-            # was measured live, analysis §15).
+            # The request's own words: the spelling a campaign name really has
+            # ("Frey" painted for "Boss Frey" was measured live, analysis §15).
             request_text=text,
-            animal_floor=profile.animal_floor,
-            animal_floor_living=profile.animal_floor_living)
+            world_rule=profile.world_rule)
         for w in composed.warnings:
             if w.startswith("budget "):
                 log.warning("composer budget: %s", w)
@@ -1229,8 +1239,7 @@ _gen_lock = asyncio.Lock()  # one generation at a time (mode switches +
 # own words (a collective subject, a repeated name, a meta aside) never wait —
 # they need no retrieval, and making them wait would just cost the user time.
 _VAULT_FIX_CODES = frozenset({
-    "figure_ungrounded", "look_unverified", "species_contradicted",
-    "species_unbacked", "species_conflict", "identity_left_in_scene",
+    "figure_ungrounded", "look_unverified", "identity_left_in_scene",
 })
 
 

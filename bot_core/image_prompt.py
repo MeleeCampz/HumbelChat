@@ -115,8 +115,14 @@ _SUBJECT_CUES: dict[str, tuple[str, ...]] = {
     "face": ("eye", "eyes", "nose", "muzzle", "brow", "cheek", "face", "beak"),
     "body": ("fur", "wings", "tail", "ears", "head", "build", "paws", "claws",
              "horns", "frame", "body", "wingspan", "quills", "limbs"),
-    "species": ("mammal", "bird-folk", "beast-folk", "lizard", "automaton",
-                "construct", "creature", "folk", "raccoon", "hedgehog", "owl"),
+    # Not a species JUDGMENT (the composer decides no truth about a claim, §20): this
+    # list only says which clauses of a LEGACY single-paragraph anchor are the identity
+    # clauses, so an override naming one field can find the clauses to replace. Generic
+    # kind words first; the animals are here because this vault's legacy blobs name them.
+    "species": ("species", "kind", "creature", "being", "race", "ancestry",
+                "humanoid", "animal", "mammal", "bird", "reptile", "automaton",
+                "construct", "golem", "robot", "folk", "folkish", "-folk",
+                "bird-folk", "beast-folk", "lizard", "raccoon", "hedgehog", "owl"),
     "quirks": ("always", "habitually", "posture", "recurring", "symbol"),
 }
 
@@ -134,46 +140,12 @@ _SIGNATURE_CUES = (
 # suppression for the same reason.
 NO_LETTERING_TAIL = "No text, lettering, logos or watermarks."
 
-# The table owner's ruling, 2026-11-19: "we only want animals in the final output"
-# — this campaign's world is animal-folk, so a character the vault never describes
-# must still be painted as one rather than as a person. The anchors carry their own
-# species; this line is the floor under everyone else, and it rides in the style
-# sentence, which the budget ladder is not allowed to cut.
-# The wording of both floor lines comes from the campaign profile
-# (<KB_PATH>/Campaign Prompt Profile.md); the composer holds no fallback sentence for
-# a campaign it does not know. Empty means the prompt gets no floor line.
-# …with one exception the vault states outright: Marvin is a Steel Defender, a
-# machine. "Every figure is animal-folk" next to "brass-and-steel automaton" is a
-# contradiction the renderer resolves by painting whichever it reads last, so the
-# floor says LIVING whenever someone in the frame is described as a machine. The
-# switch is made from the sheet's own wording, never from a guess about a name.
-_MACHINE_WORDS = ("automaton", "construct", "machine", "golem", "robot", "robotic",
-                  "clockwork", "defender", "android", "homunculus")
 
 
-def _living_floor(floor: str) -> str:
-    """`Every figure …` -> `Every living figure …` when no variant was profiled."""
-    return prompt_profile.living_variant(floor)
 
 
-def is_machine(*texts: str) -> bool:
-    """Does any of these descriptions say the figure is a made thing, in the
-    vault's or the plan's own words?"""
-    normed = " ".join(_norm(t) for t in texts)
-    return any(re.search(r"\b" + w + r"\b", normed) for w in _MACHINE_WORDS)
 
 
-def _identity_signal(text: str) -> bool:
-    """Does this description already say WHAT the figure is, species-wise?
-
-    A species word (badger, ratte, owl) or a generic identity the vault uses for a
-    non-animal character (construct, tiefling, demon, beast-folk).
-    """
-    if _claimed_species(text):
-        return True
-    normed = _norm(text)
-    return any(re.search(r"\b" + re.escape(w) + r"\b", normed)
-               for w in _GENERIC_SPECIES)
 
 # The scene-sentence word cap, straight from the plan contract. A runaway scene
 # sentence is measured failure 5 (an 11-figure request became 3,468 characters of
@@ -332,595 +304,66 @@ def _snippet_supported(look: str, retrieved: str) -> bool:
     return hits >= max(2, -(-total // 2))
 
 
-# A species is the most consequential thing a description asserts, and the
-# easiest to invent: measured live on the bandit-ambush rewrite, the model wrote
-# "heavy-set badger-folk bandit chief, flat snout, cutlass at his hip" for a
-# character the vault never describes — and cited a session note it HAD opened,
-# which mentions him by name and says nothing about how he looks. "The file was
-# opened, so believe the description" is therefore not sufficient on its own.
-# A creature noun must appear in what was actually retrieved, in English or in
-# German (the vault is half German and the model translates).
-_SPECIES = (
-    ("badger", "dachs"), ("fox", "fuchs"), ("squirrel", "eichh\u00f6rnchen"),
-    ("raccoon", "waschb\u00e4r"), ("hedgehog", "igel"), ("owl", "eule"),
-    ("rabbit", "kaninchen", "hase"), ("mouse", "maus"), ("rat", "ratte"),
-    ("crow", "kr\u00e4he"), ("raven", "rabe"), ("jay", "h\u00e4her"),
-    ("cat", "katze"), ("dog", "hund"), ("bear", "b\u00e4r"), ("wolf", "wolf"),
-    ("deer", "reh", "hirsch"), ("boar", "eber"), ("lizard", "echse"),
-    ("frog", "frosch"), ("toad", "kr\u00f6te"), ("mole", "maulwurf"),
-    ("otter", "otter"), ("beaver", "biber"), ("skunk", "stinktier"),
-    ("weasel", "wiesel"), ("horse", "pferd", "pony"), ("donkey", "esel"),
-    ("goat", "ziege"), ("sheep", "schaf"), ("bat", "fledermaus"),
-    ("turtle", "schildkr\u00f6te", "turtle"), ("snake", "schlange"),
-    ("hamster", "hamster"), ("quokka", "quokka"), ("mink", "mink"),
-    # Humblewood's mustelid crowd, which the vault's own prose keeps using: the
-    # first live run after the policy change wrote "two stoat-folk bandits" and the
-    # gate let it through untouched because the word was not in its vocabulary.
-    ("stoat", "hermelin"), ("ermine", "hermelin"), ("ferret", "iltis", "polecat"),
-    ("marten", "marder"),
-    # In-world species names, from the party sheet itself: "Quokka-like mammal
-    # (in-world name: Jerbeen)", "Strig (owl)", "Mapach (raccoon)". A vault that
-    # calls someone a strig must not be reported as an invented species.
-    ("quokka", "jerbeen"), ("strig", "strig"), ("mapach", "mapach"),
-    ("hedge", "hedge"), ("birdfolk", "birdfolk", "bird-folk"),
-    # Colum's sheet line says "Birdfolk (blue tit)": the conflict lint flagged that
-    # the one real species the vault uses for him was a word the gate could not see.
-    ("tit", "meise", "titmouse"),
-)
-_species_variants = {w: frozenset(variants) for variants in _SPECIES for w in variants}
-_all_species = frozenset(_species_variants)
 
 
-def _name_keys(name: str) -> list[str]:
-    return [k for k in {name,
-                        name.split()[-1] if " " in name else "",
-                        name.split()[0]} if len(k) >= 4]
 
 
-def _blocks(retrieved: str) -> list[str]:
-    """Retrieved text cut into blocks: sections, not just paragraphs.
-
-    A heading stays with its body, so a character's own section counts and the
-    next section (another character, or an unrelated D&D entry) does not.
-    """
-    blocks: list[str] = []
-    for part in re.split(r"\n\s*\n", retrieved):
-        blocks.extend(re.split(r"\n(?=#{1,4} )", part))
-    return blocks
 
 
-def _named_blocks(retrieved: str, keys: Sequence[str]) -> list[str]:
-    """The retrieved blocks that contain at least one of ``keys``."""
-    if not retrieved:
-        return []
-    keys = [k for k in keys if len(k) >= 4]
-    if not keys:
-        return [retrieved]
-    return [b for b in _blocks(retrieved)
-            if any(k.lower() in b.lower() for k in keys)]
 
 
-def evidence_about(name: str, retrieved: str) -> str:
-    """The retrieved material that is ABOUT this character.
-
-    A species has to be retrieved about the character, not merely somewhere in
-    the loop's context: measured on the bandit request, the rewrite searched
-    "Frey bandit badger wolf fox species appearance" and the vault answered with
-    a D&D magic-item chunk about a badger — which made an invented badger-folk
-    look look backed. Retrieved material arrives in blocks (one search hit or
-    one file read per block); only the blocks naming the character count.
-    """
-    return "\n".join(_named_blocks(retrieved, _name_keys(name)))
 
 
-def species_evidence_about(name: str, retrieved: str) -> str:
-    """What the material says about THIS character's SPECIES — nothing wider.
-
-    ``evidence_about`` answers a different question ("does any block name this
-    character?") and its answer is a whole section, which in this vault is often
-    thousands of characters where somebody else's animals sit in the same block as
-    the name. Measured live 2026-11-20 on the Boss Frey request: the evidence kept
-    for "Boss Frey" was 6,453 chars and the species words harvested out of it were
-    `owl, reh, tit` — Bubo's species, the Luma bounty called Godfather, and a
-    blue-tit's own sheet — because a search result arrives as ONE JSON block whose
-    snippets are about eight different characters. ``verify_look`` then called the
-    rewrite's badger-folk a contradiction and dropped the look it had genuinely
-    retrieved, painting the figure by name alone: exactly the identity-less figure
-    line §18 measures the renderer dropping or merging into a neighbour.
-
-    So a fact about a character has to sit in the SAME UNIT as that character's
-    name — the same rule ``crowd_adjacency`` already enforces for a crowd, cut to
-    the smaller unit because a name is smaller than a role. The one exception is
-    mechanical and in the character's favour: a section whose HEADING names them is
-    about them, heading to bottom.
-    """
-    keys = [k for k in _name_keys(name) if len(k) >= 4]
-    if not retrieved:
-        return ""
-    if not keys:
-        return retrieved
-    out: list[str] = []
-    owner = False
-    for block in _blocks(retrieved):
-        head = block.split("\n", 1)[0]
-        if head.lstrip().startswith("#"):
-            # A section whose HEADING names them is about them, heading to bottom
-            # — and its sub-sections inherit that, because "## Visual Anchor" under
-            # "# Colum Bidae" is his sheet even though his name is not repeated.
-            owner = any(k.lower() in head.lower() for k in keys)
-        if owner:
-            out.append(block)
-            continue
-        for line in block.splitlines():
-            low = line.lower()
-            for k in keys:
-                for m in re.finditer(re.escape(k.lower()), low):
-                    out.append(_unit(line, m.start()))
-    return "\n".join(dict.fromkeys(o for o in out if o.strip()))
 
 
-# Words that name no species and are therefore never a fact claim.
-_GENERIC_SPECIES = frozenset(
-    """beast beastfolk animal animals anthropomorphic creature creatures humanoid
-    human humanoids construct constructs tiefling demon devil spirit monster
-    folk folks kin people volk race races kind kinds""".split())
 
 
-def _claimed_species(text: str) -> list[str]:
-    """Species animals a description claims, in the order they appear.
-
-    Both shapes: a "-folk" compound ("weasel-folk bandits") and a bare creature
-    word used as an identity ("a brass-and-steel construct", "a plump peddler
-    squirrel"). Generic words are not claims.
-    """
-    out: list[str] = []
-    for m in _SPECIES_COMPOUND.finditer(text or ""):
-        t = m.group(1).lower()
-        if t not in _GENERIC_SPECIES and t not in out:
-            out.append(t)
-    for tok in re.findall(r"[a-z\u00e4\u00f6\u00fc]+", _norm(text or "")):
-        if tok in _all_species and tok not in _GENERIC_SPECIES and tok not in out:
-            out.append(tok)
-    return out
 
 
-def _species_named_in(evidence: str) -> set[str]:
-    """Which species the material itself names (English or German spellings)."""
-    found: set[str] = {m.group(1).lower()
-                       for m in _SPECIES_COMPOUND.finditer(evidence or "")}
-    for tok in re.findall(r"[a-z\u00e4\u00f6\u00fc]+", _norm(evidence or "")):
-        if tok in _all_species and tok not in _GENERIC_SPECIES:
-            found.add(tok)
-    return found
 
 
-def _species_near(keys: Sequence[str], evidence: str,
-                  window: int = 90) -> set[str]:
-    """Species named NEAR the words that identify the beings being described.
-
-    Chunk membership is not evidence. A live run retagged "two weasel-folk
-    bandits" as "lizard-folk bandits" because the retrieved material contained
-    the PHB's find-familiar list — "Bat, Cat, Frog, Hawk, Lizard, Octopus, Owl,
-    Rat, Raven, Spider, Weasel" — a rules paragraph about familiars that merely
-    shared a chunk with the ambush. Proximity to the crowd word is what makes a
-    species statement ABOUT that crowd.
-    """
-    hay = evidence or ""
-    out: set[str] = set()
-    if not keys:
-        return out
-    low = hay.lower()
-    for k in keys:
-        k = _norm(k)
-        if len(k) < 4:
-            continue
-        # Stem matching: the vault and the plan need not spell the crowd alike.
-        # "bandits" has to answer "Banditen" before the vault's own animal counts
-        # as a statement ABOUT that crowd rather than about somebody else.
-        stem = k[:5]
-        for m in re.finditer(re.escape(stem), low, re.I):
-            lo, hi = max(0, m.start() - window), min(len(hay), m.end() + window)
-            out |= _species_named_in(hay[lo:hi])
-    return out
 
 
-def species_verdict(text: str, evidence: str,
-                    allow: Iterable[str] = (),
-                    near: Sequence[str] = ()) -> tuple[list[str], list[str]]:
-    """(must_strip, allowed_guess) for the species a description claims.
-
-    The policy is the table owner's (2026-11-19): **this world has no humans**, so
-    a crowd or NPC the vault never describes must still come out as animal-folk
-    rather than as people — inventing a species that fits the setting is allowed,
-    and it is what puts animals in the final picture. What is refused is a claim
-    that CONTRADICTS the material about those particular characters: if the vault
-    says the crew are rats, they are not painted as weasels, and a species found
-    in a block about someone else (a badger-shaped magic sword) never authorises a
-    claim about bandits either.
-
-    So the gate inverted: backing used to be required, now only agreement with what
-    IS said is required. `allow` carries words the caller vouches for — species the
-    user typed themselves, the party's own anchors.
-    """
-    claims = _claimed_species(text)
-    if not claims:
-        return [], []
-    allowed = {_norm(a) for a in allow}
-    # Proximity when the caller says WHICH beings are being described; whole-body
-    # reading when the evidence is already narrowed to them (a named character).
-    named = _species_near(near, evidence) if near else _species_named_in(evidence)
-    hay = _norm(evidence)
-    strip: list[str] = []
-    guess: list[str] = []
-    for token in claims:
-        if token in allowed:
-            continue
-        if any(re.search(r"\b" + re.escape(v) + r"\b", hay)
-               for v in _species_variants.get(token, (token,))):
-            continue                     # the material says exactly this
-        if not named:
-            guess.append(token)          # nothing describes them: gap-filling ok
-            continue
-        strip.append(token)              # it describes them, and not this way
-    return strip, guess
 
 
-def contradicted_species(text: str, evidence: str,
-                         allow: Iterable[str] = ()) -> list[str]:
-    return species_verdict(text, evidence, allow)[0]
 
 
-def _canonical_species(token: str) -> str:
-    """The English spelling of a species the material named in German.
-
-    SESSION_01 calls the ambush boss a "Fuchsdame": when the plan says
-    badger-folk, the vault does not merely object — it offers an animal, and
-    "the vault's species wins" is only real if THAT animal reaches the prompt.
-    """
-    variants = frozenset(_species_variants.get(token) or (token,))
-    for group in _SPECIES:
-        if variants and variants <= set(group) or token in group:
-            return group[0]
-    return token
-
-def _name_claim_evidence(name: str, retrieved: str) -> str:
-    """What a species claim INSIDE A NAME has to answer to — both claims it makes.
-
-    A name says two things at once: who the character is ("Boss Frey") and what it
-    calls them ("badger-folk bandit chief"). The first is answered by the material
-    sitting next to the name; the second is a claim about a ROLE, answered by the
-    material about that role — which is what catches a figure named "crow-folk
-    bandit 1" in a vault that says the bandits are rat-folk, and the name reading
-    alone never sees.
-
-    Both readings are the ADJACENCY kind, and neither is the block kind: a section
-    is how `evidence_about` finds a character and it is far too wide to decide what
-    species they are (§see species_evidence_about). The role reading deliberately
-    skips the stray-name blanking `crowd_evidence_spans` applies: that filter exists
-    to stop a crowd borrowing some *other* individual's species, and a figure named
-    "rat-folk bandit" is the individual — its own role word is inside its own name,
-    which is exactly the shape the filter was written to exclude.
-    """
-    role = _claim_nouns(name)
-    parts = [species_evidence_about(name, retrieved)]
-    if role:
-        parts.append(crowd_adjacency(" ".join(role), retrieved))
-    return "\n".join(p for p in parts if p)
 
 
 # A collective head noun is plural for this purpose: "bandit crew", "the party".
 
 
-def crowd_keys(text: str) -> list[str]:
-    """The words that identify WHICH beings a description is about."""
-    return _segment_keys(text)
 
 
-def crowd_evidence(text: str, retrieved: str) -> str:
-    """The retrieved blocks that are about the beings THIS sentence names."""
-    return "\n".join(_named_blocks(retrieved, _segment_keys(text)))
 
 
-# The old three-argument call shape, kept so an older call site still reads.
-_crowd_spans = lambda text, retrieved, evidence=(), ours=(): crowd_evidence_spans(
-    text, retrieved, ours if ours is not evidence else ())
 
 
-_CLAUSE_BREAK = ",:!?\u2014\u2013\"\u201e()"
-
-# The unit a SPECIES fact about a named character has to live in: one comma-, semicolon-
-# or sentence-separated phrase. A search snippet is a run-on line — "Ashbarrow fire, Frey
-# bandits, Alisa Pennygleam rescue. A wolf track leads into the forest …" — and a 60-char
-# window from "Frey" reaches that wolf, which is how a live run called the bot's badger-folk
-# guess a contradiction of a wolf it had never heard of. A period is a wall here for the
-# same reason it is not one in _CLAUSE_BREAK, where the vault's own good evidence
-# ("…Winnowing Reach: three rat-folk cutthroats") has to survive a wide read.
-_UNIT_BREAK = ".,:;!?\u2014\u2013\"\u201e()"
 
 
-def _unit(line: str, i: int) -> str:
-    """The phrase *line* has at offset ``i``, cut at punctuation and word-aligned.
-
-    One phrase is followed across a colon or a comma, because that is how both the
-    vault and the plan attach a description to a name: "**Frey**: rat-folk bandit
-    chief" and "Boss Frey, a badger-folk bandit chief". The extension is ONE phrase
-    and never crosses a period, which is the wall that kept the wounded wolf out of
-    Frey's species evidence.
-    """
-    lo = i
-    while lo > 0 and line[lo - 1] not in _UNIT_BREAK:
-        lo -= 1
-    hi = i
-    while hi < len(line) and line[hi] not in _UNIT_BREAK:
-        hi += 1
-    out = line[lo:hi]
-    if hi < len(line) and line[hi] in ",:\u2014\u2013":
-        nxt = hi + 1
-        while nxt < len(line) and line[nxt] not in _UNIT_BREAK:
-            nxt += 1
-        out += line[hi:nxt]
-    return out
 
 
-def _clause_start(span: str, i: int) -> int:
-    for j in range(i - 1, max(i - 41, -1), -1):
-        if span[j] in _CLAUSE_BREAK:
-            return j + 1
-    return max(i - 40, 0)
 
 
-def _clause_end(span: str, i: int) -> int:
-    for j in range(i, min(i + 41, len(span))):
-        if span[j] in _CLAUSE_BREAK:
-            return j
-    return min(i + 40, len(span))
 
 
-def _claim_nouns(text: str) -> list[str]:
-    """The role nouns a species claim is actually attached to.
-
-    "two squirrel-folk bandits bar the path" is a claim about BANDITS, so only a
-    vault line that puts an animal next to the word "bandit" may answer it. Round
-    5 of the evaluation run (§17) showed what happens otherwise: the sentence
-    "…at Winnowing Reach" handed the substitution a key ("reach"), the vault's
-    bandit line matched it, and Alisa Pennygleam the merchant came out rat-folk.
-    """
-    nouns: list[str] = []
-    for m in _SPECIES_COMPOUND.finditer(text or ""):
-        tail = re.findall(r"[a-z\u00e4\u00f6\u00fc]{4,}", _norm(text[m.end():m.end() + 30]))
-        head = re.findall(r"[a-z\u00e4\u00f6\u00fc]{4,}",
-                          _norm(text[max(0, m.start() - 30):m.start()]))
-        for w in (tail[:2] or head[-2:]):
-            if w not in _SEGMENT_STOP and w not in _all_species:
-                nouns.append(w[:-1] if w.endswith("s") and len(w) > 4 else w)
-    return list(dict.fromkeys(nouns))[:6]
 
 
-_FUNCTION_WORDS = frozenset("""a an the der die das den dem des ein eine einer einem of at in on
-und or and but mit bei zu von zum zur for with near into from to by as like then they their
-this that these those there here all any some each every other such""".split())
 
 
-def crowd_evidence_spans(text: str, retrieved: str,
-                         ours: Sequence[str] = ()) -> str:
-    """What the material says about THE CROWD *text* describes — no more.
-
-    Two filters, both learned from the evaluation run (§17):
-
-    * only spans where a crowd word and an animal SIT TOGETHER count as a species
-      statement about that crowd, so a D&D familiar list sharing a chunk with the
-      ambush ("Bat, Cat, Frog, Hawk, Lizard … Rat, Raven") never answers it, and
-    * a species claim belonging to a NAMED individual is blanked, so Spleck the
-      lizard merchant is not evidence about Alisa Pennygleam the merchant.
-
-    This is the evidence both the contradiction test and the substitution read,
-    which is why one function serves both: a rule that only policed the
-    substitution still let the contradiction strip a character on somebody else's
-    description.
-    """
-    """Crowd-near spans with another character's species blanked out.
-
-    A span is not rejected wholesale for mentioning someone (the vault names its
-    places and its NPCs constantly); the SPECIES claim that belongs to a named
-    individual is blanked, so it cannot be borrowed for our crowd.
-    """
-    nouns = _claim_nouns(text) or _segment_keys(text)
-    # The vault's OWN spelling of the crowd ("Banditen") is what a name gets glued
-    # to — a German session log names its bandits just as plainly as English does.
-    nouns = nouns + [k for k in _segment_keys(text) if k not in nouns][:4]
-    # A word that is part of a name we are painting is not a role word: "merchant"
-    # in "the hedgehog-folk merchant Alisa Pennygleam" describes Alisa, and the
-    # vault's lizard merchant Spleck has nothing to do with her.
-    ours_low = [_norm(o) for o in ours]
-    nouns = [n for n in nouns if not any(_norm(n) in o for o in ours_low)]
-    # …nor may the claim's OWN species be a crowd key: searching the vault with
-    # "weasel" finds the D&D familiar list, which then "contradicts" the plan with
-    # the very sentence it is being asked about.
-    claim = {_norm(w) for w in _claimed_species(text)}
-    nouns = [n for n in nouns if _norm(n) not in claim]
-    out: list[str] = []
-    for span in crowd_adjacency(" ".join(nouns), retrieved).split("\n"):
-        keep = list(span)
-        low = span.lower()
-        # Both claim shapes: a "rat-folk" compound and a bare animal word used as
-        # an identity ("lizard merchant Spleck"). The bare shape is what got
-        # Alisa Pennygleam painted as a lizard.
-        hits = [m.span() for m in _SPECIES_COMPOUND.finditer(span)]
-        # A bare animal word is a species claim only where it MODIFIES a crowd
-        # word: "lizard merchant", "Frosch Piraten". Round 8 of the evaluation run
-        # (§17) shows why distance is not enough — the D&D familiar list
-        # ("…options: Bat, Cat, Frog, Hawk, Lizard…") sits sixty characters from
-        # "Banditen" and answers a question nobody asked it.
-        for m in re.finditer(r"[a-z\u00e4\u00f6\u00fc]+", low):
-            w = m.group(0)
-            if w not in _all_species or w in _GENERIC_SPECIES:
-                continue
-            following = re.findall(r"[a-z\u00e4\u00f6\u00fc]+", low[m.end():m.end() + 24])[:1]
-            if not any(f and (f == n or f.startswith(n[:5]) or n.startswith(f[:5]))
-                       for f in following for n in nouns):
-                continue
-            hits.append(m.span())
-        for lo0, hi0 in hits:
-            lo, hi = max(0, lo0 - 40), min(len(span), hi0 + 40)
-            near = span[lo:hi]
-            # …and only when the name is attached to it, not merely in the same
-            # breath: "Winnowing Reach: three rat-folk cutthroats" names a place,
-            # and the colon says so. Breaking on punctuation keeps the vault's
-            # good evidence ("three rat-folk cutthroats") intact. "lizard merchant
-            # Spleck" is a species belonging to Spleck; "Boss Frey führt seine
-            # Banditen: two rat-folk cutthroats" is a species belonging to the
-            # bandits, with a name merely further up the line.
-            # The whole breath around the claim, not just a few characters:
-            # "Session 5 Trunk Market: Romi leaves, lizard merchant Spleck sells
-            # potions" — Spleck is the vault's OWN lizard merchant, and his species
-            # is not Alisa Pennygleam's. A species may be borrowed for a crowd only
-            # when everyone the sentence names is a character we are painting.
-            lo_s = _clause_start(span, lo0)
-            hi_s = _clause_end(span, hi0)
-            for _ in range(2):          # widen once: names sit a clause further out
-                lo_s = _clause_start(span, lo_s)
-                hi_s = _clause_end(span, hi_s)
-            if _stray_name(span[lo_s:hi_s], ours, nouns):
-                keep[lo0:hi0] = " " * (hi0 - lo0)
-        out.append("".join(keep))
-    return "\n".join(out)
 
 
-def _adjacent_spans(keys: Sequence[str], text: str,
-                     window: int = 60) -> list[str]:
-    """Word-aligned spans of *text* where one of *keys* sits next to something.
-
-    Growing the window to whole words is not decoration: a slice that cut "regal
-    bearing" down to "bear" handed the substitution an animal the campaign never
-    named (round 10 of the evaluation run, §17).
-    """
-    spans: list[str] = []
-    for line in text.splitlines():
-        low = line.lower()
-        for k in keys:
-            for m in re.finditer(re.escape(k.lower()), low):
-                lo, hi = max(0, m.start() - window), min(len(line), m.end() + window)
-                while lo > 0 and (line[lo - 1].isalnum() or line[lo - 1] in "äöüß-_"):
-                    lo -= 1
-                while hi < len(line) and (line[hi].isalnum() or line[hi] in "äöüß-_"):
-                    hi += 1
-                spans.append(line[lo:hi])
-    return spans
 
 
-def crowd_adjacency(text: str, retrieved: str, window: int = 60) -> str:
-    """The spans of retrieved text where a crowd word and an animal SIT TOGETHER.
-
-    Substitution is the risky operation: picking a species for a nameless crew
-    invents campaign canon. Round 4 of the evaluation run (§17) showed what
-    loose evidence does — a badger-folk bandit chief retagged FROG-folk (from
-    "Frosch Piraten" in an unrelated session note) and birdfolk-folk (from a
-    calendar entry about a festival). So the species has to sit next to the crowd
-    word on the same line to count as a statement about that crowd.
-    """
-    keys = [k for k in _segment_keys(text) if len(k) >= 4]
-    if not keys or not retrieved:
-        return ""
-    return "\n".join(_adjacent_spans(keys, retrieved, window))
 
 
-def _stray_name(span: str, ours: Iterable[str],
-                nouns: Sequence[str] = ()) -> str | None:
-    """A character the vault NAMED together with one of these role words.
-
-    The vault does have a lizard merchant — Spleck, at the Trunk Market in
-    Alderheart. Round 5 of the evaluation run (§17) borrowed his species for
-    Alisa Pennygleam, because the request said "merchant" and the vault said
-    "lizard merchant" somewhere nearby. A species glued to a NAME is evidence
-    about that individual, not about the crowd the plan is describing.
-
-    The test is the GLUE, not capitalisation: "lizard merchant Spleck" and "die
-    Hexe Susan" name somebody, so the species belongs to them. "an der Old
-    Bridge" and "bei Winnowing Reach" name a place, and a place must not outvote
-    the vault's species statement — which is why scanning for anything capitalised
-    (German capitalises every noun) was the wrong detector.
-    """
-    allowed = {_norm(o) for o in ours}
-    role = sorted({re.escape(_norm(n)) for n in nouns if len(_norm(n)) >= 4})
-    if not role:
-        return None
-    names = "|".join(sorted(_all_species))
-    cap = r"[A-ZÄÖÜ][a-zäöüß\u00df]{3,}"
-    # Two separate scans, not one alternation: "lizard merchant Spleck" matches the
-    # name-before-role shape first ("lizard" before "merchant"), and an alternation
-    # would have CONSUMED "merchant" there, so the name glued after it — the one
-    # that actually owns the species — was never seen.
-    after = re.compile(r"(?:" + "|".join(role) + r")\s+(?!(?:" + names + r")\b)("
-                       + cap + r")", re.IGNORECASE)
-    before = re.compile(r"(" + cap + r")\s+(?:" + "|".join(role) + r")\b",
-                        re.IGNORECASE)
-    for m in list(after.finditer(span)) + list(before.finditer(span)):
-        raw = m.group(1) or m.group(2)
-        # The role words match in any case ("Banditen"), but the NAME side has to
-        # actually be a name: with IGNORECASE on, "three rat-folk cutthroats" looked
-        # like a character called Three and blanked the vault's own species.
-        if not raw[0].isupper():
-            continue
-        tok = _norm(raw)
-        if tok in allowed or tok in _all_species or tok in _FUNCTION_WORDS:
-            continue
-        if any(tok in _norm(o) for o in allowed):
-            continue
-        return raw
-    return None
 
 
-def invented_species(look: str, retrieved: str,
-                     allow: Iterable[str] = ()) -> list[str]:
-    """Kept name for the contradiction test on a figure's own `look`."""
-    return contradicted_species(look, retrieved, allow)
 
 
-# A species claim was policed only inside a figure's `look`. Measured live
-# (analysis §15): the same ambush request that produced an invented badger-folk
-# Boss Frey also produced "two lanky weasel-folk bandits with pointed ears, long
-# snouts and russet fur" and "two rat-folk bandit lackeys" in `entities` — the
-# crowd descriptions were never checked, and a small scene keeps the entity line
-# instead of budget-dropping it. Only the `-folk` compounds are policed: "a giant
-# rat blocking the corridor" names a creature, which is what `entities` is FOR,
-# while "weasel-folk bandits" is a claim about WHO they are.
-# A species compounded onto a being-word is how the vault's German says
-# beast-folk: "eine Fuchsdame" (a fox-woman) is the ambush boss's own species
-# in SESSION_01. Without these heads the gate reads "Fuchsdame" as an unknown
-# word and never notices that the vault HAS an animal for that character.
-_SPECIES_COMPOUND_SUFFIXES = ("folk", "folks", "kin", "people", "volk",
-                              "dame", "mann", "leute", "wesen", "frau", "weib")
-_SPECIES_COMPOUND = re.compile(
-    r"\b(" + "|".join(sorted(_all_species, key=len, reverse=True)) + r")"
-    r"[\-\u2011 ]?(?:" + "|".join(_SPECIES_COMPOUND_SUFFIXES) + r")\b",
-    re.IGNORECASE)
-
-# Words too general to locate the passage a claim came from.
-_SEGMENT_STOP = frozenset(
-    """scene scenes image images picture pictures character characters figure
-    figures people person persons group groups party several many some other
-    such about inside outside behind before during while through towards toward
-    wearing holding carrying standing walking with them themselves every all
-    foreground background lighting palette mood styleRequest request""".split())
 
 
-def _segment_keys(text: str) -> list[str]:
-    """The distinctive nouns of a sentence, used to find where it came from.
 
-    Singular stems are included so "bandits" finds a vault passage that says
-    "bandit crew". A vault that names the crowd only in German ("Banditen") is
-    not found, and the species claim is then STRIPPED — the safe direction: the
-    crowd is still painted, the composer just refuses to decide what species it
-    is.
-    """
-    out: set[str] = set()
-    for w in re.findall(r"[a-z\u00e4\u00f6\u00fc]{4,}", _norm(text)):
-        if w in _SEGMENT_STOP or w in _all_species:
-            continue
-        out.add(w)
-        if w.endswith("s") and len(w) > 4:
-            out.add(w[:-1])
-    return sorted(out)[:12]
 
 
 def _named_in_request(entry: str, request_text: str) -> bool:
@@ -939,38 +382,10 @@ def _named_in_request(entry: str, request_text: str) -> bool:
     return bool(stems(request_text) & stems(entry))
 
 
-def request_species(text: str) -> set[str]:
-    """Species the USER named. Their own campaign is their own authority.
-
-    "Paint Boss Frey as a badger-folk" is not the model inventing a species, and
-    dropping it would be the composer arguing with the person holding the reins.
-    """
-    out: set[str] = set()
-    for token in re.findall(r"[a-z\u00e4\u00f6\u00fc]+", _norm(text)):
-        if token in _all_species:
-            out.add(token)
-    return out
 
 
-def unbacked_species(text: str, retrieved: str,
-                     request_text: str = "") -> list[str]:
-    """Species a sentence claims that the material about THOSE beings denies."""
-    strip, _ = species_verdict(text, crowd_evidence(text, retrieved),
-                               request_species(request_text), near=crowd_keys(text))
-    return strip
 
 
-def species_guesses(text: str, retrieved: str,
-                    request_text: str = "") -> list[str]:
-    """Species a sentence claims that nothing describes either way.
-
-    Kept by policy, but reported: an invented species in a painted image is the
-    composer deciding campaign canon, and the person running the table should see
-    it and put the real species in the vault if they have one.
-    """
-    _, guess = species_verdict(text, crowd_evidence(text, retrieved),
-                               request_species(request_text), near=crowd_keys(text))
-    return guess
 
 
 def verify_look(figure: Figure, read_paths: Sequence[str] | None,
@@ -988,6 +403,13 @@ def verify_look(figure: Figure, read_paths: Sequence[str] | None,
       the vault never describes, written after no lookup at all.
     * It cites nothing this rewrite touched: invention, dropped loudly.
 
+    Whether the SPECIES named in a description is the campaign's is no longer asked
+    here (retired 2026-11-20, analysis §19–§20): the gate that asked it read species
+    words out of retrieved prose and attributed other characters' animals to the
+    character being checked, which dropped a look the rewrite had genuinely opened a
+    file for. What stays is the question code can answer without interpreting
+    language: was this description retrieved, or invented.
+
     With no evidence channel at all (`read_paths=None`, no snippets) there is
     nothing to check against and the plan is taken at its word — that is the
     caller's choice, not this function's.
@@ -1002,14 +424,6 @@ def verify_look(figure: Figure, read_paths: Sequence[str] | None,
                           "nothing — painted unverified")
         return False, ("`look` without a `source` — the vault records NPC roles, "
                        "never appearances")
-    ev = species_evidence_about(figure.name, retrieved)
-    bad = invented_species(figure.look, ev, allow=request_species(request_text))
-    if bad:
-        says = (", ".join(sorted(_species_named_in(ev))) or "something else")
-        return False, ("describes them as " + "/".join(bad) +
-                       "-folk while the material about THIS character says " +
-                       says + " — the invented species is dropped and the "
-                       "figure is painted by name")
     if read_paths is None and not snippet_paths:
         return True, ""
     if read_paths is not None and source_matches(figure.source, read_paths):
@@ -1440,7 +854,6 @@ _META_COMMENT = re.compile(
 FIXABLE_CODES = frozenset({
     "meta_comment", "collective_subject", "collective_in_figure",
     "collective_in_entity", "duplicate_mention", "name_spelling",
-    "species_contradicted", "species_unbacked", "species_conflict",
     "negation_clause", "entity_named_not_painted", "figure_ungrounded",
     "identity_left_in_scene", "look_unverified", "name_form",
     "same_person_listed_twice",
@@ -1637,25 +1050,6 @@ def lint_plan(plan: ImagePlan, anchors: dict[str, Anchor], *,
             add(Finding("negation_clause", f.name,
                         f"the pose {f.pose!r} says what to leave OUT; a renderer "
                         "paints the item anyway — write the pose positively"))
-        ev_look = species_evidence_about(f.name, retrieved)
-        anch = match_anchor(f.name, anchors)
-        if anch is not None and anch.fields.get("species"):
-            # The sheet IS material about them. Their own species line is what
-            # vouches for a `look` that restates it and what refuses an override
-            # that calls a blue tit a fox — until now an anchored figure's override
-            # was answered only by whatever session text happened to be in hand.
-            ev_look = "\n".join(x for x in (ev_look, anch.fields["species"]) if x)
-        claim = contradicted_species(f.look, ev_look,
-                                     request_species(request_text))
-        if claim:
-            add(Finding("species_contradicted", f.name,
-                        f"the look says {'/'.join(claim)}-folk while the material "
-                        f"about this character says {_said_animals(ev_look)} — they "
-                        "are two different animals"))
-        for token in species_guesses(f.look, retrieved, request_text):
-            add(Finding("species_unbacked", f.name,
-                        f"{token}-folk is an invention: nothing in what was retrieved "
-                        "describes this character's species"))
         if not f.look and not f.source and match_anchor(f.name, anchors) is None:
             # A description the plan DID write — in the scene sentence — while the
             # figure's own line went out as a bare pose. Measured live 2026-11-19
@@ -1677,7 +1071,6 @@ def lint_plan(plan: ImagePlan, anchors: dict[str, Anchor], *,
                             "with no appearance at all; look it up or drop the figure"))
 
     for e in plan.entities:
-        ev_ent = crowd_evidence_spans(e, retrieved, names + list(anchors))
         for note in _meta_comments(e):
             add(Finding("meta_comment", "entities",
                         f"{note!r} inside an entity entry"))
@@ -1689,12 +1082,6 @@ def lint_plan(plan: ImagePlan, anchors: dict[str, Anchor], *,
             add(Finding("negation_clause", "entities",
                         f"{e!r} says what an object is NOT; a renderer paints the "
                         "thing it names — describe it positively"))
-        claim = contradicted_species(e, ev_ent, request_species(request_text))
-        if claim:
-            add(Finding("species_contradicted", "entities",
-                        f"{e!r} claims {'/'.join(claim)}-folk while the material "
-                        f"about those beings says {_said_animals(ev_ent)} — fix the "
-                        "claim or name where yours came from"))
 
     if has_negation(plan.scene):
         add(Finding("negation_clause", "scene",
@@ -1717,20 +1104,8 @@ def lint_plan(plan: ImagePlan, anchors: dict[str, Anchor], *,
                     "the scene enumerates this name again, and the figure line already "
                     "describes them — a name said three times is a character painted "
                     "twice"))
-    ev_scene = crowd_evidence_spans(plan.scene, retrieved, names + list(anchors))
-    claim_scene = contradicted_species(plan.scene, ev_scene,
-                                       request_species(request_text))
-    if claim_scene:
-        add(Finding("species_contradicted", "scene",
-                    f"the scene claims {'/'.join(claim_scene)}-folk while the "
-                    f"material about those beings says {_said_animals(ev_scene)} — "
-                    "fix the claim or name where yours came from"))
-    for token in species_guesses(plan.scene, retrieved, request_text):
-        add(Finding("species_unbacked", "scene",
-                    f"{token}-folk is claimed in the scene sentence and the vault "
-                    "states no species for those beings — kept, because a species "
-                    "guess is what keeps humans out of the frame, but it is canon "
-                    "the bot invented"))
+    for note in _meta_comments(plan.scene):
+        pass                      # already reported above
 
     for f in plan.figures:
         if not isinstance(f, Figure) or match_anchor(f.name, anchors):
@@ -1835,35 +1210,8 @@ def _request_names(request_text: str) -> list[str]:
     return out
 
 
-def _said_animals(evidence: str) -> str:
-    """Quote what the evidence the verdict ALREADY READ says about the species.
-
-    Round 14 (live, 2026-11-19): a finding told the model "the material about those
-    beings says nothing about their species" while the verdict that produced it had
-    just read a span containing "birdfolk". Two functions re-deriving the evidence
-    differently produce a report that contradicts its own ruling. Both sides of a
-    finding now read one string.
-    """
-    return ", ".join(sorted(_species_named_in(evidence))) or "nothing about their species"
 
 
-def vault_animals(text: str, retrieved: str) -> tuple[str, ...]:
-    """The species words the retrieved material puts NEXT TO this crowd phrase.
-
-    Detection only — what a report is allowed to say. Proximity is the whole point:
-    a species from a find-familiar list ten headings away is not evidence about the
-    bandits, and a report naming the wrong animal is worse than no report (round 10:
-    a merchant's lizard reached a bandit crew exactly this way).
-    """
-    out: list[str] = []
-    # `crowd_evidence_spans` has already done the judging: it keeps only the text
-    # where a crowd word and an animal sit together, and blanks a named individual's
-    # species claim. What is left is quoted here in the vault's own words.
-    for m in re.finditer(r"\b[a-z][a-z-]*folk\b",
-                         _norm(crowd_evidence_spans(text, retrieved))):
-        if m.group(0) not in out:
-            out.append(m.group(0))
-    return tuple(out)
 
 
 def finding_feedback(findings: Sequence[Finding]) -> str:
@@ -2001,8 +1349,7 @@ def compose_prompt(
     snippet_paths: Iterable[str] | None = None,
     retrieved: str = "",
     request_text: str = "",
-    animal_floor: str = "",
-    animal_floor_living: str = "",
+    world_rule: str = "",
 ) -> Composed:
     """Assemble the final prompt from the plan + the vault anchors.
 
@@ -2021,34 +1368,6 @@ def compose_prompt(
                          read_paths=read_paths, snippet_paths=snippet_paths,
                          request_text=request_text)
     figures = [f for f in (_as_figure(x) for x in plan.figures) if f is not None]
-    # A species claim smuggled into a NAME is still a species claim: a live run
-    # produced figures called "crow-folk bandit 1" and "crow-folk bandit 2", and
-    # the gate only ever policed the scene sentence and the entity line.
-    # Read with the SAME verdict a look gets, from the same narrowed evidence:
-    # a claim the vault never discusses is the table owner's allowed guess (said
-    # out loud as invented canon), and only a claim the material contradicts is a
-    # contradiction. Until 2026-11-20 every name claim was filed as
-    # `species_contradicted` with the words "the material does not back" — the
-    # wording for the allowed case under the `contradicted` code, which sent the
-    # correction turn off to rename a figure out of the very animal-folk guess the
-    # animal floor exists to require.
-    for f in figures:
-        ev_name = _name_claim_evidence(f.name, retrieved)
-        strip, guess = species_verdict(f.name, ev_name,
-                                       request_species(request_text))
-        for token in strip:
-            findings.append(Finding(
-                "species_contradicted", f.name,
-                f"the figure is NAMED {f.name!r}, which claims {token}-folk while "
-                f"the material about this character says {_said_animals(ev_name)} — "
-                "a name is not a description, but the renderer paints it as one"))
-        for token in guess:
-            findings.append(Finding(
-                "species_unbacked", f.name,
-                f"{token}-folk in the figure's NAME is an invention — kept, because "
-                "an animal-folk guess is what keeps humans out of the picture, but "
-                f"it is canon the bot invented and the renderer reads {f.name!r} as "
-                "a description"))
     if not figures and not plan.scene.strip():
         # An empty plan must never paint an empty prompt: the caller's raw-request
         # fallback is a better image than nothing.
@@ -2085,16 +1404,6 @@ def compose_prompt(
             warnings.append(f"{f.name}: {why}")
             findings.append(Finding("look_unverified", f.name, why))
         if ok:
-            # A species the vault never states, painted anyway: allowed by the
-            # animal-folk ruling, but said out loud — an invented species in a
-            # painted image is canon the table should know the bot invented.
-            for token in species_verdict(
-                    f.look, species_evidence_about(f.name, retrieved),
-                    request_species(request_text))[1]:
-                findings.append(Finding(
-                    "species_unbacked", f.name,
-                    f"{token}-folk in the look is an invention — kept, because an "
-                    "animal-folk guess is what keeps humans out of the picture"))
             keep.append((f, a))
             continue
         ungrounded.append(f.name)
@@ -2157,10 +1466,10 @@ def compose_prompt(
                         f"contract's {_MAX_SCENE_WORDS}; the anchor lines are what "
                         "the model paints the characters from")
     # The scene sentence is the model's sentence. Everything the composer notices
-    # about it — a species the material disagrees with, a crowd noun naming the
-    # cast, a name enumerated twice — is in `findings`, and the correction turn is
-    # where it gets fixed. The one thing still enforced here is the contract's own
-    # word cap above, because that is a budget and not an interpretation.
+    # about it — a crowd noun naming the cast, a name enumerated twice — is in
+    # `findings`, and the correction turn is where it gets fixed. The one thing
+    # still enforced here is the contract's own word cap above, because that is a
+    # budget and not an interpretation.
 
     count = len(resolved)
     front_n = min(foreground, count)
@@ -2169,21 +1478,15 @@ def compose_prompt(
     if count > front_n:
         count_line += f", {front_n} in the foreground and {count - front_n} behind them"
     style = base_style.rstrip(". ")
-    # The floor line and a machine in the frame have to agree before either is said.
-    # Marvin's sheet line says "steampunk magical construct" and his Visual Anchor
-    # says automaton: a fact from the vault, not a guess about what a name looks like.
-    if animal_floor and any(is_machine(a.desc if a else "", f.look, f.source,
-                                       *(a.fields.values() if a else ()))
-                           for f, a in resolved):
-        animal_floor = (animal_floor_living or _living_floor(animal_floor))
-    # Nobody in this world is a person (the table owner's ruling, 2026-11-19): the
-    # floor line rides in the style sentence, which the budget ladder never cuts,
-    # so a character or crowd the vault gives no species for is still painted
-    # animal-folk instead of human. Unconditional on purpose — deciding which
-    # entities are beings and which are wagons is exactly the guesswork this
-    # pipeline refuses to do, and 80 characters is what certainty costs here.
-    if animal_floor:
-        style = f"{style}. {animal_floor.rstrip('. ')}"
+    # The campaign's world line — what kind of beings exist in this world — is one
+    # sentence of CAMPAIGN DATA (`world_rule:` in the Campaign Prompt Profile), said
+    # verbatim, and it rides in the style sentence where the budget ladder never
+    # cuts it. The composer holds no wording of its own and asks nothing about who
+    # is an animal, a human or a machine: a Humblewood profile says everyone is
+    # animal-folk, a human-world profile says something else or nothing, and the
+    # code is the same either way (retired species logic, analysis §20).
+    if world_rule:
+        style = f"{style}. {world_rule.rstrip('. ')}"
     scene_line = (f"{style}. {scene}. {count_line}." if scene
                   else f"{style}. {count_line}.")
 
