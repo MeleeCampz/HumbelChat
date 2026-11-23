@@ -1060,3 +1060,94 @@ gone, and the identical claim is reported truthfully —
 Still open from this run: `identity_left_in_scene [Boss Frey]` — the model again put his
 description in the scene sentence instead of the figure's `look`, so his block is
 painted with a pose and no identity. Reporting it has not made the model stop doing it.
+
+## 20. The species layer was deleted, not repaired (2026-11-22)
+
+§19 fixed evidence attribution and the layer still did not earn its keep. The table's
+ruling: **the bot is a general-purpose tool, so no part of it may decide what another
+campaign's world contains.** A human-world campaign would have needed the code changed
+in four places before a single image could be painted.
+
+### 20.1 The two tiers, and which one survived
+
+Everything the composer checked fell into two classes, and the split is the whole
+decision:
+
+| | What it compares | Verdict |
+|---|---|---|
+| **Tier A — string facts against a named source** | did this rewrite open this path (`read_paths`); does a search snippet contain the phrase; does the material write this name bare or only inside another name; does the entity entry LEAD with the requested name; is there a negation in a paintable clause; is the crowd noun in the scene the one the request used | **kept.** A path, a spelling and a position are checkable and were never wrong |
+| **Tier B — a fact read out of retrieved prose** | is this species backed for THIS character; does the vault deny it; is this animal word about the crowd or about somebody named three lines away | **deleted.** §19 is the measurement of how often this misfires, and the fix for one case (heading-owned sections, phrase adjacency) just moves the failure to the next phrasing |
+
+Tier B is not one check with a bug; it is a reading-comprehension task, and the pipeline
+already has a reader for it — the rewrite model, in the turn where it holds the vault's
+text and can be told to fix what the composer reports.
+
+### 20.2 What was removed
+
+In `bot_core/image_prompt.py` (734 lines out, 44 module-level names): the species
+vocabulary (`_SPECIES`, `_species_variants`, `_all_species`, `_GENERIC_SPECIES`,
+`_canonical_species`, `_SPECIES_COMPOUND`, `_SPECIES_COMPOUND_SUFFIXES`, `_claim_nouns`,
+`_FUNCTION_WORDS`), the attribution machinery from §19 (`species_evidence_about`,
+`evidence_about`, `_name_claim_evidence`, `_unit`, `_UNIT_BREAK`, `_adjacent_spans`,
+`_segment_keys`, `_name_keys`, `_blocks`, `_named_blocks`, `_clause_start`,
+`_clause_end`, `_CLAUSE_BREAK`, `_SEGMENT_STOP`), the verdicts (`species_verdict`,
+`_species_named_in`, `_species_near`, `_claimed_species`, `_stray_name`,
+`contradicted_species`, `unbacked_species`, `invented_species`, `species_guesses`,
+`request_species`), the crowd half (`crowd_evidence_spans`, `crowd_evidence`,
+`crowd_adjacency`, `crowd_keys`, `_crowd_spans`, `vault_animals`, `_said_animals`), the
+machine detection that picked between two campaign sentences (`is_machine`,
+`_MACHINE_WORDS`, `_living_floor`), and the species half of `verify_look`. In
+`bot_core/images.py`: the species sentences in the party dossier and the campaign
+wording in the built-in fallbacks (§20.4). Three finding codes — `species_contradicted`,
+`species_unbacked`, `species_conflict` — are gone from `FIXABLE_CODES`, so the correction
+turn is never told to argue about a species. 34 tests retired with them.
+
+What `verify_look` still decides is provenance alone: opened file → search snippet →
+the model's own invention (painted, reported as `figure_ungrounded` /
+`look_unverified`). That is Tier A.
+
+### 20.3 What replaced it: one line of campaign data
+
+`world_rule:` in the Campaign Prompt Profile — a single sentence, injected verbatim into
+the style sentence where the budget ladder never cuts it, and **never read by code**. It
+replaces `animal_floor` + `animal_floor_living` (both names are still parsed, the first
+wins) and `IMAGE_ANIMAL_FLOOR` (`IMAGE_WORLD_RULE` is the new name, the old one still
+works). The old pair existed because the composer detected a construct in the frame and
+swapped sentences; the sentence now covers constructs in its own words:
+
+> Nobody in this world is a human being: every figure is an anthropomorphic
+> animal-folk character, or a construct painted as the machine it is
+
+This campaign's wording stays editable in Obsidian, and a campaign that has no such
+claim deletes the line — the code has no fallback sentence, because a fallback sentence
+would be this campaign's claim wearing a default.
+
+### 20.4 The campaign wording that was hiding in fallbacks
+
+`prompts/image_rewrite_system.md` (the prose fallback) opened with a sentence naming
+Humblewood and repeating the style sentence, and `images.py` shipped built-in defaults
+that were Humblewood canon: "no humans — only animals or humanoid beast-folk", and
+"Googly eyes … belong ONLY to Colum Bidae". All of it is out. The fallback now carries
+`{{OPENING_STYLE}}`, filled at load from the profile (`style` + `world_rule`,
+`images._opening_style`), so both rewrite paths open a prompt with the profile's
+sentence and neither has a campaign in the repo. The missing-vault-note default is a
+neutral marker.
+
+### 20.5 What is now deliberately unpoliced
+
+- A plan may call the bandits weasel-folk while the notes call them rat-folk, and
+  **nothing in the pipeline notices**. The only defence is the vault's own text.
+- The vault's *Image Generation Policy* note still tells the model "every creature in
+  this world is beast-folk" — that is where the campaign states its facts now, in the
+  prompt the model reads, not in a checker.
+- A bare role word ("bandits") is still painted as written. The profile's `world_rule`
+  sentence is what keeps humans out of the frame, and it is a sentence, not a gate.
+- `identity_left_in_scene` (§19.3) is unchanged and still the open behaviour problem:
+  reporting that a description is stranded in the scene sentence has not stopped the
+  model doing it.
+
+The accepted trade, stated plainly: the checks Tier B removed caught a handful of real
+mislabels over the D-run, and produced at least three wrong verdicts that dropped a
+verified look or burned a lookup turn (§19). Removing them costs the mislabels and buys
+back the wrong verdicts, the campaign coupling, and ~700 lines of reading prose in a
+module whose job is assembling text.

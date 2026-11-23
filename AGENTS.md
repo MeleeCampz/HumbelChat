@@ -64,13 +64,16 @@ Two paths, one outcome (`bot_core/images.py::rewrite_prompt`):
 
 - **Primary — plan + composer.** The model answers with an `<image_plan>` JSON
   block (`prompts/image_plan_system.md`) and **`bot_core/image_prompt.py` writes the
-  prompt**. Style sentence, figure-count line, foreground/background split, budget
-  ladder, collective-noun replacement, NPC-look verification (opened file / search
-  snippet / invention — an invented `look` is dropped, and a **species claim needs
-  its own backing** in the retrieved text about that character), promotion of a
-  named character hiding in `entities`, and every reported cut are guarantees of
-  that module, not requests to the model. A named character with no verified
-  appearance triggers one **enforced lookup pass** before composing again; the
+  prompt**. Style sentence, figure-count line, identity-first clause order,
+  foreground/background split, budget ladder, negation scrubbing and NPC-look
+  provenance (opened file / search snippet / the model's own invention) are
+  guarantees of that module, not requests to the model. Anything the composer can
+  only *notice* — a collective subject, a bare repeated name, a meta aside, an
+  abbreviation of a sheet name, a named character left in `entities`, a description
+  stranded in the scene sentence — is a `Finding` said back to the model, never an
+  edit of its prose (`FIXABLE_CODES` is that list). A named character with no verified
+  appearance triggers one **enforced lookup pass** before composing again, and the
+  correction pass is only painted when it composes with FEWER open findings; the
   agent loop refuses a repeated identical tool call instead of re-running it.
 - **Fallback — prose.** `prompts/image_rewrite_system.md` (the pre-#84 path) runs
   only when the plan path fails.
@@ -107,27 +110,34 @@ chat-path fact). Likewise the vault note's human-facing "Edit freely — changes
 apply…" header is stripped before injection (`_strip_editor_preamble`), and the
 contract's worked example uses invented names (Pell Wicker / Orin Vek / Sable Rin)
 — with real campaign names in it, the model copied the example's invented NPC look
-verbatim into a live plan. Name and species fidelity is enforced as code: a plan
-abbreviation is painted with the form the vault uses only when the vault never
-writes the plan's form bare (`request_spelling`), sheet spellings replace
-abbreviations in the scene, entity lines and poses, and a `-folk` claim is refused
-only when the material about THOSE characters names a different species — invention
-for a character the vault never describes is ALLOWED and logged as the bot's own
-guess (the table's ruling: nobody in this world is a person, so a bare role word
-must not be painted as one), with `IMAGE_ANIMAL_FLOOR` stating the animal-folk rule
-in the style sentence where the budget ladder never cuts it. §15–§16 of the analysis
-doc carry the measurements and what is still NOT enforced: nothing compares the
-actors the REQUEST names against the cast the plan paints.
+verbatim into a live plan.
 
-**Species evidence is read phrase by phrase, never block by block** (measured
-2026-11-20, §19): a search result arrives as ONE JSON line, so "the block that names
-Boss Frey" used to be the whole blob — his species came out as owl, reh and tit from
-Bubo's sheet, Colum's anchor and a Session 5 bounty, and `verify_look` answered that
-"contradiction" by dropping a look the rewrite had genuinely opened the file for, which
-is the figure-with-no-identity shape §18 measures the renderer dropping. Use
-`species_evidence_about` (heading-owned sections, else the phrase around the name, one
-step across `:` or `,`, period as a wall) whenever a FACT is read out of retrieved text;
-`evidence_about` stays for "near him" questions only. A PC's OWN anchor species line is
-their evidence. An entity line the request named is a missed character only when the
-plan USES the name as the entry — `entity_named_not_painted` fired on "the weathered
-mossy stone arch of the Old Bridge" until that was fixed.
+**Campaign wording is DATA, never code** (user decision 2026-11-22, §19–§20). The
+composer used to carry this campaign's sentences — a style line, an animal-folk floor
+line, a party-sheet path, a vocabulary of species words — and to read FACTS out of
+retrieved prose in order to decide whether the plan's species claims were backed. That
+machinery is deleted: ~600 lines and 30 tests, because reading a fact out of a search
+blob is the one kind of judgment this pipeline kept mis-executing — a `search_kb` hit
+arrives as ONE JSON line, so "the block that names Boss Frey" was the whole blob and
+his species came out as owl, reh and tit from Bubo's sheet, Colum's anchor and a
+Session 5 bounty; `verify_look` then answered that "contradiction" by dropping a look
+the rewrite had genuinely opened the file for, which is the figure-with-no-identity
+shape §18 measures the renderer dropping.
+
+What survived is the Tier A layer — string comparison against named sources, no prose
+reading: paths the rewrite actually opened, sheet spellings, whether the material
+writes a name bare. Name spelling is REPORTED, not rewritten (`name_spelling`,
+`name_form`): the model that read the request writes the campaign's own form on the
+correction turn. `entity_named_not_painted` fires only when the entity ENTRY leads with
+the requested name, so "the weathered mossy stone arch of the Old Bridge" is not a
+missing character.
+
+The campaign's single sentence about what its beings ARE is `world_rule` in the
+Campaign Prompt Profile (`docs/campaign-profile.md`; `IMAGE_WORLD_RULE` overrides it,
+`IMAGE_ANIMAL_FLOOR` is still read as the old name): injected verbatim into the style
+sentence, never budget-cut, and **never interpreted by code**. Per-character species
+wording lives in the vault — its *Image Generation Policy* note and the notes about
+each NPC. Do NOT reintroduce a check that decides whether a species claim is true:
+where the vault is silent the model's guess is painted, by ruling. What is still not
+checked at all (§15–§16): nothing compares the actors the REQUEST names against the
+cast the plan paints.

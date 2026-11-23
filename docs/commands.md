@@ -90,12 +90,14 @@ Schedule a one-time reminder (minimum 10 seconds ahead); the bot posts a `⏰ Re
 ```
 
 Paint an image from a short prompt via the Unsloth Studio diffusion model and
-send it as a PNG. Base style: semi-realistic fantasy illustration (explicitly
-no painterly/watercolor look), set in Humblewood (the D&D world). The rewrite enforces
-"no humans — only animals or humanoid animals (Humbelfolk style)" drawn as
-upright D&D player characters in adventurer gear. Googly eyes are NOT a
-bird-folk trait — only Colum Bidae (Luma) has them, and they're mentioned only
-when he's in the picture. No
+send it as a PNG. The campaign wording comes from the Campaign Prompt Profile
+(`data/knowledge/Campaign Prompt Profile.md` — [`docs/campaign-profile.md](campaign-profile.md)),
+not from the code: this campaign's profile says semi-realistic fantasy illustration
+with no painterly/watercolor look and builds the world's SCALE into that sentence, and
+its `world_rule` line says nobody in this world is a human being. Per-character rules
+(googly eyes belong to Colum Bidae alone; Marvin is a machine, never a cat) live in the
+vault note `HumbleWood/Image Generation Policy.md`, which is injected as the "Campaign
+rules" section of both rewrite paths. No
 modern objects, and no unsolicited text — but user-requested text (signs,
 book titles, labels) is included verbatim and NOT suppressed by the negative
 prompt. The prompt is first
@@ -125,7 +127,11 @@ freed merchant "Alisa Pennygleam" came out as invented fox-folk and hare-folk; w
 rule, the rewrite found the vault's actual lizard merchant **Spleck** and his blue-and-yellow
 wagon). What the vault does NOT yet hold is NPC appearance data — its `Lexikon: Personen`
 entries record roles and bounties, not species or colours — so recurring NPCs stay partly
-invented until the vault carries Visual Anchors for them. An amount in a request ('a bag
+invented until the vault carries Visual Anchors for them (the bot paints an invented
+appearance and reports it as `figure_ungrounded`; it no longer second-guesses whether a
+species the model named is possible in this world — see
+[`docs/internal/IMAGE_PROMPT_PIPELINE_ANALYSIS_2026-11.md`](internal/IMAGE_PROMPT_PIPELINE_ANALYSIS_2026-11.md)
+§19–§20). An amount in a request ('a bag
 with 70 gold') describes the scene and is not lettering to paint.
 Group scenes carry one more rule after the first A/B test on the rendered images: the
 cast must not be named twice. Both six-figure scenes had a collective subject in the
@@ -168,7 +174,8 @@ switch takes offline), so the second request's rewrite lands INSIDE the first
 request's painting window, where `RAG_IMAGE_MODE_LEXICAL_ONLY` skips the dense
 leg and the reranker is stopped outright. When the composer reports a finding
 whose fix is READING the vault (a named figure with no verified appearance, a
-contradicted species, a description left in the scene sentence), that lookup
+description stranded in the scene sentence instead of the figure's `look`, a character
+the plan filed under `entities`), that lookup
 waits for the window to close — the rag restore that ends the window brings the
 sidecars back, so the wait costs nothing the pipeline was not paying anyway —
 and the progress message says why (`IMAGE_REWRITE_LOOKUP_WAIT_S` caps it). A

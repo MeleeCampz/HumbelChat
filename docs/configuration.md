@@ -226,7 +226,7 @@ back to `rag` mode happens in a `finally` after every painting window.
 | `IMAGE_PROMPT_CHARS_PER_FIGURE` | Extra budget per named figure | `420` |
 | `IMAGE_PROMPT_MAX_CHARS` | Hard ceiling regardless of figure count (measured: 6 anchors fit; 7–8 figures hit it and the ladder starts cutting) | `3600` |
 | `IMAGE_PROMPT_FOREGROUND_FIGURES` | Figures painted in the front group; the rest get "behind them, smaller and softer" | `4` |
-| `IMAGE_ANIMAL_FLOOR` | A style-level sentence stating every figure is animal-folk, so an undescribed bandit is not painted as a person (§16). Never cut by the budget ladder; set empty to drop it | animal-folk sentence |
+| `IMAGE_WORLD_RULE` | One sentence of **campaign data** saying what kind of beings this world has, said verbatim in the style sentence so an undescribed NPC is not painted as the wrong kind of being (§19–§20). The composer never reads it or reasons about it. Normally set in the profile file, not here; `IMAGE_ANIMAL_FLOOR` is still read as the old name. Set empty to drop the sentence | `""` (the profile file supplies it) |
 | `IMAGE_REASONING_EFFORT` | Reasoning effort on **every** rewrite turn (tool-picking, plan answer, lookup, prose fallback). Measured: `low` 42.7 s median, `medium` 52.2 s, `high` 152.8 s — `medium` writes visibly more paintable detail, `high` buys nothing at 3.6× | `medium` |
 | `IMAGE_REWRITE_MAX_TOKENS` | Output cap for those calls; thinking spends part of it and can truncate the plan, so it tracks the effort (`4096` at off/low, `6144` above). `0` = derive | `0` (derived) |
 
