@@ -118,9 +118,10 @@ WORLD_RULE = ("Every figure in this image is an anthropomorphic animal-folk char
 
 
 def _compose(plan, anchors=None, *, budget=100000, foreground=4, rule=WORLD_RULE,
-             retrieved="", request_text="", read_paths=None):
+             retrieved="", request_text="", read_paths=None, clause_cap=0):
     return ip.compose_prompt(plan, anchors or _anchors(), BASE,
                              foreground=foreground,
+                             max_clauses_per_figure=clause_cap,
                              budget_kwargs={"base": 1100, "per_figure": 420,
                                             "hard_cap": budget},
                              world_rule=rule,
@@ -1348,3 +1349,91 @@ def test_the_plan_contract_asks_for_a_species_word_without_promising_a_checker()
                     "reported to the table as the bot's own guess",
                     "species the vault states"):
         assert retired not in raw, retired
+
+
+# ── §22: a budget cut must never create the dangling-name shape ──────────
+
+# The live case, 2026-11-24, "/image Boss Grey, der Anführer der Banditen auf der
+# Old Bridge": a 53-word scene sentence, a cap of 45. The plan's own words put a
+# cast member's NAME at word 45 and its verb past the end, and the composer's trim
+# kept exactly the first 45 — shipping "…grips a gear, Marvin." as the end of the
+# scene. A name with no action is the shape the renderer skips (§17, §18).
+_LIVE_LONG_SCENE = (
+    "Boss Grey, a badger-folk bandit chief, stands at the far end of the old wooden "
+    "bridge, blocking the crossing while Bubo Krallensturm raises his staff, Seta Onix "
+    "crouches low on the planks, Romi Stachelpfote sways in a low stance, Trixy "
+    "Smoldersome grips a gear, Marvin stands at the rail with his pot hook")
+_LIVE_NAMES = ["Boss Grey", "Bubo Krallensturm", "Seta Onix", "Romi Stachelpfote",
+               "Trixy Smoldersome", "Marvin"]
+
+
+def test_the_old_word_cut_is_the_bug_this_replaces():
+    """Keeping the first `limit` words landed mid-clause, on a name."""
+    cut = " ".join(_LIVE_LONG_SCENE.split()[:45]).rstrip(" ,;.")
+    assert cut.endswith("Marvin"), cut
+
+
+def test_a_scene_trim_cuts_whole_clauses_and_never_leaves_a_name_without_a_verb():
+    kept, gone = ip._trim_scene(_LIVE_LONG_SCENE, _LIVE_NAMES, ip._MAX_SCENE_WORDS)
+    assert len(kept.split()) <= ip._MAX_SCENE_WORDS
+    assert not any(kept.rstrip().endswith(n) for n in _LIVE_NAMES), kept
+    assert gone == ["Marvin stands at the rail with his pot hook"], gone
+    # The survivors are still a sentence, punctuation and all.
+    assert kept.startswith("Boss Grey, a badger-folk bandit chief, stands")
+
+
+def test_a_scene_trim_keeps_the_setting_and_a_nameless_characters_only_description():
+    """The two clauses a figure line cannot replace.
+
+    The setting ("at the far end of the old wooden bridge") appears nowhere else in
+    the prompt, and "a badger-folk bandit chief" is the ONLY appearance Boss Grey
+    has — the vault has no notes on him, so that apposition is the whole identity
+    claim. A trim that cut either would trade a fact for a repetition.
+    """
+    kept, _ = ip._trim_scene(_LIVE_LONG_SCENE, _LIVE_NAMES, ip._MAX_SCENE_WORDS)
+    assert "at the far end of the old wooden bridge" in kept
+    assert "a badger-folk bandit chief" in kept
+
+
+def test_a_composed_scene_over_the_cap_reports_the_clause_it_dropped():
+    plan = _plan(_LIVE_LONG_SCENE,
+                 [{"name": n, "pose": "holding the line"} for n in _LIVE_NAMES])
+    c = _compose(plan)
+    warns = " ".join(c.warnings)
+    assert "trimmed to the contract's" in warns and "by dropping the tail clauses" in warns, c.warnings
+    assert "Marvin stands at the rail with his pot hook" in warns, c.warnings
+    kept, _ = ip._trim_scene(_LIVE_LONG_SCENE, _LIVE_NAMES, ip._MAX_SCENE_WORDS)
+    assert kept in c.prompt and "with his pot hook" not in c.prompt
+
+
+def test_the_clause_cap_empties_the_fattest_block_before_touching_a_thin_one():
+    """Equal treatment, measured: 8/8 at 587 tokens and 12/12 at 810 (the ceiling
+    ladder) versus a shipped prompt that spent 124 tokens on Bubo and 16 on Benner."""
+    fat = ip.Anchor("Colum Bidae", fields={
+        "species": "a small blue tit with amber eyes",
+        "body": ", ".join(f"a body clause number {i} of nine here" for i in range(9)),
+        "outfit": ", ".join(f"an outfit clause number {i}" for i in range(5)),
+        "signature": "a small leather spell pouch with bone clasps"})
+    thin = ip.Anchor("Marvin", fields={
+        "species": "a hedgehog cook", "look": "stocky, flour-dusted",
+        "signature": "a battered pot hook"})
+    anchors = {"Colum Bidae": fat, "Marvin": thin}
+    plan = ip.ImagePlan(scene="A bridge at dusk",
+                        figures=[ip.Figure("Colum Bidae", "hovering"),
+                                 ip.Figure("Marvin", "cooking")])
+    capped = _compose(plan, anchors=anchors, budget=700, clause_cap=4)
+    uncapped = _compose(plan, anchors=anchors, budget=700, clause_cap=0)
+    fat_cuts = sum(1 for w in capped.cuts if "Colum Bidae" in w)
+    thin_cuts = sum(1 for w in uncapped.cuts if "Marvin" in w)
+    clause_cuts = [w for w in capped.cuts if "[body]" in w or "[outfit]" in w]
+    assert fat_cuts, capped.cuts
+    assert clause_cuts and all("Colum Bidae" in w for w in clause_cuts), capped.cuts
+    assert thin_cuts, uncapped.cuts       # the old ladder reached into the thin block
+    assert "spell pouch" in capped.prompt and "pot hook" in capped.prompt
+    for name in ("Colum Bidae", "Marvin"):
+        assert name in capped.prompt, "the cap balances blocks, it never drops figures"
+
+
+def test_the_clause_cap_defaults_to_today_behaviour():
+    plan = _plan("A bridge at dusk", [{"name": "Marvin", "pose": "cooking"}])
+    assert _compose(plan).prompt == _compose(plan, clause_cap=0).prompt

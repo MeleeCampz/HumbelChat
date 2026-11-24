@@ -976,7 +976,8 @@ async def _correction_pass(*, complete, system: str, msg: str, out: str,
         read_paths=opened,
         snippet_paths=_snippet_paths_from(gathered, opened),
         retrieved=_vault_evidence(gathered), request_text=text,
-        world_rule=profile.world_rule)
+        world_rule=profile.world_rule,
+        max_clauses_per_figure=profile.clauses_per_figure)
     for w in revised.warnings:
         if w.startswith("budget "):
             log.warning("composer budget: %s", w)
@@ -1072,7 +1073,8 @@ async def _rewrite_composed(text: str, complete,
             # The request's own words: the spelling a campaign name really has
             # ("Frey" painted for "Boss Frey" was measured live, analysis §15).
             request_text=text,
-            world_rule=profile.world_rule)
+            world_rule=profile.world_rule,
+            max_clauses_per_figure=profile.clauses_per_figure)
         for w in composed.warnings:
             if w.startswith("budget "):
                 log.warning("composer budget: %s", w)

@@ -1291,6 +1291,97 @@ def _join(clauses: list[str], protect: set[str]) -> str:
     return ", ".join(out)
 
 
+def _scene_units(text: str) -> list[tuple[str, str]]:
+    """(clause, following separator) at TOP level — the separators kept.
+
+    `_split` throws the punctuation away, which is fine for a Visual Anchor field
+    and not fine here: a scene sentence is the model's own prose and a trim has to
+    be able to put the sentence back exactly as it wrote it.
+    """
+    units: list[tuple[str, str]] = []
+    buf: list[str] = []
+    depth = 0
+    for ch in text:
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth = max(0, depth - 1)
+        if ch in ";," and depth == 0:
+            if "".join(buf).strip():
+                units.append(("".join(buf).strip(), ch))
+            buf = []
+            continue
+        buf.append(ch)
+    tail = "".join(buf).strip()
+    if tail:
+        units.append((tail.rstrip("."), ""))
+    return units
+
+
+def _names_in(text: str, names: Iterable[str]) -> int:
+    """How many cast names appear in this clause (word boundaries, any case)."""
+    return sum(1 for n in names
+               if re.search(r"(?<![\wÄÖÜäöüß])" + re.escape(n) + r"(?![\wÄÖÜäöüß])",
+                            text, re.I))
+
+
+def _ends_on_a_name(text: str, names: Iterable[str]) -> bool:
+    """Does this clause END with a cast name (the shape an apposition opens with)?"""
+    words = [w for w in text.replace(",", " ").split() if w]
+    return bool(words) and any(_names_in(w, names) for w in words[-2:])
+
+
+def _trim_scene(scene: str, names: Iterable[str], limit: int) -> tuple[str, list[str]]:
+    """Cut a too-long scene sentence at CLAUSE boundaries, never mid-clause.
+
+    The old cut kept the first `limit` words, and that is how a live prompt on
+    2026-11-24 ended `"…while Trixy Smoldersome grips a gear, Marvin"`: the cut
+    landed inside a clause, the verb went and the NAME stayed. A cast name with no
+    action is the shape the renderer skips (§17/§18), so a budget trim must never
+    create one. Whole clauses go instead, from the tail inwards, and two kinds of
+    clause are never taken:
+
+    - the OPENING clause, which is the setting — the figure lines repeat the cast,
+      they never repeat where the shot is; measured live, the old cut deleted
+      "stands at the far end of the old wooden bridge" and kept three figures'
+      actions, which are already in their own lines;
+    - an APPOSITION hanging off a cast name — for a character with no Visual Anchor
+      that phrase is the only appearance the image has (§22: Boss Grey).
+
+    Cutting a figure's action out of the scene costs nothing it does not already
+    say: every figure in the plan gets its own line, and the ceiling ladder's clean
+    8/8 and 12/12 runs had no cast name in the scene sentence at all.
+    """
+    units = _scene_units(scene)
+    names = list(names)
+
+    def words() -> int:
+        return len(" ".join(c for c, _ in units).split())
+
+    gone: list[str] = []
+    while words() > limit and len(units) > 1:
+        victim = None
+        for j in range(len(units) - 1, 0, -1):
+            if _ends_on_a_name(units[j - 1][0], names):
+                continue            # units[j] is someone's description
+            victim = j
+            break
+        if victim is None:
+            break                   # everything left is protected
+        gone.append(units.pop(victim)[0])
+    if words() > limit:             # one clause, longer than the cap
+        kept = units[0][0].split()
+        while len(kept) > limit:
+            kept.pop()
+        # A sentence must not END on a bare cast name either.
+        while kept and _ends_on_a_name(kept[-1], names):
+            kept.pop()
+        gone.append(" ".join(units[0][0].split()[len(kept):]))
+        units = [(" ".join(kept), "")]
+    out = " ".join(c + sep for c, sep in units).rstrip(" ,;")
+    return out.rstrip(" ,;"), gone
+
+
 def _figure_text(fr: _FigureRender, protect: set[str]) -> str:
     """One figure's block: what it IS, then what it is DOING, then the rest.
 
@@ -1350,6 +1441,7 @@ def compose_prompt(
     retrieved: str = "",
     request_text: str = "",
     world_rule: str = "",
+    max_clauses_per_figure: int = 0,
 ) -> Composed:
     """Assemble the final prompt from the plan + the vault anchors.
 
@@ -1459,11 +1551,13 @@ def compose_prompt(
         scene = scene[0].upper() + scene[1:]
     # The contract's own word cap, enforced: a runaway scene sentence is how an
     # 11-figure request became 3,468 characters of mush with no anchors left (§4).
-    if len(scene.split()) > _MAX_SCENE_WORDS:
-        words = scene.split()
-        scene = " ".join(words[:_MAX_SCENE_WORDS]).rstrip(" ,;.")
-        warnings.append(f"scene sentence ran to {len(words)} words — trimmed to the "
-                        f"contract's {_MAX_SCENE_WORDS}; the anchor lines are what "
+    scene_words = len(scene.split())
+    if scene_words > _MAX_SCENE_WORDS:
+        scene, gone = _trim_scene(scene, [f.name for f, _ in resolved],
+                                  _MAX_SCENE_WORDS)
+        warnings.append(f"scene sentence ran to {scene_words} words — trimmed to the "
+                        f"contract's {_MAX_SCENE_WORDS} by dropping the tail clauses "
+                        f"{', '.join(repr(g) for g in gone)}; the anchor lines are what "
                         "the model paints the characters from")
     # The scene sentence is the model's sentence. Everything the composer notices
     # about it — a crowd noun naming the cast, a name enumerated twice — is in
@@ -1599,28 +1693,39 @@ def compose_prompt(
     dropped_notes: list[str] = []
     # Pass 1 may not touch an identity clause; pass 2 exists so the ladder can
     # still finish instead of hard-truncating a sentence mid-name.
+    #
+    # `max_clauses_per_figure` (0 = off) adds a FAIRNESS pass before the global
+    # one: while the budget is over and some figure is holding more clauses than
+    # the cap, the least distinctive clause comes out of THAT figure. Measured
+    # against the ceiling ladder, which gave every character the same treatment
+    # and painted 8/8 at 587 tokens and 12/12 at 810, against the shipped
+    # prompts' 17-clause block next to a 2-clause one (§22).
+    cap = max(0, max_clauses_per_figure)
     for allow_identity_cut in (False, True):
-        while len(prompt) > budget:
-            best: tuple[int, int, str, int] | None = None   # score, fig, field, idx
-            for fi, fr in enumerate(r.figures):
-                background = fi >= front_n
-                for field, clauses in fr.fields.items():
-                    if (field in _IDENTITY_FIELDS
-                            and not allow_identity_cut):
+        for over_cap_only in ((True, False) if cap else (False,)):
+            while len(prompt) > budget:
+                best: tuple[int, int, str, int] | None = None   # score, fig, field, idx
+                for fi, fr in enumerate(r.figures):
+                    if over_cap_only and sum(len(c) for c in fr.fields.values()) <= cap:
                         continue
-                    for ci, clause in enumerate(clauses):
-                        sc = score(field, clause, background)
-                        if best is None or sc < best[0]:
-                            best = (sc, fi, field, ci)
-            if best is None:
-                break
-            _, fi, field, ci = best
-            fr = r.figures[fi]
-            gone = fr.fields[field].pop(ci)
-            if not fr.fields[field]:
-                del fr.fields[field]
-            dropped_notes.append(f"{fr.name} [{field}] {gone!r}")
-            prompt = _render_text(r)
+                    background = fi >= front_n
+                    for field, clauses in fr.fields.items():
+                        if (field in _IDENTITY_FIELDS
+                                and not allow_identity_cut):
+                            continue
+                        for ci, clause in enumerate(clauses):
+                            sc = score(field, clause, background)
+                            if best is None or sc < best[0]:
+                                best = (sc, fi, field, ci)
+                if best is None:
+                    break
+                _, fi, field, ci = best
+                fr = r.figures[fi]
+                gone = fr.fields[field].pop(ci)
+                if not fr.fields[field]:
+                    del fr.fields[field]
+                dropped_notes.append(f"{fr.name} [{field}] {gone!r}")
+                prompt = _render_text(r)
 
     if dropped_notes and len(prompt) <= budget:
         cut(f"budget {budget}: {len(dropped_notes)} least-distinctive clause(s) "

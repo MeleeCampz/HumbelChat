@@ -70,6 +70,7 @@ _DEFAULTS: dict[str, Any] = {
     "chars_per_figure": settings.IMAGE_PROMPT_CHARS_PER_FIGURE,
     "max_chars": settings.IMAGE_PROMPT_MAX_CHARS,
     "foreground_figures": settings.IMAGE_PROMPT_FOREGROUND_FIGURES,
+    "clauses_per_figure": settings.IMAGE_PROMPT_MAX_CLAUSES_PER_FIGURE,
 }
 
 # Only the settings that genuinely have two homes are listed; the negative tail is
@@ -83,10 +84,12 @@ _ENV_FOR_FIELD = {
     "chars_per_figure": "IMAGE_PROMPT_CHARS_PER_FIGURE",
     "max_chars": "IMAGE_PROMPT_MAX_CHARS",
     "foreground_figures": "IMAGE_PROMPT_FOREGROUND_FIGURES",
+    "clauses_per_figure": "IMAGE_PROMPT_MAX_CLAUSES_PER_FIGURE",
 }
 
 _BUDGET_KEYS = {"base": "base_chars", "per_figure": "chars_per_figure",
-                "max": "max_chars", "foreground": "foreground_figures"}
+                "max": "max_chars", "foreground": "foreground_figures",
+                "clauses": "clauses_per_figure"}
 
 #: Same story for the environment: a deployment that set the old name keeps working.
 _LEGACY_ENV = {"world_rule": "IMAGE_ANIMAL_FLOOR"}
@@ -105,6 +108,7 @@ class Profile:
     max_chars: int
     foreground_figures: int
     source: str               # the file it came from, or "<defaults>"
+    clauses_per_figure: int = 0   # 0 = off; the budget ladder's fairness cap
     warnings: tuple[str, ...] = ()
 
     def sheet_path(self) -> Path | None:
@@ -193,7 +197,7 @@ def load() -> Profile:
             continue
         target = "negative_prompt" if key == "negative" else key
         if target in ("base_chars", "chars_per_figure", "max_chars",
-                      "foreground_figures"):
+                      "foreground_figures", "clauses_per_figure"):
             try:
                 values[target] = int(raw)
             except ValueError:
@@ -216,6 +220,7 @@ def load() -> Profile:
         chars_per_figure=int(values["chars_per_figure"]),
         max_chars=int(values["max_chars"]),
         foreground_figures=int(values["foreground_figures"]),
+        clauses_per_figure=int(values["clauses_per_figure"]),
         source=source,
         warnings=tuple(warnings),
     )

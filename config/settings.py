@@ -183,6 +183,13 @@ IMAGE_PROMPT_MAX_CHARS: int = _safe_int(os.getenv("IMAGE_PROMPT_MAX_CHARS"), 360
 # figures in one 1024² frame (docs/internal/IMAGE_PROMPT_PIPELINE_ANALYSIS_2026-11.md).
 IMAGE_PROMPT_FOREGROUND_FIGURES: int = _safe_int(
     os.getenv("IMAGE_PROMPT_FOREGROUND_FIGURES"), 4)
+# 0 = off. When set, the budget ladder takes its clauses out of the figures that are
+# holding MORE of them than this, before it takes any from the thin ones: a prompt
+# that spends 124 tokens on one character and 16 on the next is what the shipped
+# ladder produces, and the ceiling ladder — every character treated the same —
+# painted 8/8 and 12/12 (analysis §22). Off until the A/B measures a number.
+IMAGE_PROMPT_MAX_CLAUSES_PER_FIGURE: int = _safe_int(
+    os.getenv("IMAGE_PROMPT_MAX_CLAUSES_PER_FIGURE"), 0)
 # One sentence of CAMPAIGN DATA saying what kind of beings exist in the world (in a
 # Humblewood deployment: that every figure is animal-folk, so an undescribed bandit is
 # not painted as a person). It rides in the style sentence, which the composer's budget
