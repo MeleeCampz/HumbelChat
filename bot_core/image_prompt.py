@@ -1442,6 +1442,19 @@ def _strip_pipeline_label(clause: str, who: str, warnings: list[str]) -> str:
 # A figure block is reported as thin when it holds under this fraction of the
 # median block in the SAME image, and only once there are enough figures for a
 # comparison to mean anything (two characters is not a crowd).
+#
+# Where the number comes from (analysis §22.1, painted batch of 2026-11-25): the figure
+# the renderer left out was 43 tokens against a 99-token median and was the only such
+# figure in the batch, while a prompt of the same total length that had no thin block
+# lost nothing — prompt LENGTH is not the variable, and the clause cap that thins every
+# block made a figure vanish.
+#
+# Reporting it is not a fix. Four further arms of that same prompt — a line enriched by
+# the correction turn, the block moved to the front row, the block moved to LEAD, and the
+# block rewritten with the identity opener every painted figure here carries — all still
+# lost the character. What the batch did paint was an antagonist the vault describes as a
+# BODY, against one it describes only as clothing. This report names the figure at risk;
+# only the notes can save it.
 _THIN_LINE_MIN_FIGURES = 3
 _THIN_LINE_RATIO = 0.6
 

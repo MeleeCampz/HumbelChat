@@ -1344,7 +1344,29 @@ It is **fixable** (the correction turn is the only thing that can add descriptio
 because only the rewrite model has read anything about the character) and it is **not**
 in `_VAULT_FIX_CODES` — it asks for more of what was already read, not another lookup.
 In this batch it fired on 09 and on 09 alone: the one prompt whose figure was missing,
-and no clean prompt. Whether it *fixes* the drop is the next measurement.
+and no clean prompt.
+
+**That next measurement, run the same evening, came back negative.** Four further arms of
+the same request (`data/image_probes/2026-11-25_sample_range/`, files `10_`, `13_pos_*`,
+`14_opener.png`):
+
+| arm | what it changed | Boss Frey painted? |
+|---|---|---|
+| `10_boss_frey_v2` | fresh rewrite with the report live — the correction turn read it and enriched his line 175 → 209 chars | no |
+| `13_pos_control` | control repeat of that prompt | no |
+| `13_posA_front3` | his block moved into the FRONT group, demotion phrase handed to the last block; word multiset asserted identical | no |
+| `13_posB_lead` | his block leads every figure line; word multiset asserted identical | no — a second Trixy-like bandit appeared in his place |
+| `14_opener` | his line rewritten into the shape every painted figure here has: `Boss Frey: A small fox-folk bandit chief, …`, identity-first | no |
+
+Position is ruled out for this prompt (2/2 arms with the words held identical), the
+identity opener is ruled out, and enrichment through the report did not save him: four
+absences, with all six anchored party members present in every one. What the batch did
+paint was Boss Grey, twice, and he is described with a BODY — a badger-folk brute, a
+fox-folk in a long coat — where Frey's whole description is clothing and posture. The
+sample is small and the mechanism is not proven; what is measured is that the composer
+cannot talk the renderer around a character the vault never describes. `figure_thin_line`
+stays as a report, with this written into its docstring: naming the figure at risk is not
+the same as being able to save it.
 
 **Two vault-wording findings, deliberately not fixed in code.** The scale sentence in
 the Campaign Profile painted nothing on its own (02 came back human-sized) — the size
