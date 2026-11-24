@@ -1322,11 +1322,21 @@ per-image verdicts).
 | 08 black-pudding octopus | 884 / 190 | 0 named | creature painted ✓ (asked for torchlight, got cold window light) |
 
 **The cap is off, and this is why.** Its claim was textual (spread 93–124 / 43–119 →
-43–88). Painted, it removed a party member in one arm and changed nothing in the other:
-the figure that vanished in both 09 arms was the one *under* the cap. A cap thins
-blocks, and thin blocks are what the corpus and §18 say the renderer skips. Kept as a
-knob (`IMAGE_PROMPT_MAX_CLAUSES_PER_FIGURE`, default 0) with the negative result
+43–88). Painted, the capped arm of 01 lost a party member and the capped arm of 09
+changed nothing — and the figure that vanished in both 09 arms was already *under* the
+cap. Kept as a knob (`IMAGE_PROMPT_MAX_CLAUSES_PER_FIGURE`, default 0) with that result
 recorded, so nobody re-derives the text argument and ships it.
+
+**The variance caveat, which this batch proved the hard way.** Request 01 painted 7/7 in
+its first run (`01_discord_group_bridge.png`) and **5/6 when the same request was
+rewritten and painted again** an hour later (`12_group_vs_grey_v2.png`: Seta Onix gone,
+the antagonist gone, a second Trixy-like bandit in her place) — with no cap and no shape
+change at all. Single renders of a single request therefore cannot settle a "this shape
+loses figures" claim on their own; only repeated arms can. That weakens the cap verdict
+from "the cap removed a party member" to "the capped arm lost one and the uncapped re-run
+of the same request lost one too". The cap stays off for the stronger reason: it is the
+only mechanism here that deliberately shortens figure blocks, and shortening figure
+blocks is what §18 and §22 correlate with absence.
 
 **The length of the prompt is not the variable.** 01 (845 tokens) lost nothing; 09
 (840 tokens) lost its antagonist. The variable is the shape of that one block.

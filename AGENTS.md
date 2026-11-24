@@ -28,8 +28,13 @@ Two physical cards, two backends — **never mix them up**:
   MODEL wrote that way is reported as the fixable finding `scene_dangling_name`; and
   `IMAGE_PROMPT_MAX_CLAUSES_PER_FIGURE` (profile `budget: clauses=N`) is the equal-
   treatment knob — no figure gets more description clauses than the cap, identity
-  clauses never cut — **default 0/off: painted (§22.1) a cap 8 prompt LOST a party
-  member, and the figure that vanished in every arm was already under the cap.**
+  clauses never cut — **default 0/off: it is the only mechanism here that deliberately
+  shortens figure blocks, and short figure blocks are what §18/§22.1 correlate with
+  absence. (Painted, the capped arm lost a party member — but an UNCAPPED re-run of the
+  same request lost one too, see the variance note below: single renders decide nothing.)**
+- **The renderer is stochastic and the rewrite is stochastic**: request 01 painted 7/7
+  and, an hour later with no change of shape or cap, 5/6. Never conclude "shape X loses
+  figures" from one render of one request — repeat the arms or the finding is noise.
 - **What actually predicts a skipped figure is the thinness of ITS block, not the
   length of the prompt** (§22.1: 845 tokens lost nothing, 840 tokens lost their
   antagonist, and the lost block was 43 tokens against a 99-token median). The composer
