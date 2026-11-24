@@ -828,6 +828,55 @@ def test_a_look_citing_a_search_snippet_must_be_traceable_to_it():
     assert not any("search snippet" in w for w in keep.warnings)
 
 
+def test_a_half_read_look_keeps_the_clauses_the_notes_back():
+    """Judged clause by clause, a partially backed look is not thrown away whole.
+
+    The live request of 2026-11-24 ("Die Gruppe wird von Banditen überfallen…") is
+    the failure this answers: 12 of Boss Frey's 19 descriptive words were not in what
+    had been retrieved, so his whole appearance went, and he went out of the picture as
+    a 61-character block beside 443-character party blocks. The clauses the notes DO
+    say are painted; the ones the model added are named and refused.
+    """
+    retrieved = ('4 hit(s): [{"file": "humblewood/SessionLogs/SESSION_05/notes.md", '
+                 '"snippet": "Boss Frey: a fox-folk bandit chief in a fine coat, '
+                 'russet fur, demanding tolls at the Old Bridge"}]')
+    plan = _plan("Boss Frey blocks the bridge.",
+                 [{"name": "Boss Frey", "pose": "blocking the bridge",
+                   "look": "a fox-folk bandit chief in a fine coat, russet fur, "
+                           "a six-fingered hand and a jewelled crown",
+                   "source": "SESSION_05/notes.md"}])
+    c = ip.compose_prompt(plan, {}, BASE, read_paths=[],
+                          snippet_paths=["humblewood/SessionLogs/SESSION_05/notes.md"],
+                          retrieved=retrieved)
+    assert "fox-folk bandit chief in a fine coat" in c.prompt
+    assert "russet fur" in c.prompt
+    assert "six-fingered" not in c.prompt and "jewelled crown" not in c.prompt
+    codes = [f.code for f in c.findings]
+    assert "look_partially_backed" in codes, [f.as_line() for f in c.findings]
+    assert "look_unverified" not in codes
+    assert c.ungrounded == [], "a half-backed figure is not a name-only figure"
+    w = [x for x in c.warnings if "ARE in what was retrieved" in x]
+    assert w and "six-fingered" in w[0], c.warnings
+
+
+def test_a_look_with_nothing_backed_still_goes_completely():
+    """The clause check rescues backed clauses; it does not rescue an invented look."""
+    retrieved = ('4 hit(s): [{"file": "humblewood/SessionLogs/SESSION_05/notes.md", '
+                 '"snippet": "Boss Frey: a fox-folk bandit chief in a fine coat"}]')
+    plan = _plan("Boss Frey blocks the bridge.",
+                 [{"name": "Boss Frey", "pose": "blocking the bridge",
+                   "look": "a towering frost giant in silver plate, carrying a "
+                           "flaming greatsword",
+                   "source": "SESSION_05/notes.md"}])
+    c = ip.compose_prompt(plan, {}, BASE, read_paths=[],
+                          snippet_paths=["humblewood/SessionLogs/SESSION_05/notes.md"],
+                          retrieved=retrieved)
+    assert "frost giant" not in c.prompt and "flaming greatsword" not in c.prompt
+    assert [f.code for f in c.findings].count("look_unverified") == 1
+    assert not any(f.code == "look_partially_backed" for f in c.findings)
+    assert c.ungrounded == ["Boss Frey"]
+
+
 def test_an_opened_file_is_believed_even_when_the_wording_does_not_match():
     """The vault is half German: a look written in English from a German section
     is a translation, not an invention, so the wording test never applies to a
@@ -1561,6 +1610,11 @@ def test_a_figure_far_thinner_than_its_neighbours_is_reported():
                  _anchors(), read_paths=["x/Notes.md"])
     thin = [f for f in c.findings if f.code == "figure_thin_line"]
     assert [f.subject for f in thin] == ["Boss Frey"], [f.as_line() for f in c.findings]
+    # The same number, exposed for a caller that has to compare two candidate plans
+    # (images.py refuses a correction that thins a figure without fixing anything).
+    assert len(c.block_chars) == 3
+    assert ip.thinnest_block(c) == min(c.block_chars)
+    assert c.block_chars[-1] < c.block_chars[0], "the reported figure IS the thin block"
     assert thin[0].fixable, "the rewrite model is the one that can add the description"
     assert "characters of description" in thin[0].detail
 

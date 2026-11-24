@@ -999,6 +999,20 @@ async def _correction_pass(*, complete, system: str, msg: str, out: str,
                     "that composes WORSE (%d open finding(s) → %d) — "
                     "painting the first plan instead", before, after)
         return composed, plan
+    # Equal findings is not the same prompt. Live, 2026-11-24: the first plan painted
+    # Boss Frey in 215 characters; the correction pass answered with a `look` the
+    # composer could not verify, his description collapsed to 98 against a 447 median,
+    # and the finding count was identical — so the worse plan was the one painted, and
+    # the request came back with only the player characters in it. §22.1 measures the
+    # thin block as the figure the renderer leaves out, so a correction that buys no
+    # fewer findings is not allowed to make any figure thinner than what it replaced.
+    was_thin, now_thin = (image_prompt.thinnest_block(composed),
+                          image_prompt.thinnest_block(revised))
+    if after == before and now_thin < was_thin:
+        log.warning("rewrite: the correction pass left the finding count where it was "
+                    "(%d) but thinned the smallest figure block %d → %d characters — "
+                    "painting the first plan instead", before, was_thin, now_thin)
+        return composed, plan
     log.info("image prompt recomposed after the lookup pass: %d "
              "char(s), %d figure(s), %d tool call(s) in the lookup%s",
              len(revised.prompt), revised.figures,
@@ -1249,6 +1263,7 @@ _gen_lock = asyncio.Lock()  # one generation at a time (mode switches +
 # they need no retrieval, and making them wait would just cost the user time.
 _VAULT_FIX_CODES = frozenset({
     "figure_ungrounded", "look_unverified", "identity_left_in_scene",
+    "look_partially_backed",
 })
 
 

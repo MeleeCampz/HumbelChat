@@ -1384,3 +1384,82 @@ that lands is the size the character's own anchor states, which is why six ancho
 looked right and an unanchored chief did not. And 06 proves the other half of the same
 rule: the vault's words are painted, literally, including "heavy bosom". Both are
 vault-line fixes.
+
+---
+
+## 23. Two live requests painted only the player characters (2026-11-24)
+
+The table asked twice for the bandit crew that holds the Old Bridge and got the party
+back both times. Both prompts are in `logs/dev.log` (32345 and 32398) and both name
+seven figures, so neither is a figure-count failure and neither is a model that ignored
+the request — the crew is in the text. What differs is how much text each crew member
+got.
+
+| | request | what the frame contained | Boss Frey's block |
+|---|---|---|---|
+| 19:12:51 | "Zeig mir die ganze Gruppe auf der Old Bridge wenn Boss Frey und seine Schergen angreifen" | 6 named + "a hulking fox-folk brute called The Muscle" (trimmed by the entity-line budget), Boss Frey named in the scene only | **0 characters** — his description was stranded in the scene sentence |
+| 19:13:34 | "Zeig mir die ganze Gruppe auf der Old Bridge wenn Boss Frey angreift" | 7 named, "Bandit Crew at the bridge" as an entity line | **98 characters** against a 447-character median |
+
+**Prompt 1 stranded the description the rewrite had paid for.** The rewrite opened the
+vault twice — it asked for the Old Bridge, missed, searched, got 13 hits, opened
+`SessionLogs/SESSION_05/Anlass.md` and read "Die Banditen der Old Bridge erpressen die
+Reisenden… Boss Frey der dicke Fuchs will die Old Bridge halten": he is the thick fox.
+The composer then put his *pose* in a figure line ("Boss Frey blocks the bridge") and
+his *identity* in the scene clause ("as Boss Frey, a thick fox-folk bandit chief, attacks
+from the bridge ramp"), which is exactly the shape §18 measures as the shape the renderer
+skips. The finding existed — `identity_left_in_scene` fired in both compositions — and it
+was fed to the correction pass, which answered with a plan that moved the crowd noun but
+left him a bare name in the scene and a pose-only line. Nothing then stopped that plan
+from being painted.
+
+**Prompt 2 threw away a half-read appearance.** The plan cited the session notes for
+
+> "a heavyset fox-folk brute with a wide flat face, thick russet fur, dark leather
+> harness, wide belt with pouches, short thick fingers, heavy boots"
+
+The rewrite never opened that file, so only its search snippet counts as evidence, and 12
+of the look's 19 distinctive words were not in the snippet. Whole-look verification said
+no and dropped the whole description — including "fox-folk", which was in the snippet
+verbatim, from the very heading the search had matched. The figure survived as a name plus
+a pose (98 characters), `figure_thin_line` reported it, and §22.1's measurement says a
+block that thin, painted last, is a block that does not appear.
+
+**And the correction pass chose the worse plan.** The comparison shipped in §17.3 keeps
+the first plan only when the correction *increases* the fixable-finding count. This run
+went 2 → 2: the first plan's Boss Frey had 215 characters and a `look_unverified`
+finding; the corrected plan had the same finding count and a 98-character Boss Frey. Equal
+counts meant "not worse", so the thinner plan was painted. A tie is not an improvement,
+and on this pipeline an unimproved correction that thins a figure is a regression with the
+volume turned down.
+
+**The two shipped changes.**
+
+1. **A half-read look keeps the clauses the notes back.** `backed_clauses()` splits the
+   look at clause boundaries and judges each one against what was retrieved: the backed
+   clauses are painted, the rest are refused and named in the report, and the figure gets
+   `look_partially_backed` (fixable, and a vault-fix code — the fix for it is opening the
+   file, so a correction that needs it waits for the card, §16). Judged whole, a look is
+   either believed or thrown away; judged clause by clause, the model's half-correct
+   reading stops costing the character his whole appearance. An entirely unbacked look
+   still goes, unchanged.
+2. **A correction that fixes nothing may not thin a figure.** `Composed.block_chars`
+   exposes each figure's character count and `thinnest_block()` picks the smallest; when
+   the correction pass leaves the fixable-finding count where it was and the smallest
+   block gets smaller, the FIRST plan is painted and the swap is logged. A correction that
+   genuinely reduces findings still wins even if a block shrinks — the rule only closes
+   the tie.
+
+**What is still not fixed.** The composer still cannot write a description it does not
+have: prompt 1's rewrite *found* "der dicke Fuchs" and the composer's scene cap (45 words,
+§22) is where a long cast sentence goes to die — the finding is reported and the model's
+second answer is what decides. The entity-line budget also cut "a hulking fox-folk brute
+called The Muscle" out of prompt 1 while clauses were kept elsewhere, and no rule yet says
+a named character outranks an unnamed crowd clause. The thin-block rule is now arithmetic
+at the one place where two candidate plans meet; it is not a guarantee that the chosen
+plan is good, and both conclusions here rest on single paintings, which §22.1 already
+showed cannot be trusted alone.
+
+**Tests.** `tests/test_image_prompt.py`: a half-read look paints its backed clauses and
+reports the rest; a wholly unbacked look still goes whole; `block_chars` /
+`thinnest_block` agree with the reported thin figure. `tests/test_images.py::TestCorrectionKeepsTheFatterPlan`:
+a correction that only thins is not painted, a correction that thickens the thin figure is.

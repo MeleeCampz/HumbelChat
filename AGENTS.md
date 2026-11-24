@@ -47,6 +47,16 @@ Two physical cards, two backends — **never mix them up**:
   Do not re-derive a positional or clause-order fix for that request: the difference the
   batch shows is a character the vault describes as a BODY being painted, and one it
   describes only as clothing not being painted — a vault line, not composer logic.
+- **A half-read appearance keeps the clauses the notes back, and a correction may not
+  win a tie by thinning a figure** (two live 2026-11-24 requests returned only the player
+  characters, §23 — both thin-block failures, not count failures). `backed_clauses` judges
+  a snippet-sourced `look` clause by clause: the backed clauses are painted, the rest are
+  refused and named, and the figure gets the fixable finding `look_partially_backed` — a
+  VAULT-fix code, so its correction waits for the card like `figure_ungrounded`. Judging a
+  look whole is what threw away "fox-folk bandit in a fine coat" (verbatim in the hit) for
+  the sake of the model's own invented tail, and left a 61-character block in a seven-
+  character image. Likewise the correction pass keeps the FIRST plan when the fixable
+  finding count is unchanged and `thinnest_block` got smaller — a tie is not an improvement.
 - **Prompt rewriting ALWAYS happens before the switch** (the rewrite's KB agent
   tools include the reranker, which the switch takes offline).
 - **…but a rewrite is not locked to a painting window**, so back-to-back `/image`

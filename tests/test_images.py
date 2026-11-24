@@ -2178,3 +2178,125 @@ class TestRewriteLoopCaps:
         from config.settings import IMAGE_GEN_TIMEOUT_S, IMAGE_REWRITE_LOOKUP_WAIT_S
         assert IMAGE_REWRITE_LOOKUP_WAIT_S <= 300 < IMAGE_GEN_TIMEOUT_S
 
+
+
+class TestCorrectionKeepsTheFatterPlan:
+    """A correction that fixes nothing may not make a figure thinner (§22.1).
+
+    Live 2026-11-24, "Die Gruppe wird von Banditen überfallen, die die Old Bridge
+    kontrollieren": the first composition painted Boss Frey in 215 characters; the
+    correction pass answered with a plan whose description of him the composer could
+    not verify, his block collapsed to 98 characters against a 447-character median,
+    and the FIXABLE FINDING COUNT WAS IDENTICAL (2 → 2) — so the comparison that
+    existed called the two plans equal and painted the worse one. The image came back
+    with only the player characters in it, which is the thin-block shape §22.1 measures
+    as the figure the renderer leaves out.
+    """
+
+    _SHEET = """# Colum Bidae
+Birdfolk (blue tit), Warlock.
+
+## Visual Anchor (group images — reuse VERBATIM for named appearances)
+
+> species: Birdfolk (blue tit)
+> body: small and plump, short clipped tail
+> outfit: moss-green cloak, small round spectacles
+> signature: golden rose carried in both claws
+
+# Romi Stachelpfote
+Hedge (hedgehog), Monk.
+
+## Visual Anchor (group images — reuse VERBATIM for named appearances)
+
+> species: Hedge (hedgehog)
+> body: taupe quills, low wide stance
+> outfit: ochre monk's robe
+> quirks: thick padded fists held ready
+"""
+
+    _OPENED = "humblewood/SessionLogs/SESSION_05/notes.md"
+
+    def _anchors(self, monkeypatch, tmp_path):
+        sheet = tmp_path / "Player Characters.md"
+        sheet.write_text(self._SHEET, encoding="utf-8")
+        monkeypatch.setattr(images, "_party_sheet_file", lambda: sheet)
+        return images._load_anchors()
+
+    def _meta(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            tool_calls=[{"tool": "kb_read_section"}], iterations=1,
+            answer_truncated=False, degraded=False,
+            tool_calls_detail=[{"tool": "kb_read_section",
+                                "args": {"path": self._OPENED}}],
+            gathered_context="Boss Frey: a bandit chief of the Old Bridge toll crew.")
+
+    def _compose(self, anchors, look):
+        from bot_core import image_prompt
+        plan = image_prompt.extract_plan("<image_plan>\n" + json.dumps({
+            "scene": "Boss Frey blocks the torch-lit Old Bridge opposite Colum "
+                     "Bidae and Romi Stachelpfote",
+            "figures": [
+                {"name": "Boss Frey", "pose": "blocking the bridge with an axe",
+                 "look": look, "source": "SESSION_05/notes.md"},
+                {"name": "Colum Bidae", "pose": "perched on the railing"},
+                {"name": "Romi Stachelpfote", "pose": "crouched in front"},
+            ],
+            "lighting": "torch light", "palette": "amber", "mood": "tense"})
+            + "\n</image_plan>")
+        profile = prompt_profile.load()
+        composed = image_prompt.compose_prompt(
+            plan, anchors, "cinematic fantasy illustration",
+            foreground=profile.foreground_figures,
+            max_clauses_per_figure=profile.clauses_per_figure,
+            budget_kwargs=images._budget_kwargs(profile),
+            world_rule=profile.world_rule, read_paths=[self._OPENED],
+            retrieved="", request_text="boss frey blocks the old bridge")
+        return plan, composed
+
+    def _answer(self, look):
+        data = {
+            "scene": "Boss Frey blocks the torch-lit Old Bridge opposite Colum "
+                     "Bidae and Romi Stachelpfote",
+            "figures": [
+                {"name": "Boss Frey", "pose": "blocking the bridge with an axe",
+                 "look": look, "source": "SESSION_05/notes.md"},
+                {"name": "Colum Bidae", "pose": "perched on the railing"},
+                {"name": "Romi Stachelpfote", "pose": "crouched in front"}]}
+        return "<image_plan>\n" + json.dumps(data) + "\n</image_plan>"
+
+    async def _correct(self, monkeypatch, tmp_path, composed, plan, revised_text):
+        async def fake_loop(**kw):
+            return revised_text, self._meta()
+        monkeypatch.setattr(images, "run_agent_loop", fake_loop)
+        return await images._correction_pass(
+            complete=AsyncMock(), system="sys", msg="user",
+            out="<image_plan>original</image_plan>", ask=[], worth=[],
+            meta=self._meta(), composed=composed, plan=plan,
+            anchors=self._anchors(monkeypatch, tmp_path),
+            profile=prompt_profile.load(), text="boss frey blocks the bridge")
+
+    async def test_a_correction_that_only_thins_a_figure_is_not_the_one_painted(
+            self, monkeypatch, tmp_path, caplog):
+        anchors = self._anchors(monkeypatch, tmp_path)
+        plan, composed = self._compose(anchors, "a bandit chief in a coat")
+        codes = [f.code for f in composed.findings]
+        assert codes == ["figure_thin_line"], codes      # the setup, not the claim
+        # The correction answers with the same characters and the same one open
+        # finding — it just says LESS about the one figure that was already thin.
+        caplog.set_level(logging.WARNING)
+        out, _ = await self._correct(monkeypatch, tmp_path, composed, plan,
+                                     self._answer("a bandit"))
+        assert "bandit chief in a coat" in out.prompt, "the first plan's figure survived"
+        assert any("thinned the smallest figure block" in m for m in caplog.messages), \
+            caplog.messages
+
+    async def test_a_correction_that_actually_thickens_the_thin_figure_wins(
+            self, monkeypatch, tmp_path):
+        anchors = self._anchors(monkeypatch, tmp_path)
+        plan, composed = self._compose(anchors, "a bandit chief in a coat")
+        out, _ = await self._correct(
+            monkeypatch, tmp_path, composed, plan,
+            self._answer("a heavy-set bandit chief in a patched coat with an iron "
+                         "hook hand, a battered buckler and a crooked silver crown"))
+        assert "crooked silver crown" in out.prompt

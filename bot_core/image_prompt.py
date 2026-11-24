@@ -304,6 +304,22 @@ def _snippet_supported(look: str, retrieved: str) -> bool:
     return hits >= max(2, -(-total // 2))
 
 
+def backed_clauses(look: str, retrieved: str) -> tuple[list[str], list[str]]:
+    """(backed, refused) — the clauses of a snippet-sourced look, judged one at a time.
+
+    A look that matches the retrieved text in seven of its nineteen words is neither
+    true nor invented; it is half-read. Judged whole it fails and the whole description
+    goes, which is how the live request of 2026-11-24 ("Die Gruppe wird von Banditen
+    überfallen…") ended up with a 61-character antagonist block against 443-character
+    party blocks — the exact thin-block shape §22.1 measures as the one the renderer
+    leaves out. Judged clause by clause, the seven words the notes do say get painted
+    and the twelve the model added are named in the report.
+    """
+    clauses = _clauses(look)
+    backed = [c for c in clauses if _snippet_supported(c, retrieved)]
+    return backed, [c for c in clauses if c not in backed]
+
+
 
 
 
@@ -390,8 +406,13 @@ def _named_in_request(entry: str, request_text: str) -> bool:
 
 def verify_look(figure: Figure, read_paths: Sequence[str] | None,
                 snippet_paths: Iterable[str] | None,
-                retrieved: str, request_text: str = "") -> tuple[bool, str]:
+                retrieved: str, request_text: str = "") -> tuple[bool, str, list[str]]:
     """May this NPC's `look` be painted? Three grounds, not equally strong.
+
+    Returns ``(ok, why, backed)``. `why` is empty when nothing is wrong; `backed` is
+    non-empty only when the look FAILED as a whole but individual clauses of it are in
+    the retrieved text — the caller then paints those clauses and reports the rest
+    (`look_partially_backed`) instead of painting a bare name.
 
     * The rewrite OPENED the file it cites: it had the section in front of it and
       may describe it in its own words (the vault is half German, so wording
@@ -415,30 +436,29 @@ def verify_look(figure: Figure, read_paths: Sequence[str] | None,
     caller's choice, not this function's.
     """
     if not figure.look:
-        return True, ""
+        return True, "", []
     if not figure.source:
         if read_paths is None and not snippet_paths:
             # No evidence channel at all (a unit test, a caller that trusts the
             # plan): paint it, but say out loud that nothing backs it.
             return True, ("`look` has no `source` and this caller verifies "
-                          "nothing — painted unverified")
+                          "nothing — painted unverified"), []
         return False, ("`look` without a `source` — the vault records NPC roles, "
-                       "never appearances")
+                       "never appearances"), []
     if read_paths is None and not snippet_paths:
-        return True, ""
+        return True, "", []
     if read_paths is not None and source_matches(figure.source, read_paths):
-        return True, ""
+        return True, "", []
     if snippet_paths and source_matches(figure.source, snippet_paths):
-        if _snippet_supported(figure.look, retrieved):
-            return True, ""
+        backed, refused = backed_clauses(figure.look, retrieved)
+        if not refused:
+            return True, "", []
         hits, total = look_supported_by(figure.look, retrieved)
         return False, (f"`look` cites {figure.source!r} only as a search snippet, "
                        f"and {total - hits} of its {total} descriptive words are "
-                       "not in what was retrieved — the appearance is dropped and "
-                       "the figure is painted by name")
+                       f"not in what was retrieved"), backed
     return False, (f"`look` cites {figure.source!r}, which this rewrite never "
-                   "retrieved — the appearance is dropped and the figure is painted"
-                   " by name (measured drift, analysis §10)")
+                   "retrieved"), []
 
 
 def source_matches(source: str, read_paths: Sequence[str]) -> bool:
@@ -857,6 +877,7 @@ FIXABLE_CODES = frozenset({
     "negation_clause", "entity_named_not_painted", "figure_ungrounded",
     "identity_left_in_scene", "look_unverified", "name_form",
     "same_person_listed_twice", "scene_dangling_name", "figure_thin_line",
+    "look_partially_backed",
 })
 
 
@@ -1278,6 +1299,20 @@ class Composed:
     # caller (images.py) uses this to run one lookup pass instead of trusting a
     # rule the model may simply not have followed.
     ungrounded: list[str] = field(default_factory=list)
+    #: Character count of each painted figure block, in prompt order — the number
+    #: §22.1 measures against absence, exposed so a caller can compare two candidate
+    #: plans without re-parsing the prompt.
+    block_chars: tuple[int, ...] = ()
+
+
+def thinnest_block(c: "Composed") -> int:
+    """The smallest figure block in a composed prompt (a huge number if none).
+
+    `images.py` compares two candidate plans with it: §22.1 measures the thin block as
+    the one the renderer leaves out, so a correction that does not reduce the finding
+    count must not be allowed to make a figure thinner than the plan it replaced.
+    """
+    return min(c.block_chars) if c.block_chars else 1 << 30
 
 
 def _protect_names(anchors: dict[str, Anchor], figures: list[Figure]) -> set[str]:
@@ -1587,14 +1622,34 @@ def compose_prompt(
             warnings.append(f"{f.name}: look is {len(f.look.split())} words, over the "
                             f"contract's {_MAX_LOOK_WORDS} — a look is not cut, so "
                             "shorten it in the plan")
-        ok, why = verify_look(f, read_paths, snippet_paths, retrieved,
-                              request_text)
-        if why:
-            warnings.append(f"{f.name}: {why}")
-            findings.append(Finding("look_unverified", f.name, why))
+        ok, why, backed = verify_look(f, read_paths, snippet_paths, retrieved,
+                                      request_text)
         if ok:
+            if why:
+                warnings.append(f"{f.name}: {why}")
+                findings.append(Finding("look_unverified", f.name, why))
             keep.append((f, a))
             continue
+        if backed:
+            # Half of it was read. Paint the half the notes say, name the half they
+            # do not, and keep the figure out of the name-only shape the renderer
+            # skips — this is the whole reason the clause check exists.
+            refused = [c for c in _clauses(f.look) if c not in backed]
+            warnings.append(f"{f.name}: {why} — {len(backed)} clause(s) of it ARE in "
+                            f"what was retrieved and are painted ({'; '.join(backed)}); "
+                            f"{len(refused)} are not and are dropped ({'; '.join(refused)})")
+            findings.append(Finding(
+                "look_partially_backed", f.name,
+                f"{len(refused)} clause(s) of its appearance are not in what you "
+                f"retrieved and were not painted ({'; '.join(refused)}) — open the "
+                "file and back them, or say only what you read"))
+            keep.append((replace(f, look="; ".join(backed)), None))
+            continue
+        warnings.append(f"{f.name}: {why} — the appearance is dropped and the figure "
+                        "is painted by name")
+        findings.append(Finding("look_unverified", f.name,
+                                f"{why} — the appearance is dropped and the figure "
+                                "is painted by name"))
         ungrounded.append(f.name)
         # Never mutate the caller's plan: an unverifiable look is dropped on a
         # copy, so the plan the log shows is the plan the model wrote.
@@ -1890,6 +1945,7 @@ def compose_prompt(
     # the others (that arm lost a party member too); it is to tell the rewrite model
     # that this line is under-weighted and let it say more, from what it read.
     findings.extend(_thin_line_findings(r))
+    block_chars = tuple(len(_figure_text(fr, r.protect)) for fr in r.figures)
 
     if shared:
         log.debug("shared palette tokens in this scene: %s", ", ".join(sorted(shared)))
@@ -1897,6 +1953,7 @@ def compose_prompt(
             if w.startswith(("budget ", "clause cap "))]
     return Composed(prompt=prompt, figures=count, foreground=front_n,
                     cuts=cuts, warnings=warnings, findings=findings,
+                    block_chars=block_chars,
                     cast=[f for f, _ in resolved if f.name],
                     ungrounded=ungrounded)
 
