@@ -1485,3 +1485,61 @@ def test_the_dangling_name_is_not_the_identity_left_behind_finding():
     codes = {f.code for f in _compose(plan).findings}
     assert "scene_dangling_name" in codes
     assert "identity_left_in_scene" in codes
+
+
+def test_the_clause_cap_never_pays_for_equality_with_an_identity_clause():
+    """Equal treatment must not delete a character to even things out.
+
+    §18: the identity clause is what makes a figure appear. A cap that reached into
+    it would fix a token spread by making a person vanish — the opposite of the rule
+    this module exists for. Tested on both shapes an identity arrives in: an anchored
+    character's `species` line and an unanchored one's plan-written `look`.
+    """
+    fat = ip.Anchor("Colum Bidae", fields={
+        "species": "a small blue tit with amber eyes",
+        "body": ", ".join(f"a body clause number {i} of nine here" for i in range(9)),
+        "face": ", ".join(f"a face clause number {i} of six here" for i in range(6)),
+        "signature": "a small leather spell pouch with bone clasps"})
+    plan = ip.ImagePlan(scene="Colum stands in a hall",
+                        figures=[ip.Figure("Colum Bidae", "standing")])
+    c = _compose(plan, anchors={"Colum Bidae": fat}, budget=100000, clause_cap=3)
+    assert "blue tit" in c.prompt, c.prompt            # identity survived a cap of 3
+    assert any(w.startswith("clause cap 3") for w in c.cuts), c.cuts
+
+    # The same rule for a character the vault has nothing about: the plan's own
+    # `look` is their identity line and the cap may not take it.
+    unanchored = _plan("Boss Grey blocks the bridge",
+                       [{"name": "Boss Grey", "pose": "blocking the crossing",
+                         "look": "a badger-folk bandit chief, scarred snout",
+                         "source": "NPC Codex.md"}], )
+    u = _compose(unanchored, anchors={}, budget=100000, clause_cap=1) if False else \
+        ip.compose_prompt(unanchored, {}, BASE, foreground=4,
+                          budget_kwargs={"base": 1100, "per_figure": 420,
+                                         "hard_cap": 100000},
+                          world_rule=WORLD_RULE, max_clauses_per_figure=1)
+    assert "badger-folk bandit chief" in u.prompt, u.prompt
+
+
+def test_a_sheet_line_written_with_the_pipelines_own_word_still_paints():
+    """`look` is the name the plan JSON uses for an appearance, so it is the label a
+    vault author reaches for in a Visual Anchor — and a prompt containing the word
+    "look:" is a prompt asking the renderer to paint a word.
+
+    The content stays and the pipeline word goes. A label the pipeline has never
+    heard of ("wheels:") is the sheet's own vocabulary and stays verbatim: a sheet
+    edit in Obsidian must never lose content.
+    """
+    raw = ("# Sela Thorne\nA red-squirrel scout.\n\n## Visual Anchor\n\n"
+           "> species: a red-squirrel scout\n"
+           "> look: a chipped bronze compass always in her paw\n"
+           "> wheels: two brass bicycle wheels\n")
+    a = ip.parse_party_sheet(raw)[0]
+    assert a.extra == ["look: a chipped bronze compass always in her paw",
+                       "wheels: two brass bicycle wheels"], "parsing loses nothing"
+    c = _compose(ip.ImagePlan(scene="Sela at the gate",
+                              figures=[ip.Figure("Sela Thorne", "standing")]),
+                 anchors={a.name: a})
+    assert "a chipped bronze compass always in her paw" in c.prompt
+    assert "look:" not in c.prompt, c.prompt
+    assert "wheels: two brass bicycle wheels" in c.prompt
+    assert any("pipeline's own word" in w for w in c.warnings), c.warnings

@@ -20,6 +20,15 @@ Two physical cards, two backends — **never mix them up**:
   `./scripts/gpu_switch.sh status|image|rag`. The helper derives its mode from
   live container state and REFUSES an image switch while Studio is unreachable
   (no half-switched card).
+- **Prompt shape is enforced as code, not as prose rules** (analysis §22): a scene
+  sentence over the word cap is cut at CLAUSE boundaries from the tail (never the
+  opening setting clause, never a description hanging off a cast name — the old
+  `split()[:45]` cut mid-clause and shipped `…grips a gear, Marvin.`, a name with no
+  verb, which §17/§18 measure as the shape the renderer skips); a scene sentence the
+  MODEL wrote that way is reported as the fixable finding `scene_dangling_name`; and
+  `IMAGE_PROMPT_MAX_CLAUSES_PER_FIGURE` (profile `budget: clauses=N`) is the equal-
+  treatment knob — no figure gets more description clauses than the cap, identity
+  clauses never cut — **default 0/off until the visual A/B in §22 picks a number**.
 - **Prompt rewriting ALWAYS happens before the switch** (the rewrite's KB agent
   tools include the reranker, which the switch takes offline).
 - **…but a rewrite is not locked to a painting window**, so back-to-back `/image`

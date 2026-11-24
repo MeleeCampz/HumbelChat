@@ -1418,6 +1418,27 @@ def _dangling_tail_names(scene: str, names: Iterable[str]) -> list[str]:
     return out
 
 
+# A Visual Anchor label the composer does not know is kept verbatim (a sheet edit in
+# Obsidian must never lose content) — EXCEPT the pipeline's own field names. A sheet
+# that writes `> look: scarred snout` puts the word "look:" into an image prompt, and
+# a renderer paints words it is shown; `look` is also the name the plan JSON uses for
+# the same thing, so it is the label a vault author reaches for. The content stays;
+# the pipeline word goes, and the swap is reported.
+_PIPELINE_LABELS = frozenset({
+    "look", "looks", "appearance", "description", "desc", "pose", "override",
+    "modify", "source", "anchor", "fields", "figure", "figures", "scene",
+})
+
+
+def _strip_pipeline_label(clause: str, who: str, warnings: list[str]) -> str:
+    m = re.match(r"^([A-Za-z][A-Za-z _-]{1,24}):\s*(.+)$", clause)
+    if not m or _norm(m.group(1)) not in _PIPELINE_LABELS:
+        return clause
+    warnings.append(f"{who}: sheet field {m.group(1)!r} is the pipeline's own word, "
+                    f"not a description — its text is painted without the label")
+    return m.group(2).strip()
+
+
 def _figure_text(fr: _FigureRender, protect: set[str]) -> str:
     """One figure's block: what it IS, then what it is DOING, then the rest.
 
@@ -1650,7 +1671,7 @@ def compose_prompt(
                                 "the prompt; a removal is painted by omission")
             for name, clauses in raw_fields.items():
                 fields[name] = _unique_first(clauses, shared)
-            extra = list(a.extra)
+            extra = [_strip_pipeline_label(x, f.name, warnings) for x in a.extra]
         else:
             for bad in (c for c in _split(f.look) if has_negation(c)):
                 warnings.append(f"{f.name}: negation in its look ({bad!r}) — not "
@@ -1726,6 +1747,52 @@ def compose_prompt(
                 - 2 * len(pal & shared) + _FIELD_WEIGHT.get(field, 0)
                 - (6 if background else 0))
 
+    # `max_clauses_per_figure` (0 = off) is EQUAL TREATMENT, applied before the
+    # budget ladder and independently of it: while a figure is holding more clauses
+    # than the cap, its LEAST DISTINCTIVE clause comes out, even when the total
+    # budget is already met. Measured against the clean ceiling-ladder runs (§17),
+    # which gave every character the same treatment and painted 8/8 at 587 tokens
+    # and 12/12 at 810 (~50-70 tokens per figure), against the two live 2026-11-24
+    # prompts that ran 93-124 tokens per figure and both dropped figures (§22).
+    #
+    # It is a CEILING on description, never on characters: the cap takes clauses out
+    # of the fattest blocks and has nothing to say about who is in the image.
+    cap = max(0, max_clauses_per_figure)
+    cap_notes: list[str] = []
+    if cap:
+        while True:
+            over = [(fi, fr) for fi, fr in enumerate(r.figures)
+                    if sum(len(c) for c in fr.fields.values()) > cap]
+            if not over:
+                break
+            best: tuple[int, int, str] | None = None
+            for fi, fr in over:
+                background = fi >= front_n
+                for field, clauses in fr.fields.items():
+                    # The same rule as the budget ladder, for the same reason (§18):
+                    # the identity clause is what makes a figure exist in the render.
+                    # A cap that cut it would fix a spread by deleting a character.
+                    if field in _IDENTITY_FIELDS:
+                        continue
+                    for ci, clause in enumerate(clauses):
+                        sc = score(field, clause, background)
+                        if best is None or sc < best[0]:
+                            best = (sc, fi, field)
+            if best is None:
+                break
+            _, fi, field = best
+            fr = r.figures[fi]
+            gone = fr.fields[field].pop(0)
+            if not fr.fields[field]:
+                del fr.fields[field]
+            cap_notes.append(f"{fr.name} [{field}] {gone!r}")
+            prompt = _render_text(r)
+        if cap_notes:
+            cut(f"clause cap {cap}: {len(cap_notes)} clause(s) taken out of the most "
+                f"heavily described figures before the budget was asked — every "
+                f"character is described, none twice as hard — "
+                f"{', '.join(cap_notes)}")
+
     dropped_notes: list[str] = []
     # Pass 1 may not touch an identity clause; pass 2 exists so the ladder can
     # still finish instead of hard-truncating a sentence mid-name.
@@ -1777,7 +1844,8 @@ def compose_prompt(
 
     if shared:
         log.debug("shared palette tokens in this scene: %s", ", ".join(sorted(shared)))
-    cuts = [w for w in warnings if w.startswith("budget ")]
+    cuts = [w for w in warnings
+            if w.startswith(("budget ", "clause cap "))]
     return Composed(prompt=prompt, figures=count, foreground=front_n,
                     cuts=cuts, warnings=warnings, findings=findings,
                     cast=[f for f, _ in resolved if f.name],

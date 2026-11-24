@@ -27,7 +27,7 @@ Typed lines, the same shape as a Visual Anchor (plain `key: value` lines also wo
 > world_rule: Nobody in this world is a human being: every figure is an…
 > negative: humans, watermark, signature, modern objects, extra limbs
 > party_sheet: humblewood/HumbleWood/Characters/Player Characters.md
-> budget: base=1100 per_figure=420 max=3600 foreground=4
+> budget: base=1100 per_figure=420 max=3600 foreground=4 clauses=0
 ```
 
 | Field | What it does | Env override |
@@ -36,7 +36,7 @@ Typed lines, the same shape as a Visual Anchor (plain `key: value` lines also wo
 | `world_rule` | One sentence about what kind of beings this world has. Said verbatim, in the style sentence, where the budget ladder never cuts it. The composer neither reads it nor reasons about it | `IMAGE_WORLD_RULE` |
 | `negative` | The tail every prompt ends with | `IMAGE_NEGATIVE_PROMPT` |
 | `party_sheet` | The sheet whose `Visual Anchor` field lines are painted verbatim, and the roster injected into the rewrite's system prompt. Empty = no anchors: the model describes everyone it names | `IMAGE_PARTY_SHEET` |
-| `budget` | `base`, `per_figure`, `max`, `foreground` — see [configuration.md](configuration.md) | the four `IMAGE_PROMPT_*` numbers |
+| `budget` | `base`, `per_figure`, `max`, `foreground`, `clauses` (per-figure description cap, 0 = off) — see [configuration.md](configuration.md) | the matching `IMAGE_PROMPT_*` numbers |
 
 **Precedence:** an environment variable that is actually set → the profile file → the
 neutral defaults (`docs/configuration.md`). A missing line gets no sentence; there is

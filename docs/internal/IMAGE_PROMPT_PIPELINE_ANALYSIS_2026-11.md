@@ -1201,3 +1201,98 @@ lookup's own budget, and the two are unrelated waits.
 Worst case for one `/image`, stated so nobody has to derive it:
 120 (rewrite) + 180 (wait) + 120 (lookup) + 600 (`IMAGE_GEN_TIMEOUT_S`) = 1020 s, and
 the progress message narrates the waiting part.
+
+## 22. The two live prompts that dropped figures, read as STRUCTURE (2026-11-24)
+
+Two `/image` calls on 2026-11-24 (dev.log 13:47 and 13:56) came back with characters
+missing, and the images are not kept on disk — so the prompts were recovered from the
+log and re-run offline:
+
+| prompt | composed | figures | clause spread | per-figure token spread |
+|---|---|---|---|---|
+| `die ganze Gruppe auf der old Bridge gegen Boss Grey` | 3599 chars / 837 tokens | 6 | 10–17 | 93–124 |
+| `Boss Grey, der Anführer der Banditen auf der Old Bridge` | 3591 / 833 | 7 | 4–15 | 43–119 |
+
+`/tmp/live_repro.py` rebuilds both plans from the composed text and re-composes them
+**byte-identical** to what was sent (the ladder's control arms assert it every run), so
+everything below is a property of the prompt that was actually painted, not of a guess
+about it.
+
+**A correction to my own first reading.** The first structural pass over these prompts
+mis-parsed figure blocks and reported "12 named figures" with named NPCs (Hexe Susan,
+Lucky, Fisher Quickfingers…) that are not in either prompt — the count line says
+`Exactly 6` and `Exactly 7`, and none of those names appears in the text. Every number
+in this section was re-derived from the prompt strings themselves.
+
+### What the two prompts actually do wrong
+
+1. **A cast name with nothing said about it.** Prompt 02's scene sentence ends
+   `…Trixy Smoldersome grips a gear, Marvin.` — the name is the last word of the
+   sentence and no verb belongs to it. The model wrote that itself (45 words, exactly
+   at `_MAX_SCENE_WORDS`, so no trimming was involved).
+2. **A second way to make the same shape, and this one is ours.** The budget trim was
+   `scene.split()[:45]` — keep the first 45 words. Cut mid-clause, that keeps a name
+   and drops its verb, which is defect 1 manufactured by the composer.
+3. **The thinnest figure is also the worst-shaped one.** `Boss Grey: planting himself
+   at the far end of the bridge, blocking the crossing.` — 43 tokens, the only block in
+   either prompt with **no identity clause**, and the **last** block. §18 measured that
+   a block whose identity clause does not lead loses its figure (5/5 shipped-shape runs
+   lost one, 4/4 identity-first runs lost none, Fisher p = 0.0079), and the 22-run
+   corpus adds ~15 % drop rate for the final block. Boss Grey had both.
+4. **Unequal treatment.** Every party member arrives with 10–17 clauses and 93–124
+   tokens; the one figure the vault has nothing about gets 2 clauses. The clean runs in
+   §17 describe every character at the same depth (~50–70 tokens each) and painted 8/8
+   at 587 tokens and 12/12 at 810.
+
+### Landed (Tier A — structural, campaign-neutral, tested)
+
+- **`_trim_scene`** (`bot_core/image_prompt.py`): a scene over the word cap is cut at
+  *clause* boundaries from the tail inwards, and never takes the opening clause (the
+  setting — figure lines repeat the cast, never the place) or a clause hanging off a
+  cast name (an apposition is an unanchored character's only appearance). The sentence
+  is re-joined with the model's own punctuation, and every dropped clause is named in
+  the warning. Commit `f4df3c7`.
+- **`scene_dangling_name`**, a fixable finding for defect 1: the composer does not edit
+  the model's prose, and a finding is what the correction pass is built to receive.
+  Kept distinct in code and in tests from `identity_left_in_scene` (a figure with no
+  appearance line that *had* a description in the scene) — two defects, two codes.
+  Commit `02a19db`.
+- **`_strip_pipeline_label`**: a Visual Anchor written as `> look: scarred snout` — the
+  word `look` is this pipeline's own field name, so it was being painted as a word
+  inside the image prompt. The content stays, the pipeline word is dropped, and the
+  swap is reported. A label the pipeline has never heard of (`> wheels: …`) is the
+  sheet's own vocabulary and stays verbatim.
+- Suite: **1541 passed**.
+
+### Built, measured offline, and deliberately left OFF
+
+`IMAGE_PROMPT_MAX_CLAUSES_PER_FIGURE` (profile: `budget: … clauses=N`), default **0 =
+off**. It is *equal treatment*, applied before the budget ladder and independently of
+it: while a figure holds more clauses than the cap, its least distinctive clause comes
+out, even when the total budget is already met. Identity clauses are untouchable — a
+cap that reached into them would fix a spread by deleting a character.
+
+On the two live prompts (control = the prompt that was painted):
+
+| arm | chars | tokens | clauses/figure | per-figure tokens |
+|---|---|---|---|---|
+| 02 control | 3591 | 833 | 4–15 | 43–119 |
+| 02 cap 8 | 3133 | 737 | 4–11 | 43–88 |
+| 02 cap 6 | 2850 | 673 | 4–9 | 43–75 |
+| 01 control | 3599 | 837 | 10–17 | 93–124 |
+| 01 cap 8 | 2977 | 699 | 9–11 | 77–101 |
+
+The cap does what it claims to the TEXT: the spread narrows, the thinnest figure keeps
+everything it had, and the total drops ~12–17 % while the figure count never changes.
+**It is not shipped on** because the claim it needs is visual, and the last time a
+plausible prompt theory was shipped on text evidence alone it was wrong (§17's colour-
+collision theory). The harness is ready and its control arms are byte-identical to the
+failures: `data/image_probes/2026-11-24_structure_ladder/manifest.json`, runner
+`/tmp/structure_ladder.py --paint` (4 arms for prompt 02, one GPU window, ~9 min).
+
+### What no code can fix
+
+Boss Grey has no appearance in the vault (§16), so his line can only ever be pose plus
+whatever the rewrite found in a file it actually opened. `identity_left_in_scene` and
+`figure_ungrounded` both fire on exactly this shape, and §21's lookup window is what
+gives that lookup a card to run on. The remaining fix is a line in the vault.
