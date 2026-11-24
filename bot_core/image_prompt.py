@@ -856,7 +856,7 @@ FIXABLE_CODES = frozenset({
     "collective_in_entity", "duplicate_mention", "name_spelling",
     "negation_clause", "entity_named_not_painted", "figure_ungrounded",
     "identity_left_in_scene", "look_unverified", "name_form",
-    "same_person_listed_twice", "scene_dangling_name",
+    "same_person_listed_twice", "scene_dangling_name", "figure_thin_line",
 })
 
 
@@ -1439,6 +1439,33 @@ def _strip_pipeline_label(clause: str, who: str, warnings: list[str]) -> str:
     return m.group(2).strip()
 
 
+# A figure block is reported as thin when it holds under this fraction of the
+# median block in the SAME image, and only once there are enough figures for a
+# comparison to mean anything (two characters is not a crowd).
+_THIN_LINE_MIN_FIGURES = 3
+_THIN_LINE_RATIO = 0.6
+
+
+def _thin_line_findings(r: "_Render") -> list[Finding]:
+    """Report a figure described far less than the others in the same image."""
+    texts = [_figure_text(fr, r.protect) for fr in r.figures]
+    if len(texts) < _THIN_LINE_MIN_FIGURES:
+        return []
+    lengths = sorted(len(t) for t in texts)
+    median = lengths[len(lengths) // 2]
+    if median <= 0:
+        return []
+    return [
+        Finding("figure_thin_line", fr.name,
+                f"this figure gets {len(t)} characters of description while the "
+                f"others in the same image average {median}; in a crowded image the "
+                "thinnest figure is the one the renderer leaves out — give it the "
+                "same weight, saying only what the notes you opened actually say")
+        for fr, t in zip(r.figures, texts)
+        if len(t) < _THIN_LINE_RATIO * median
+    ]
+
+
 def _figure_text(fr: _FigureRender, protect: set[str]) -> str:
     """One figure's block: what it IS, then what it is DOING, then the rest.
 
@@ -1841,6 +1868,15 @@ def compose_prompt(
         prompt = prompt[:budget].rsplit(" ", 1)[0]
         warnings.append(f"budget {budget}: prompt hard-truncated — this scene "
                         "asks for more figures than one image can hold")
+
+    # ── Unequal treatment, measured on the shape that actually gets painted.
+    # The 2026-11-25 sample batch (analysis §22.1): in the two seven-figure scenes
+    # the ONE figure the renderer left out was the block far thinner than its
+    # neighbours — the unanchored NPC at 43 tokens against a 99-token median, painted
+    # LAST, in both the shipped arm and the clause-cap arm. The fix is not to shave
+    # the others (that arm lost a party member too); it is to tell the rewrite model
+    # that this line is under-weighted and let it say more, from what it read.
+    findings.extend(_thin_line_findings(r))
 
     if shared:
         log.debug("shared palette tokens in this scene: %s", ", ".join(sorted(shared)))

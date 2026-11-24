@@ -1543,3 +1543,55 @@ def test_a_sheet_line_written_with_the_pipelines_own_word_still_paints():
     assert "look:" not in c.prompt, c.prompt
     assert "wheels: two brass bicycle wheels" in c.prompt
     assert any("pipeline's own word" in w for w in c.warnings), c.warnings
+
+
+# ── Unequal treatment across figures (analysis §22.1) ────────────────────
+
+def test_a_figure_far_thinner_than_its_neighbours_is_reported():
+    """Live measurement, 2026-11-25: in both seven-figure scenes the ONE character
+    the renderer left out was the block far thinner than the rest (43 tokens against
+    a 99-token median). The composer cannot write the missing description — it does
+    not know the character — but it can measure the imbalance and hand it back.
+    """
+    c = _compose(_plan("The party confronts a bandit chief on the bridge.",
+                       [{"name": "Seta Onix", "pose": "drawing a bow"},
+                        {"name": "Marvin", "pose": "raising a shield plate"},
+                        {"name": "Boss Frey", "pose": "blocking the way",
+                         "look": "a bandit chief in a fine coat", "source": "x/Notes.md"}]),
+                 _anchors(), read_paths=["x/Notes.md"])
+    thin = [f for f in c.findings if f.code == "figure_thin_line"]
+    assert [f.subject for f in thin] == ["Boss Frey"], [f.as_line() for f in c.findings]
+    assert thin[0].fixable, "the rewrite model is the one that can add the description"
+    assert "characters of description" in thin[0].detail
+
+
+def test_the_balance_check_needs_a_crowd_and_still_fires_on_a_thin_one():
+    # Two named figures: no median to speak of, nothing to report.
+    two = _compose(_plan("Two figures at a forge.",
+                         [{"name": "Marvin", "pose": "holding a lens"},
+                          {"name": "Boss Frey", "pose": "waiting",
+                           "look": "a bandit chief", "source": "x/Notes.md"}]),
+                   _anchors(), read_paths=["x/Notes.md"])
+    assert not [f for f in two.findings if f.code == "figure_thin_line"]
+    # Three figures with nothing to compare against each other: still silent.
+    even = _compose(_plan("Three of the party at the bridge.",
+                          [{"name": "Seta Onix", "pose": "drawing a bow"},
+                           {"name": "Marvin", "pose": "raising a shield plate"},
+                           {"name": "Trixy Smoldersome", "pose": "levelling a pistol"}]),
+                    _anchors())
+    assert not [f for f in even.findings if f.code == "figure_thin_line"], \
+        [f.as_line() for f in even.findings]
+
+
+def test_the_balance_report_reads_the_painted_shape_not_a_cap_that_made_it():
+    """The cap is a budget tool and the balance report reads what is PAINTED: a cap
+    that trims every figure to the same clause count must not manufacture a complaint
+    about figures being described unequally (measured on the live cap-8 arms, which
+    came out 65–91 tokens per figure against an 80-token median — unequal, not thin)."""
+    c = _compose(_plan("The party confronts a bandit chief on the bridge.",
+                       [{"name": "Seta Onix", "pose": "drawing a bow"},
+                        {"name": "Marvin", "pose": "raising a shield plate"},
+                        {"name": "Trixy Smoldersome", "pose": "levelling a pistol"}]),
+                 _anchors(), clause_cap=2)
+    assert not [f for f in c.findings if f.code == "figure_thin_line"], \
+        [f.as_line() for f in c.findings]

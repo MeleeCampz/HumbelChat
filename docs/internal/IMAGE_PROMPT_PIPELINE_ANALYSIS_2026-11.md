@@ -1296,3 +1296,59 @@ Boss Grey has no appearance in the vault (§16), so his line can only ever be po
 whatever the rewrite found in a file it actually opened. `identity_left_in_scene` and
 `figure_ungrounded` both fire on exactly this shape, and §21's lookup window is what
 gives that lookup a card to run on. The remaining fix is a line in the vault.
+
+### 22.1 The same requests painted, and the cap measured against paint (2026-11-25)
+
+Nine requests were run through the LIVE rewrite path (chat model + KB tools + vault,
+rag mode live, 335 s) and their 11 prompts painted in ONE GPU window (258 s, ~19 s per
+image): the two 2026-11-24 Discord requests, the clause-cap arms for the two densest
+ones, and a spread — close-up, two-figure interaction, two NPCs the party sheet says
+nothing about, a collective request, a creature-only request, NPC-against-the-party.
+Run dir `data/image_probes/2026-11-25_sample_range/` (PNGs + `REVIEW.md` with the
+per-image verdicts).
+
+| prompt | composed | figures | what came back |
+|---|---|---|---|
+| 01 `die ganze Gruppe … gegen Boss Grey` | 3590 ch / 845 tok | 6 + Boss Grey as an entity | **7 bodies**: all 6 PCs, each with its own signature items, plus a large anonymous brute |
+| 01 cap 8 | 2909 / 691 | 6 | **Colum Bidae missing** — 5 PCs + the brute |
+| 09 `Boss Frey stellt sich der Gruppe …` | 3594 / 840 | 7 | **6/7 — Boss Frey missing** (43-token block against a 99-token median, and LAST) |
+| 09 cap 8 | 3138 / 744 | 7 | **6/7 — Boss Frey missing** (he was already under the cap; it cut the others) |
+| 02 `Boss Grey …` | 996 / 215 | 1 | 1/1 ✓ — but painted human-sized, against the profile's scale sentence |
+| 03 Seta close-up | 1414 / 325 | 1 | 1/1 ✓ bow, quiver, hooded cloak, bracers, satchel all present |
+| 04 Romi + Marvin at the oven | 1630 / 368 | 2 | 2/2 ✓ including the interaction (the pliers change hands) |
+| 05 Fisher Quickfingers | 998 / 223 | 1 | 1/1 ✓ painted from the lookup's words (`mapach … raccoon-like beast-folk`) |
+| 06 Hexe Susan | 1048 / 250 | 1 + an entity | 1/1 ✓, and the vault's phrase "heavy bosom" came back as a bare-chested figure |
+| 07 the group fleeing a coal shaft | 3587 / 832 | 6 | 6/6 ✓ and the flight reads as motion |
+| 08 black-pudding octopus | 884 / 190 | 0 named | creature painted ✓ (asked for torchlight, got cold window light) |
+
+**The cap is off, and this is why.** Its claim was textual (spread 93–124 / 43–119 →
+43–88). Painted, it removed a party member in one arm and changed nothing in the other:
+the figure that vanished in both 09 arms was the one *under* the cap. A cap thins
+blocks, and thin blocks are what the corpus and §18 say the renderer skips. Kept as a
+knob (`IMAGE_PROMPT_MAX_CLAUSES_PER_FIGURE`, default 0) with the negative result
+recorded, so nobody re-derives the text argument and ships it.
+
+**The length of the prompt is not the variable.** 01 (845 tokens) lost nothing; 09
+(840 tokens) lost its antagonist. The variable is the shape of that one block.
+
+**New report, no new enforcement**: `figure_thin_line`. After the budget ladder has
+done its cuts the composer measures each painted figure block, and when a figure holds
+under 60 % of the median block length in an image with three or more figures it reports
+
+> `figure_thin_line [Boss Frey]: this figure gets 211 characters of description while
+> the others in the same image average 421; in a crowded image the thinnest figure is
+> the one the renderer leaves out — give it the same weight, saying only what the notes
+> you opened actually say`
+
+It is **fixable** (the correction turn is the only thing that can add description,
+because only the rewrite model has read anything about the character) and it is **not**
+in `_VAULT_FIX_CODES` — it asks for more of what was already read, not another lookup.
+In this batch it fired on 09 and on 09 alone: the one prompt whose figure was missing,
+and no clean prompt. Whether it *fixes* the drop is the next measurement.
+
+**Two vault-wording findings, deliberately not fixed in code.** The scale sentence in
+the Campaign Profile painted nothing on its own (02 came back human-sized) — the size
+that lands is the size the character's own anchor states, which is why six anchored PCs
+looked right and an unanchored chief did not. And 06 proves the other half of the same
+rule: the vault's words are painted, literally, including "heavy bosom". Both are
+vault-line fixes.
