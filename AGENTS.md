@@ -48,15 +48,19 @@ Two physical cards, two backends — **never mix them up**:
   batch shows is a character the vault describes as a BODY being painted, and one it
   describes only as clothing not being painted — a vault line, not composer logic.
 - **A half-read appearance keeps the clauses the notes back, and a correction may not
-  win a tie by thinning a figure** (two live 2026-11-24 requests returned only the player
-  characters, §23 — both thin-block failures, not count failures). `backed_clauses` judges
-  a snippet-sourced `look` clause by clause: the backed clauses are painted, the rest are
-  refused and named, and the figure gets the fixable finding `look_partially_backed` — a
-  VAULT-fix code, so its correction waits for the card like `figure_ungrounded`. Judging a
-  look whole is what threw away "fox-folk bandit in a fine coat" (verbatim in the hit) for
-  the sake of the model's own invented tail, and left a 61-character block in a seven-
-  character image. Likewise the correction pass keeps the FIRST plan when the fixable
-  finding count is unchanged and `thinnest_block` got smaller — a tie is not an improvement.
+  win a tie by thinning a figure** (live 2026-11-24, read line by line out of `logs/dev.log`,
+  §23). `backed_clauses` judges a snippet-sourced `look` clause by clause: the backed clauses
+  are painted, the rest refused and named, and the figure gets the fixable finding
+  `look_partially_backed` — a VAULT-fix code, so its correction waits for the card like
+  `figure_ungrounded`. Judging a look WHOLE is what cost the 19:11 request its antagonist:
+  his `look` cited `Characters/Player Characters.md`, that file had only ever reached the
+  loop as a search snippet, 12 of 19 distinctive words missed, and the whole description —
+  including the crew identity the search had actually matched — went, leaving
+  `Boss Frey: planting herself at the brink, hand raised in command.` (98 characters against
+  a 447 median) painted from the composition the CORRECTION pass produced. The lookup pass ran
+  0 tool calls, so nothing new was read to back it. Likewise the correction pass now keeps the
+  FIRST plan when the fixable-finding count is unchanged and `thinnest_block` got smaller — a
+  tie is not an improvement (2 fixable findings before, 2 after, 215 → 98 characters).
 - **Prompt rewriting ALWAYS happens before the switch** (the rewrite's KB agent
   tools include the reranker, which the switch takes offline).
 - **…but a rewrite is not locked to a painting window**, so back-to-back `/image`

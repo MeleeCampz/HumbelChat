@@ -1253,8 +1253,9 @@ def finding_feedback(findings: Sequence[Finding]) -> str:
     return ("Your plan was assembled and these things were noticed in it. Fix them "
             "in the plan and answer with the WHOLE corrected <image_plan> again — "
             "same JSON shape, same rules. Do not describe the picture in prose, do "
-            "not explain your changes, and do not repeat a lookup that already "
-            "happened.\n\n" + "\n".join(lines))
+            "not explain your changes, and do not run again a search that already "
+            "returned the text in front of you: what these findings need is usually "
+            "OPENING a file you cited without opening.\n\n" + "\n".join(lines))
 
 
 @dataclass
@@ -1649,7 +1650,11 @@ def compose_prompt(
                         "is painted by name")
         findings.append(Finding("look_unverified", f.name,
                                 f"{why} — the appearance is dropped and the figure "
-                                "is painted by name"))
+                                "is painted by name. "
+                                + (f"Open {f.source!r} and restate the appearance from "
+                                   "what the file says" if f.source else
+                                   "Read the notes and add an appearance")
+                                + ", or leave the description out of the plan"))
         ungrounded.append(f.name)
         # Never mutate the caller's plan: an unverifiable look is dropped on a
         # copy, so the plan the log shows is the plan the model wrote.

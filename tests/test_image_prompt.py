@@ -358,6 +358,32 @@ def test_the_correction_turn_gets_a_message_it_can_act_on():
     assert ip.finding_feedback([]) == ""
 
 
+def test_the_correction_turn_asks_for_opening_a_file_that_was_only_cited():
+    """The live 2026-11-24 lookup pass ran 0 tool calls (dev.log 32394).
+
+    The model re-answered with the same plan it had already failed, because the
+    instruction said "do not repeat a lookup that already happened" while the finding was
+    a `look` citing a file the loop had only ever seen as a search snippet. The turn has
+    to say which action the finding needs: open the file, not search again.
+    """
+    retrieved = ('4 hit(s): [{"file": "humblewood/SessionLogs/SESSION_05/notes.md", '
+                 '"snippet": "Boss Frey: a fox-folk bandit chief in a fine coat"}]')
+    plan = _plan("Boss Frey blocks the bridge.",
+                 [{"name": "Boss Frey", "pose": "blocking the bridge",
+                   "look": "a towering frost giant in silver plate, carrying a "
+                           "flaming greatsword, with a crooked iron crown and a "
+                           "wolf-pelt cloak",
+                   "source": "SESSION_05/notes.md"}])
+    c = ip.compose_prompt(plan, {}, BASE, read_paths=[],
+                          snippet_paths=["humblewood/SessionLogs/SESSION_05/notes.md"],
+                          retrieved=retrieved)
+    text = ip.finding_feedback(c.findings)
+    assert "look_unverified" in text
+    assert "Open 'SESSION_05/notes.md'" in text, text
+    assert "OPENING a file you cited without opening" in text
+    assert "do not repeat a lookup that already happened" not in text
+
+
 def test_collective_subject_is_reported_and_never_painted():
     """Failure 6 (measured twice): the scene named the cast AND the anchors
     followed, which is how an unnamed crowd gets painted.

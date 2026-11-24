@@ -2170,6 +2170,19 @@ class TestRewriteLoopCaps:
         from config.settings import IMAGE_REWRITE_AGENT_BUDGET_SECONDS, RAG_AGENT_BUDGET_SECONDS
         assert IMAGE_REWRITE_AGENT_BUDGET_SECONDS > RAG_AGENT_BUDGET_SECONDS
 
+    def test_a_partially_backed_look_is_a_vault_fix_too(self):
+        """`look_partially_backed` must wait for the card like `figure_ungrounded`.
+
+        Its fix is opening the file the plan cited without opening — a lexical-only search
+        during a painting window cannot produce it, so a correction that carries it queues
+        behind the window (§16) instead of answering with another guess.
+        """
+        from bot_core import image_prompt
+        f = image_prompt.Finding("look_partially_backed", "Boss Frey",
+                                 "2 clause(s) of its appearance are not in what you retrieved")
+        reason = images._needs_vault_fix([], [f])
+        assert "look_partially_backed" in reason, reason
+
     def test_the_lookup_wait_cap_is_a_persons_patience_not_a_card_timeout(self):
         """900 s was the first draft and it was wrong: the wait is paid by someone
         watching one Discord message, and the measured wait for a real
