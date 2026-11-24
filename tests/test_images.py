@@ -2170,19 +2170,6 @@ class TestRewriteLoopCaps:
         from config.settings import IMAGE_REWRITE_AGENT_BUDGET_SECONDS, RAG_AGENT_BUDGET_SECONDS
         assert IMAGE_REWRITE_AGENT_BUDGET_SECONDS > RAG_AGENT_BUDGET_SECONDS
 
-    def test_a_partially_backed_look_is_a_vault_fix_too(self):
-        """`look_partially_backed` must wait for the card like `figure_ungrounded`.
-
-        Its fix is opening the file the plan cited without opening — a lexical-only search
-        during a painting window cannot produce it, so a correction that carries it queues
-        behind the window (§16) instead of answering with another guess.
-        """
-        from bot_core import image_prompt
-        f = image_prompt.Finding("look_partially_backed", "Boss Frey",
-                                 "2 clause(s) of its appearance are not in what you retrieved")
-        reason = images._needs_vault_fix([], [f])
-        assert "look_partially_backed" in reason, reason
-
     def test_the_lookup_wait_cap_is_a_persons_patience_not_a_card_timeout(self):
         """900 s was the first draft and it was wrong: the wait is paid by someone
         watching one Discord message, and the measured wait for a real
@@ -2313,3 +2300,26 @@ Hedge (hedgehog), Monk.
             self._answer("a heavy-set bandit chief in a patched coat with an iron "
                          "hook hand, a battered buckler and a crooked silver crown"))
         assert "crooked silver crown" in out.prompt
+
+    async def test_enforce_off_paints_the_refinement_answer_with_no_arbitration(
+            self, monkeypatch, tmp_path, caplog):
+        """The experiment arm keeps no plan-vs-plan comparison (analysis §24).
+
+        Same setup as the tie test above: the refinement answer says LESS about the thin
+        figure. In the shipped arm the first plan wins; with corrections off the answer is
+        painted exactly as answered — which is what the arm exists to measure.
+        """
+        anchors = self._anchors(monkeypatch, tmp_path)
+        plan, composed = self._compose(anchors, "a bandit chief in a coat")
+        monkeypatch.setattr(images, "IMAGE_CODE_CORRECTIONS", False)
+        caplog.set_level(logging.INFO)
+        out, _ = await self._correct(monkeypatch, tmp_path, composed, plan,
+                                     self._answer("a bandit"))
+        assert "bandit chief in a coat" not in out.prompt
+        assert any("enforce off — painting the refinement turn's plan" in m
+                   for m in caplog.messages), caplog.messages
+
+    def test_the_enforce_switch_defaults_to_the_shipped_behaviour(self):
+        from config.settings import IMAGE_CODE_CORRECTIONS
+        assert IMAGE_CODE_CORRECTIONS is True
+

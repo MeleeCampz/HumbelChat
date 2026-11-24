@@ -190,6 +190,16 @@ IMAGE_PROMPT_FOREGROUND_FIGURES: int = _safe_int(
 # painted 8/8 and 12/12 (analysis §22). Off until the A/B measures a number.
 IMAGE_PROMPT_MAX_CLAUSES_PER_FIGURE: int = _safe_int(
     os.getenv("IMAGE_PROMPT_MAX_CLAUSES_PER_FIGURE"), 0)
+
+# EXPERIMENT SWITCH (analysis §24, 2026-11-26): run the image rewrite with every
+# composer path that CORRECTS the model's plan switched off — an unverified `look` is
+# painted as written, the plan keeps its own name spellings and its own figure order,
+# sheet field labels and negations survive, and the refinement turn's answer is painted
+# without a plan-vs-plan comparison. What stays on is what a SIZE limit is rather than a
+# correction: the budget ladder and the contract's scene word cap. The findings report
+# stays too, because the refinement turn is the corrector in this arm. Default ON = the
+# shipped behaviour.
+IMAGE_CODE_CORRECTIONS: bool = _safe_bool(os.getenv("IMAGE_CODE_CORRECTIONS"), True)
 # One sentence of CAMPAIGN DATA saying what kind of beings exist in the world (in a
 # Humblewood deployment: that every figure is animal-folk, so an undescribed bandit is
 # not painted as a person). It rides in the style sentence, which the composer's budget

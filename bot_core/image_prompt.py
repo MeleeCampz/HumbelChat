@@ -535,7 +535,7 @@ class Anchor:
         return bool(self.fields)
 
     def clauses_for(
-        self, override: dict[str, str],
+        self, override: dict[str, str], scrub: bool = True,
     ) -> tuple[dict[str, list[str]], list[str]]:
         """Per-field clauses to paint, with *override* fields replaced.
 
@@ -546,25 +546,34 @@ class Anchor:
         anything reading like the overridden subject is dropped, signature
         clauses survive, and the replacement is appended. Dropping an item is far
         less harmful than painting two contradictory outfits.
+
+        `scrub=False` (the enforce=off experiment, analysis §24) keeps the sheet's own
+        negations and a plan's negated override as written: nothing is removed and
+        nothing is rewritten, so the only corrector left is the refinement turn.
         """
+        def cl(text: str) -> list[str]:
+            return _clauses(text) if scrub else [p for p in _split(text) if p]
+
         out: dict[str, list[str]] = {}
-        dropped = [c for c in _split(
-            " ; ".join(override.values() if not self.typed else
-                       [override.get(f, "") for f in ANCHOR_FIELDS])
-        ) if has_negation(c)]
-        dropped += [c for c in _split(
-            " ; ".join(self.fields.values()) if self.typed else [self.blob]
-        ) if has_negation(c)]
+        dropped: list[str] = []
+        if scrub:
+            dropped = [c for c in _split(
+                " ; ".join(override.values() if not self.typed else
+                           [override.get(f, "") for f in ANCHOR_FIELDS])
+            ) if has_negation(c)]
+            dropped += [c for c in _split(
+                " ; ".join(self.fields.values()) if self.typed else [self.blob]
+            ) if has_negation(c)]
         if self.typed:
             for f in ANCHOR_FIELDS:
                 src = override[f] if f in override else self.fields.get(f, "")
-                clauses = _clauses(src)
+                clauses = cl(src)
                 if clauses:
                     out[f] = clauses
             return out, dropped
 
         kept: list[str] = []
-        for clause in _clauses(self.blob):
+        for clause in cl(self.blob):
             drop = False
             for f in override:
                 if f == "signature":
@@ -577,7 +586,7 @@ class Anchor:
                 kept.append(clause)
         for repl in override.values():
             if repl:
-                kept.extend(_clauses(repl))
+                kept.extend(cl(repl))
         return {"outfit": kept}, dropped
 
 
@@ -1258,6 +1267,23 @@ def finding_feedback(findings: Sequence[Finding]) -> str:
             "OPENING a file you cited without opening.\n\n" + "\n".join(lines))
 
 
+def refinement_request(findings: Sequence["Finding"], prompt: str) -> str:
+    """The enforce=off arm's refinement turn (analysis §24).
+
+    The shipped arm sends the findings; this one sends the assembled PROMPT verbatim plus
+    what was noticed in it. Nothing was verified, dropped, reordered or relabelled on the
+    way here, so the model is looking at what the renderer would have been given and is
+    the only layer left that can change it.
+    """
+    lines = [f"- {f.as_line()}" for f in findings if f.fixable]
+    return ("Your plan was assembled into this prompt exactly as you wrote it — nothing "
+            "was verified, dropped, reordered or relabelled:\n\n```\n" + prompt + "\n```\n\n"
+            + (("What was noticed in it:\n" + "\n".join(lines) + "\n\n") if lines else "")
+            + "Answer with the WHOLE refined <image_plan> you would rather have painted "
+              "— same JSON shape, same rules. Do not describe the picture in prose and do "
+              "not explain your changes.")
+
+
 @dataclass
 class _FigureRender:
     name: str
@@ -1575,6 +1601,7 @@ def compose_prompt(
     request_text: str = "",
     world_rule: str = "",
     max_clauses_per_figure: int = 0,
+    enforce: bool = True,
 ) -> Composed:
     """Assemble the final prompt from the plan + the vault anchors.
 
@@ -1584,6 +1611,13 @@ def compose_prompt(
     there are more figures than the model can hold, no negation clause anywhere,
     and a hard character budget trimmed in a declared order that reports every
     cut.
+
+    `enforce=False` turns off every path in this function that CORRECTS the model's
+    plan — an unverified `look` is painted as written, the plan keeps its own name
+    spellings and its own figure order, sheet field labels and negations survive —
+    while keeping everything that is a SIZE limit (the budget ladder, the contract's
+    scene word cap) and keeping every `findings` report, so the rewrite model still
+    gets one refinement turn to fix what it wrote. Experiment switch, analysis §24.
     """
     warnings: list[str] = []
     # What the composer notices about the plan. Reported, never edited: the model
@@ -1625,6 +1659,21 @@ def compose_prompt(
                             "shorten it in the plan")
         ok, why, backed = verify_look(f, read_paths, snippet_paths, retrieved,
                                       request_text)
+        if not enforce:
+            # The experiment arm: paint what the model wrote, report what backs it
+            # and what does not, and let the refinement turn decide (analysis §24).
+            if why:
+                warnings.append(f"{f.name}: {why} — painted as written "
+                                "(enforce off: nothing is verified here)")
+                findings.append(Finding("look_unverified", f.name, f"{why} — painted "
+                                "as written, and nothing you retrieved backs it. Open "
+                                + (f"{f.source!r}" if f.source else "the notes")
+                                + " and restate the appearance from what it says, or "
+                                "write an appearance of your own"))
+            if not ok:
+                ungrounded.append(f.name)
+            keep.append((f, a))
+            continue
         if ok:
             if why:
                 warnings.append(f"{f.name}: {why}")
@@ -1668,6 +1717,11 @@ def compose_prompt(
     # Stachelpfote" while the same prompt's sentence said "Romi".)
     relabelled = {f.name: a.name for f, a in resolved
                   if a is not None and a.name != f.name}
+    if relabelled and not enforce:
+        warnings.append("plan wrote " + ", ".join(
+            f"{o!r} for {n!r}" for o, n in sorted(relabelled.items()))
+            + " — kept as written (enforce off: the sheet's spelling is not substituted)")
+        relabelled = {}
     if relabelled:
         resolved = [(replace(f, name=a.name), a) if a is not None else (f, a)
                     for f, a in resolved]
@@ -1680,7 +1734,11 @@ def compose_prompt(
     # paint the monsters large and the player characters "smaller and softer".
     anchored = [p for p in resolved if p[1] is not None]
     unanchored = [p for p in resolved if p[1] is None]
-    if anchored and unanchored and resolved != anchored + unanchored:
+    if not enforce:
+        if anchored and unanchored and resolved != anchored + unanchored:
+            warnings.append("plan listed " + ", ".join(f.name for f, _ in unanchored)
+                            + " ahead of the party — order kept as written (enforce off)")
+    elif anchored and unanchored and resolved != anchored + unanchored:
         moved = [f.name for f, _ in unanchored]
         resolved = anchored + unanchored
         warnings.append(f"plan listed {', '.join(moved)} ahead of the party — "
@@ -1759,7 +1817,7 @@ def compose_prompt(
                 warnings.append(f"{f.name}: override names unknown field(s) "
                                 f"{', '.join(unknown)} — ignored (the fields are "
                                 f"{', '.join(ANCHOR_FIELDS)})")
-            raw_fields, dropped = a.clauses_for(f.modify)
+            raw_fields, dropped = a.clauses_for(f.modify, scrub=enforce)
             if f.modify and not a.typed:
                 warnings.append(f"{f.name}: legacy anchor has no fields to "
                                 "replace — the override filtered the clauses that "
@@ -1771,17 +1829,21 @@ def compose_prompt(
                                 "the prompt; a removal is painted by omission")
             for name, clauses in raw_fields.items():
                 fields[name] = _unique_first(clauses, shared)
-            extra = [_strip_pipeline_label(x, f.name, warnings) for x in a.extra]
+            extra = ([_strip_pipeline_label(x, f.name, warnings) for x in a.extra]
+                     if enforce else list(a.extra))
         else:
             for bad in (c for c in _split(f.look) if has_negation(c)):
-                warnings.append(f"{f.name}: negation in its look ({bad!r}) — not "
-                                "written into the prompt")
-            fields["look"] = _unique_first(_clauses(f.look), shared)
+                warnings.append(f"{f.name}: negation in its look ({bad!r}) — "
+                                + ("not written into the prompt" if enforce else
+                                   "kept as written (enforce off)"))
+            fields["look"] = _unique_first(
+                _clauses(f.look) if enforce else [p for p in _split(f.look) if p],
+                shared)
         renders.append(_FigureRender(
             # The vault spelling of the name, when an anchor matched: it is the
             # name the sheet and every earlier image used, and a plan abbreviation
             # ("Seta") must not drift into a different character.
-            name=a.name if a is not None else f.name,
+            name=(a.name if (a is not None and enforce) else f.name),
             prefix="Behind them, smaller and softer, " if i >= front_n else "",
             pose=pose, fields=fields, extra=extra))
 

@@ -42,6 +42,7 @@ from config.settings import (
     GPU_SWITCH_TIMEOUT_S,
     GPU_HEAL_ON_START,
     GPU_SWITCH_URL,
+    IMAGE_CODE_CORRECTIONS,
     IMAGE_DEFAULT_SIZE,
     IMAGE_GEN_TIMEOUT_S,
     IMAGE_GGUF_FILENAME,
@@ -977,7 +978,8 @@ async def _correction_pass(*, complete, system: str, msg: str, out: str,
         snippet_paths=_snippet_paths_from(gathered, opened),
         retrieved=_vault_evidence(gathered), request_text=text,
         world_rule=profile.world_rule,
-        max_clauses_per_figure=profile.clauses_per_figure)
+        max_clauses_per_figure=profile.clauses_per_figure,
+        enforce=IMAGE_CODE_CORRECTIONS)
     for w in revised.warnings:
         if w.startswith("budget "):
             log.warning("composer budget: %s", w)
@@ -994,6 +996,12 @@ async def _correction_pass(*, complete, system: str, msg: str, out: str,
     # compares them and paints the one with fewer open findings.
     before = sum(1 for f in composed.findings if f.fixable)
     after = sum(1 for f in revised.findings if f.fixable)
+    if not IMAGE_CODE_CORRECTIONS:
+        # The enforce=off arm has no arbitration: the refinement turn's answer is what
+        # gets painted, better or worse (analysis §24).
+        log.info("rewrite: enforce off — painting the refinement turn's plan as "
+                 "answered (%d finding(s) → %d)", before, after)
+        return revised, retry
     if after > before:
         log.warning("rewrite: the correction pass answered with a plan "
                     "that composes WORSE (%d open finding(s) → %d) — "
@@ -1088,7 +1096,8 @@ async def _rewrite_composed(text: str, complete,
             # ("Frey" painted for "Boss Frey" was measured live, analysis §15).
             request_text=text,
             world_rule=profile.world_rule,
-            max_clauses_per_figure=profile.clauses_per_figure)
+            max_clauses_per_figure=profile.clauses_per_figure,
+            enforce=IMAGE_CODE_CORRECTIONS)
         for w in composed.warnings:
             if w.startswith("budget "):
                 log.warning("composer budget: %s", w)
@@ -1114,7 +1123,10 @@ async def _rewrite_composed(text: str, complete,
         if worth:
             ask.append(_LOOKUP_NUDGE.replace("{{NAMES}}", ", ".join(worth)))
         if fixable:
-            ask.append(image_prompt.finding_feedback(fixable))
+            ask.append(image_prompt.finding_feedback(fixable) if IMAGE_CODE_CORRECTIONS
+                       else image_prompt.refinement_request(fixable, composed.prompt))
+        elif worth and not IMAGE_CODE_CORRECTIONS:
+            ask.append(image_prompt.refinement_request([], composed.prompt))
         if worth or fixable:
             log.info("rewrite: %d finding(s)%s — one correction pass before "
                      "composing again", len(fixable),

@@ -358,6 +358,86 @@ def test_the_correction_turn_gets_a_message_it_can_act_on():
     assert ip.finding_feedback([]) == ""
 
 
+# ── enforce=off: the refinement-turn-only arm (analysis §24) ─────────────
+
+
+def _off(plan, anchors=None, **kw):
+    kw.setdefault("budget_kwargs", {"base": 1100, "per_figure": 420, "hard_cap": 100000})
+    kw.setdefault("world_rule", WORLD_RULE)
+    return ip.compose_prompt(plan, anchors if anchors is not None else _anchors(),
+                             BASE, enforce=False, **kw)
+
+
+def test_enforce_off_paints_an_unverified_look_and_still_reports_it():
+    """Nothing is verified here — but the report is what the refinement turn works from."""
+    plan = _plan("Boss Frey blocks the bridge.",
+                 [{"name": "Boss Frey", "pose": "blocking the bridge",
+                   "look": "a towering frost giant in silver plate carrying a "
+                           "flaming greatsword", "source": "Nowhere.md"}])
+    on = ip.compose_prompt(plan, {}, BASE, read_paths=[], retrieved="",
+                           world_rule=WORLD_RULE)
+    off = _off(plan, {}, read_paths=[], retrieved="")
+    assert "frost giant" not in on.prompt
+    assert "frost giant" in off.prompt and "flaming greatsword" in off.prompt
+    assert any(f.code == "look_unverified" for f in on.findings)
+    assert any(f.code == "look_unverified" for f in off.findings), \
+        [f.as_line() for f in off.findings]
+    assert off.ungrounded == ["Boss Frey"]
+
+
+def test_enforce_off_keeps_the_plans_own_order_and_its_own_name_spelling():
+    plan = _plan("A bandit chief blocks the bridge.",
+                 [{"name": "Boss Frey", "pose": "blocking the bridge",
+                   "look": "a bandit chief in a fine coat", "source": "x/Notes.md"},
+                  {"name": "Seta", "pose": "drawing a bow"}])
+    on = ip.compose_prompt(plan, _anchors(), BASE, read_paths=["x/Notes.md"],
+                           retrieved="", world_rule=WORLD_RULE)
+    off = _off(plan, _anchors(), read_paths=["x/Notes.md"], retrieved="")
+    assert on.prompt.index("Seta Onix") < on.prompt.index("Boss Frey"), \
+        "the shipped arm reorders the party into the foreground"
+    assert off.prompt.index("Boss Frey:") < off.prompt.index("Seta:"), \
+        "the plan's own order survives"
+    assert "Seta Onix" not in off.prompt, "the sheet's spelling is not substituted"
+    assert any("order kept as written" in w for w in off.warnings), off.warnings
+
+
+def test_enforce_off_keeps_negations_and_sheet_labels():
+    """The two paths that rewrite CONTENT rather than cut it: `_scrub` and the label strip."""
+    anchors = _anchors()
+    plan = _plan("Marvin at the workbench.",
+                 [{"name": "Marvin", "pose": "holding a lens",
+                   "modify": {"outfit": "no cloak, brass goggles"}}])
+    on = ip.compose_prompt(plan, anchors, BASE, retrieved="", world_rule=WORLD_RULE)
+    off = _off(plan, anchors, retrieved="")
+    assert "no cloak" not in on.prompt, on.prompt
+    assert "no cloak" in off.prompt and "brass goggles" in off.prompt, off.prompt
+    assert any("negation" in w for w in on.warnings)
+    assert not any("not written into the prompt" in w for w in off.warnings), off.warnings
+
+    # The same for a plan's own NPC look.
+    look = _plan("A bandit waits at the gate.",
+                 [{"name": "Boss Frey", "pose": "waiting at the gate",
+                   "look": "a bandit chief in a fine coat, no helmet",
+                   "source": "x/Notes.md"}])
+    on2 = ip.compose_prompt(look, {}, BASE, read_paths=["x/Notes.md"], retrieved="",
+                            world_rule=WORLD_RULE)
+    off2 = _off(look, {}, read_paths=["x/Notes.md"], retrieved="")
+    assert "no helmet" not in on2.prompt
+    assert "no helmet" in off2.prompt
+    assert any("kept as written (enforce off)" in w for w in off2.warnings), off2.warnings
+
+
+def test_the_refinement_turn_sees_the_prompt_it_would_have_been_painted():
+    plan = _plan("the whole upright party squares off against a bandit chief",
+                 [{"name": "Seta Onix", "pose": "nocking an arrow"}])
+    c = _off(plan)
+    text = ip.refinement_request([f for f in c.findings if f.fixable], c.prompt)
+    assert c.prompt in text, "the arm's whole point is that the model sees the result"
+    assert "nothing was verified, dropped, reordered or relabelled" in text
+    assert "<image_plan>" in text
+    assert "collective_subject" in text
+
+
 def test_the_correction_turn_asks_for_opening_a_file_that_was_only_cited():
     """The live 2026-11-24 lookup pass ran 0 tool calls (dev.log 32394).
 
