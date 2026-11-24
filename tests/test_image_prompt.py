@@ -1437,3 +1437,51 @@ def test_the_clause_cap_empties_the_fattest_block_before_touching_a_thin_one():
 def test_the_clause_cap_defaults_to_today_behaviour():
     plan = _plan("A bridge at dusk", [{"name": "Marvin", "pose": "cooking"}])
     assert _compose(plan).prompt == _compose(plan, clause_cap=0).prompt
+
+
+# ── §22: a name the scene mentions and then drops is reported ────────────
+
+_LIVE_DANGLING_SCENE = (
+    "Boss Grey, a badger-folk bandit chief, stands at the far end of the old wooden "
+    "bridge, blocking the crossing: Bubo Krallensturm raises his staff, Seta Onix "
+    "draws her recurve bow, Colum Bidae hovers mid-leap, Romi Stachelpfote lifts her "
+    "horn, Trixy Smoldersome grips a gear, Marvin.")
+
+
+def test_the_live_scene_that_ended_on_a_bare_name_says_so():
+    """The 2026-11-24 prompt 02 scene, verbatim from the log: `…grips a gear, Marvin.`"""
+    assert ip._dangling_tail_names(_LIVE_DANGLING_SCENE,
+                                   ["Marvin", "Seta Onix", "Colum Bidae"]) == ["Marvin"]
+    plan = _plan(_LIVE_DANGLING_SCENE.rstrip("."),
+                 [{"name": n, "pose": "holding the line"} for n in
+                  ("Boss Grey", "Bubo Krallensturm", "Seta Onix", "Colum Bidae",
+                   "Marvin")])
+    c = _compose(plan)
+    hits = [f for f in c.findings if f.code == "scene_dangling_name"]
+    assert [f.subject for f in hits] == ["Marvin"], [f.as_line() for f in c.findings]
+    assert hits[0].fixable, "this is the model's own sentence — it is the one who fixes it"
+    assert "Give it its own clause" in hits[0].detail
+
+
+def test_a_name_with_a_verb_is_not_flagged():
+    scene = ("Bubo raises his staff, Seta draws her bow, Marvin plants brass pincers "
+             "on the planks.")
+    assert ip._dangling_tail_names(scene, ["Marvin", "Seta", "Bubo"]) == []
+
+
+def test_a_name_said_earlier_with_an_action_is_not_flagged_by_a_later_bare_mention():
+    scene = "Marvin trots along while Seta scans the rail, then Marvin."
+    assert ip._dangling_tail_names(scene, ["Marvin", "Seta"]) == []
+
+
+def test_the_dangling_name_is_not_the_identity_left_behind_finding():
+    """Two different defects, two codes: one is a figure with no appearance line that
+    had a description in the scene, the other is a name the sentence mentions with no
+    action at all. Collapsing them would hide one behind the other."""
+    plan = _plan(_LIVE_DANGLING_SCENE.rstrip("."),
+                 [{"name": n, "pose": "holding the line"} for n in
+                  ("Boss Grey", "Bubo Krallensturm", "Seta Onix", "Colum Bidae",
+                   "Marvin")])
+    codes = {f.code for f in _compose(plan).findings}
+    assert "scene_dangling_name" in codes
+    assert "identity_left_in_scene" in codes

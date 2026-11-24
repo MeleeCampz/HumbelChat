@@ -856,7 +856,7 @@ FIXABLE_CODES = frozenset({
     "collective_in_entity", "duplicate_mention", "name_spelling",
     "negation_clause", "entity_named_not_painted", "figure_ungrounded",
     "identity_left_in_scene", "look_unverified", "name_form",
-    "same_person_listed_twice",
+    "same_person_listed_twice", "scene_dangling_name",
 })
 
 
@@ -1069,6 +1069,16 @@ def lint_plan(plan: ImagePlan, anchors: dict[str, Anchor], *,
                 add(Finding("figure_ungrounded", f.name,
                             "no Visual Anchor and no `look` — this name is painted "
                             "with no appearance at all; look it up or drop the figure"))
+
+    # A name the sentence brings up and then drops. The composer never edits the
+    # model's prose, and a TRIM is not allowed to create this shape either (see
+    # _trim_scene); when the model wrote it itself, the correction pass is told.
+    for name in _dangling_tail_names(plan.scene, [f.name for f in plan.figures]):
+        add(Finding("scene_dangling_name", name,
+                    f"the scene sentence ends on the bare name {name!r} with nothing "
+                    "said about what it does — a label, not a figure. Give it its own "
+                    "clause with an action, or leave it out of the sentence: its "
+                    "figure line already says what it looks like and what it is doing"))
 
     for e in plan.entities:
         for note in _meta_comments(e):
@@ -1380,6 +1390,32 @@ def _trim_scene(scene: str, names: Iterable[str], limit: int) -> tuple[str, list
         units = [(" ".join(kept), "")]
     out = " ".join(c + sep for c, sep in units).rstrip(" ,;")
     return out.rstrip(" ,;"), gone
+
+
+def _dangling_tail_names(scene: str, names: Iterable[str]) -> list[str]:
+    """Cast names in the scene sentence's FINAL clause and nowhere else in it.
+
+    The live 2026-11-24 prompt ended its scene sentence `"…while Trixy Smoldersome
+    grips a gear, Marvin."` — a name with no verb anywhere near it. §17 measured a
+    dangling name as a strong predictor of a figure the renderer leaves out, and the
+    ceiling ladder's clean runs had none. This is the model's own sentence, so it is
+    REPORTED (the correction pass can rewrite it) and never rewritten here.
+    """
+    names = list(names)
+    units = _scene_units(scene)
+    if not units:
+        return []
+    tail = units[-1][0]
+    others = " ".join(c for c, _ in units[:-1])
+    out: list[str] = []
+    for n in names:
+        if not _names_in(tail, [n]) or _names_in(others, [n]):
+            continue                      # named earlier, with what it was doing
+        rest = [w.strip(",.") for w in tail.split()
+                if w.strip(",.") and w.lower() != "and" and not _names_in(w, [n])]
+        if not rest:                      # the final clause is ONLY this name
+            out.append(n)
+    return out
 
 
 def _figure_text(fr: _FigureRender, protect: set[str]) -> str:
