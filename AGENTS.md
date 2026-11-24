@@ -28,7 +28,20 @@ Two physical cards, two backends — **never mix them up**:
   MODEL wrote that way is reported as the fixable finding `scene_dangling_name`; and
   `IMAGE_PROMPT_MAX_CLAUSES_PER_FIGURE` (profile `budget: clauses=N`) is the equal-
   treatment knob — no figure gets more description clauses than the cap, identity
-  clauses never cut — **default 0/off until the visual A/B in §22 picks a number**.
+  clauses never cut — **default 0/off: painted (§22.1) a cap 8 prompt LOST a party
+  member, and the figure that vanished in every arm was already under the cap.**
+- **What actually predicts a skipped figure is the thinness of ITS block, not the
+  length of the prompt** (§22.1: 845 tokens lost nothing, 840 tokens lost their
+  antagonist, and the lost block was 43 tokens against a 99-token median). The composer
+  reports it as the fixable finding `figure_thin_line` — under 60 % of the median
+  figure block in an image of 3+ figures, measured AFTER the budget ladder has cut.
+  Reporting it is NOT a fix, measured four ways on the prompt that loses Boss Frey: a
+  line the correction turn enriched, a block moved to the front row, a block moved to
+  LEAD (both with the word multiset held identical), and a block rewritten with the
+  identity opener every painted figure carries — absent in all four. Position is not it.
+  Do not re-derive a positional or clause-order fix for that request: the difference the
+  batch shows is a character the vault describes as a BODY being painted, and one it
+  describes only as clothing not being painted — a vault line, not composer logic.
 - **Prompt rewriting ALWAYS happens before the switch** (the rewrite's KB agent
   tools include the reranker, which the switch takes offline).
 - **…but a rewrite is not locked to a painting window**, so back-to-back `/image`
