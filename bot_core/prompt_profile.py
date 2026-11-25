@@ -178,6 +178,18 @@ def load() -> Profile:
         source = str(path)
         break
 
+    if source == "<defaults>":
+        # Silent defaults are how a campaign loses its own wording: the code holds no
+        # fallback prose on purpose, so a profile that went missing (it lives under
+        # `data/`, which is gitignored) means every prompt simply stops opening with
+        # the campaign's sentence — and nothing in the log said so. Say it once per load.
+        warnings.append(
+            "no campaign profile file found — looked in: "
+            + ", ".join(str(p) for p in _profile_files())
+            + " (or IMAGE_PROMPT_PROFILE). The composer holds no fallback wording, so "
+              "this deployment paints with no style sentence, no world-rule sentence "
+              "and no party sheet — docs/campaign-profile.md")
+
     values: dict[str, Any] = dict(_DEFAULTS)
     for key in ("style", "world_rule", "negative", "party_sheet"):
         if key in fields:

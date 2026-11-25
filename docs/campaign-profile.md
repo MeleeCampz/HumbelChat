@@ -46,6 +46,33 @@ no fallback wording in code for a campaign the code does not know.
 sheet. An edit in Obsidian applies to the next image, not to the next restart. An
 unknown field is logged as ignored, never guessed at.
 
+## Where the file lives, and what version control does not
+
+```
+<KB_PATH>/Campaign Prompt Profile.md             # this repo: data/knowledge/… (gitignored)
+<KB_PATH>/<vault>/Campaign Prompt Profile.md     # also searched: inside the vault repo
+IMAGE_PROMPT_PROFILE=/abs/path                   # wins over both
+```
+
+Paths written INSIDE the file (`party_sheet`) resolve against `KB_PATH`, never against the
+profile file — moving the profile one level down into the vault changes nothing.
+
+`data/` is gitignored in this repo, so while the file sits at `data/knowledge/` it is **in
+no repository at all**: it is a host-side data file, and a fresh checkout or a second
+machine loses it. Because the composer deliberately holds no fallback campaign wording, a
+lost profile does not break anything — the prompts just quietly stop opening with the
+campaign's sentence. `prompt_profile.load()` now logs a warning naming every path it
+searched, so the loss is visible in the log instead of only in the pictures. Keep the file
+somewhere version control can see it:
+
+- put it in the **vault repo** (the second search path above finds it, `vault_sync` carries
+  it, and it travels with the campaign it describes), or
+- `git add -f "data/knowledge/Campaign Prompt Profile.md"` to track it in this repo.
+
+Production mounts the whole `data/` directory (`docker-compose.yml`: `./data:/app/data` with
+`KB_PATH=/app/data/knowledge`), so the file is inside the container's tree either way — the
+KB root is `…/data/knowledge`, not the vault submodule alone.
+
 ## Writing `world_rule` well
 
 It is the only place a campaign says what its beings ARE, and it is painted next to
