@@ -47,20 +47,25 @@ Two physical cards, two backends — **never mix them up**:
   Do not re-derive a positional or clause-order fix for that request: the difference the
   batch shows is a character the vault describes as a BODY being painted, and one it
   describes only as clothing not being painted — a vault line, not composer logic.
-- **A half-read appearance keeps the clauses the notes back, and a correction may not
-  win a tie by thinning a figure** (live 2026-11-24, read line by line out of `logs/dev.log`,
-  §23). `backed_clauses` judges a snippet-sourced `look` clause by clause: the backed clauses
-  are painted, the rest refused and named, and the figure gets the fixable finding
-  `look_partially_backed` — a VAULT-fix code, so its correction waits for the card like
-  `figure_ungrounded`. Judging a look WHOLE is what cost the 19:11 request its antagonist:
-  his `look` cited `Characters/Player Characters.md`, that file had only ever reached the
-  loop as a search snippet, 12 of 19 distinctive words missed, and the whole description —
-  including the crew identity the search had actually matched — went, leaving
-  `Boss Frey: planting herself at the brink, hand raised in command.` (98 characters against
-  a 447 median) painted from the composition the CORRECTION pass produced. The lookup pass ran
-  0 tool calls, so nothing new was read to back it. Likewise the correction pass now keeps the
-  FIRST plan when the fixable-finding count is unchanged and `thinnest_block` got smaller — a
-  tie is not an improvement (2 fixable findings before, 2 after, 215 → 98 characters).
+- **An NPC appearance is PAINTED unless the notes about THAT character deny it** (the table's
+  own species ruling, applied to appearances on 2026-11-25 after §24 measured what refusing it
+  bought: nothing). `look_contradiction` cuts ONLY the clauses carrying an animal that the
+  retrieved material about that character contradicts, and `_name_evidence` decides what counts
+  as being about that character — a heading-owned section, or one step across `:` / `,`, never
+  the whole search blob (§19's Boss Frey mess: his species came out as owl, reh and tit from
+  Bubo's sheet, Colum's anchor and a Session 5 bounty). Everything else the model wrote is
+  painted and reported as `look_invented`; `Composed.invented` names those figures and they are
+  deliberately NOT in `Composed.ungrounded`, because a guess must not stall the GPU card
+  (`_VAULT_FIX_CODES` holds no appearance codes any more). The two measured failures this
+  replaces: 2026-11-24 19:11 — a `look` citing a file that had only reached the loop as a search
+  snippet, 12 of 19 distinctive words missed, the WHOLE description cut including the crew
+  identity the search had matched, leaving `Boss Frey: planting herself at the brink, hand raised
+  in command.` (98 chars against a 447 median) that the renderer left out; §24's request 02 —
+  painting the name alone let the renderer invent "a grey-furred wolf in a fine coat with a
+  pistol" from the WORD "Grey", which is the invention the refusal was supposed to prevent.
+  `backed_clauses` still runs and still names which clauses were retrieved, which is what makes
+  a `look_invented` report honest. A correction pass still may not win a tie by thinning a
+  figure: `thinnest_block` keeps the first plan when the fixable-finding count is unchanged.
 - **Prompt rewriting ALWAYS happens before the switch** (the rewrite's KB agent
   tools include the reranker, which the switch takes offline).
 - **…but a rewrite is not locked to a painting window**, so back-to-back `/image`

@@ -1124,9 +1124,11 @@ async def _rewrite_composed(text: str, complete,
             ask.append(_LOOKUP_NUDGE.replace("{{NAMES}}", ", ".join(worth)))
         if fixable:
             ask.append(image_prompt.finding_feedback(fixable) if IMAGE_CODE_CORRECTIONS
-                       else image_prompt.refinement_request(fixable, composed.prompt))
+                       else image_prompt.refinement_request(composed.findings,
+                                                             composed.prompt))
         elif worth and not IMAGE_CODE_CORRECTIONS:
-            ask.append(image_prompt.refinement_request([], composed.prompt))
+            ask.append(image_prompt.refinement_request(composed.findings,
+                                                        composed.prompt))
         if worth or fixable:
             log.info("rewrite: %d finding(s)%s — one correction pass before "
                      "composing again", len(fixable),
@@ -1138,6 +1140,11 @@ async def _rewrite_composed(text: str, complete,
                 anchors=anchors, profile=profile, text=text, on_phase=on_phase)
 
         _remember_plan(memory_key, final_plan)
+        if composed.invented:
+            # The appearance ruling (§24): an NPC description the vault does not contradict is
+            # painted, and the log has to say whose description it was.
+            log.info("bot's own description painted for: %s (nothing retrieved "
+                     "contradicts it)", ", ".join(composed.invented))
         log.info(
             "image prompt composed: %d char(s), %d figure(s) (%d foreground), "
             "%d tool call(s), %d cut(s), %d anchor(s) available%s — %s",
@@ -1274,8 +1281,7 @@ _gen_lock = asyncio.Lock()  # one generation at a time (mode switches +
 # own words (a collective subject, a repeated name, a meta aside) never wait —
 # they need no retrieval, and making them wait would just cost the user time.
 _VAULT_FIX_CODES = frozenset({
-    "figure_ungrounded", "look_unverified", "identity_left_in_scene",
-    "look_partially_backed",
+    "figure_ungrounded", "identity_left_in_scene", "look_contradicted",
 })
 
 

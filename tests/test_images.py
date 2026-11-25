@@ -1357,9 +1357,7 @@ class TestRewritePromptShape:
         first = self._plan(
             "Boss Frey blocks the path as Seta Onix draws her bow",
             '{"name": "Seta Onix", "pose": "drawing her bow"}, '
-            '{"name": "Boss Frey", "pose": "blocking the path", '
-            '"look": "broad-shouldered bandit in a patched coat", '
-            '"source": "SESSION_05/notes.md"}')
+            '{"name": "Boss Frey", "pose": "blocking the path"}')
         after = self._plan(
             "Boss Frey blocks the path as Seta Onix draws her bow",
             '{"name": "Seta Onix", "pose": "drawing her bow"}, '

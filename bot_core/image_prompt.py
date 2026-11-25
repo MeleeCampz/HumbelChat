@@ -407,33 +407,33 @@ def _named_in_request(entry: str, request_text: str) -> bool:
 def verify_look(figure: Figure, read_paths: Sequence[str] | None,
                 snippet_paths: Iterable[str] | None,
                 retrieved: str, request_text: str = "") -> tuple[bool, str, list[str]]:
-    """May this NPC's `look` be painted? Three grounds, not equally strong.
+    """Is this NPC's `look` backed by what the rewrite actually retrieved?
 
-    Returns ``(ok, why, backed)``. `why` is empty when nothing is wrong; `backed` is
-    non-empty only when the look FAILED as a whole but individual clauses of it are in
-    the retrieved text — the caller then paints those clauses and reports the rest
-    (`look_partially_backed`) instead of painting a bare name.
+    Returns ``(ok, why, backed)``. `why` is empty when nothing is wrong; `backed` is non-empty
+    when the look FAILED as a whole but individual clauses of it are in the retrieved text.
 
-    * The rewrite OPENED the file it cites: it had the section in front of it and
-      may describe it in its own words (the vault is half German, so wording
-      overlap is not the test there).
-    * The file came back only as a SEARCH snippet: then the wording must be
-      traceable to that snippet. A ten-word description matching none of a
-      hundred-character snippet was not read from it — §4.2 measured a "large
-      badger-folk with coarse grey-brown fur and a red bandana" for a character
-      the vault never describes, written after no lookup at all.
-    * It cites nothing this rewrite touched: invention, dropped loudly.
+    Since the appearance ruling (2026-11-26, analysis §24) a False answer no longer means "do
+    not paint it": an unbacked description is painted and reported as the bot's own guess
+    (`look_invented`), because refusing it did not remove the invention — it moved it into the
+    renderer, which fills the gap from the only word it has left (§24's 02) and the cut thins
+    the figure the renderer already tends to skip. The one claim the composer still cuts is the
+    one the notes about that character deny: :func:`look_contradiction`.
 
-    Whether the SPECIES named in a description is the campaign's is no longer asked
-    here (retired 2026-11-20, analysis §19–§20): the gate that asked it read species
-    words out of retrieved prose and attributed other characters' animals to the
-    character being checked, which dropped a look the rewrite had genuinely opened a
-    file for. What stays is the question code can answer without interpreting
-    language: was this description retrieved, or invented.
+    * The rewrite OPENED the file it cites: it had the section in front of it and may describe
+      it in its own words (the vault is half German, so wording overlap is not the test there).
+    * The file came back only as a SEARCH snippet: then the wording is traceable clause by
+      clause — §4.2 measured a "large badger-folk with coarse grey-brown fur and a red
+      bandana" for a character the vault never describes, written after no lookup at all.
+    * It cites nothing this rewrite touched: invention, said out loud.
 
-    With no evidence channel at all (`read_paths=None`, no snippets) there is
-    nothing to check against and the plan is taken at its word — that is the
-    caller's choice, not this function's.
+    Whether the SPECIES named in a description is the campaign's is not asked here (retired
+    2026-11-20, analysis §19–§20): the gate that asked it read species words out of retrieved
+    prose and attributed other characters' animals to the character being checked. What stays
+    is the question code can answer without interpreting language: was this description
+    retrieved, or invented.
+
+    With no evidence channel at all (`read_paths=None`, no snippets) there is nothing to check
+    against and the plan is taken at its word — that is the caller's choice, not this one's.
     """
     if not figure.look:
         return True, "", []
@@ -484,6 +484,116 @@ def source_matches(source: str, read_paths: Sequence[str]) -> bool:
         if r[-n:] == s[-n:]:
             return True
     return False
+
+
+# The animal vocabulary this vault's sheets use as species nouns. NOT a judgment layer:
+# :func:`look_contradiction` compares the animals a text names, nothing more (§20 retired the
+# layer that decided whether a species claim is true).
+_ANIMAL_NOUNS = frozenset({
+    "fox", "badger", "otter", "weasel", "stoat", "mink", "ferret", "raccoon", "hedgehog",
+    "mole", "owl", "tit", "jay", "bluejay", "crow", "raven", "robin", "sparrow",
+    "cat", "dog", "wolf", "bear", "deer", "hare", "rabbit", "mouse", "rat", "squirrel",
+    "boar", "pig", "goat", "sheep", "cattle", "horse", "donkey", "mule", "otterfolk",
+    "mustelid", "shoosuva", "tengu", "kitsune", "lizard", "crocodile", "alligator",
+    "serpent", "snake", "toad", "frog", "turtle", "bunny", "panda", "wolverine",
+    "beaver", "skunk", "opossum", "antelope", "elk", "moose", "bison", "owlkin",
+})
+
+
+def _animal_claims(text: str) -> set[str]:
+    """Which animal KINDS a piece of text claims — vocabulary, nothing else.
+
+    Every `X-folk` compound plus any word on the animal list this vault's sheets use as a
+    species noun. It says nothing about whether a claim is true (§20); only
+    :func:`look_contradiction` reads it, to ask the one question code can answer: do the notes
+    about THIS character name an animal the plan's description calls something else?
+    """
+    out = {m.group(1).lower() for m in re.finditer(r"\b([a-z]{3,})-folk\b", text or "", re.I)}
+    low = _norm(text)
+    out |= {a for a in _ANIMAL_NOUNS if re.search(rf"\b{a}\b", low)}
+    return out
+
+
+def _name_evidence(text: str, name: str) -> list[str]:
+    """The retrieved units that are ABOUT *name* (the attribution rule, analysis §19).
+
+    A search result arrives as ONE JSON line, so "the text about Boss Frey" used to be the
+    whole blob — his species came out as owl, reh and tit, read out of Bubo's sheet, Colum's
+    anchor and a Session 5 bounty. A unit counts as about the name when:
+
+    * a HEADING owns it — the name is in the heading and the section runs to the next heading;
+      or
+    * the name and the claim sit in the same comma-or-period-delimited unit, one step across
+      ':' or ',' (the sheets write "Boss Frey: fox-folk bandit chief"), with a period, ';',
+      '?' or '!' as a wall.
+
+    File paths are removed first: they are plumbing, and a note called `Fox.md` is not a
+    description of the character being checked.
+    """
+    if not text or not name:
+        return []
+    lines = text.splitlines()
+    head = re.compile(r"^\s*(?:#{1,6}\s|\*\*)")
+    for i, ln in enumerate(lines):
+        if head.match(ln) and _norm(name) in _norm(ln):
+            j = i + 1
+            while j < len(lines) and not head.match(lines[j]):
+                j += 1
+            block = " ".join(x.strip() for x in lines[i:j] if x.strip())
+            if block:
+                return [block]
+    clean = re.sub(r"[\w./\\-]+\.(?:md|txt|json|csv|png)", " ", text)
+    parts = re.split(r"([,;.:!?]+)", clean)
+    chunks = parts[0::2]
+    seps = parts[1::2]
+    units: list[str] = []
+    for idx, ch in enumerate(chunks):
+        if not ch.strip() or not re.search(re.escape(name), ch, re.I):
+            continue
+        group = [ch.strip()]
+        if idx and seps[idx - 1] in (":", ",") and chunks[idx - 1].strip():
+            group.insert(0, chunks[idx - 1].strip())
+        if idx < len(seps) and seps[idx] in (":", ",") and chunks[idx + 1].strip():
+            group.append(chunks[idx + 1].strip())
+        units.append(" ".join(group))
+    return units
+
+
+def look_contradiction(figure: Figure, retrieved: str) -> tuple[str, list[str]]:
+    """``(detail, clauses to cut)`` when the notes about THIS character deny its look.
+
+    The ruling this encodes (2026-11-26, analysis §24): the vault's species ruling — a claim is
+    painted where the vault is silent and refused only where the material about that character
+    contradicts it — applied to appearances. Three conditions keep it narrow:
+
+    * the retrieved text must hold a unit ABOUT this character (:func:`_name_evidence`);
+    * those units must name EXACTLY ONE animal — a bounty notice mentioning three characters'
+      animals is not a contradiction (§19's Boss Frey mess);
+    * the plan's `look` must name an animal too, and a different one.
+
+    Only the clauses carrying the denied claim come out; the rest of the description stays.
+    Cutting a whole look is what moved the invention into the renderer (§24's request 02).
+    """
+    if not figure.look or not retrieved:
+        return "", []
+    units = _name_evidence(retrieved, figure.name)
+    if not units:
+        return "", []
+    vault_kinds: set[str] = set()
+    for u in units:
+        vault_kinds |= _animal_claims(u)
+    if len(vault_kinds) != 1:
+        return "", []
+    mine = _animal_claims(figure.look)
+    if not mine or mine & vault_kinds:
+        return "", []
+    theirs = next(iter(vault_kinds))
+    bad = [c for c in _clauses(figure.look)
+           if _animal_claims(c) and not (_animal_claims(c) & vault_kinds)]
+    if not bad:
+        return "", []
+    return (f"the notes about {figure.name} describe a {theirs} figure, while the `look` says "
+            f"{', '.join(sorted(mine - vault_kinds))}"), bad
 
 
 def prompt_budget(figures: int, *, base: int = _BASE_CHARS,
@@ -884,9 +994,9 @@ FIXABLE_CODES = frozenset({
     "meta_comment", "collective_subject", "collective_in_figure",
     "collective_in_entity", "duplicate_mention", "name_spelling",
     "negation_clause", "entity_named_not_painted", "figure_ungrounded",
-    "identity_left_in_scene", "look_unverified", "name_form",
+    "identity_left_in_scene", "name_form",
     "same_person_listed_twice", "scene_dangling_name", "figure_thin_line",
-    "look_partially_backed",
+    "look_contradicted",
 })
 
 
@@ -1270,12 +1380,12 @@ def finding_feedback(findings: Sequence[Finding]) -> str:
 def refinement_request(findings: Sequence["Finding"], prompt: str) -> str:
     """The enforce=off arm's refinement turn (analysis §24).
 
-    The shipped arm sends the findings; this one sends the assembled PROMPT verbatim plus
-    what was noticed in it. Nothing was verified, dropped, reordered or relabelled on the
-    way here, so the model is looking at what the renderer would have been given and is
-    the only layer left that can change it.
+    The shipped arm sends the fixable findings; this one sends the assembled PROMPT verbatim
+    plus EVERYTHING that was noticed, fixable or not. Nothing was verified, dropped, reordered
+    or relabelled on the way here, so the model is looking at what the renderer would have been
+    given and is the only layer left that can change it.
     """
-    lines = [f"- {f.as_line()}" for f in findings if f.fixable]
+    lines = [f"- {f.as_line()}" for f in findings]
     return ("Your plan was assembled into this prompt exactly as you wrote it — nothing "
             "was verified, dropped, reordered or relabelled:\n\n```\n" + prompt + "\n```\n\n"
             + (("What was noticed in it:\n" + "\n".join(lines) + "\n\n") if lines else "")
@@ -1326,6 +1436,11 @@ class Composed:
     # caller (images.py) uses this to run one lookup pass instead of trusting a
     # rule the model may simply not have followed.
     ungrounded: list[str] = field(default_factory=list)
+    #: Names painted with a description the vault neither backs nor contradicts — the bot's
+    #: own guess, said out loud (§24's ruling). Kept apart from `ungrounded` (a figure with no
+    #: appearance at all, which the caller chases with a lookup) because a guess is not a gap:
+    #: it must not stall the card.
+    invented: list[str] = field(default_factory=list)
     #: Character count of each painted figure block, in prompt order — the number
     #: §22.1 measures against absence, exposed so a caller can compare two candidate
     #: plans without re-parsing the prompt.
@@ -1639,6 +1754,7 @@ def compose_prompt(
     plan_names = [a.name if a is not None else f.name for f, a in resolved]
     keep: list[tuple[Figure, Anchor | None]] = []
     ungrounded: list[str] = []
+    invented: list[str] = []
     for f, a in resolved:
         if a is not None:
             keep.append((f, a))
@@ -1659,55 +1775,62 @@ def compose_prompt(
                             "shorten it in the plan")
         ok, why, backed = verify_look(f, read_paths, snippet_paths, retrieved,
                                       request_text)
+        clash, bad = look_contradiction(f, retrieved)
         if not enforce:
             # The experiment arm: paint what the model wrote, report what backs it
             # and what does not, and let the refinement turn decide (analysis §24).
             if why:
                 warnings.append(f"{f.name}: {why} — painted as written "
                                 "(enforce off: nothing is verified here)")
-                findings.append(Finding("look_unverified", f.name, f"{why} — painted "
-                                "as written, and nothing you retrieved backs it. Open "
-                                + (f"{f.source!r}" if f.source else "the notes")
-                                + " and restate the appearance from what it says, or "
-                                "write an appearance of your own"))
+                findings.append(Finding("look_invented", f.name, f"{why} — painted "
+                                "as written, and nothing you retrieved backs it"))
             if not ok:
-                ungrounded.append(f.name)
+                invented.append(f.name)
             keep.append((f, a))
+            continue
+        if clash:
+            # The ONLY appearance claim the composer still refuses: the one the notes
+            # about THIS character contradict. Everything else about an NPC is the bot's
+            # own description and gets painted (§24's ruling).
+            left = [c for c in _clauses(f.look) if c not in bad]
+            warnings.append(f"{f.name}: {clash} — {len(bad)} clause(s) cut "
+                            f"({'; '.join(bad)}); the rest is painted "
+                            f"({'; '.join(left) or 'nothing'})")
+            findings.append(Finding(
+                "look_contradicted", f.name,
+                f"{clash} — those clauses are not painted. "
+                + (f"Open {f.source!r}" if f.source else "Open the vault")
+                + f" (or the file the notes about {f.name} live in) and restate the "
+                "appearance from what it says, or drop the animal word from the `look`"))
+            ungrounded.append(f.name)
+            keep.append((replace(f, look="; ".join(left)), None))
             continue
         if ok:
             if why:
                 warnings.append(f"{f.name}: {why}")
-                findings.append(Finding("look_unverified", f.name, why))
+                findings.append(Finding("look_invented", f.name, why))
+                invented.append(f.name)
             keep.append((f, a))
             continue
+        # The appearance ruling (2026-11-26, analysis §24): an NPC description the vault does
+        # not contradict is PAINTED and logged as the bot's own guess. Refusing it did not
+        # remove the invention — it moved it into the renderer, which filled the gap from the
+        # only word it had ("Boss Grey" name-only → a grey-furred wolf with a pistol), and the
+        # cut is what made the figure thin enough for the renderer to skip.
+        detail = why
         if backed:
-            # Half of it was read. Paint the half the notes say, name the half they
-            # do not, and keep the figure out of the name-only shape the renderer
-            # skips — this is the whole reason the clause check exists.
-            refused = [c for c in _clauses(f.look) if c not in backed]
-            warnings.append(f"{f.name}: {why} — {len(backed)} clause(s) of it ARE in "
-                            f"what was retrieved and are painted ({'; '.join(backed)}); "
-                            f"{len(refused)} are not and are dropped ({'; '.join(refused)})")
-            findings.append(Finding(
-                "look_partially_backed", f.name,
-                f"{len(refused)} clause(s) of its appearance are not in what you "
-                f"retrieved and were not painted ({'; '.join(refused)}) — open the "
-                "file and back them, or say only what you read"))
-            keep.append((replace(f, look="; ".join(backed)), None))
-            continue
-        warnings.append(f"{f.name}: {why} — the appearance is dropped and the figure "
-                        "is painted by name")
-        findings.append(Finding("look_unverified", f.name,
-                                f"{why} — the appearance is dropped and the figure "
-                                "is painted by name. "
-                                + (f"Open {f.source!r} and restate the appearance from "
-                                   "what the file says" if f.source else
-                                   "Read the notes and add an appearance")
-                                + ", or leave the description out of the plan"))
-        ungrounded.append(f.name)
-        # Never mutate the caller's plan: an unverifiable look is dropped on a
-        # copy, so the plan the log shows is the plan the model wrote.
-        keep.append((replace(f, look=""), None))
+            all_c = _clauses(f.look)
+            rest = [c for c in all_c if c not in backed]
+            detail = (f"{why} — {len(backed)} clause(s) of it ARE in what you retrieved "
+                      f"({'; '.join(backed)}); {len(rest)} are not ({'; '.join(rest)})")
+        invented.append(f.name)
+        warnings.append(f"{f.name}: {detail} — painted as the bot's own description, and "
+                        "said so in the log")
+        findings.append(Finding(
+            "look_invented", f.name,
+            f"{detail}. Painted as written because nothing retrieved contradicts it — this is "
+            "the bot guessing, not the vault describing"))
+        keep.append((f, a))
     resolved = keep
 
     # A figure LINE is identity, not prose: "Seta" and "Seta Onix" have to be the
@@ -2022,7 +2145,7 @@ def compose_prompt(
                     cuts=cuts, warnings=warnings, findings=findings,
                     block_chars=block_chars,
                     cast=[f for f, _ in resolved if f.name],
-                    ungrounded=ungrounded)
+                    ungrounded=ungrounded, invented=invented)
 
 
 # ─────────────────────────── the party sheet ──────────────────────────────

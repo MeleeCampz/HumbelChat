@@ -56,17 +56,20 @@ name, species or place from this example belongs to the campaign.
 - **pose** — what this figure is DOING here, max 12 words. No appearance: the
   composer paints appearance from the roster fields, and clothing written here is
   ignored.
-- **look** + **source** — REQUIRED for anyone not in the Party roster (an NPC, a
+- **look** + **source** — for anyone not in the Party roster (an NPC, a
   merchant, a bandit, a monster, a named animal). The vault records NPC *roles*,
   never appearances, so an NPC you have not looked up is an NPC you are
-  inventing. `look` = visible appearance in max 25 words (build, colours, gear)
-  written from what you actually retrieved; `source` = the exact "file" value it
-  came from. Rules creatures come from the rulebooks.
-  If the vault holds no appearance, OMIT `look` and name the figure in the scene or
-  `entities` instead, using only what the vault DOES say about it — a role, a kit, a
-  size, a name. Give it a SPECIES WORD while you are there ("two rat-folk bandits block
-  the path"): a bare role word ("bandits", "a merchant", "guards") is not one, and the
-  renderer paints a bare role word as a person. Say no more than you read.
+  inventing — and inventing is ALLOWED: a `look` you wrote yourself is painted and
+  logged as your guess. `look` = visible appearance in max 25 words (build, colours,
+  gear); `source` = the exact "file" value it came from, or `""` when the description
+  is yours. Rules creatures come from the rulebooks.
+  What is NOT allowed is contradicting the notes: when retrieved material about THAT
+  character describes an animal your `look` names differently, those clauses are cut and
+  the rest is painted.
+  Never leave a named figure with no `look` at all: a bare name is the shape the renderer
+  leaves out, and it costs the bot an extra lookup pass. Give the figure a SPECIES WORD
+  while you are there ("two rat-folk bandits block the path"): a bare role word
+  ("bandits", "a merchant", "guards") is not one — the renderer paints a bare role word as a person.
 - **modify** — ONLY when the request deliberately changes one aspect of a party
   member ("Seta in metal armour instead of her cloak", "Colum without his cape",
   "Marvin with a red paint job"). Name exactly ONE field and replace it with a

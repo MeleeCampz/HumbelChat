@@ -369,7 +369,7 @@ def _off(plan, anchors=None, **kw):
 
 
 def test_enforce_off_paints_an_unverified_look_and_still_reports_it():
-    """Nothing is verified here — but the report is what the refinement turn works from."""
+    """Both arms paint an unbacked look now (§24's ruling); only the CUT paths differ."""
     plan = _plan("Boss Frey blocks the bridge.",
                  [{"name": "Boss Frey", "pose": "blocking the bridge",
                    "look": "a towering frost giant in silver plate carrying a "
@@ -377,12 +377,14 @@ def test_enforce_off_paints_an_unverified_look_and_still_reports_it():
     on = ip.compose_prompt(plan, {}, BASE, read_paths=[], retrieved="",
                            world_rule=WORLD_RULE)
     off = _off(plan, {}, read_paths=[], retrieved="")
-    assert "frost giant" not in on.prompt
-    assert "frost giant" in off.prompt and "flaming greatsword" in off.prompt
-    assert any(f.code == "look_unverified" for f in on.findings)
-    assert any(f.code == "look_unverified" for f in off.findings), \
+    assert "frost giant" in on.prompt and "frost giant" in off.prompt
+    assert any(f.code == "look_invented" for f in on.findings), \
+        [f.as_line() for f in on.findings]
+    assert any(f.code == "look_invented" for f in off.findings), \
         [f.as_line() for f in off.findings]
-    assert off.ungrounded == ["Boss Frey"]
+    assert on.invented == off.invented == ["Boss Frey"]
+    assert on.ungrounded == off.ungrounded == [], \
+        "a guessed appearance is not a name-only figure: it must not stall the card"
 
 
 def test_enforce_off_keeps_the_plans_own_order_and_its_own_name_spelling():
@@ -444,21 +446,22 @@ def test_the_correction_turn_asks_for_opening_a_file_that_was_only_cited():
     The model re-answered with the same plan it had already failed, because the
     instruction said "do not repeat a lookup that already happened" while the finding was
     a `look` citing a file the loop had only ever seen as a search snippet. The turn has
-    to say which action the finding needs: open the file, not search again.
+    to say which action the finding needs: open the file, not search again. The finding
+    that still needs that action is the CONTRADICTED one — the notes about Boss Frey say
+    fox-folk, the plan says wolf-folk.
     """
     retrieved = ('4 hit(s): [{"file": "humblewood/SessionLogs/SESSION_05/notes.md", '
                  '"snippet": "Boss Frey: a fox-folk bandit chief in a fine coat"}]')
     plan = _plan("Boss Frey blocks the bridge.",
                  [{"name": "Boss Frey", "pose": "blocking the bridge",
-                   "look": "a towering frost giant in silver plate, carrying a "
-                           "flaming greatsword, with a crooked iron crown and a "
-                           "wolf-pelt cloak",
+                   "look": "a wolf-folk bandit chief in silver plate, carrying a "
+                           "flaming greatsword, with a crooked iron crown",
                    "source": "SESSION_05/notes.md"}])
     c = ip.compose_prompt(plan, {}, BASE, read_paths=[],
                           snippet_paths=["humblewood/SessionLogs/SESSION_05/notes.md"],
                           retrieved=retrieved)
     text = ip.finding_feedback(c.findings)
-    assert "look_unverified" in text
+    assert "look_contradicted" in text, [f.as_line() for f in c.findings]
     assert "Open 'SESSION_05/notes.md'" in text, text
     assert "OPENING a file you cited without opening" in text
     assert "do not repeat a lookup that already happened" not in text
@@ -581,13 +584,17 @@ def test_a_look_without_a_source_is_reported():
     # No evidence channel here: painted, but said out loud to be unverified.
     assert "badger-folk" in c.prompt
     assert any("has no `source`" in w and "unverified" in w for w in c.warnings)
-    # Once the caller verifies, the same look is a rule violation and goes.
+    # With verification live the same look is still painted — as the bot's own
+    # description, named as one (§24's ruling): the vault says nothing about Frey,
+    # so nothing contradicts it.
     c = ip.compose_prompt(_plan("Frey blocks the road",
                                 [{"name": "Frey", "pose": "blocking",
                                   "look": "heavy-set badger-folk in a torn coat"}]),
                           {}, BASE, read_paths=[])
-    assert "badger-folk" not in c.prompt
+    assert "badger-folk" in c.prompt
     assert any("without a `source`" in w for w in c.warnings)
+    assert any("bot's own description" in w for w in c.warnings), c.warnings
+    assert c.invented == ["Frey"]
 
 
 def test_override_on_an_unknown_field_is_ignored_and_reported():
@@ -889,27 +896,35 @@ def test_source_matching_is_suffix_segments_not_substring():
                              ["Humblewood/HumbleWood/Characters/NPCs.md"])
 
 
-def test_an_unverified_npc_look_is_dropped_and_said_so():
+def test_an_unverified_npc_look_is_painted_and_said_so():
+    """§24's ruling: the vault's species ruling applied to appearances.
+
+    An NPC description nothing contradicts is PAINTED and logged as the bot's own guess.
+    Refusing it did not remove the invention — §24's request 02 is the measurement: the
+    name-only paint let the renderer invent from the name itself, and the cut is what made
+    the figure thin enough to skip.
+    """
     anchors = {a.name: a for a in ip.parse_party_sheet(_SHEET)}
     plan = _plan("Spleck stalks a merchant",
                  [{"name": "Boss Frey", "pose": "blocking the road",
                    "look": "large badger-folk with grey-black striped fur",
                    "source": "Characters/Villains.md"}])
-    c = _compose(plan, anchors=anchors)     # no evidence channel: taken at face value
-    assert "badger-folk" in c.prompt
     c = ip.compose_prompt(plan, anchors, BASE, read_paths=[])
-    assert "badger-folk" not in c.prompt
+    assert "badger-folk" in c.prompt
     assert any("never retrieved" in w for w in c.warnings)
-    assert "Boss Frey" in c.prompt, "the figure stays; only the look goes"
-    assert "Exactly 1 named figure" in c.prompt
+    assert any("bot's own description" in w for w in c.warnings), c.warnings
+    assert c.invented == ["Boss Frey"] and c.ungrounded == []
+    assert "Boss Frey" in c.prompt and "Exactly 1 named figure" in c.prompt
+    assert not any(f.code == "look_unverified" for f in c.findings), \
+        "the refusal code is retired with the refusal"
 
 
 def test_a_look_citing_a_search_snippet_must_be_traceable_to_it():
-    """A hit is evidence; a description invented on top of one is not.
+    """A hit is evidence; a description invented on top of one is the bot's own guess.
 
-    Same citation, two looks: the one whose wording is in what was retrieved is
-    painted, the one matching none of it is dropped. This is the difference
-    between reading a note and pattern-matching a headline.
+    Same citation, two looks: the traceable one is painted without comment, the invented
+    one is painted TOO and reported — under the §24 ruling an unbacked description is said
+    out loud rather than cut, because the cut is what thins a figure into absence.
     """
     retrieved = ('8 hit(s): [{"file": "humblewood/SessionLogs/SESSION_01/notes.md", '
                  '"snippet": "Spleck Smandra: a lizard merchant who travels by a '
@@ -921,27 +936,30 @@ def test_a_look_citing_a_search_snippet_must_be_traceable_to_it():
                         "source": "SESSION_01/notes.md"}])
     invented = _plan("Spleck waits by the wagon",
                      [{"name": "Spleck Smandra", "pose": "waiting by the wagon",
-                       "look": "a tall reptilian warrior in black plate armour "
-                               "carrying a two-handed axe",
+                       "look": "a tall warrior in black plate armour carrying a "
+                               "two-handed axe",
                        "source": "SESSION_01/notes.md"}])
     keep = ip.compose_prompt(traceable, {}, BASE, read_paths=[],
                              snippet_paths=snips, retrieved=retrieved)
-    drop = ip.compose_prompt(invented, {}, BASE, read_paths=[],
-                             snippet_paths=snips, retrieved=retrieved)
+    guess = ip.compose_prompt(invented, {}, BASE, read_paths=[],
+                              snippet_paths=snips, retrieved=retrieved)
     assert "blue and yellow wagon" in keep.prompt
-    assert "reptilian warrior" not in drop.prompt
-    assert any("search snippet" in w for w in drop.warnings)
-    assert not any("search snippet" in w for w in keep.warnings)
+    assert not any("search snippet" in w for w in keep.warnings), keep.warnings
+    assert "black plate armour" in guess.prompt
+    assert any("search snippet" in w for w in guess.warnings)
+    assert guess.invented == ["Spleck Smandra"]
+    assert any(f.code == "look_invented" for f in guess.findings)
 
 
 def test_a_half_read_look_keeps_the_clauses_the_notes_back():
-    """Judged clause by clause, a partially backed look is not thrown away whole.
+    """Partial backing is REPORTED clause by clause, and all of it is painted.
 
-    The live request of 2026-11-24 ("Die Gruppe wird von Banditen überfallen…") is
-    the failure this answers: 12 of Boss Frey's 19 descriptive words were not in what
-    had been retrieved, so his whole appearance went, and he went out of the picture as
-    a 61-character block beside 443-character party blocks. The clauses the notes DO
-    say are painted; the ones the model added are named and refused.
+    The live request of 2026-11-24 ("Die Gruppe wird von Banditen überfallen…") is the
+    failure this replaced: 12 of Boss Frey's 19 descriptive words were not in what had been
+    retrieved, so his whole appearance went and he ended up a 61-character block beside
+    443-character party blocks. §24 measures what the cut bought: nothing — it made the
+    thin figure thinner and the renderer left him out. So the backed clauses are named, the
+    rest is painted as the bot's own description, and nothing is cut.
     """
     retrieved = ('4 hit(s): [{"file": "humblewood/SessionLogs/SESSION_05/notes.md", '
                  '"snippet": "Boss Frey: a fox-folk bandit chief in a fine coat, '
@@ -956,31 +974,60 @@ def test_a_half_read_look_keeps_the_clauses_the_notes_back():
                           retrieved=retrieved)
     assert "fox-folk bandit chief in a fine coat" in c.prompt
     assert "russet fur" in c.prompt
-    assert "six-fingered" not in c.prompt and "jewelled crown" not in c.prompt
+    assert "six-fingered hand" in c.prompt and "jewelled crown" in c.prompt, c.prompt
     codes = [f.code for f in c.findings]
-    assert "look_partially_backed" in codes, [f.as_line() for f in c.findings]
-    assert "look_unverified" not in codes
-    assert c.ungrounded == [], "a half-backed figure is not a name-only figure"
-    w = [x for x in c.warnings if "ARE in what was retrieved" in x]
+    assert codes.count("look_invented") == 1, [f.as_line() for f in c.findings]
+    assert "look_contradicted" not in codes and "look_unverified" not in codes
+    assert c.ungrounded == [] and c.invented == ["Boss Frey"]
+    w = [x for x in c.warnings if "ARE in what you retrieved" in x]
     assert w and "six-fingered" in w[0], c.warnings
 
 
-def test_a_look_with_nothing_backed_still_goes_completely():
-    """The clause check rescues backed clauses; it does not rescue an invented look."""
-    retrieved = ('4 hit(s): [{"file": "humblewood/SessionLogs/SESSION_05/notes.md", '
-                 '"snippet": "Boss Frey: a fox-folk bandit chief in a fine coat"}]')
-    plan = _plan("Boss Frey blocks the bridge.",
-                 [{"name": "Boss Frey", "pose": "blocking the bridge",
-                   "look": "a towering frost giant in silver plate, carrying a "
-                           "flaming greatsword",
-                   "source": "SESSION_05/notes.md"}])
-    c = ip.compose_prompt(plan, {}, BASE, read_paths=[],
-                          snippet_paths=["humblewood/SessionLogs/SESSION_05/notes.md"],
-                          retrieved=retrieved)
-    assert "frost giant" not in c.prompt and "flaming greatsword" not in c.prompt
-    assert [f.code for f in c.findings].count("look_unverified") == 1
-    assert not any(f.code == "look_partially_backed" for f in c.findings)
-    assert c.ungrounded == ["Boss Frey"]
+def test_the_one_appearance_still_cut_is_the_one_the_notes_deny():
+    """The contradiction gate, in both directions (§24's ruling).
+
+    The vault's species ruling — paint what it is silent about, refuse what it contradicts —
+    applied to appearances. Evidence units are the ones ABOUT this character (§19), so a
+    description nothing about Boss Frey says is the bot's guess and stands, while a
+    description fox-folk Boss Frey is not gets its animal clause cut and the REST of it
+    painted.
+    """
+    fox = ('4 hit(s): [{"file": "humblewood/SessionLogs/SESSION_05/notes.md", '
+             '"snippet": "Boss Frey: a fox-folk bandit chief in a fine coat"}]')
+    silent = ('4 hit(s): [{"file": "humblewood/SessionLogs/SESSION_05/notes.md", '
+              '"snippet": "Boss Frey demands tolls at the Old Bridge and never rides alone"}]')
+
+    guess = ip.compose_prompt(
+        _plan("Boss Frey blocks the bridge.",
+              [{"name": "Boss Frey", "pose": "blocking the bridge",
+                "look": "a towering frost giant in silver plate, carrying a flaming "
+                        "greatsword", "source": "SESSION_05/notes.md"}]),
+        {}, BASE, read_paths=[], snippet_paths=["SESSION_05/notes.md"], retrieved=silent)
+    assert "frost giant" in guess.prompt, "nothing about him says otherwise — painted"
+    assert guess.invented == ["Boss Frey"]
+
+    clash = ip.compose_prompt(
+        _plan("Boss Frey blocks the bridge.",
+              [{"name": "Boss Frey", "pose": "blocking the bridge",
+                "look": "a wolf-folk bandit chief in silver plate, carrying a flaming "
+                        "greatsword", "source": "SESSION_05/notes.md"}]),
+        {}, BASE, read_paths=[], snippet_paths=["SESSION_05/notes.md"], retrieved=fox)
+    assert "wolf-folk" not in clash.prompt, clash.prompt
+    assert "flaming greatsword" in clash.prompt, "the rest of the description stays"
+    assert any(f.code == "look_contradicted" for f in clash.findings), \
+        [f.as_line() for f in clash.findings]
+    assert any("fox" in f.detail for f in clash.findings)
+    assert clash.ungrounded == ["Boss Frey"]
+
+    # Ambiguous material is not a contradiction: three characters' animals in one blob.
+    both = ('4 hit(s): [{"file": "a/Bubo.md", "snippet": "Bubo: an owl cleric"}, '
+            '{"file": "c/Notes.md", "snippet": "Boss Frey and his crew"}]')
+    amb = ip.compose_prompt(
+        _plan("Boss Frey blocks the bridge.",
+              [{"name": "Boss Frey", "pose": "blocking the bridge",
+                "look": "a wolf-folk bandit chief", "source": "c/Notes.md"}]),
+        {}, BASE, read_paths=[], snippet_paths=["c/Notes.md"], retrieved=both)
+    assert "wolf-folk" in amb.prompt, [f.as_line() for f in amb.findings]
 
 
 def test_an_opened_file_is_believed_even_when_the_wording_does_not_match():
@@ -1023,7 +1070,8 @@ def test_a_citation_named_without_a_lookup_is_reported():
                  [{"name": "Boss Frey", "pose": "blocking the road",
                    "look": "large badger-folk"}])
     c = ip.compose_prompt(plan, anchors, BASE, read_paths=[])
-    assert "badger-folk" not in c.prompt
+    assert "badger-folk" in c.prompt, "painted, and named as the bot's guess"
+    assert c.invented == ["Boss Frey"]
     assert any("without a `source`" in w for w in c.warnings)
 
 
