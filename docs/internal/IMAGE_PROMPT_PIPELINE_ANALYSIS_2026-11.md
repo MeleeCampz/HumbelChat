@@ -1563,3 +1563,108 @@ it. The vault's own ruling on species (§20) is the opposite policy: a claim is 
 the material about *that character* contradicts it. The appearance rule is still the strict
 one, and 02 is what the strict rule costs. That is a table-owner decision, not a code
 decision — see the open question in #88.
+
+## 25. The appearance ruling, then 10 requests painted with and without the correction code (2026-11-25)
+
+§24 ended on an open question: the shipped arm refused an NPC appearance nothing in the vault
+backed, and the renderer filled the gap from the only word it had. The table owner answered it
+(2026-11-26): **use the vault's own species ruling for appearances too** — paint a claim where
+the vault is silent, refuse only where the material about *that character* contradicts it, and
+say out loud when the description is the bot's guess. `372d8ce` implements it:
+
+- `look_contradiction(figure, retrieved)` returns `(detail, clauses to cut)`, and the only
+  clauses it cuts are the ones carrying the denied claim. Three conditions keep it narrow: the
+  retrieved text must hold a unit ABOUT this character (`_name_evidence` — a heading-owned
+  section, or one step across `:` or `,` with `.`/`;`/`?`/`!` as walls, file paths stripped
+  first); those units must name exactly ONE animal; and the plan's `look` must name an animal
+  too, a different one. Ambiguous material is not a contradiction.
+- Everything else stands and is reported: `look_invented`, `Composed.invented`, and a log line
+  naming whose description it was. `Composed.ungrounded` keeps its old meaning (a figure with no
+  appearance at all), so **a guess cannot stall the GPU card** — `_VAULT_FIX_CODES` holds no
+  appearance codes any more, only `figure_ungrounded`, `identity_left_in_scene`,
+  `look_contradicted`.
+- `look_unverified` and `look_partially_backed` left `FIXABLE_CODES` with the refusals they
+  described; `look_contradicted` joined it. `backed_clauses` still runs — it is what makes a
+  `look_invented` report name which clauses were read and which were not.
+- The plan contract says the same thing now: an uncited `look` is painted and logged as the
+  model's own guess, contradicting the notes is what gets cut, and **a named figure must never
+  be left with no `look` at all** (a bare name is the shape the renderer leaves out).
+
+### The batch
+
+10 requests, each run twice through the live pipeline — `correct` (production) and `nocorrect`
+(`IMAGE_CODE_CORRECTIONS=off`) — 20 rewrites (767 s, 0 failures), then 20 images in one GPU
+window (328 s), then every arm's final plan **recomposed both ways** from the recorded compose
+kwargs. That last step is the attribution: same plan, same evidence, same budget, so a
+difference is the correction code alone, with no model re-roll in the way. Full tables in
+`data/image_probes/2026-11-25_correction_ab/` (`MEASURE.md`, `REVIEW.md`, `GALLERY.html`,
+`pair_<id>.jpg`).
+
+**Which correction paths fired in 20 live compositions:**
+
+| path | correct | nocorrect |
+|---|---|---|
+| foreground reorder | **3** | 0 (3× "order kept as written") |
+| look refusal / contradiction cut | 0 | 0 |
+| name substitution, label strip, negation scrub | 0 (no input in 20 rolls) | 0 |
+| budget ladder steps | 19 | 18 |
+| `look_invented` reported | 11 names | 7 names |
+| look > 25 words / pose > 12 words (reported, not cut) | 3 + 2 | 2 |
+
+**Same-plan census (20 recompositions):** 14 byte-identical, 2 order-only, 4 where different
+clauses survived the ladder — the reorder's knock-on, because the ladder cuts from the tail, so
+moving an NPC from first to last changes *which party member's* clauses get compressed. Request
+02 has no budget pressure (0 cuts), so there the arms differ only in order, and Boss Frey's
+block is the thinnest in both (237 characters either way).
+
+**What the 20 frames show.** ON painted 38 of its 41 cast, OFF 36 of 39: one party member lost
+in each arm (OFF lost Colum in 01, ON lost Trixy in 08) and the 9-figure crowd (03) lost Bubo in
+both. The OFF arm's missing figure in 01 had the **largest** block in its prompt (548 characters,
+position 4 of 7) — thickness and position fail as predictors again (§22.1), this time with a
+positive counter-example rather than a failed fix.
+
+Request 10 makes the ordering guarantee visible: ON puts the party in front with the fugitive
+(a fox, the bot's guess) behind them; OFF lets the invented fugitive (a badger with a sword and
+a sack) lead the frame. Request 07 shows the new ruling in one pair — two rewrites invented two
+different Alisa Pennygleams (squirrel-folk and dove-feathered), both were painted, both were
+logged as guesses, neither was refused. Request 05 (armour override) came out identical in
+behaviour in both arms: steel cuirass, no cloak, bow/quiver/leaf charm kept.
+
+**What this does not decide.** Whether the corrected arm paints better pictures — 20 single
+renders cannot, and this batch says the corrections' measurable effect on figure presence is
+zero. What it does establish is what the correction code is *for*: composition (the party holds
+the front row) and honesty (every guessed appearance is named in the log). The refusal machinery
+that §23–§24 spent two sections debugging is gone from the shipped path, and the two guards that
+are left (contradiction cut, name-only lookup) had nothing to do across 10 requests.
+
+### The decision that followed: the correction switch ships OFF (2026-11-26)
+
+The table owner evaluated the 20 frames and decided: **`IMAGE_CODE_CORRECTIONS` defaults to
+`0`**, with the switch kept so the correcting composer can be restored with one environment
+variable. The measurement above is what the decision rests on — corrections changed
+composition, not figure presence.
+
+What that changed in code, and what it deliberately did not:
+
+- `compose_prompt(enforce=…)` keeps its switch, and the wording around it is now accurate in
+  both directions: `refinement_request()` says "nothing was verified, reordered, relabelled
+  or scrubbed, and the only things missing are the ones a finding names".
+- **`look_contradiction` moved ABOVE the `enforce` branch** (`test_the_contradiction_cut_
+  survives_the_correction_switch` pins it). The ruling's cut is a rule about the vault's data
+  — paint what it is silent about, cut what the notes about *that character* deny — and a
+  switch about composition may not silently re-allow a description the campaign contradicts.
+  It runs, and its finding reaches the refinement turn, in both settings.
+- Still on with corrections off: the budget ladder, the contract's scene word cap, every
+  `findings` report (in this configuration the refinement turn is the only corrector left),
+  `figure_thin_line`, the invention log, and the enforced lookup for a named figure with no
+  appearance at all (`figure_ungrounded` — a name-only figure is still the shape the renderer
+  leaves out, and that is a size/coverage problem, not a composition edit).
+- Off: the foreground reorder, the sheet-spelling substitution, negation scrubbing, the
+  pipeline-label strip, and the plan-vs-plan arbitration in `_correction_pass` — the
+  arbitration belongs to the correcting configuration, so the tests that exercise it now set
+  the switch on explicitly and the default test asserts the opposite of what it used to.
+
+Suite after the change: 1557 passed. Production verification after the next deploy should
+show, in `logs/bot.log`: `composer finding: look_invented [Boss Frey]: … painted as the bot's
+own description` instead of any cut, `order kept as written (enforce off)` when the plan puts
+an NPC in front, and NO species verdicts anywhere.
