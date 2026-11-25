@@ -203,17 +203,23 @@ where the vault is silent the model's guess is painted, by ruling. What is still
 checked at all (§15–§16): nothing compares the actors the REQUEST names against the
 cast the plan paints.
 
-`IMAGE_CODE_CORRECTIONS` (`exp/no-code-corrections`, analysis §24) is the measurement
-switch, not a feature: `off` disables every composer path that CORRECTS a plan (the
-unverified-`look` refusal and its clause rescue, the foreground reorder, the
-sheet-spelling substitution, negation scrubbing, the label strip) and the plan-vs-plan
-arbitration in `_correction_pass`, leaving only size limits (budget ladder, scene word
-cap) plus the findings report the refinement turn works from. Keep it ON in production.
-What §24 measured and must be remembered when touching this code: on a 20-prompt corpus
-**15 prompts come out byte-identical with corrections off** — the live footprint is 4
-reorders and 1 refused look — the **reorder changes content** (moving a figure reorders
-which clauses the budget ladder cuts: 112 chars vs 79 for the same plan), and a refused
-look does not remove the invention, it moves it into the renderer, which fills the gap
-from the only word it has ("Boss Grey" name-only → a grey-furred wolf with a pistol).
-One render per arm decided nothing about which arm paints better; 09 reproduced §22.1 —
-leading and thick did not save the figure that last and thinner did.
+`IMAGE_CODE_CORRECTIONS` (analysis §24–§25) is **off in production since 2026-11-26**, by
+the table owner's decision after 10 requests were painted both arms: `off` disables every
+composer path that CORRECTS a plan (the foreground reorder, the sheet-spelling
+substitution, negation scrubbing, the label strip) and the plan-vs-plan arbitration in
+`_correction_pass`. What stays on in both settings: the SIZE limits (budget ladder, scene
+word cap), the findings report — which is the only corrector left, so the refinement turn
+must stay — and `look_contradiction`, because that cut is the appearance ruling's rule
+about the vault's data, not a composition choice. `1` restores the correcting composer;
+do not describe it as a feature either way.
+What §24–§25 measured and what must be remembered when touching this code: on 20 live
+compositions the correcting configuration's entire footprint was **3 foreground reorders**
+— no refusal, no substitution, no label strip, no negation scrub had anything to do — and
+the **reorder changes content**, because the budget ladder cuts from the tail (same plan,
+20 vs 13 clauses compressed; block sizes 464 549 429 462 327 351 273 vs 263 467 454 525
+387 331 356). Corrections bought no figure presence (38/41 cast painted with them, 36/39
+without, one loss in each arm) and the arm that lost a figure lost the one whose block was
+the LARGEST in its prompt (548 chars, position 4 of 7) — §22.1's rule that thickness and
+position do not predict, now with a counter-example. A refused look does not remove the
+invention either: it moves it into the renderer, which fills the gap from the only word it
+had ("Boss Grey" name-only → a grey-furred wolf with a pistol).

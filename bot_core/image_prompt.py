@@ -1378,16 +1378,18 @@ def finding_feedback(findings: Sequence[Finding]) -> str:
 
 
 def refinement_request(findings: Sequence["Finding"], prompt: str) -> str:
-    """The enforce=off arm's refinement turn (analysis §24).
+    """The refinement turn when the correction paths are off (analysis §24–§25).
 
-    The shipped arm sends the fixable findings; this one sends the assembled PROMPT verbatim
-    plus EVERYTHING that was noticed, fixable or not. Nothing was verified, dropped, reordered
-    or relabelled on the way here, so the model is looking at what the renderer would have been
-    given and is the only layer left that can change it.
+    The correcting configuration sends the fixable findings; this one sends the assembled
+    PROMPT verbatim plus EVERYTHING that was noticed, fixable or not. No look was verified,
+    nothing was reordered, relabelled or scrubbed and no clause was re-allocated, so the model
+    is looking at what the renderer would have been given and is the only layer left that can
+    change it — the only cuts it will see already made are the ones a finding names.
     """
     lines = [f"- {f.as_line()}" for f in findings]
-    return ("Your plan was assembled into this prompt exactly as you wrote it — nothing "
-            "was verified, dropped, reordered or relabelled:\n\n```\n" + prompt + "\n```\n\n"
+    return ("Your plan was assembled into this prompt exactly as you wrote it — nothing was "
+            "verified, reordered, relabelled or scrubbed, and the only things missing are the "
+            "ones a finding below says were cut:\n\n```\n" + prompt + "\n```\n\n"
             + (("What was noticed in it:\n" + "\n".join(lines) + "\n\n") if lines else "")
             + "Answer with the WHOLE refined <image_plan> you would rather have painted "
               "— same JSON shape, same rules. Do not describe the picture in prose and do "
@@ -1727,12 +1729,13 @@ def compose_prompt(
     and a hard character budget trimmed in a declared order that reports every
     cut.
 
-    `enforce=False` turns off every path in this function that CORRECTS the model's
-    plan — an unverified `look` is painted as written, the plan keeps its own name
-    spellings and its own figure order, sheet field labels and negations survive —
-    while keeping everything that is a SIZE limit (the budget ladder, the contract's
-    scene word cap) and keeping every `findings` report, so the rewrite model still
-    gets one refinement turn to fix what it wrote. Experiment switch, analysis §24.
+    `enforce=False` (the shipped configuration since 2026-11-26, analysis §24–§25) turns
+    off every path in this function that CORRECTS the model's plan — the plan keeps its own
+    name spellings and its own figure order, sheet field labels and negations survive — while
+    keeping everything that is a SIZE limit (the budget ladder, the contract's scene word cap)
+    and keeping every `findings` report, so the rewrite model is the layer that fixes what it
+    wrote. The ONE cut that runs in both settings is `look_contradiction`: the appearance
+    ruling's data rule about what the notes say about a character, not a composition choice.
     """
     warnings: list[str] = []
     # What the composer notices about the plan. Reported, never edited: the model
@@ -1776,22 +1779,12 @@ def compose_prompt(
         ok, why, backed = verify_look(f, read_paths, snippet_paths, retrieved,
                                       request_text)
         clash, bad = look_contradiction(f, retrieved)
-        if not enforce:
-            # The experiment arm: paint what the model wrote, report what backs it
-            # and what does not, and let the refinement turn decide (analysis §24).
-            if why:
-                warnings.append(f"{f.name}: {why} — painted as written "
-                                "(enforce off: nothing is verified here)")
-                findings.append(Finding("look_invented", f.name, f"{why} — painted "
-                                "as written, and nothing you retrieved backs it"))
-            if not ok:
-                invented.append(f.name)
-            keep.append((f, a))
-            continue
         if clash:
             # The ONLY appearance claim the composer still refuses: the one the notes
             # about THIS character contradict. Everything else about an NPC is the bot's
-            # own description and gets painted (§24's ruling).
+            # own description and gets painted (§24's ruling). This cut is NOT switched off
+            # by `enforce` — it is the ruling's rule about the vault's data, and both arms
+            # of the correction switch paint a description the notes deny otherwise.
             left = [c for c in _clauses(f.look) if c not in bad]
             warnings.append(f"{f.name}: {clash} — {len(bad)} clause(s) cut "
                             f"({'; '.join(bad)}); the rest is painted "
@@ -1804,6 +1797,18 @@ def compose_prompt(
                 "appearance from what it says, or drop the animal word from the `look`"))
             ungrounded.append(f.name)
             keep.append((replace(f, look="; ".join(left)), None))
+            continue
+        if not enforce:
+            # Corrections off: paint what the model wrote, report what backs it
+            # and what does not, and let the refinement turn decide (analysis §24).
+            if why:
+                warnings.append(f"{f.name}: {why} — painted as written "
+                                "(corrections off: nothing else is verified here)")
+                findings.append(Finding("look_invented", f.name, f"{why} — painted "
+                                "as written, and nothing you retrieved backs it"))
+            if not ok:
+                invented.append(f.name)
+            keep.append((f, a))
             continue
         if ok:
             if why:

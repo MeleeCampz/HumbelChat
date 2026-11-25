@@ -191,15 +191,18 @@ IMAGE_PROMPT_FOREGROUND_FIGURES: int = _safe_int(
 IMAGE_PROMPT_MAX_CLAUSES_PER_FIGURE: int = _safe_int(
     os.getenv("IMAGE_PROMPT_MAX_CLAUSES_PER_FIGURE"), 0)
 
-# EXPERIMENT SWITCH (analysis §24, 2026-11-26): run the image rewrite with every
-# composer path that CORRECTS the model's plan switched off — an unverified `look` is
-# painted as written, the plan keeps its own name spellings and its own figure order,
-# sheet field labels and negations survive, and the refinement turn's answer is painted
-# without a plan-vs-plan comparison. What stays on is what a SIZE limit is rather than a
-# correction: the budget ladder and the contract's scene word cap. The findings report
-# stays too, because the refinement turn is the corrector in this arm. Default ON = the
-# shipped behaviour.
-IMAGE_CODE_CORRECTIONS: bool = _safe_bool(os.getenv("IMAGE_CODE_CORRECTIONS"), True)
+# Correction switch (analysis §24–§25). SHIPPED DEFAULT: OFF — decided 2026-11-26 after
+# 10 requests were rewritten and painted both ways: the corrected arm painted 38 of its 41
+# cast, the uncorrected arm 36 of 39, and the same figure was absent in each, so composition
+# corrections bought no figure presence. OFF switches off every composer path that CORRECTS
+# the model's plan — the plan keeps its own name spellings and its own figure order, sheet
+# field labels and negations survive, and the refinement turn's answer is painted without a
+# plan-vs-plan comparison. What stays on regardless: the SIZE limits (budget ladder, the
+# contract's scene word cap), the findings report (in this configuration the refinement turn
+# is the only corrector), and the appearance ruling's contradiction cut — clauses that the
+# notes about THAT character deny are the ruling's data rule, not a composition correction
+# (§24), so they are cut in both settings. Set 1 to restore the correcting composer.
+IMAGE_CODE_CORRECTIONS: bool = _safe_bool(os.getenv("IMAGE_CODE_CORRECTIONS"), False)
 # One sentence of CAMPAIGN DATA saying what kind of beings exist in the world (in a
 # Humblewood deployment: that every figure is animal-folk, so an undescribed bandit is
 # not painted as a person). It rides in the style sentence, which the composer's budget

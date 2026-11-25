@@ -382,9 +382,12 @@ class TestRewritePrompt:
         left at all. Two problems answered with three.
 
         The composer has both plans composed. It paints the one with fewer open
-        findings, and says so in the log.
+        findings, and says so in the log. (That comparison belongs to the CORRECTING
+        configuration — `IMAGE_CODE_CORRECTIONS` on — so this test turns it on; the
+        shipped default is off, analysis §25.)
         """
         client = MagicMock()
+        monkeypatch.setattr(images, "IMAGE_CODE_CORRECTIONS", True)
         client.chat.completions.create = AsyncMock(side_effect=[
             self._resp('<image_plan>\n{"scene": "Boss Frey, a bandit chief, stands '
                        'alone in a moonlit clearing", "figures": [{"name": "Boss Frey", '
@@ -2276,6 +2279,7 @@ Hedge (hedgehog), Monk.
 
     async def test_a_correction_that_only_thins_a_figure_is_not_the_one_painted(
             self, monkeypatch, tmp_path, caplog):
+        monkeypatch.setattr(images, "IMAGE_CODE_CORRECTIONS", True)   # the arbitration
         anchors = self._anchors(monkeypatch, tmp_path)
         plan, composed = self._compose(anchors, "a bandit chief in a coat")
         codes = [f.code for f in composed.findings]
@@ -2291,6 +2295,7 @@ Hedge (hedgehog), Monk.
 
     async def test_a_correction_that_actually_thickens_the_thin_figure_wins(
             self, monkeypatch, tmp_path):
+        monkeypatch.setattr(images, "IMAGE_CODE_CORRECTIONS", True)   # the arbitration
         anchors = self._anchors(monkeypatch, tmp_path)
         plan, composed = self._compose(anchors, "a bandit chief in a coat")
         out, _ = await self._correct(
@@ -2301,11 +2306,12 @@ Hedge (hedgehog), Monk.
 
     async def test_enforce_off_paints_the_refinement_answer_with_no_arbitration(
             self, monkeypatch, tmp_path, caplog):
-        """The experiment arm keeps no plan-vs-plan comparison (analysis §24).
+        """With the corrections off there is no plan-vs-plan comparison (analysis §24–§25).
 
         Same setup as the tie test above: the refinement answer says LESS about the thin
-        figure. In the shipped arm the first plan wins; with corrections off the answer is
-        painted exactly as answered — which is what the arm exists to measure.
+        figure. In the correcting configuration the first plan wins; with the corrections off
+        — the shipped configuration since 2026-11-26 — the answer is painted exactly as
+        answered, which is what the switch exists to be able to measure.
         """
         anchors = self._anchors(monkeypatch, tmp_path)
         plan, composed = self._compose(anchors, "a bandit chief in a coat")
@@ -2314,10 +2320,11 @@ Hedge (hedgehog), Monk.
         out, _ = await self._correct(monkeypatch, tmp_path, composed, plan,
                                      self._answer("a bandit"))
         assert "bandit chief in a coat" not in out.prompt
-        assert any("enforce off — painting the refinement turn's plan" in m
+        assert any("off — painting the refinement turn's plan" in m
                    for m in caplog.messages), caplog.messages
 
     def test_the_enforce_switch_defaults_to_the_shipped_behaviour(self):
         from config.settings import IMAGE_CODE_CORRECTIONS
-        assert IMAGE_CODE_CORRECTIONS is True
+        assert IMAGE_CODE_CORRECTIONS is False, \
+            "corrections off is the shipped configuration after the 20-image A/B (§25)"
 

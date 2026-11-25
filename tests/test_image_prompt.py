@@ -429,13 +429,41 @@ def test_enforce_off_keeps_negations_and_sheet_labels():
     assert any("kept as written (enforce off)" in w for w in off2.warnings), off2.warnings
 
 
+def test_the_contradiction_cut_survives_the_correction_switch():
+    """The ruling's cut is not a correction path, so `enforce` does not switch it off.
+
+    §24's ruling is about the vault's DATA: paint what the notes are silent about, cut what
+    the notes about THAT character deny. The 2026-11-26 decision to ship corrections off
+    turns off composition edits — ordering, spelling substitution, scrubbing — and must not
+    quietly re-allow a description the campaign notes contradict. Same plan, same evidence,
+    both arms: the animal clause goes, the rest of the look stays, the finding is reported so
+    the refinement turn can restate it from the file.
+    """
+    fox = ('4 hit(s): [{"file": "humblewood/SessionLogs/SESSION_05/notes.md", '
+           '"snippet": "Boss Frey: a fox-folk bandit chief in a fine coat"}]')
+    plan = _plan("Boss Frey blocks the bridge.",
+                 [{"name": "Boss Frey", "pose": "blocking the bridge",
+                   "look": "a wolf-folk bandit chief in silver plate, carrying a flaming "
+                           "greatsword", "source": "SESSION_05/notes.md"}])
+    kw = dict(read_paths=[], snippet_paths=["SESSION_05/notes.md"], retrieved=fox)
+    on = ip.compose_prompt(plan, {}, BASE, world_rule=WORLD_RULE, **kw)
+    off = _off(plan, {}, world_rule=WORLD_RULE, **kw)
+    for c in (on, off):
+        assert "wolf-folk" not in c.prompt, c.prompt
+        assert "flaming greatsword" in c.prompt, c.prompt
+        assert any(f.code == "look_contradicted" for f in c.findings), \
+            [f.as_line() for f in c.findings]
+    text = ip.refinement_request([f for f in off.findings if f.fixable], off.prompt)
+    assert "look_contradicted" in text
+
+
 def test_the_refinement_turn_sees_the_prompt_it_would_have_been_painted():
     plan = _plan("the whole upright party squares off against a bandit chief",
                  [{"name": "Seta Onix", "pose": "nocking an arrow"}])
     c = _off(plan)
     text = ip.refinement_request([f for f in c.findings if f.fixable], c.prompt)
     assert c.prompt in text, "the arm's whole point is that the model sees the result"
-    assert "nothing was verified, dropped, reordered or relabelled" in text
+    assert "nothing was verified, reordered, relabelled or scrubbed" in text
     assert "<image_plan>" in text
     assert "collective_subject" in text
 
