@@ -197,3 +197,18 @@ each NPC. Do NOT reintroduce a check that decides whether a species claim is tru
 where the vault is silent the model's guess is painted, by ruling. What is still not
 checked at all (§15–§16): nothing compares the actors the REQUEST names against the
 cast the plan paints.
+
+`IMAGE_CODE_CORRECTIONS` (`exp/no-code-corrections`, analysis §24) is the measurement
+switch, not a feature: `off` disables every composer path that CORRECTS a plan (the
+unverified-`look` refusal and its clause rescue, the foreground reorder, the
+sheet-spelling substitution, negation scrubbing, the label strip) and the plan-vs-plan
+arbitration in `_correction_pass`, leaving only size limits (budget ladder, scene word
+cap) plus the findings report the refinement turn works from. Keep it ON in production.
+What §24 measured and must be remembered when touching this code: on a 20-prompt corpus
+**15 prompts come out byte-identical with corrections off** — the live footprint is 4
+reorders and 1 refused look — the **reorder changes content** (moving a figure reorders
+which clauses the budget ladder cuts: 112 chars vs 79 for the same plan), and a refused
+look does not remove the invention, it moves it into the renderer, which fills the gap
+from the only word it has ("Boss Grey" name-only → a grey-furred wolf with a pistol).
+One render per arm decided nothing about which arm paints better; 09 reproduced §22.1 —
+leading and thick did not save the figure that last and thinner did.

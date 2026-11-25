@@ -1480,3 +1480,86 @@ reports the rest; a wholly unbacked look still goes whole; `block_chars` /
 `thinnest_block` agree with the reported thin figure. `tests/test_images.py::
 TestCorrectionKeepsTheFatterPlan`: a correction that only thins is not painted, a correction
 that thickens the thin figure is.
+
+## 24. Corrections switched off, the same requests painted both ways (2026-11-26)
+
+**The question the backlog had never asked.** Every guarantee in `compose_prompt` was added
+because a live prompt went wrong. Nobody had measured what the corrections do when the model
+is simply allowed to refine its own plan. So the arm was built to switch them off
+(`exp/no-code-corrections`, `2b88e4e`): `IMAGE_CODE_CORRECTIONS=off` turns off every path in
+`compose_prompt` that CORRECTS the plan — `verify_look`'s refusal and its clause rescue, the
+foreground reorder, the sheet-spelling substitution, negation scrubbing (`clauses_for(
+scrub=False)`), the pipeline-label strip — and removes the plan-vs-plan arbitration in
+`_correction_pass`, so the refinement turn's answer is painted as answered. What stays on is
+what a SIZE limit is rather than a correction: the budget ladder and the contract's 45-word
+scene cap. The findings report stays in both arms because in the off arm it is the only
+corrector, and its message changes: `refinement_request` hands the model its own assembled
+prompt verbatim ("nothing was verified, dropped, reordered or relabelled") and asks for a
+better plan. Default stays ON, so the shipped path is unchanged.
+
+**Two measurements, because the live A/B has a confound.** 10 requests (the 9 of the
+2026-11-25 sample batch plus the 2026-11-24 19:11 request §23 reconstructed) were run twice
+through the live path — chat model, KB tools, vault, rag mode live: 20 rewrites, 1126.7 s —
+and then all 20 prompts were painted in ONE GPU window (20/20, 1308.7 s, card restored to rag
+mode). That arm re-rolls the MODEL as well as the composer, so it cannot attribute anything
+to the code. The attribution comes from recomposing each recorded plan both ways offline
+(`/tmp/nc_census.py`): same plan, same anchors, same budget, only `enforce` differing.
+
+| request/arm | prompt | figure order | Δchars | Δthinest block | paths that fired |
+|---|---|---|---|---|---|
+| 01 group bridge / shipped | CHANGED | moved | +11 | +33 | look refused, reorder |
+| 01 group bridge / enforce off | CHANGED | moved | 0 | 0 | reorder |
+| 02 Boss Grey / shipped | identical | same | 0 | 0 | name-only paint |
+| 05 Fisher / both arms | identical | same | 0 | 0 | name-only paint |
+| 06 Hexe Susan / enforce off | identical | same | 0 | 0 | name-only paint |
+| 09 Boss Frey vs group / both arms | CHANGED | moved | +5 / −40 | +33 / +33 | reorder |
+| 10 ambush / enforce off | CHANGED | same | −15 | **−138** | **look refused** |
+| 03, 04, 07, 08, 10 shipped | identical | same | 0 | 0 | — |
+
+**Path census (20 recorded plans, deterministic recompose):** 5/20 hit "no identity to paint"
+(the plan named a figure it gave no appearance for — nothing to remove), 4/20 were reordered,
+**1/20 had a written `look` refused**, and 0/20 fired the clause rescue, the sheet-spelling
+substitution, the negation scrub or the label strip. **15/20 prompts come out byte-identical
+with corrections off**, median |Δ| over the five that changed: 11 characters. The code's live
+footprint is much smaller than the number of rules in it suggests, and it is concentrated in
+two behaviours.
+
+Two things the census settles:
+
+- **The reorder is not cosmetic.** Moving a figure changes which clauses survive the budget
+  ladder: request 01's NPC came out at 112 characters when the code moved him to the back of
+  the queue and 79 when the plan's own lead position was kept. A guarantee about POSITION
+  therefore changes CONTENT, which is the thing §17–18 say decides whether a figure appears.
+- **The one refusal was the biggest single change in the corpus.** Request 10's refinement
+  turn wrote a rich NPC look (`lean russet fox-folk build, sharp amber eyes, torn travelling
+  coat`) citing `CampaignNotes/MarketStall.md` — a file that rewrite never opened. The ON arm
+  cut 138 characters off the thinnest block (262 → 124) and then reported `figure_thin_line`
+  for that figure, which the off arm never reported: the correction created the defect it
+  then noticed.
+
+**What the 20 renders show.** One render per arm, so nothing here is arithmetic (§22.1): the
+pairs are stored as `pair_<request>.jpg` (left = corrections on, right = corrections off),
+with `contact_sheet_pairs.jpg` and `GALLERY.html` in
+`data/image_probes/2026-11-26_no_code_correction/`.
+
+| pair | corrections ON | corrections OFF |
+|---|---|---|
+| 01 group vs Boss Grey | 6 of 7 figures visible; the named antagonist absent, Seta absent | all 7 visible, the bandit chief the largest figure in frame |
+| 02 Boss Grey alone | painted by name only (87 chars): the renderer filled the gap **from the name** — a grey-furred wolf-creature holding a pistol | the model's invented fox-folk bandit chief in a coat, with three bandits — matches the request and the vault's fox-folk bandit look |
+| 06 Hexe Susan | canonical: a **fox**-folk witch (that arm's rewrite opened the file the vault has) | a **cat**-folk witch — plausible, and wrong against the vault |
+| 09 Boss Frey vs group | Boss Frey painted LAST (230 chars) and **present** — tall fox-folk in a long coat | Boss Frey painted FIRST (222 chars) and **absent** |
+| 07 group in the mine | 5 visible, Seta absent | all 6 visible |
+| 05 Fisher, 08 black pudding | equivalent | equivalent |
+
+**What this does NOT decide.** Which arm paints better pictures: 20 single renders cannot say
+that, and 09 reproduces §22.1 exactly — leading and thick did not save Boss Frey, last and
+thinner did. Both arms produced a picture with a missing figure and a picture without one.
+
+**What it does expose, and what needs a ruling.** Request 02 is the clean case: the shipped
+arm refused an unbacked appearance, so the renderer invented one **from the only word it
+had** — "Grey" — and produced a grey-furred wolf with a firearm in a world that has neither.
+Refusal does not remove the invention, it moves it into the renderer, where nothing reports
+it. The vault's own ruling on species (§20) is the opposite policy: a claim is allowed unless
+the material about *that character* contradicts it. The appearance rule is still the strict
+one, and 02 is what the strict rule costs. That is a table-owner decision, not a code
+decision — see the open question in #88.
